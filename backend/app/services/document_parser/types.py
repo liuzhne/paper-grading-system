@@ -44,6 +44,7 @@ class ParsedPaper:
     full_text: str
     structure_checks: list[StructureCheck]
     parse_quality: float
+    structure_confidence: float = 1.0
 
     def to_dict(self):
         return asdict(self)

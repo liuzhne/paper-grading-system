@@ -51,24 +51,36 @@ def parse_document(file_path):
     path = Path(file_path)
     suffix = path.suffix.lower()
     if suffix == ".docx":
-        paragraphs = _extract_docx(path)
+        raw_paragraphs, heading_texts = _extract_docx(path)
     elif suffix == ".pdf":
-        paragraphs = _extract_pdf(path)
+        raw_paragraphs, heading_texts = _extract_pdf(path)
     else:
         raise ValueError("unsupported file type; only .docx and text PDF are supported")
 
-    paragraphs = [(page, _normalize_text(text)) for page, text in paragraphs if _normalize_text(text)]
+    paragraphs = [(page, _normalize_text(text)) for page, text in raw_paragraphs if _normalize_text(text)]
     if not paragraphs:
         raise ValueError("no readable text found; scanned PDFs require OCR and are not supported in MVP")
+    heading_texts = {_normalize_text(text) for text in heading_texts if _normalize_text(text)}
 
-    sections = _build_sections(paragraphs)
+    sections = _build_sections(paragraphs, heading_texts)
     full_text = "\n".join(text for _, text in paragraphs)
     cover_metadata = _extract_cover_metadata(paragraphs)
     references = _extract_references(sections)
     checks = _structure_checks(full_text, sections, references)
+    structure_confidence = _estimate_structure_confidence(sections, heading_texts)
+    checks.append(
+        StructureCheck(
+            code="SECTION_DETECTION",
+            name="章节识别可靠性",
+            passed=structure_confidence >= 0.5,
+            message="章节识别置信度 %.2f（依据：%s）" % (structure_confidence, "标题样式+规则" if heading_texts else "规则启发式"),
+            location=None if structure_confidence >= 0.5 else "章节划分不可靠，建议人工确认",
+        )
+    )
     parse_quality = _estimate_parse_quality(full_text, checks, sections)
 
     return ParsedPaper(
+        structure_confidence=structure_confidence,
         title=cover_metadata.get("title") or _infer_title(paragraphs),
         student_id=cover_metadata.get("student_id") or _first_regex_group(STUDENT_ID_RE, full_text),
         student_name=cover_metadata.get("student_name") or _first_regex_group(STUDENT_NAME_RE, full_text),
@@ -93,18 +105,24 @@ def _extract_docx(path):
 
     document = Document(str(path))
     result = []
+    heading_texts = set()
     for child in document.element.body.iterchildren():
         if isinstance(child, CT_P):
-            text = Paragraph(child, document).text.strip()
-            if text:
-                result.append((1, text))
+            paragraph = Paragraph(child, document)
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            result.append((1, text))
+            style_name = getattr(paragraph.style, "name", "") or ""
+            if "Heading" in style_name or "Title" in style_name or "标题" in style_name:
+                heading_texts.add(text)
         elif isinstance(child, CT_Tbl):
             table = Table(child, document)
             for row in table.rows:
                 cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
                 if cells:
                     result.append((1, " | ".join(cells)))
-    return result
+    return result, heading_texts
 
 
 def _extract_pdf(path):
@@ -118,20 +136,23 @@ def _extract_pdf(path):
                 cleaned = block.strip()
                 if cleaned:
                     result.append((page_index, cleaned))
-    return result
+    # 文本 PDF 无样式信息，标题识别仅靠规则启发式。
+    return result, set()
 
 
 def _normalize_text(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _build_sections(paragraphs):
+def _build_sections(paragraphs, heading_texts=None):
+    heading_texts = heading_texts or set()
     sections = []
     current = None
     paragraph_number = 1
 
     for page, text in paragraphs:
-        if _looks_like_section_title(text):
+        # 多策略：标题样式（heading_texts）∪ 规则启发式（编号/已知章节名）。
+        if text in heading_texts or _looks_like_section_title(text):
             if current is not None:
                 current.page_end = page
             current = ParsedSection(
@@ -413,6 +434,17 @@ def _contains_check(code, name, text, keywords):
         message="检测到%s" % name if found else "未检测到%s" % name,
         location=found,
     )
+
+
+def _estimate_structure_confidence(sections, heading_texts):
+    """章节识别置信度（N3）：标题样式可用是强信号；否则只靠规则启发式，
+    叠加"章节数量"与"是否含摘要/结论/参考文献等预期章节"两项信号。低于阈值会告警人工确认。"""
+    style_signal = 0.45 if heading_texts else 0.0  # 标题样式是分段可靠性的最强信号
+    section_signal = min(len(sections), 6) / 6 * 0.3
+    titles = " ".join(section.title for section in sections)
+    expected_hits = sum(1 for keyword in ("摘要", "结论", "参考文献") if keyword in titles)
+    expected_signal = expected_hits / 3 * 0.25
+    return round(min(style_signal + section_signal + expected_signal, 1.0), 3)
 
 
 def _estimate_parse_quality(full_text, checks, sections):

@@ -1,5 +1,6 @@
 from datetime import datetime
 from datetime import timezone
+from types import SimpleNamespace
 import time
 
 from sqlalchemy import select
@@ -60,8 +61,11 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     for criterion in rubric.criteria:
         # 按 criterion_type 路由（设计§6.2）：deterministic 走确定性检查器（不调 LLM）；
         # llm_judgment/hybrid 走模型。hybrid 暂按 llm 路径，子检查拆分见后续阶段。
-        if getattr(criterion, "criterion_type", "llm_judgment") == "deterministic":
+        criterion_type = getattr(criterion, "criterion_type", "llm_judgment")
+        if criterion_type == "deterministic":
             output = run_deterministic_checker(criterion, parsed)
+        elif criterion_type == "hybrid" and getattr(criterion, "sub_checks", None):
+            output = _score_hybrid(db, scorer, paper, criterion, parsed, structure_checks, rubric.version)
         else:
             candidates = retrieve_for_criterion(db, paper.id, criterion, top_k=settings.SCORING_CHUNK_EVAL_TOP_K)
             output = _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric.version)
@@ -242,9 +246,12 @@ def _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_c
             chunk_outputs.append(chunk_output)
         output = _aggregate_chunk_outputs(criterion, chunk_outputs)
 
-    # 计分模式分流（设计§6.3 / N6）：deductive 由代码从结构化扣分算分，并跳过 0.8 常规封顶。
-    if getattr(criterion, "scoring_mode", "llm_direct") == "deductive":
+    # 计分模式分流（设计§6.3 / N6）：deductive 代码算分跳过封顶；banded 吸附到档位；其余走证据门槛。
+    mode = getattr(criterion, "scoring_mode", "llm_direct")
+    if mode == "deductive":
         return _apply_deductive(criterion, output)
+    if mode == "banded":
+        return _apply_banded(criterion, output)
     return _apply_evidence_gate(output, criterion, chunk_outputs)
 
 
@@ -273,6 +280,115 @@ def _apply_deductive(criterion, output):
         max_score,
     )
     return output
+
+
+def _apply_banded(criterion, output):
+    """分档制（设计§6.3）：把模型判断吸附到 rubric_levels 中最接近的档位分，并记录带证据的 BandSelection。
+    注：当前按模型给分就近吸附；让模型直接选档的 banded 专属 prompt 属后续增强。"""
+    bands = _numeric_bands(criterion)
+    if not bands:
+        # 无有效档位 → 退回证据门槛，避免分档项无法计分。
+        return _apply_evidence_gate(output, criterion, [])
+    max_score = float(criterion.max_score)
+    model_score = float(output.get("score") or 0)
+    chosen = min(bands, key=lambda band: (abs(band["points"] - model_score), -band["points"]))
+    first_evidence = (output.get("evidence") or [{}])[0] if output.get("evidence") else {}
+    output["score_before_banded"] = model_score
+    output["score"] = round(min(float(chosen["points"]), max_score), 2)
+    output["band_selection"] = {
+        "level": chosen.get("label"),
+        "awarded": output["score"],
+        "rationale": output.get("reason") or "",
+        "rule_ref": getattr(criterion, "code", None),
+        "evidence_location": first_evidence.get("location", ""),
+        "evidence_quote": first_evidence.get("quote", ""),
+    }
+    output["scoring_mode"] = "banded"
+    output["reason"] = "%s 按分档制核算：选档「%s」=%.2f/%.2f。" % (
+        criterion.name,
+        chosen.get("label"),
+        output["score"],
+        max_score,
+    )
+    if not output.get("evidence"):
+        output["need_manual_review"] = True
+    return output
+
+
+def _numeric_bands(criterion):
+    bands = []
+    for band in getattr(criterion, "rubric_levels", None) or []:
+        if isinstance(band, dict) and band.get("points") is not None:
+            try:
+                bands.append({"label": band.get("label") or str(band.get("points")), "points": float(band["points"])})
+            except (TypeError, ValueError):
+                continue
+    return bands
+
+
+def _score_hybrid(db, scorer, paper, criterion, parsed, structure_checks, rubric_version):
+    """混合制（设计§2/§6.3）：按 sub_checks 拆成确定性/语义子检查分别计分，再汇总。
+    确定性子项走 checker（不调 LLM），语义子项走模型；本项得分 = Σ 子项得分。"""
+    sub_results = []
+    usage = _blank_usage()
+    for index, sub in enumerate(criterion.sub_checks, start=1):
+        sub_criterion = _make_sub_criterion(criterion, sub, index)
+        if sub_criterion.criterion_type == "deterministic":
+            sub_output = run_deterministic_checker(sub_criterion, parsed)
+        else:
+            candidates = retrieve_for_criterion(db, paper.id, sub_criterion, top_k=settings.SCORING_CHUNK_EVAL_TOP_K)
+            sub_output = _score_criterion_by_chunks(scorer, paper, sub_criterion, candidates, structure_checks, rubric_version)
+        _add_usage(usage, sub_output.get("usage"))
+        sub_results.append(sub_output)
+    return _aggregate_hybrid(criterion, sub_results, usage)
+
+
+def _make_sub_criterion(parent, sub, index):
+    kind = sub.get("kind") or "llm_judgment"
+    return SimpleNamespace(
+        id="%s::sub%d" % (getattr(parent, "id", "c"), index),
+        code="%s-S%d" % (getattr(parent, "code", "C"), index),
+        name=sub.get("name") or sub.get("criteria") or getattr(parent, "name", "子检查"),
+        max_score=float(sub.get("max_points") or 0),
+        description=sub.get("criteria") or sub.get("description"),
+        evidence_hints=list(getattr(parent, "evidence_hints", None) or []),
+        deduction_rules=list(getattr(parent, "deduction_rules", None) or []),
+        criterion_type=kind,
+        scoring_mode="deductive" if kind == "deterministic" else "llm_direct",
+        applies_to=getattr(parent, "applies_to", "global"),
+        rubric_levels=[],
+        sub_checks=[],
+    )
+
+
+def _aggregate_hybrid(criterion, sub_results, usage):
+    max_score = float(criterion.max_score)
+    awarded = round(min(sum(float(item.get("score") or 0) for item in sub_results), max_score), 2)
+    deduction_items = []
+    deductions = []
+    evidence = []
+    for item in sub_results:
+        deduction_items.extend(item.get("deduction_items") or [])
+        deductions.extend(item.get("deductions") or [])
+        evidence.extend(item.get("evidence") or [])
+    confidences = [float(item.get("confidence") or 0) for item in sub_results] or [0.0]
+    return {
+        "criterion_id": criterion.id,
+        "criterion_name": criterion.name,
+        "max_score": max_score,
+        "score": awarded,
+        "evidence_sufficient": all(item.get("evidence_sufficient") for item in sub_results) if sub_results else False,
+        "reason": "%s 按混合制核算：%d 个子检查合计 %.2f/%.2f。" % (criterion.name, len(sub_results), awarded, max_score),
+        "deductions": _dedupe_texts(deductions),
+        "deduction_items": _dedupe_deduction_items(deduction_items),
+        "evidence": _dedupe_evidence(evidence)[:6],
+        "suggestion": "混合制：确定性子项由规则核验，语义子项由模型评分。",
+        "confidence": round(min(confidences), 3),
+        "need_manual_review": any(item.get("need_manual_review") for item in sub_results),
+        "scoring_mode": "hybrid",
+        "sub_results": sub_results,
+        "usage": usage,
+    }
 
 
 def _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure_checks, rubric_version=None):
