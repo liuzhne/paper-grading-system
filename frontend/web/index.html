@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>毕业论文智能评分系统</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=20260522-llm-runtime-status" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">PG</div>
+          <div>
+            <div class="brand-title">论文评分系统</div>
+            <div class="brand-subtitle">AI Assisted Review</div>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-page="dashboard">总览</button>
+          <button class="nav-item" data-page="rubrics">评分标准</button>
+          <button class="nav-item" data-page="batches">批次与论文</button>
+          <button class="nav-item" data-page="review">评分复核</button>
+          <button class="nav-item" data-page="exports">导出写表</button>
+        </nav>
+        <div class="sidebar-note">
+          <span>本地单用户模式</span>
+          <strong>dev-user</strong>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1 id="page-title">总览</h1>
+            <p id="page-subtitle">查看评分批次、论文状态和待复核工作量。</p>
+          </div>
+          <div class="api-box">
+            <label for="api-base">API</label>
+            <input id="api-base" type="text" value="/api" />
+            <button id="refresh-btn" class="icon-button" title="刷新数据">刷新</button>
+          </div>
+        </header>
+
+        <div id="toast" class="toast hidden"></div>
+
+        <section id="page-dashboard" class="page active">
+          <div class="metric-grid">
+            <div class="metric"><span>批次数</span><strong id="metric-batches">0</strong></div>
+            <div class="metric"><span>论文数</span><strong id="metric-papers">0</strong></div>
+            <div class="metric"><span>待复核</span><strong id="metric-review">0</strong></div>
+            <div class="metric"><span>失败解析</span><strong id="metric-failed">0</strong></div>
+          </div>
+          <section class="panel">
+            <div class="panel-header">
+              <h2>P0 集成状态</h2>
+              <button class="secondary" data-action="reload">刷新</button>
+            </div>
+            <div id="integration-status" class="integration-grid"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header">
+              <h2>批次概览</h2>
+              <button class="secondary" data-action="reload">刷新</button>
+            </div>
+            <div id="dashboard-batches" class="table-wrap"></div>
+          </section>
+        </section>
+
+        <section id="page-rubrics" class="page">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-header"><h2>评分标准</h2></div>
+              <div id="rubric-list" class="stack"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header"><h2>新建标准</h2></div>
+              <form id="rubric-form" class="form">
+                <label>名称<input name="name" value="本科毕业论文通用评分标准" /></label>
+                <label>版本<input name="version" value="v1.1" /></label>
+                <label>说明<textarea name="description">正式前端创建的评分标准。</textarea></label>
+                <label>评分项 JSON<textarea name="criteria" class="code-input"></textarea></label>
+                <button type="submit">创建评分标准</button>
+              </form>
+              <div class="divider"></div>
+              <form id="rubric-import-form" class="form compact">
+                <label>导入标准名称<input name="name" value="导入的论文评分标准" /></label>
+                <label>导入版本<input name="version" value="v1.0-import" /></label>
+                <label>导入说明<textarea name="description">由 Word 论文模板和 Excel 评分规则解析生成。</textarea></label>
+                <label>Word 模板<input name="template_file" type="file" accept=".docx" /></label>
+                <label>Excel 评分规则<input name="rules_file" type="file" accept=".xlsx,.xlsm" /></label>
+                <button id="download-rubric-template-btn" type="button" class="secondary">下载 Excel 模板</button>
+                <button type="submit" class="secondary">解析文件并创建草稿</button>
+              </form>
+              <div class="divider"></div>
+              <form id="rubric-edit-form" class="form compact">
+                <label>编辑草稿<select id="rubric-edit-select"></select></label>
+                <div class="form-row">
+                  <label>名称<input name="name" /></label>
+                  <label>版本<input name="version" /></label>
+                </div>
+                <label>说明<textarea name="description"></textarea></label>
+                <label>评分项 JSON<textarea name="criteria" class="code-input compact-code"></textarea></label>
+                <button type="submit" class="secondary">保存草稿评分标准</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-batches" class="page">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-header"><h2>批次</h2></div>
+              <form id="batch-form" class="form compact">
+                <label>批次名称<input name="name" value="2026 届论文评分批次" /></label>
+                <label>评分标准<select name="rubric_id"></select></label>
+                <div class="form-row">
+                  <label>学院<input name="department" value="计算机学院" /></label>
+                  <label>专业<input name="major" value="软件工程" /></label>
+                </div>
+                <button type="submit">创建批次</button>
+              </form>
+              <div id="batch-list" class="stack"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <h2>论文</h2>
+                <button id="score-batch-btn" class="secondary">批量评分</button>
+              </div>
+              <div class="upload-row">
+                <input id="paper-files" type="file" accept=".docx,.pdf" multiple />
+                <button id="upload-btn">上传并解析</button>
+              </div>
+              <div id="paper-list" class="table-wrap"></div>
+              <div class="divider"></div>
+              <form id="paper-edit-form" class="form compact">
+                <label>校正论文<select id="paper-edit-select"></select></label>
+                <label>论文题名<input name="title" /></label>
+                <div class="form-row">
+                  <label>学号<input name="student_id" /></label>
+                  <label>学生姓名<input name="student_name" /></label>
+                </div>
+                <div class="form-row">
+                  <label>学院<input name="department" /></label>
+                  <label>专业<input name="major" /></label>
+                </div>
+                <label>指导教师<input name="advisor" /></label>
+                <button type="submit" class="secondary">保存论文信息</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-review" class="page">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-header">
+                <h2>评分任务</h2>
+                <button id="score-paper-btn" class="secondary">评分选中论文</button>
+              </div>
+              <div class="form compact">
+                <label>批次<select id="review-batch-select"></select></label>
+                <label>论文<select id="review-paper-select"></select></label>
+                <label>评分任务<select id="run-select"></select></label>
+              </div>
+              <div id="llm-runtime-status" class="llm-status"></div>
+              <div id="run-summary" class="run-summary"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header"><h2>评分明细与证据</h2></div>
+              <div id="score-items" class="stack"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-exports" class="page">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>导出与在线写表</h2>
+              <button id="refresh-export-logs-btn" class="secondary">刷新记录</button>
+            </div>
+            <div class="toolbar">
+              <label>批次<select id="export-batch-select"></select></label>
+              <label>评分任务<select id="export-run-select"></select></label>
+              <label>写表目标<input id="sheet-target" value="local-preview" /></label>
+              <button id="export-excel-btn">导出 Excel</button>
+              <button id="write-sheet-btn" class="secondary">写入在线表格</button>
+              <button id="report-btn" class="secondary">生成报告</button>
+            </div>
+            <div id="export-result" class="result-box"></div>
+            <h3 class="section-title">写表记录</h3>
+            <div id="export-logs" class="table-wrap"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/app.js?v=20260522-chunk-scoring-policy"></script>
+  </body>
+</html>
