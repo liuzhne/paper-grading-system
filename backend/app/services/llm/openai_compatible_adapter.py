@@ -110,6 +110,8 @@ def _instructions():
         "满分极少使用，必须有非常强的原文依据。不得因为论文结构完整或篇幅较长就给满分。"
         "deductions 必须是字符串数组；没有扣分点时返回空数组 []，不能返回数字或字符串。"
         "可选返回 deduction_items：结构化扣分数组，每个元素 {points(本扣分点扣几分,数字), reason, rule_ref(对应规则ID,可空), evidence_quote, evidence_location}；提供后系统将优先据此核算分数。"
+        "按 criterion.scoring_mode 调整输出：deductive=扣分制，务必在 deduction_items 给出每个扣分点的 points（数字），得分由系统按满分减扣分核算；"
+        "banded=分档制，必须从 criterion.rubric_levels 选最贴切的一档，返回 band_selection={level(档位名), rationale, evidence_quote, evidence_location}。"
         "evidence 必须是数组；不得编造原文依据；evidence.quote 必须逐字来自候选证据文本，"
         "evidence.chunk_id 必须使用候选证据中的 chunk_id。"
         "最终总分、等级和复核结论由系统计算，你只输出单项评分。"
@@ -148,6 +150,8 @@ def _input_payload(paper, criterion, evidence_candidates, structure_checks):
             "description": getattr(criterion, "description", None),
             "evidence_hints": getattr(criterion, "evidence_hints", None) or [],
             "deduction_rules": getattr(criterion, "deduction_rules", None) or [],
+            "scoring_mode": getattr(criterion, "scoring_mode", "llm_direct"),
+            "rubric_levels": getattr(criterion, "rubric_levels", None) or [],
         },
         "structure_checks": structure_checks,
         "evidence_candidates": safe_evidence,

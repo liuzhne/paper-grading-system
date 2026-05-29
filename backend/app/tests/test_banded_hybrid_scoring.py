@@ -39,6 +39,20 @@ def test_banded_without_levels_falls_back_without_crashing():
     assert result.get("scoring_mode") != "banded"  # 无档位 → 走证据门槛
 
 
+def test_banded_prefers_model_selected_band():
+    criterion = SimpleNamespace(name="创新性", code="C04", max_score=10, rubric_levels=BANDS)
+    output = {
+        "score": 6.0,  # 仅就近吸附会落到 良(7)
+        "band_selection": {"level": "优", "rationale": "很有创新"},
+        "evidence": [{"quote": "q", "location": "l"}],
+        "reason": "r",
+    }
+    result = _apply_banded(criterion, output)
+    assert result["score"] == 10.0  # 采用模型选的 优(10)
+    assert result["band_selection"]["level"] == "优"
+    assert result["band_selection_basis"] == "model-band"
+
+
 def test_make_sub_criterion_maps_kind_and_points():
     parent = SimpleNamespace(id="h1", code="H1", name="规范性", applies_to="global", evidence_hints=[], deduction_rules=[])
     sub = _make_sub_criterion(parent, {"kind": "deterministic", "max_points": 10, "name": "参考文献"}, 1)

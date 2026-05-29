@@ -229,12 +229,22 @@ def submit_review(db: Session, run_id: str, reason: str, reviewer_id: str):
 
 
 def _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric_version):
+    mode = getattr(criterion, "scoring_mode", "llm_direct")
+    # 扣分制/分档制必须对整段一次定性：逐块打分再聚合会把各块扣分累加，重复计扣（且分档无意义）。
+    single_call = mode in ("deductive", "banded")
+
     if not candidates:
         raw_output = _score_with_runtime_fallback(scorer, paper, criterion, [], structure_checks, rubric_version)
         output = validate_score_output(raw_output, criterion, [])
         output["chunk_evaluation_mode"] = "single-empty-evidence"
         output["chunk_scores"] = []
         chunk_outputs = []
+    elif single_call:
+        raw_output = _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure_checks, rubric_version)
+        output = validate_score_output(raw_output, criterion, candidates)
+        output["chunk_evaluation_mode"] = "single-combined"
+        output["chunk_scores"] = []
+        chunk_outputs = [output]
     else:
         chunk_outputs = []
         for index, candidate in enumerate(candidates, start=1):
@@ -246,8 +256,7 @@ def _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_c
             chunk_outputs.append(chunk_output)
         output = _aggregate_chunk_outputs(criterion, chunk_outputs)
 
-    # 计分模式分流（设计§6.3 / N6）：deductive 代码算分跳过封顶；banded 吸附到档位；其余走证据门槛。
-    mode = getattr(criterion, "scoring_mode", "llm_direct")
+    # 计分模式分流（设计§6.3 / N6）：deductive 代码算分跳过封顶；banded 吸附/采用模型选档；其余走证据门槛。
     if mode == "deductive":
         return _apply_deductive(criterion, output)
     if mode == "banded":
@@ -283,26 +292,33 @@ def _apply_deductive(criterion, output):
 
 
 def _apply_banded(criterion, output):
-    """分档制（设计§6.3）：把模型判断吸附到 rubric_levels 中最接近的档位分，并记录带证据的 BandSelection。
-    注：当前按模型给分就近吸附；让模型直接选档的 banded 专属 prompt 属后续增强。"""
+    """分档制（设计§6.3）：优先采用模型在 band_selection 选的档位（匹配 rubric_levels）；
+    模型未给或不匹配时，按模型给分就近吸附到最接近的档位。记录带证据的 BandSelection。"""
     bands = _numeric_bands(criterion)
     if not bands:
         # 无有效档位 → 退回证据门槛，避免分档项无法计分。
         return _apply_evidence_gate(output, criterion, [])
     max_score = float(criterion.max_score)
     model_score = float(output.get("score") or 0)
-    chosen = min(bands, key=lambda band: (abs(band["points"] - model_score), -band["points"]))
+    model_band = output.get("band_selection") or {}
+    chosen = _match_band(model_band.get("level"), bands)
+    if chosen is not None:
+        basis = "model-band"
+    else:
+        chosen = min(bands, key=lambda band: (abs(band["points"] - model_score), -band["points"]))
+        basis = "score-snap"
     first_evidence = (output.get("evidence") or [{}])[0] if output.get("evidence") else {}
     output["score_before_banded"] = model_score
     output["score"] = round(min(float(chosen["points"]), max_score), 2)
     output["band_selection"] = {
         "level": chosen.get("label"),
         "awarded": output["score"],
-        "rationale": output.get("reason") or "",
+        "rationale": model_band.get("rationale") or output.get("reason") or "",
         "rule_ref": getattr(criterion, "code", None),
-        "evidence_location": first_evidence.get("location", ""),
-        "evidence_quote": first_evidence.get("quote", ""),
+        "evidence_location": model_band.get("evidence_location") or first_evidence.get("location", ""),
+        "evidence_quote": model_band.get("evidence_quote") or first_evidence.get("quote", ""),
     }
+    output["band_selection_basis"] = basis
     output["scoring_mode"] = "banded"
     output["reason"] = "%s 按分档制核算：选档「%s」=%.2f/%.2f。" % (
         criterion.name,
@@ -313,6 +329,17 @@ def _apply_banded(criterion, output):
     if not output.get("evidence"):
         output["need_manual_review"] = True
     return output
+
+
+def _match_band(level, bands):
+    if not level:
+        return None
+    level = str(level).strip()
+    for band in bands:
+        label = str(band.get("label") or "")
+        if label and (label == level or level in label or label in level):
+            return band
+    return None
 
 
 def _numeric_bands(criterion):

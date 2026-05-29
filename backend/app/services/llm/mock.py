@@ -60,7 +60,7 @@ class MockLLMScorer(LLMScorer):
                     }
                 )
 
-        return {
+        result = {
             "criterion_id": criterion.id,
             "criterion_name": criterion.name,
             "max_score": max_score,
@@ -73,6 +73,30 @@ class MockLLMScorer(LLMScorer):
             "confidence": confidence,
             "need_manual_review": (not evidence_sufficient) or confidence < 0.65,
         }
+        # 模式感知（与真实模型行为对齐，便于端到端测试）：
+        mode = getattr(criterion, "scoring_mode", "llm_direct")
+        if mode == "deductive":
+            result["deduction_items"] = [
+                {
+                    "points": round(max_score - score, 2),
+                    "reason": "；".join(deductions)[:120] or "综合扣分",
+                    "rule_ref": getattr(criterion, "code", None),
+                    "evidence_location": "",
+                    "evidence_quote": "",
+                }
+            ]
+        elif mode == "banded":
+            bands = [b for b in (getattr(criterion, "rubric_levels", None) or []) if isinstance(b, dict) and b.get("points") is not None]
+            if bands:
+                chosen = min(bands, key=lambda b: abs(float(b["points"]) - score))
+                result["band_selection"] = {
+                    "level": chosen.get("label"),
+                    "rationale": result["reason"],
+                    "rule_ref": getattr(criterion, "code", None),
+                    "evidence_location": "",
+                    "evidence_quote": "",
+                }
+        return result
 
 
 def _contains_any(text, keywords):
