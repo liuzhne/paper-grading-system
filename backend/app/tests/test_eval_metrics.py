@@ -2,6 +2,7 @@ from backend.app.eval import metrics
 from backend.app.eval.runner import EvalPrediction
 from backend.app.eval.runner import EvalSample
 from backend.app.eval.runner import assert_no_regression
+from backend.app.eval.runner import baseline_from_report
 from backend.app.eval.runner import evaluate
 
 
@@ -53,6 +54,23 @@ def test_evaluate_pairs_and_reports():
     # C01 系统比人工低 → bias 为负（偏严）。
     assert report["per_criterion"]["C01"]["bias"] == -1.0
     assert report["per_criterion"]["C01"]["mae"] == 1.0
+
+
+def test_baseline_from_report_extracts_aggregate_only():
+    report = {
+        "qwk": 0.8, "mae": 2.0, "rmse": 3.0,
+        "exact_grade_agreement": 0.7, "adjacent_grade_agreement": 0.9,
+        "per_criterion": {"C01": {"bias": -1}}, "errors": [], "n": 5,
+    }
+    assert baseline_from_report(report) == {
+        "qwk": 0.8, "mae": 2.0, "rmse": 3.0, "exact_grade_agreement": 0.7, "adjacent_grade_agreement": 0.9,
+    }
+
+
+def test_run_qwk_eval_script_imports():
+    import backend.app.scripts.run_qwk_eval as script
+
+    assert callable(script.main)
 
 
 def test_regression_gate_passes_and_fails():

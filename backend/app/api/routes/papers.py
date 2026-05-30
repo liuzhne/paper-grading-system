@@ -7,7 +7,6 @@ from fastapi import File
 from fastapi import Form
 from fastapi import HTTPException
 from fastapi import UploadFile
-from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,13 +19,11 @@ from backend.app.schemas.paper import PaperChunkRead
 from backend.app.schemas.paper import PaperRead
 from backend.app.schemas.paper import PaperUpdate
 from backend.app.schemas.paper import ParsedPaperResponse
-from backend.app.services.document_parser.chunking import build_chunks
-from backend.app.services.document_parser.parser import parse_document
+from backend.app.services.papers.ingestion import parse_and_store
 from backend.app.services.storage.local import ensure_storage_dirs
 from backend.app.services.storage.local import read_json
 from backend.app.services.storage.local import safe_filename
 from backend.app.services.storage.local import save_binary
-from backend.app.services.storage.local import write_json
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -107,7 +104,7 @@ def reparse_paper(paper_id: str, db: Session = Depends(get_db)):
     if not paper.file_path:
         raise HTTPException(status_code=400, detail="paper has no source file path")
 
-    _parse_existing_paper(db, paper)
+    parse_and_store(db, paper)
     db.commit()
     db.refresh(paper)
     return paper
@@ -163,38 +160,5 @@ def _save_and_parse_upload(db: Session, batch_id: str, file: UploadFile, strict_
     destination = settings.uploads_dir / ("%s_%s" % (paper.id, filename))
     save_binary(file.file, destination)
     paper.file_path = str(destination)
-    _parse_existing_paper(db, paper)
-    return paper
-
-
-def _parse_existing_paper(db: Session, paper: Paper):
-    existing_title = paper.title
-    existing_student_id = paper.student_id
-    existing_student_name = paper.student_name
-    existing_department = paper.department
-    existing_major = paper.major
-    existing_advisor = paper.advisor
-    db.execute(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
-    paper.parsed_text_path = None
-    paper.parse_quality = None
-    paper.error_message = None
-    paper.status = "parsing"
-    try:
-        parsed = parse_document(paper.file_path)
-        parsed_path = settings.parsed_dir / ("%s.json" % paper.id)
-        write_json(parsed_path, parsed.to_dict())
-        paper.title = existing_title or parsed.title
-        paper.student_id = existing_student_id or parsed.student_id
-        paper.student_name = existing_student_name or parsed.student_name
-        paper.department = existing_department or parsed.department
-        paper.major = existing_major or parsed.major
-        paper.advisor = existing_advisor or parsed.advisor
-        paper.parsed_text_path = str(parsed_path)
-        paper.parse_quality = parsed.parse_quality
-        paper.status = "parsed"
-        for chunk in build_chunks(parsed, paper.id):
-            db.add(chunk)
-    except Exception as exc:
-        paper.status = "failed"
-        paper.error_message = str(exc)
+    parse_and_store(db, paper)
     return paper

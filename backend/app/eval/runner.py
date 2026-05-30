@@ -91,6 +91,12 @@ def _per_criterion_errors(paired):
     return result
 
 
+def baseline_from_report(report):
+    """从报告抽取可固化为回归基线的**聚合指标**（无任何学生内容，可安全提交仓库）。"""
+    keys = ("qwk", "mae", "rmse", "exact_grade_agreement", "adjacent_grade_agreement")
+    return {key: report.get(key) for key in keys}
+
+
 def assert_no_regression(report, baseline, qwk_drop_tol=0.02, mae_rise_tol=1.0):
     """回归门禁：返回问题列表，空列表=通过。用于 CI（设计§15.2）。"""
     issues = []

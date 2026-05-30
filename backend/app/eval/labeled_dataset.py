@@ -1,0 +1,150 @@
+"""QWK 留出集：从"论文文件夹 + 教师成绩表"构建评估，比对系统分与真实人工分（设计§15）。
+
+成绩表（.xlsx 或 .csv）列约定：
+- 文件名列（表头含 文件名/文件/论文/filename/file/paper）
+- 总分列（表头含 总分/总成绩/total/score）
+- 其余表头 = 评分项 code 的列 → 视为该项的人工分（分项分，用于逐维度 bias）
+"""
+
+import csv
+from pathlib import Path
+
+from openpyxl import load_workbook
+from sqlalchemy.orm import Session
+
+from backend.app.db.models import GradingBatch
+from backend.app.db.models import Rubric
+from backend.app.eval.run_eval import _items_by_code
+from backend.app.eval.runner import EvalPrediction
+from backend.app.eval.runner import EvalSample
+from backend.app.eval.runner import evaluate
+from backend.app.services.papers.ingestion import ingest_file
+from backend.app.services.scoring.engine import score_paper
+
+FILENAME_HEADERS = ("文件名", "文件", "论文", "filename", "file", "paper")
+TOTAL_HEADERS = ("总分", "总成绩", "总评", "total", "score")
+
+
+def build_labeled_eval(db: Session, rubric_id: str, papers_dir, scores_path, scorer=None):
+    """从论文文件夹 + 教师成绩表构建评估：逐篇导入+评分，与人工真值比对（设计§15）。"""
+    rubric = db.get(Rubric, rubric_id)
+    if rubric is None:
+        raise ValueError("rubric not found: %s" % rubric_id)
+    rubric_codes = {criterion.code for criterion in rubric.criteria}
+    table = load_scores_table(scores_path)
+    if not table:
+        raise ValueError("成绩表为空或未识别到有效行")
+
+    batch = GradingBatch(name="QWK评估-%s-%s" % (rubric.name, rubric.version), rubric_id=rubric_id, status="draft")
+    db.add(batch)
+    db.flush()
+
+    base_dir = Path(papers_dir)
+    samples = []
+    predictions = []
+    errors = []
+    for entry in table:
+        source = base_dir / entry["filename"]
+        if not source.exists():
+            errors.append({"filename": entry["filename"], "error": "未找到论文文件"})
+            continue
+        try:
+            paper = ingest_file(db, batch.id, str(source), entry["filename"])
+            if paper.status != "parsed":
+                errors.append({"filename": entry["filename"], "error": paper.error_message or "解析失败"})
+                continue
+            run = score_paper(db, paper.id, scorer=scorer)
+        except Exception as exc:  # 单篇失败不中断整批
+            errors.append({"filename": entry["filename"], "error": str(exc)})
+            continue
+        human_items = {code: value for code, value in entry["items"].items() if code in rubric_codes}
+        samples.append(EvalSample(key=paper.id, human_total=entry["total"], human_items=human_items))
+        predictions.append(
+            EvalPrediction(key=paper.id, system_total=float(run.final_total_score or 0), system_items=_items_by_code(run))
+        )
+    db.commit()
+
+    report = evaluate(predictions, samples)
+    report["errors"] = errors
+    report["rubric_id"] = rubric_id
+    report["dataset_size"] = len(table)
+    return report
+
+
+def load_scores_table(path):
+    """返回 [{filename, total, items:{code:score}}]。"""
+    suffix = Path(path).suffix.lower()
+    rows = _read_xlsx(path) if suffix in (".xlsx", ".xlsm") else _read_csv(path)
+    return _rows_to_samples(rows)
+
+
+def _read_xlsx(path):
+    workbook = load_workbook(str(path), data_only=True)
+    sheet = workbook.active
+    return [list(row) for row in sheet.iter_rows(values_only=True)]
+
+
+def _read_csv(path):
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        return [row for row in csv.reader(handle)]
+
+
+def _rows_to_samples(rows):
+    rows = [row for row in rows if row and any(_norm(cell) for cell in row)]
+    if not rows:
+        return []
+    raw_header = ["" if cell is None else str(cell).strip() for cell in rows[0]]
+    norm_header = [cell.lower() for cell in raw_header]  # 仅用于别名匹配
+    filename_idx = _find_column(norm_header, FILENAME_HEADERS)
+    total_idx = _find_column(norm_header, TOTAL_HEADERS)
+    if filename_idx is None or total_idx is None:
+        raise ValueError("成绩表需包含『文件名』列与『总分』列")
+
+    # 其余列视为评分项 code → 保留原始大小写（与 rubric 的 criterion code 严格匹配）。
+    code_columns = {
+        index: raw_header[index]
+        for index in range(len(raw_header))
+        if index not in (filename_idx, total_idx) and raw_header[index]
+    }
+
+    samples = []
+    for row in rows[1:]:
+        filename = _cell(row, filename_idx)
+        total = _num(_cell(row, total_idx))
+        if not filename or total is None:
+            continue
+        items = {}
+        for index, code in code_columns.items():
+            value = _num(_cell(row, index))
+            if value is not None:
+                items[code] = value
+        samples.append({"filename": str(filename).strip(), "total": total, "items": items})
+    return samples
+
+
+def _find_column(header, aliases):
+    for index, cell in enumerate(header):
+        if cell and any(alias.lower() in cell for alias in aliases):
+            return index
+    return None
+
+
+def _cell(row, index):
+    if index is None or index >= len(row):
+        return None
+    return row[index]
+
+
+def _num(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except ValueError:
+        return None
+
+
+def _norm(value):
+    return "" if value is None else str(value).strip().lower()
