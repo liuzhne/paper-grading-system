@@ -48,6 +48,10 @@ def test_import_rubric_from_word_template_and_excel_rules(client):
     assert "实验设计" in rubric["criteria"][0]["evidence_hints"]
     assert "Word 模板解析提示" in rubric["criteria"][0]["description"]
     assert "参考文献" in result["template_summary"]["hints"]
+    # 模板期望格式规格已抽取并持久化（格式检查器的基准前置）。
+    assert rubric["format_spec"]["source"] == "template"
+    assert "body_font_ascii" in rubric["format_spec"]
+    assert "format_spec" in result["template_summary"]
 
     duplicate_response = client.post(
         "/api/rubrics/import-files",

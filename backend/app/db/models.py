@@ -52,6 +52,8 @@ class Rubric(Base):
     total_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=100)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="draft")
     description: Mapped[str] = mapped_column(Text, nullable=True)
+    # 期望格式规格（设计§2 global_format）：从 Word 模板抽取，作格式检查器的基准。
+    format_spec: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     published_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)

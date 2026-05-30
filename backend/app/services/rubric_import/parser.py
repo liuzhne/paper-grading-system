@@ -5,6 +5,8 @@ from io import BytesIO
 from docx import Document
 from openpyxl import load_workbook
 
+from backend.app.services.document_parser.format_resolver import resolve_default_format
+
 
 HEADER_ALIASES = {
     "code": ["编号", "指标编号", "评分项编号", "代码", "code", "criterion_code"],
@@ -66,16 +68,27 @@ class RubricImport:
     criteria: list[ImportedCriterion]
     template_summary: dict
     warnings: list[str]
+    format_spec: dict = field(default_factory=dict)
 
 
 def parse_rubric_files(rules_bytes: bytes, template_bytes: bytes | None = None):
     warnings = []
-    template_summary = parse_word_template(template_bytes) if template_bytes else {"section_titles": [], "hints": [], "paragraph_count": 0}
+    template_summary = (
+        parse_word_template(template_bytes)
+        if template_bytes
+        else {"section_titles": [], "hints": [], "paragraph_count": 0, "format_spec": {}}
+    )
     criteria, excel_warnings = parse_excel_rules(rules_bytes)
     warnings.extend(excel_warnings)
     enriched = [_enrich_with_template(item, template_summary) for item in criteria]
     total_score = round(sum(item.max_score for item in enriched), 2)
-    return RubricImport(total_score=total_score, criteria=enriched, template_summary=template_summary, warnings=warnings)
+    return RubricImport(
+        total_score=total_score,
+        criteria=enriched,
+        template_summary=template_summary,
+        warnings=warnings,
+        format_spec=template_summary.get("format_spec") or {},
+    )
 
 
 def parse_word_template(template_bytes):
@@ -113,6 +126,7 @@ def parse_word_template(template_bytes):
         "section_titles": _dedupe(section_titles)[:30],
         "hints": _dedupe(hints)[:40],
         "paragraph_count": len(paragraphs),
+        "format_spec": resolve_default_format(template_bytes),
     }
 
 

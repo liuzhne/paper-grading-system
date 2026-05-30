@@ -111,6 +111,7 @@ def import_rubric_from_files(
         version=version,
         total_score=imported.total_score,
         description=_import_description(description, imported.template_summary),
+        format_spec=imported.format_spec,
         status="draft",
         created_by=settings.DEFAULT_DEV_USER_ID,
     )

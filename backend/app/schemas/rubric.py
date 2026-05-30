@@ -91,6 +91,7 @@ class RubricRead(BaseModel):
     total_score: float
     status: str
     description: Optional[str] = None
+    format_spec: dict = Field(default_factory=dict)
     created_at: datetime
     published_at: Optional[datetime] = None
     criteria: list[RubricCriterionRead] = Field(default_factory=list)
