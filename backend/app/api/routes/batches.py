@@ -15,6 +15,8 @@ from backend.app.schemas.batch import BatchSummary
 from backend.app.schemas.batch import BatchUpdate
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.batches import get_batch_summary
+from backend.app.services.calibration.analytics import batch_ranking
+from backend.app.services.calibration.analytics import score_drift
 from backend.app.services.scoring.engine import score_batch
 
 router = APIRouter(prefix="/batches", tags=["batches"])
@@ -65,6 +67,22 @@ def start_batch_endpoint(batch_id: str, rescore: bool = False, db: Session = Dep
 def get_batch_summary_endpoint(batch_id: str, db: Session = Depends(get_db)):
     try:
         return get_batch_summary(db, batch_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{batch_id}/ranking")
+def batch_ranking_endpoint(batch_id: str, db: Session = Depends(get_db)):
+    try:
+        return batch_ranking(db, batch_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{batch_id}/drift")
+def batch_drift_endpoint(batch_id: str, db: Session = Depends(get_db)):
+    try:
+        return score_drift(db, batch_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

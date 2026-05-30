@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     LLM_FALLBACK_TO_MOCK: bool = True
     LLM_CACHE_ENABLED: bool = True  # L0 缓存/账本（设计§7）：按输入哈希复用 LLM 评分结果
     COHERENCE_SEMANTIC_ENABLED: bool = True  # §8 语义一致性核验（研究问题↔结论等），每篇额外一次 LLM 调用
+    SCORING_DRIFT_BIAS_THRESHOLD: float = 1.0  # L2 漂移检测：|AI分−人工终分| 的人均偏移超过此值即标记（设计§7/§15.2）
     LLM_DEBUG_LOG_ENABLED: bool = True
     LLM_DEBUG_LOG_MAX_CHARS: int = 12000
     LLM_RATE_LIMIT_SLEEP_SECONDS: float = 1.0
