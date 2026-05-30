@@ -6,7 +6,8 @@ class MockLLMScorer(LLMScorer):
     model_name = "mock-criterion-scorer"
     model_version = "v1"
 
-    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks):
+    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks, anchors=None):
+        # Mock 忽略 anchors（启发式评分）；真实模型据 anchors 校准宽严。
         max_score = float(criterion.max_score)
         evidence_text = "\n".join(item.get("text", "") for item in evidence_candidates)
         evidence_sufficient = len(evidence_candidates) > 0 and len(evidence_text) >= 40

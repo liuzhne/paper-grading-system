@@ -21,8 +21,9 @@ from backend.app.core.config import settings
 PROMPT_VERSION = "2026-05-29-1"
 
 
-def build_request(scorer, criterion, candidates, structure_checks, rubric_version):
-    """构造进入哈希且作为审计留存的"完整输入"。"""
+def build_request(scorer, criterion, candidates, structure_checks, rubric_version, anchors=None):
+    """构造进入哈希且作为审计留存的"完整输入"。
+    校准锚点并入哈希 → 锚点变化即缓存失效（保可复现，设计§7）。"""
     return {
         "prompt_version": PROMPT_VERSION,
         "provider": getattr(scorer, "provider", ""),
@@ -48,6 +49,7 @@ def build_request(scorer, criterion, candidates, structure_checks, rubric_versio
         },
         "candidates": [{"chunk_id": c.get("chunk_id"), "text": c.get("text")} for c in (candidates or [])],
         "structure_checks": structure_checks,
+        "calibration_anchors": anchors or [],
     }
 
 

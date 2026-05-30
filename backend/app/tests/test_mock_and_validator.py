@@ -377,5 +377,5 @@ class FailingScorer:
     model_name = "glm-4.7-flash"
     model_version = "chat-completions"
 
-    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks):
+    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks, anchors=None):
         raise RuntimeError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol")

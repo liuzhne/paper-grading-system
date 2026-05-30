@@ -231,6 +231,24 @@ class ReviewLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
 
+class CalibrationAnchor(Base):
+    """L2 跨文档校准锚点（设计§7）：脱敏范文 + 已知分数 + 理由，按 rubric/评分项归档。
+    评分时作 few-shot 校准模型宽严；**用脱敏范文，不用真实学生论文互锚**（隐私/公平，§15.3）。"""
+
+    __tablename__ = "calibration_anchors"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    rubric_id: Mapped[str] = mapped_column(String(36), ForeignKey("rubrics.id"), nullable=False)
+    criterion_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
+    max_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
+    label: Mapped[str] = mapped_column(String(50), nullable=True)
+    excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="范文")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
 class SpreadsheetWriteLog(Base):
     __tablename__ = "spreadsheet_write_logs"
 

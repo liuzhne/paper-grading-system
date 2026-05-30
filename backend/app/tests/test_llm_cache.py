@@ -29,7 +29,7 @@ class CountingScorer:
     def __init__(self):
         self.calls = 0
 
-    def score_criterion(self, paper, criterion, candidates, structure_checks):
+    def score_criterion(self, paper, criterion, candidates, structure_checks, anchors=None):
         self.calls += 1
         return {
             "criterion_id": criterion.id,
@@ -61,6 +61,21 @@ def test_key_is_deterministic_and_input_sensitive():
     assert base == same
     assert diff_text != base
     assert diff_version != base
+
+
+def test_calibration_anchors_change_cache_key():
+    scorer = CountingScorer()
+    criterion = _criterion()
+    candidates = [{"chunk_id": "k1", "text": "原文证据"}]
+
+    without = llm_cache.key_of(llm_cache.build_request(scorer, criterion, candidates, [], "v1.0", None))
+    with_anchor = llm_cache.key_of(
+        llm_cache.build_request(
+            scorer, criterion, candidates, [], "v1.0",
+            [{"label": "优", "score": 9, "max_score": 10, "excerpt": "范文", "rationale": "好"}],
+        )
+    )
+    assert without != with_anchor  # 锚点变化 → 缓存失效（保可复现）
 
 
 def test_get_put_roundtrip(monkeypatch, tmp_path):

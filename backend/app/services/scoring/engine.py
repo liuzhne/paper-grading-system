@@ -18,6 +18,7 @@ from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.services.llm.debug_logging import log_llm_throttle_sleep
 from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.cache import llm_cache
+from backend.app.services.calibration import get_anchors
 from backend.app.services.checkers import run_deterministic_checker
 from backend.app.services.coherence import analyze_semantic_coherence
 from backend.app.services.retrieval.keyword import retrieve_for_criterion
@@ -69,7 +70,8 @@ def score_paper(db: Session, paper_id: str, scorer=None):
             output = _score_hybrid(db, scorer, paper, criterion, parsed, structure_checks, rubric.version)
         else:
             candidates = retrieve_for_criterion(db, paper.id, criterion, top_k=settings.SCORING_CHUNK_EVAL_TOP_K)
-            output = _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric.version)
+            anchors = get_anchors(db, rubric.id, criterion.code)  # L2 校准锚点（脱敏范文）
+            output = _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric.version, anchors)
         _add_usage(usage_totals, output.get("usage"))
         item = ScoreItem(
             scoring_run_id=run.id,
@@ -231,19 +233,19 @@ def submit_review(db: Session, run_id: str, reason: str, reviewer_id: str):
     return run
 
 
-def _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric_version):
+def _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric_version, anchors=None):
     mode = getattr(criterion, "scoring_mode", "llm_direct")
     # 扣分制/分档制必须对整段一次定性：逐块打分再聚合会把各块扣分累加，重复计扣（且分档无意义）。
     single_call = mode in ("deductive", "banded")
 
     if not candidates:
-        raw_output = _score_with_runtime_fallback(scorer, paper, criterion, [], structure_checks, rubric_version)
+        raw_output = _score_with_runtime_fallback(scorer, paper, criterion, [], structure_checks, rubric_version, anchors)
         output = validate_score_output(raw_output, criterion, [])
         output["chunk_evaluation_mode"] = "single-empty-evidence"
         output["chunk_scores"] = []
         chunk_outputs = []
     elif single_call:
-        raw_output = _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure_checks, rubric_version)
+        raw_output = _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure_checks, rubric_version, anchors)
         output = validate_score_output(raw_output, criterion, candidates)
         output["chunk_evaluation_mode"] = "single-combined"
         output["chunk_scores"] = []
@@ -251,7 +253,7 @@ def _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_c
     else:
         chunk_outputs = []
         for index, candidate in enumerate(candidates, start=1):
-            raw_output = _score_with_runtime_fallback(scorer, paper, criterion, [candidate], structure_checks, rubric_version)
+            raw_output = _score_with_runtime_fallback(scorer, paper, criterion, [candidate], structure_checks, rubric_version, anchors)
             chunk_output = validate_score_output(raw_output, criterion, [candidate])
             chunk_output["chunk_index"] = index
             chunk_output["chunk_id"] = candidate.get("chunk_id")
@@ -421,13 +423,13 @@ def _aggregate_hybrid(criterion, sub_results, usage):
     }
 
 
-def _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure_checks, rubric_version=None):
+def _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure_checks, rubric_version=None, anchors=None):
     provider = getattr(scorer, "provider", "")
     cache_request = None
     cache_key = None
     # L0 缓存（设计§7）：仅对真实模型生效；mock 廉价且确定，不缓存。
     if settings.LLM_CACHE_ENABLED and provider != "mock":
-        cache_request = llm_cache.build_request(scorer, criterion, candidates, structure_checks, rubric_version)
+        cache_request = llm_cache.build_request(scorer, criterion, candidates, structure_checks, rubric_version, anchors)
         cache_key = llm_cache.key_of(cache_request)
         cached = llm_cache.get(cache_key)
         if cached is not None:
@@ -439,13 +441,13 @@ def _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure
 
     try:
         _throttle_real_llm_call(scorer)
-        output = scorer.score_criterion(paper, criterion, candidates, structure_checks)
+        output = scorer.score_criterion(paper, criterion, candidates, structure_checks, anchors)
     except Exception as exc:
         if not settings.LLM_FALLBACK_TO_MOCK or provider == "mock":
             raise LLMScoringError("真实模型调用失败：%s" % _short_error(exc)) from exc
 
         fallback = MockLLMScorer()
-        output = fallback.score_criterion(paper, criterion, candidates, structure_checks)
+        output = fallback.score_criterion(paper, criterion, candidates, structure_checks, anchors)
         fallback_reason = _short_error(exc)
         output["provider"] = fallback.provider
         output["fallback_from_provider"] = getattr(scorer, "provider", "unknown")

@@ -9,6 +9,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import ProgrammingError
 
 from backend.app.api.routes import batches
+from backend.app.api.routes import calibration
 from backend.app.api.routes import exports
 from backend.app.api.routes import papers
 from backend.app.api.routes import rubrics
@@ -55,6 +56,7 @@ def create_app():
     app.include_router(scoring.router, prefix=settings.API_PREFIX)
     app.include_router(exports.router, prefix=settings.API_PREFIX)
     app.include_router(system.router, prefix=settings.API_PREFIX)
+    app.include_router(calibration.router, prefix=settings.API_PREFIX)
 
     web_dir = Path(__file__).resolve().parents[2] / "frontend" / "web"
     assets_dir = web_dir / "assets"

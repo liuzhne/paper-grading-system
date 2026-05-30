@@ -8,7 +8,7 @@ class LLMScorer(ABC):
     model_version = "v1"
 
     @abstractmethod
-    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks):
+    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks, anchors=None):
         raise NotImplementedError
 
     def complete_json(self, instructions, payload):

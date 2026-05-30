@@ -29,12 +29,12 @@ class OpenAICompatibleChatScorer(LLMScorer):
         self.provider_name = provider_name or settings.OPENAI_COMPATIBLE_PROVIDER_NAME
         self.client = client or httpx.Client(timeout=settings.OPENAI_COMPATIBLE_TIMEOUT_SECONDS)
 
-    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks):
+    def score_criterion(self, paper, criterion, evidence_candidates, structure_checks, anchors=None):
         payload = {
             "model": self.model_name,
             "messages": [
                 {"role": "system", "content": _instructions()},
-                {"role": "user", "content": _input_payload(paper, criterion, evidence_candidates, structure_checks)},
+                {"role": "user", "content": _input_payload(paper, criterion, evidence_candidates, structure_checks, anchors)},
             ],
             "temperature": settings.OPENAI_COMPATIBLE_TEMPERATURE,
             "max_tokens": settings.OPENAI_COMPATIBLE_MAX_TOKENS,
@@ -133,6 +133,7 @@ def _instructions():
         "banded=分档制，必须从 criterion.rubric_levels 选最贴切的一档，返回 band_selection={level(档位名), rationale, evidence_quote, evidence_location}。"
         "evidence 必须是数组；不得编造原文依据；evidence.quote 必须逐字来自候选证据文本，"
         "evidence.chunk_id 必须使用候选证据中的 chunk_id。"
+        "若提供 calibration_anchors（脱敏范文+已知分数+理由），请据其统一宽严尺度，使本次评分与范例一致。"
         "最终总分、等级和复核结论由系统计算，你只输出单项评分。"
         "只返回一个 JSON 对象，不要返回 Markdown、代码块或解释文字。"
         "JSON 必须包含：criterion_id, criterion_name, max_score, score, evidence_sufficient, "
@@ -140,7 +141,7 @@ def _instructions():
     )
 
 
-def _input_payload(paper, criterion, evidence_candidates, structure_checks):
+def _input_payload(paper, criterion, evidence_candidates, structure_checks, anchors=None):
     safe_evidence = [
         {
             "chunk_id": item.get("chunk_id"),
@@ -173,6 +174,7 @@ def _input_payload(paper, criterion, evidence_candidates, structure_checks):
             "rubric_levels": getattr(criterion, "rubric_levels", None) or [],
         },
         "structure_checks": structure_checks,
+        "calibration_anchors": anchors or [],
         "evidence_candidates": safe_evidence,
     }
     return json.dumps(payload, ensure_ascii=False)
