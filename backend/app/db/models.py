@@ -167,6 +167,8 @@ class ScoringRun(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    # 篇章一致性发现（设计§8）：确定性（图表/引文）+ 语义（研究问题↔结论）合并，进报告、供人工复核。
+    coherence_findings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)

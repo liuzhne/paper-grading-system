@@ -27,7 +27,7 @@ def generate_report(db: Session, run_id: str):
         raise ValueError("scoring run not found")
 
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
-    html = _render_html(run, review_logs, _load_coherence(run.paper))
+    html = _render_html(run, review_logs, _coherence_for(run))
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
     path = settings.reports_dir / ("scoring_report_%s.html" % run_id)
     path.write_text(html, encoding="utf-8")
@@ -117,6 +117,13 @@ def _render_item(item):
         suggestion=escape(item.suggestion or ""),
         evidence=evidence,
     )
+
+
+def _coherence_for(run):
+    # 评分运行已合并存档（确定性+语义）；旧运行回退到解析期的确定性发现。
+    if getattr(run, "coherence_findings", None):
+        return run.coherence_findings
+    return _load_coherence(run.paper)
 
 
 def _load_coherence(paper):

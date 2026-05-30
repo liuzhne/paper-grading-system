@@ -55,6 +55,18 @@ class OpenAIResponsesScorer(LLMScorer):
         output["usage"] = _usage_from_responses(data)
         return output
 
+    def complete_json(self, instructions, payload):
+        body = {
+            "model": self.model_name,
+            "temperature": settings.OPENAI_TEMPERATURE,
+            "instructions": instructions,
+            "input": json.dumps(payload, ensure_ascii=False),
+            "max_output_tokens": settings.OPENAI_MAX_OUTPUT_TOKENS,
+        }
+        response = self._post_with_retry(body)
+        response.raise_for_status()
+        return _parse_json_output(response.json())
+
     def _post_with_retry(self, payload):
         url = "%s/responses" % self.base_url
         headers = {

@@ -11,6 +11,10 @@ class LLMScorer(ABC):
     def score_criterion(self, paper, criterion, evidence_candidates, structure_checks):
         raise NotImplementedError
 
+    def complete_json(self, instructions, payload):
+        """通用结构化 JSON 补全原语（供语义一致性、L2 等复用）。默认未实现。"""
+        raise NotImplementedError
+
 
 class LLMScoringError(RuntimeError):
     pass

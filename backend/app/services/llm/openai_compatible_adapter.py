@@ -57,6 +57,25 @@ class OpenAICompatibleChatScorer(LLMScorer):
         output["usage"] = _usage_from_chat(data)
         return output
 
+    def complete_json(self, instructions, payload):
+        body = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            "temperature": settings.OPENAI_COMPATIBLE_TEMPERATURE,
+            "max_tokens": settings.OPENAI_COMPATIBLE_MAX_TOKENS,
+        }
+        thinking_type = (settings.OPENAI_COMPATIBLE_THINKING_TYPE or "").strip()
+        if thinking_type:
+            body["thinking"] = {"type": thinking_type}
+        if settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON:
+            body["response_format"] = {"type": "json_object"}
+        response = self._post_with_retry(body)
+        response.raise_for_status()
+        return _parse_chat_json_output(response.json())
+
     def _post_with_retry(self, payload):
         url = "%s/chat/completions" % self.base_url
         headers = {

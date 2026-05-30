@@ -99,6 +99,11 @@ class MockLLMScorer(LLMScorer):
         return result
 
 
+    def complete_json(self, instructions, payload):
+        # Mock 无法做真正的语义核验：返回空核验结构（不产出语义一致性发现）。
+        return {"research_questions": [], "conclusion_claims": []}
+
+
 def _contains_any(text, keywords):
     return any(keyword in text for keyword in keywords)
 

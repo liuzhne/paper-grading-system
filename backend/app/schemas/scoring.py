@@ -66,9 +66,15 @@ class ScoringRunRead(BaseModel):
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    coherence_findings: list = Field(default_factory=list)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     created_at: datetime
+
+    @field_validator("coherence_findings", mode="before")
+    @classmethod
+    def normalize_coherence(cls, value):
+        return value or []
 
 
 class ScoreItemUpdate(BaseModel):

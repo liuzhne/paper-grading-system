@@ -55,7 +55,12 @@ def _reference_integrity(full_text, kind):
 
 def _citation_integrity(full_text, references):
     """编号制引文 ↔ 参考文献条目 的双向核对。著者-年制只提示，不做确定性判断。"""
-    intext = {int(number) for number in INTEXT_CITATION_RE.findall(full_text)}
+    # 正文引用扫描需剔除参考文献条目本身，否则条目里的 [n] 标号会被误当成正文引用，造成"自洽"假象。
+    body_text = full_text
+    for entry in references:
+        if entry:
+            body_text = body_text.replace(str(entry), " ")
+    intext = {int(number) for number in INTEXT_CITATION_RE.findall(body_text)}
     ref_numbers = set()
     for entry in references:
         match = re.match(r"\s*\[(\d{1,3})\]", str(entry))

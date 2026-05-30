@@ -19,6 +19,7 @@ from backend.app.services.llm.debug_logging import log_llm_throttle_sleep
 from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.cache import llm_cache
 from backend.app.services.checkers import run_deterministic_checker
+from backend.app.services.coherence import analyze_semantic_coherence
 from backend.app.services.retrieval.keyword import retrieve_for_criterion
 from backend.app.services.scoring.rules import calculate_total_score
 from backend.app.services.scoring.rules import match_grade
@@ -95,6 +96,8 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     run.prompt_tokens = usage_totals["prompt_tokens"]
     run.completion_tokens = usage_totals["completion_tokens"]
     run.total_tokens = usage_totals["total_tokens"]
+    # 篇章一致性（设计§8）：确定性（解析期算好）+ 语义（本次 LLM 核验）合并存档。
+    run.coherence_findings = (parsed.get("coherence_findings", []) or []) + analyze_semantic_coherence(parsed, scorer)
     _recalculate_run(run, items, paper.parse_quality, rubric.total_score)
     run.status = "scored"
     run.finished_at = _utcnow()

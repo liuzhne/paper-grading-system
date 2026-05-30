@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "mock"
     LLM_FALLBACK_TO_MOCK: bool = True
     LLM_CACHE_ENABLED: bool = True  # L0 缓存/账本（设计§7）：按输入哈希复用 LLM 评分结果
+    COHERENCE_SEMANTIC_ENABLED: bool = True  # §8 语义一致性核验（研究问题↔结论等），每篇额外一次 LLM 调用
     LLM_DEBUG_LOG_ENABLED: bool = True
     LLM_DEBUG_LOG_MAX_CHARS: int = 12000
     LLM_RATE_LIMIT_SLEEP_SECONDS: float = 1.0
