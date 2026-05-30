@@ -9,6 +9,7 @@ from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.services.scoring.rules import as_float
+from backend.app.services.storage.local import read_json
 
 
 def generate_report(db: Session, run_id: str):
@@ -26,18 +27,19 @@ def generate_report(db: Session, run_id: str):
         raise ValueError("scoring run not found")
 
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
-    html = _render_html(run, review_logs)
+    html = _render_html(run, review_logs, _load_coherence(run.paper))
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
     path = settings.reports_dir / ("scoring_report_%s.html" % run_id)
     path.write_text(html, encoding="utf-8")
     return path
 
 
-def _render_html(run, review_logs):
+def _render_html(run, review_logs, coherence_findings):
     paper = run.paper
     item_html = "\n".join(_render_item(item) for item in run.items)
     item_names = {item.id: item.criterion.name for item in run.items}
     review_html = _render_review_logs(review_logs, item_names)
+    coherence_html = _render_coherence(coherence_findings)
     return """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -66,6 +68,8 @@ def _render_html(run, review_logs):
   </div>
   <h2>评分明细</h2>
   {items}
+  <h2>篇章一致性发现</h2>
+  {coherence}
   <h2>人工复核记录</h2>
   {reviews}
 </body>
@@ -81,6 +85,7 @@ def _render_html(run, review_logs):
         grade=escape(run.grade or ""),
         need_review="是" if run.need_manual_review else "否",
         items=item_html,
+        coherence=coherence_html,
         reviews=review_html,
     )
 
@@ -111,6 +116,34 @@ def _render_item(item):
         deductions=escape(deductions),
         suggestion=escape(item.suggestion or ""),
         evidence=evidence,
+    )
+
+
+def _load_coherence(paper):
+    if not getattr(paper, "parsed_text_path", None):
+        return []
+    try:
+        parsed = read_json(paper.parsed_text_path)
+        return parsed.get("coherence_findings", []) or []
+    except Exception:
+        return []
+
+
+def _render_coherence(findings):
+    if not findings:
+        return "<p>未发现确定性一致性问题（图表引用、编号制引文-参考文献核对通过）。</p>"
+    rows = []
+    for finding in findings:
+        rows.append(
+            "<tr><td>{severity}</td><td>{kind}</td><td>{message}</td></tr>".format(
+                severity=escape(str(finding.get("severity", ""))),
+                kind=escape(str(finding.get("kind", ""))),
+                message=escape(str(finding.get("message", ""))),
+            )
+        )
+    return (
+        "<table><thead><tr><th>级别</th><th>类型</th><th>说明</th></tr></thead>"
+        "<tbody>{rows}</tbody></table>".format(rows="\n".join(rows))
     )
 
 

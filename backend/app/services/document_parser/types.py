@@ -45,6 +45,7 @@ class ParsedPaper:
     structure_checks: list[StructureCheck]
     parse_quality: float
     structure_confidence: float = 1.0
+    coherence_findings: list = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)

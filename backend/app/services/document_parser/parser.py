@@ -5,6 +5,7 @@ from backend.app.services.document_parser.types import ParsedPaper
 from backend.app.services.document_parser.types import ParsedParagraph
 from backend.app.services.document_parser.types import ParsedSection
 from backend.app.services.document_parser.types import StructureCheck
+from backend.app.services.coherence import analyze_coherence
 
 SECTION_RE = re.compile(
     r"^("
@@ -66,6 +67,7 @@ def parse_document(file_path):
     full_text = "\n".join(text for _, text in paragraphs)
     cover_metadata = _extract_cover_metadata(paragraphs)
     references = _extract_references(sections)
+    coherence_findings = analyze_coherence(full_text, references)
     checks = _structure_checks(full_text, sections, references)
     structure_confidence = _estimate_structure_confidence(sections, heading_texts)
     checks.append(
@@ -81,6 +83,7 @@ def parse_document(file_path):
 
     return ParsedPaper(
         structure_confidence=structure_confidence,
+        coherence_findings=coherence_findings,
         title=cover_metadata.get("title") or _infer_title(paragraphs),
         student_id=cover_metadata.get("student_id") or _first_regex_group(STUDENT_ID_RE, full_text),
         student_name=cover_metadata.get("student_name") or _first_regex_group(STUDENT_NAME_RE, full_text),
