@@ -30,6 +30,8 @@ def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
         # 0002 原子项语义
         criterion_cols = {col["name"] for col in inspector.get_columns("rubric_criteria")}
         assert {"criterion_type", "scoring_mode", "applies_to", "rubric_levels", "sub_checks"}.issubset(criterion_cols)
+        # 0007 维度 + 结构化扣分规则
+        assert {"dimension", "deduction_rules_structured"}.issubset(criterion_cols)
         # 0002 结构化扣分 + 0003 篇章一致性 + 0006 格式问题 + token 计量
         score_item_cols = {col["name"] for col in inspector.get_columns("score_items")}
         assert {"deduction_items", "band_selection", "sub_results"}.issubset(score_item_cols)

@@ -24,6 +24,7 @@ from backend.app.schemas.rubric import RubricImportResult
 from backend.app.schemas.rubric import RubricRead
 from backend.app.schemas.rubric import RubricUpdate
 from backend.app.services.dev_user import ensure_dev_user
+from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.services.rubric_import.parser import parse_rubric_files
 from backend.app.services.rubric_import.template import build_rubric_import_template
 
@@ -102,6 +103,7 @@ def import_rubric_from_files(
         imported = parse_rubric_files(
             rules_bytes=rules_file.file.read(),
             template_bytes=template_file.file.read() if template_file else None,
+            scorer=_safe_scorer(),  # §5 扣分规则归一化（无显式规则时）；构造失败则不调小模型
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -256,6 +258,14 @@ def _build_criterion(criterion, index):
     )
 
 
+def _safe_scorer():
+    # §5 规则归一化用的小模型；构造失败（如真实 LLM 未配好）则返回 None，导入不受阻、退化为仅 Excel 显式规则。
+    try:
+        return get_llm_scorer()
+    except Exception:
+        return None
+
+
 def _extra_criterion_fields(criterion):
     return {
         "criterion_type": getattr(criterion, "criterion_type", None) or "llm_judgment",
@@ -263,6 +273,8 @@ def _extra_criterion_fields(criterion):
         "applies_to": getattr(criterion, "applies_to", None) or "global",
         "rubric_levels": list(getattr(criterion, "rubric_levels", None) or []),
         "sub_checks": list(getattr(criterion, "sub_checks", None) or []),
+        "dimension": getattr(criterion, "dimension", None),
+        "deduction_rules_structured": list(getattr(criterion, "deduction_rules_structured", None) or []),
     }
 
 

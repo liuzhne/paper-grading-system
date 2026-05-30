@@ -6,11 +6,14 @@ from docx import Document
 from openpyxl import load_workbook
 
 from backend.app.services.document_parser.format_resolver import resolve_default_format
+from backend.app.services.rubric_import.compiler import annotations_for_criterion
+from backend.app.services.rubric_import.compiler import compile_criterion_rules
+from backend.app.services.rubric_import.docx_comments import parse_comments
 
 
 HEADER_ALIASES = {
     "code": ["编号", "指标编号", "评分项编号", "代码", "code", "criterion_code"],
-    "name": ["评分项", "评分指标", "指标", "评价项目", "评价维度", "评分维度", "项目", "name", "criterion"],
+    "name": ["评分项", "评分指标", "指标", "评价项目", "项目", "name", "criterion"],
     "max_score": ["分值", "满分", "分数", "最高分", "权重分", "max_score", "score", "points"],
     "weight": ["权重", "weight"],
     "description": ["说明", "评分说明", "评价标准", "评分标准", "标准说明", "描述", "description"],
@@ -20,6 +23,7 @@ HEADER_ALIASES = {
     "criterion_type": ["类型", "判定类型", "评分类型", "判定方式", "type"],
     "applies_to": ["适用范围", "适用章节", "作用范围", "范围", "applies_to"],
     "rubric_levels": ["分档", "档位", "等级标准", "评分档次", "rubric_levels"],
+    "dimension": ["维度", "评价维度", "评分维度", "所属维度", "dimension"],
 }
 
 TEMPLATE_HINTS = [
@@ -60,6 +64,8 @@ class ImportedCriterion:
     applies_to: str = "global"
     rubric_levels: list = field(default_factory=list)
     sub_checks: list = field(default_factory=list)
+    dimension: str | None = None
+    deduction_rules_structured: list = field(default_factory=list)
 
 
 @dataclass
@@ -71,16 +77,22 @@ class RubricImport:
     format_spec: dict = field(default_factory=dict)
 
 
-def parse_rubric_files(rules_bytes: bytes, template_bytes: bytes | None = None):
+def parse_rubric_files(rules_bytes: bytes, template_bytes: bytes | None = None, scorer=None):
     warnings = []
     template_summary = (
         parse_word_template(template_bytes)
         if template_bytes
-        else {"section_titles": [], "hints": [], "paragraph_count": 0, "format_spec": {}}
+        else {"section_titles": [], "hints": [], "paragraph_count": 0, "format_spec": {}, "annotations": []}
     )
     criteria, excel_warnings = parse_excel_rules(rules_bytes)
     warnings.extend(excel_warnings)
     enriched = [_enrich_with_template(item, template_summary) for item in criteria]
+    # §5 编译：把扣分规则编译成结构化规则（Excel 显式优先，否则小模型归一化批注/自由文本）。
+    annotations = template_summary.get("annotations", [])
+    for criterion in enriched:
+        criterion.deduction_rules_structured = compile_criterion_rules(
+            criterion, annotations_for_criterion(criterion, annotations), scorer
+        )
     total_score = round(sum(item.max_score for item in enriched), 2)
     return RubricImport(
         total_score=total_score,
@@ -127,6 +139,7 @@ def parse_word_template(template_bytes):
         "hints": _dedupe(hints)[:40],
         "paragraph_count": len(paragraphs),
         "format_spec": resolve_default_format(template_bytes),
+        "annotations": parse_comments(template_bytes),
     }
 
 
@@ -190,6 +203,7 @@ def _criterion_from_row(row, mapping, order):
     applies_to = _parse_applies_to(_value(row, mapping.get("applies_to")))
     rubric_levels = _parse_bands(_value(row, mapping.get("rubric_levels")))
     scoring_mode = "banded" if rubric_levels else "llm_direct"
+    dimension = _value(row, mapping.get("dimension"))
     return ImportedCriterion(
         code=str(code),
         name=str(name),
@@ -203,6 +217,7 @@ def _criterion_from_row(row, mapping, order):
         scoring_mode=scoring_mode,
         applies_to=applies_to,
         rubric_levels=rubric_levels,
+        dimension=dimension,
     )
 
 
@@ -233,6 +248,8 @@ def _enrich_with_template(criterion, template_summary):
         applies_to=criterion.applies_to,
         rubric_levels=criterion.rubric_levels,
         sub_checks=criterion.sub_checks,
+        dimension=criterion.dimension,
+        deduction_rules_structured=criterion.deduction_rules_structured,
     )
 
 

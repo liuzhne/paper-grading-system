@@ -146,16 +146,25 @@ def _render_coherence(findings):
     rows = []
     for finding in findings:
         rows.append(
-            "<tr><td>{severity}</td><td>{kind}</td><td>{message}</td></tr>".format(
+            "<tr><td>{severity}</td><td>{kind}</td><td>{message}</td><td>{deduct}</td></tr>".format(
                 severity=escape(str(finding.get("severity", ""))),
                 kind=escape(str(finding.get("kind", ""))),
                 message=escape(str(finding.get("message", ""))),
+                deduct=escape(_deduct_note(finding)),
             )
         )
     return (
-        "<table><thead><tr><th>级别</th><th>类型</th><th>说明</th></tr></thead>"
+        "<table><thead><tr><th>级别</th><th>类型</th><th>说明</th><th>计入扣分</th></tr></thead>"
         "<tbody>{rows}</tbody></table>".format(rows="\n".join(rows))
     )
+
+
+def _deduct_note(finding):
+    by = finding.get("deducted_by")
+    if not by:
+        return ""
+    points = finding.get("deducted_points")
+    return "−%s（%s）" % (points, by) if points is not None else "已计入（%s）" % by
 
 
 def _render_format(findings):
@@ -164,14 +173,15 @@ def _render_format(findings):
     rows = []
     for finding in findings:
         rows.append(
-            "<tr><td>{severity}</td><td>{field}</td><td>{message}</td></tr>".format(
+            "<tr><td>{severity}</td><td>{field}</td><td>{message}</td><td>{deduct}</td></tr>".format(
                 severity=escape(str(finding.get("severity", ""))),
                 field=escape(str(finding.get("field", ""))),
                 message=escape(str(finding.get("message", ""))),
+                deduct=escape(_deduct_note(finding)),
             )
         )
     return (
-        "<table><thead><tr><th>级别</th><th>项</th><th>说明</th></tr></thead>"
+        "<table><thead><tr><th>级别</th><th>项</th><th>说明</th><th>计入扣分</th></tr></thead>"
         "<tbody>{rows}</tbody></table>".format(rows="\n".join(rows))
     )
 

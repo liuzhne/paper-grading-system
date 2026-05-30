@@ -21,6 +21,8 @@ class RubricCriterionCreate(BaseModel):
     applies_to: str = "global"
     rubric_levels: list[dict] = Field(default_factory=list)
     sub_checks: list[dict] = Field(default_factory=list)
+    dimension: Optional[str] = None
+    deduction_rules_structured: list[dict] = Field(default_factory=list)
 
 
 class RubricCreate(BaseModel):
@@ -80,6 +82,8 @@ class RubricCriterionRead(BaseModel):
     applies_to: str = "global"
     rubric_levels: list = Field(default_factory=list)
     sub_checks: list = Field(default_factory=list)
+    dimension: Optional[str] = None
+    deduction_rules_structured: list = Field(default_factory=list)
 
 
 class RubricRead(BaseModel):

@@ -20,6 +20,8 @@ from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.cache import llm_cache
 from backend.app.services.calibration import get_anchors
 from backend.app.services.checkers import run_deterministic_checker
+from backend.app.services.checkers.findings_checker import is_findings_enabled
+from backend.app.services.checkers.findings_checker import score_from_findings
 from backend.app.services.coherence import analyze_semantic_coherence
 from backend.app.services.document_parser.format_check import compare_format
 from backend.app.services.document_parser.format_resolver import resolve_default_format
@@ -60,13 +62,21 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     db.add(run)
     db.flush()
 
+    # 先算篇章/格式 findings（设计§8/§9），供"显式启用"的评分项按规则领取并转扣分。
+    coherence_findings = (parsed.get("coherence_findings", []) or []) + analyze_semantic_coherence(parsed, scorer)
+    format_findings = _compute_format_findings(paper, rubric)
+    all_findings = coherence_findings + format_findings
+
     items = []
     usage_totals = _blank_usage()
     for criterion in rubric.criteria:
         # 按 criterion_type 路由（设计§6.2）：deterministic 走确定性检查器（不调 LLM）；
         # llm_judgment/hybrid 走模型。hybrid 暂按 llm 路径，子检查拆分见后续阶段。
         criterion_type = getattr(criterion, "criterion_type", "llm_judgment")
-        if criterion_type == "deterministic":
+        if is_findings_enabled(criterion):
+            # 显式启用（deterministic + 维度 + 结构化规则）：把篇章/格式发现按规则转为扣分。
+            output = score_from_findings(criterion, all_findings, criterion.deduction_rules_structured)
+        elif criterion_type == "deterministic":
             output = run_deterministic_checker(criterion, parsed)
         elif criterion_type == "hybrid" and getattr(criterion, "sub_checks", None):
             output = _score_hybrid(db, scorer, paper, criterion, parsed, structure_checks, rubric.version)
@@ -100,10 +110,9 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     run.prompt_tokens = usage_totals["prompt_tokens"]
     run.completion_tokens = usage_totals["completion_tokens"]
     run.total_tokens = usage_totals["total_tokens"]
-    # 篇章一致性（设计§8）：确定性（解析期算好）+ 语义（本次 LLM 核验）合并存档。
-    run.coherence_findings = (parsed.get("coherence_findings", []) or []) + analyze_semantic_coherence(parsed, scorer)
-    # 格式问题（设计§9）：被评论文有效格式 vs 模板 FormatSpec。
-    run.format_findings = _compute_format_findings(paper, rubric)
+    # findings 已在循环前算好（并被"显式启用"项按规则消费/标记 deducted_by），此处直接存档。
+    run.coherence_findings = coherence_findings
+    run.format_findings = format_findings
     _recalculate_run(run, items, paper.parse_quality, rubric.total_score)
     run.status = "scored"
     run.finished_at = _utcnow()

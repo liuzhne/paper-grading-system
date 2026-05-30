@@ -86,6 +86,10 @@ class RubricCriterion(Base):
     applies_to: Mapped[str] = mapped_column(String(100), nullable=False, default="global")
     rubric_levels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     sub_checks: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # 设计§2 维度（内容/结构/格式/创新性/规范性/逻辑…）：findings 按维度绑定到对应评分项。
+    dimension: Mapped[str] = mapped_column(String(50), nullable=True)
+    # 设计§3.2/§5 编译产物：结构化扣分规则 [{match, points, reason, source}]，供 findings→扣分使用。
+    deduction_rules_structured: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     rubric: Mapped["Rubric"] = relationship(back_populates="criteria")
