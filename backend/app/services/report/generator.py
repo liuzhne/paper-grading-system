@@ -40,6 +40,7 @@ def _render_html(run, review_logs, coherence_findings):
     item_names = {item.id: item.criterion.name for item in run.items}
     review_html = _render_review_logs(review_logs, item_names)
     coherence_html = _render_coherence(coherence_findings)
+    format_html = _render_format(getattr(run, "format_findings", None) or [])
     return """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -70,6 +71,8 @@ def _render_html(run, review_logs, coherence_findings):
   {items}
   <h2>篇章一致性发现</h2>
   {coherence}
+  <h2>格式问题</h2>
+  {format}
   <h2>人工复核记录</h2>
   {reviews}
 </body>
@@ -86,6 +89,7 @@ def _render_html(run, review_logs, coherence_findings):
         need_review="是" if run.need_manual_review else "否",
         items=item_html,
         coherence=coherence_html,
+        format=format_html,
         reviews=review_html,
     )
 
@@ -150,6 +154,24 @@ def _render_coherence(findings):
         )
     return (
         "<table><thead><tr><th>级别</th><th>类型</th><th>说明</th></tr></thead>"
+        "<tbody>{rows}</tbody></table>".format(rows="\n".join(rows))
+    )
+
+
+def _render_format(findings):
+    if not findings:
+        return "<p>未发现格式问题（或模板未规定格式 / 非 docx 提交无法判定）。</p>"
+    rows = []
+    for finding in findings:
+        rows.append(
+            "<tr><td>{severity}</td><td>{field}</td><td>{message}</td></tr>".format(
+                severity=escape(str(finding.get("severity", ""))),
+                field=escape(str(finding.get("field", ""))),
+                message=escape(str(finding.get("message", ""))),
+            )
+        )
+    return (
+        "<table><thead><tr><th>级别</th><th>项</th><th>说明</th></tr></thead>"
         "<tbody>{rows}</tbody></table>".format(rows="\n".join(rows))
     )
 

@@ -21,6 +21,8 @@ from backend.app.services.cache import llm_cache
 from backend.app.services.calibration import get_anchors
 from backend.app.services.checkers import run_deterministic_checker
 from backend.app.services.coherence import analyze_semantic_coherence
+from backend.app.services.document_parser.format_check import compare_format
+from backend.app.services.document_parser.format_resolver import resolve_default_format
 from backend.app.services.retrieval.keyword import retrieve_for_criterion
 from backend.app.services.scoring.rules import calculate_total_score
 from backend.app.services.scoring.rules import match_grade
@@ -100,6 +102,8 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     run.total_tokens = usage_totals["total_tokens"]
     # 篇章一致性（设计§8）：确定性（解析期算好）+ 语义（本次 LLM 核验）合并存档。
     run.coherence_findings = (parsed.get("coherence_findings", []) or []) + analyze_semantic_coherence(parsed, scorer)
+    # 格式问题（设计§9）：被评论文有效格式 vs 模板 FormatSpec。
+    run.format_findings = _compute_format_findings(paper, rubric)
     _recalculate_run(run, items, paper.parse_quality, rubric.total_score)
     run.status = "scored"
     run.finished_at = _utcnow()
@@ -652,6 +656,21 @@ class _AiScoreProxy:
         self.ai_score = item.ai_score
         self.final_score = item.ai_score
         self.max_score = item.max_score
+
+
+def _compute_format_findings(paper, rubric):
+    """仅当模板规定了格式（format_spec 有非空值）且被评论文是 docx 时才比对；否则不产出（含 PDF 无法判定）。"""
+    expected = getattr(rubric, "format_spec", None) or {}
+    if not any(value is not None for key, value in expected.items() if key != "source"):
+        return []
+    path = paper.file_path or ""
+    if not path.lower().endswith(".docx"):
+        return []
+    try:
+        actual = resolve_default_format(path)
+    except Exception:
+        return []
+    return compare_format(actual, expected)
 
 
 def _blank_usage():

@@ -20,6 +20,7 @@ def test_scoring_run_records_merged_coherence_findings(client):
     run = client.post("/api/papers/%s/score" % upload.json()["id"], json={})
     assert run.status_code == 200, run.text
 
+    assert "format_findings" in run.json()  # 格式问题清单字段已落库（此处无模板格式要求 → 空）
     findings = run.json()["coherence_findings"]
     assert isinstance(findings, list)
     # 样例论文参考文献[1]未被正文引用 → 确定性一致性发现至少含一条 reference_uncited（已落到评分运行）。

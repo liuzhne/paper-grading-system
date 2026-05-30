@@ -67,6 +67,7 @@ class ScoringRunRead(BaseModel):
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
     coherence_findings: list = Field(default_factory=list)
+    format_findings: list = Field(default_factory=list)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     created_at: datetime
@@ -74,6 +75,11 @@ class ScoringRunRead(BaseModel):
     @field_validator("coherence_findings", mode="before")
     @classmethod
     def normalize_coherence(cls, value):
+        return value or []
+
+    @field_validator("format_findings", mode="before")
+    @classmethod
+    def normalize_format_findings(cls, value):
         return value or []
 
 
