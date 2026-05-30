@@ -124,9 +124,30 @@ Google Apps Script 写表端模板位于 [docs/google_apps_script_webapp.gs](doc
 - `GET /api/export-logs?batch_id={batch_id}&run_id={run_id}`
 - `GET /api/scoring-runs/{id}/report`
 - `GET /api/system/integrations`
+- `GET /api/rubrics/{id}/scores-template.xlsx`（QWK 教师成绩表模板）
+- `POST/GET /api/calibration/anchors`（L2 校准锚点）
+- `GET /api/batches/{id}/ranking`、`GET /api/batches/{id}/drift`（批量排名 / 评分漂移）
 
 ## 测试
 
 ```bash
 uv run pytest
 ```
+
+## QWK 评估验收（"打得准不准"）
+
+设计把 QWK（系统分 vs **教师分**的一致性）列为上线门槛。准备一批**真实已评论文**后：
+
+1. 下载该评分标准的成绩表模板（列随评分项自动展开）：`GET /api/rubrics/{rubric_id}/scores-template.xlsx`
+2. 按模板填教师分（文件名 / 总分 / 各评分项分），论文 `.docx` 放一个文件夹。
+3. 跑评估（需真实 LLM）：
+
+```bash
+LLM_PROVIDER=openai_compatible OPENAI_COMPATIBLE_API_KEY=... \
+uv run python -m backend.app.scripts.run_qwk_eval \
+    --rubric-id <rubric_id> --papers-dir /路径/论文文件夹 --scores /路径/成绩表.xlsx
+```
+
+输出 QWK/MAE/等级一致率/逐维度偏宽偏严；首跑写 `storage/eval/baseline.json`，之后重跑做回归门禁（指标回退则非零退出，可接 CI/cron）。
+
+> 必须用**真实教师评分**作真值（mock 仅验证管线连通）；学生论文与成绩**放仓库外**，仅聚合 `baseline.json` 可提交。细节见 [backend/app/eval/README.md](backend/app/eval/README.md)。

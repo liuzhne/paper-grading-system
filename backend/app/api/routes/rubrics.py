@@ -25,6 +25,7 @@ from backend.app.schemas.rubric import RubricRead
 from backend.app.schemas.rubric import RubricUpdate
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.llm.factory import get_llm_scorer
+from backend.app.eval.scores_template import build_scores_table_template
 from backend.app.services.rubric_import.parser import parse_rubric_files
 from backend.app.services.rubric_import.template import build_rubric_import_template
 
@@ -77,6 +78,19 @@ def download_rubric_import_template():
         build_rubric_import_template(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="rubric_import_template.xlsx"'},
+    )
+
+
+@router.get("/{rubric_id}/scores-template.xlsx")
+def download_scores_template(rubric_id: str, db: Session = Depends(get_db)):
+    """按该 rubric 的评分项 code 生成"教师成绩表"模板，供 QWK 评估填写（见 scripts/run_qwk_eval）。"""
+    rubric = _load_rubric(db, rubric_id)
+    if rubric is None:
+        raise HTTPException(status_code=404, detail="rubric not found")
+    return Response(
+        build_scores_table_template(rubric.criteria),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="scores_template.xlsx"'},
     )
 
 
