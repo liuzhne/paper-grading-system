@@ -151,3 +151,12 @@ uv run python -m backend.app.scripts.run_qwk_eval \
 输出 QWK/MAE/等级一致率/逐维度偏宽偏严；首跑写 `storage/eval/baseline.json`，之后重跑做回归门禁（指标回退则非零退出，可接 CI/cron）。
 
 > 必须用**真实教师评分**作真值（mock 仅验证管线连通）；学生论文与成绩**放仓库外**，仅聚合 `baseline.json` 可提交。细节见 [backend/app/eval/README.md](backend/app/eval/README.md)。
+
+## 部署与运维要点
+
+- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0007`；测试用 `create_all`，生产必须走迁移）。
+- **持久化状态**在 `storage/`：`uploads/`(原文)、`parsed/`(解析 JSON)、`reports/`、`exports/`、`llm_cache.sqlite`(L0 缓存/账本)、`eval/`(评估报告/基线)。除占位 `.gitkeep` 外均已 gitignore。
+- **真实 LLM**：设 `LLM_PROVIDER=openai_compatible` + `OPENAI_COMPATIBLE_*`（见上）；上线前用 `uv run python -m backend.app.scripts.diagnose_llm` 自检连通。未配置自动回退 Mock（评分项标人工复核）。
+- **可复现/降本**：`LLM_CACHE_ENABLED=true` 命中即复用；改 prompt 需 bump `cache/llm_cache.PROMPT_VERSION`。
+- **改评分逻辑后**：用 QWK 留出集重跑 `run_qwk_eval` 重新锚定基线，避免静默漂移。
+- 维护/交接速览见 [CLAUDE.md](CLAUDE.md)。

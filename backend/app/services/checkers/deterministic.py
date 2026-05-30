@@ -4,8 +4,8 @@
 结构完整性、字数、图表引用、引文-参考文献（编号制确定性核对）。
 
 每个检查器返回与 LLM 评分一致的结构化结果（含带 points 的 deduction_items、证据、confidence=1），
-得分天然为扣分制：awarded = max - Σpoints。格式检查器（字体/字号/行距，需解析 styles.xml/theme1.xml）
-本轮先留 stub，见 _format_check。
+得分天然为扣分制：awarded = max - Σpoints。格式（字体/字号/行距）走 `document_parser/format_check.py`
+比对 + `findings_checker` 按维度转扣分，不在本模块。
 """
 
 import re
@@ -156,12 +156,6 @@ def _citation_check(criterion, parsed):
     evidence = [_evidence("文中编号引用 %d 处，参考文献 %d 条" % (len(intext), ref_count), "参考文献")]
     reason = "%s：编号制引文-参考文献双向核对，发现 %d 处问题。" % (criterion.name, len(deduction_items))
     return _output(criterion, awarded, deduction_items, evidence, reason, checker="citation")
-
-
-def _format_check(criterion, parsed):  # pragma: no cover - 阶段2后续实现
-    """格式检查（字体/字号/行距/页边距）：需解析 styles.xml + theme1.xml 算有效值并设 unknown 第三态。
-    本轮先不实现，留待阶段2后续；调用方不应把格式类项标 deterministic 直到此函数完成。"""
-    raise NotImplementedError("format checker (styles.xml/theme1.xml) not implemented yet")
 
 
 # --------------------------------------------------------------------------- #
