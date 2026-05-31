@@ -19,53 +19,60 @@ DEFAULT_CRITERIA = [
 ]
 
 
-def seed():
+def seed(db=None):
+    """造默认 dev user + rubric + 批次。`db=None` 走 SessionLocal（脚本用）；传入则用该会话（CLI 用本地 sqlite）。"""
     ensure_storage_dirs()
-    with SessionLocal() as db:
-        user = ensure_dev_user(db)
-        rubric = db.scalar(select(Rubric).where(Rubric.name == "本科毕业论文通用评分标准", Rubric.version == "v1.0"))
-        if rubric is None:
-            rubric = Rubric(
-                name="本科毕业论文通用评分标准",
-                version="v1.0",
-                total_score=100,
-                status="published",
-                description="MVP 默认评分标准，用于本地开发和演示。",
+    if db is None:
+        with SessionLocal() as owned:
+            _seed_into(owned)
+        return
+    _seed_into(db)
+
+
+def _seed_into(db):
+    user = ensure_dev_user(db)
+    rubric = db.scalar(select(Rubric).where(Rubric.name == "本科毕业论文通用评分标准", Rubric.version == "v1.0"))
+    if rubric is None:
+        rubric = Rubric(
+            name="本科毕业论文通用评分标准",
+            version="v1.0",
+            total_score=100,
+            status="published",
+            description="MVP 默认评分标准，用于本地开发和演示。",
+            created_by=user.id,
+        )
+        for order, (code, name, max_score, hints, rules) in enumerate(DEFAULT_CRITERIA, start=1):
+            rubric.criteria.append(
+                RubricCriterion(
+                    code=code,
+                    name=name,
+                    max_score=max_score,
+                    display_order=order,
+                    description="考察%s相关质量。" % name,
+                    evidence_hints=hints,
+                    deduction_rules=rules,
+                )
+            )
+        db.add(rubric)
+        db.flush()
+
+    batch = db.scalar(select(GradingBatch).where(GradingBatch.name == "2026 届论文评分开发批次"))
+    if batch is None:
+        db.add(
+            GradingBatch(
+                name="2026 届论文评分开发批次",
+                department="计算机学院",
+                major="软件工程",
+                academic_year="2026",
+                paper_type="本科毕业论文",
+                rubric_id=rubric.id,
+                status="draft",
                 created_by=user.id,
             )
-            for order, (code, name, max_score, hints, rules) in enumerate(DEFAULT_CRITERIA, start=1):
-                rubric.criteria.append(
-                    RubricCriterion(
-                        code=code,
-                        name=name,
-                        max_score=max_score,
-                        display_order=order,
-                        description="考察%s相关质量。" % name,
-                        evidence_hints=hints,
-                        deduction_rules=rules,
-                    )
-                )
-            db.add(rubric)
-            db.flush()
-
-        batch = db.scalar(select(GradingBatch).where(GradingBatch.name == "2026 届论文评分开发批次"))
-        if batch is None:
-            db.add(
-                GradingBatch(
-                    name="2026 届论文评分开发批次",
-                    department="计算机学院",
-                    major="软件工程",
-                    academic_year="2026",
-                    paper_type="本科毕业论文",
-                    rubric_id=rubric.id,
-                    status="draft",
-                    created_by=user.id,
-                )
-            )
-        db.commit()
+        )
+    db.commit()
 
 
 if __name__ == "__main__":
     seed()
     print("Seeded dev user, default rubric, and demo batch.")
-

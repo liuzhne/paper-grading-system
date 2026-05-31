@@ -1,0 +1,84 @@
+"""CLI 端（pgs）冒烟测试：CliRunner + 临时 sqlite + 强制 Mock，自包含不联网。
+
+注意：conftest 的 mock 隔离是普通 fixture（仅 client 测试生效），CLI 测试不走它，
+故本文件 autouse 强制 settings.LLM_PROVIDER=mock 并在结束后还原被 configure 改写的全局设置。
+"""
+
+import pytest
+from typer.testing import CliRunner
+
+from backend.app.cli.main import app
+from backend.app.core.config import settings
+from backend.app.tests.conftest import make_rules_xlsx
+from backend.app.tests.conftest import make_sample_docx
+
+runner = CliRunner()
+
+SEED_RUBRIC = "本科毕业论文通用评分标准"
+
+
+@pytest.fixture(autouse=True)
+def _cli_isolation():
+    saved = (settings.DATABASE_URL, settings.STORAGE_ROOT, settings.LLM_PROVIDER)
+    settings.LLM_PROVIDER = "mock"  # 任何 get_llm_scorer() → mock，绝不联网
+    yield
+    settings.DATABASE_URL, settings.STORAGE_ROOT, settings.LLM_PROVIDER = saved
+
+
+@pytest.fixture
+def local(tmp_path):
+    """每个测试独立的本地 sqlite + storage。"""
+    return ["--db", str(tmp_path / "cli.db"), "--storage", str(tmp_path / "storage")]
+
+
+def test_init_seed_then_rubrics_lists_default(local):
+    assert runner.invoke(app, ["init", "--seed", *local]).exit_code == 0
+    listing = runner.invoke(app, ["rubrics", "--json", *local])
+    assert listing.exit_code == 0
+    assert SEED_RUBRIC in listing.output
+
+
+def test_check_mock_ok():
+    result = runner.invoke(app, ["check", "--json"])
+    assert result.exit_code == 0
+    assert '"stage": "mock"' in result.output
+
+
+def test_score_mock_writes_report(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    docx = tmp_path / "thesis.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    report_dir = tmp_path / "reports"
+    result = runner.invoke(
+        app,
+        ["score", str(docx), "--rubric", SEED_RUBRIC, "--mock", "--report-dir", str(report_dir), *local],
+    )
+    assert result.exit_code == 0, result.output
+    assert "thesis.docx" in result.output
+    assert (report_dir / "thesis.html").exists()
+
+
+def test_score_bad_file_nonzero_exit(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    bad = tmp_path / "broken.docx"
+    bad.write_text("this is not a docx")
+    result = runner.invoke(app, ["score", str(bad), "--rubric", SEED_RUBRIC, "--mock", "--json", *local])
+    assert result.exit_code == 1  # 解析失败 → 非零退出（供脚本/CI 判定）
+    assert "broken.docx" in result.output
+
+
+def test_score_unknown_rubric_errors(tmp_path, local):
+    runner.invoke(app, ["init", *local])
+    docx = tmp_path / "t.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    result = runner.invoke(app, ["score", str(docx), "--rubric", "不存在的标准", "--mock", *local])
+    assert result.exit_code != 0
+
+
+def test_import_rubric_from_excel(tmp_path, local):
+    rules = tmp_path / "rules.xlsx"
+    rules.write_bytes(make_rules_xlsx().getvalue())
+    result = runner.invoke(app, ["import", str(rules), "--name", "CLI导入标准", "--version", "v1.0", *local])
+    assert result.exit_code == 0, result.output
+    listing = runner.invoke(app, ["rubrics", "--json", *local])
+    assert "CLI导入标准" in listing.output

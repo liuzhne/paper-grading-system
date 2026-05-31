@@ -27,6 +27,9 @@ from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.eval.scores_template import build_scores_table_template
 from backend.app.services.rubric_import.parser import parse_rubric_files
+from backend.app.services.rubric_import.persist import build_criterion
+from backend.app.services.rubric_import.persist import extra_criterion_fields
+from backend.app.services.rubric_import.persist import persist_imported_rubric
 from backend.app.services.rubric_import.template import build_rubric_import_template
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
@@ -58,7 +61,7 @@ def create_rubric(payload: RubricCreate, db: Session = Depends(get_db)):
                 evidence_hints=criterion.evidence_hints,
                 deduction_rules=criterion.deduction_rules,
                 display_order=criterion.display_order or index,
-                **_extra_criterion_fields(criterion),
+                **extra_criterion_fields(criterion),
             )
         )
     db.add(rubric)
@@ -122,22 +125,9 @@ def import_rubric_from_files(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    rubric = Rubric(
-        name=name,
-        version=version,
-        total_score=imported.total_score,
-        description=_import_description(description, imported.template_summary),
-        format_spec=imported.format_spec,
-        status="draft",
-        created_by=settings.DEFAULT_DEV_USER_ID,
-    )
-    for index, criterion in enumerate(imported.criteria):
-        rubric.criteria.append(_build_criterion(criterion, index))
-    db.add(rubric)
-    db.commit()
-    db.refresh(rubric)
+    rubric = persist_imported_rubric(db, name, version, description, imported)
     return {
-        "rubric": _load_rubric(db, rubric.id),
+        "rubric": rubric,
         "warnings": imported.warnings,
         "template_summary": imported.template_summary,
     }
@@ -174,7 +164,7 @@ def clone_rubric(rubric_id: str, payload: RubricCloneRequest, db: Session = Depe
                 evidence_hints=list(criterion.evidence_hints or []),
                 deduction_rules=list(criterion.deduction_rules or []),
                 display_order=criterion.display_order,
-                **_extra_criterion_fields(criterion),
+                **extra_criterion_fields(criterion),
             )
         )
 
@@ -233,7 +223,7 @@ def update_rubric(rubric_id: str, payload: RubricUpdate, db: Session = Depends(g
         rubric.criteria.clear()
         db.flush()
         for index, criterion in enumerate(payload.criteria):
-            rubric.criteria.append(_build_criterion(criterion, index))
+            rubric.criteria.append(build_criterion(criterion, index))
     elif "total_score" in updates:
         _validate_criteria_total(rubric.total_score, rubric.criteria)
 
@@ -258,38 +248,12 @@ def _load_rubric(db, rubric_id):
     return db.scalar(select(Rubric).where(Rubric.id == rubric_id).options(selectinload(Rubric.criteria)))
 
 
-def _build_criterion(criterion, index):
-    return RubricCriterion(
-        code=criterion.code,
-        name=criterion.name,
-        max_score=criterion.max_score,
-        weight=criterion.weight,
-        description=criterion.description,
-        evidence_hints=criterion.evidence_hints,
-        deduction_rules=criterion.deduction_rules,
-        display_order=criterion.display_order if criterion.display_order is not None else index,
-        **_extra_criterion_fields(criterion),
-    )
-
-
 def _safe_scorer():
     # §5 规则归一化用的小模型；构造失败（如真实 LLM 未配好）则返回 None，导入不受阻、退化为仅 Excel 显式规则。
     try:
         return get_llm_scorer()
     except Exception:
         return None
-
-
-def _extra_criterion_fields(criterion):
-    return {
-        "criterion_type": getattr(criterion, "criterion_type", None) or "llm_judgment",
-        "scoring_mode": getattr(criterion, "scoring_mode", None) or "llm_direct",
-        "applies_to": getattr(criterion, "applies_to", None) or "global",
-        "rubric_levels": list(getattr(criterion, "rubric_levels", None) or []),
-        "sub_checks": list(getattr(criterion, "sub_checks", None) or []),
-        "dimension": getattr(criterion, "dimension", None),
-        "deduction_rules_structured": list(getattr(criterion, "deduction_rules_structured", None) or []),
-    }
 
 
 def _validate_criteria_total(total_score, criteria):
@@ -308,11 +272,3 @@ def _is_excel_file(filename):
 
 def _is_docx_file(filename):
     return filename.lower().endswith(".docx")
-
-
-def _import_description(description, template_summary):
-    parts = [description.strip()] if description and description.strip() else []
-    hints = template_summary.get("hints") or []
-    if hints:
-        parts.append("由 Word 模板解析到的结构提示：%s。" % "、".join(hints[:12]))
-    return "\n".join(parts) if parts else None

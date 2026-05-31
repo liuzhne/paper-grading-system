@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "paper-grading-system"
 version = "0.1.0"
@@ -16,10 +20,15 @@ dependencies = [
   "python-docx>=1.1.0",
   "python-multipart>=0.0.9",
   "requests>=2.31.0",
+  "rich>=15.0.0",
   "sqlalchemy>=2.0.27",
   "streamlit>=1.33.0",
+  "typer>=0.23.2",
   "uvicorn[standard]>=0.27.1",
 ]
+
+[project.scripts]
+pgs = "backend.app.cli.main:run"
 
 [dependency-groups]
 dev = [
@@ -29,4 +38,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["backend/app/tests"]
 pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
 
