@@ -74,7 +74,7 @@ uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx   
 ```
 
 - LLM 由环境变量驱动（与 Web 一致，读 `.env`）；`--mock` 强制本地 Mock、不联网。
-- 批量：`score --workers N` 并发评分（适合真实 LLM 批量）+ 进度条 + 等级分布汇总。注：本地 sqlite 下评分事务跨 LLM 调用持写锁，多 worker 趋于串行、加速有限；要真正并行需指向并发数据库（或后续 6.1 内核解耦）。
+- 批量：`score --workers N` 并发评分（适合真实 LLM 批量）+ 进度条 + 等级分布汇总。LLM 计算已脱离 DB 事务（6.1 解耦：collect 读 → compute 纯算 → persist 短写），多 worker 在本地 sqlite 也能并行（compute 无锁，仅末尾短写经 busy_timeout 串行）。
 - `score` 任一篇解析/评分失败即**非零退出**（便于脚本/CI）；`--json` 在 `score`/`rubrics`/`runs`/`show`/`batches`/`check` 输出机器可读结果。
 - 闭环：`score` → 拿 run_id（或 `pgs runs`）→ `pgs show <run_id>` 看逐项明细 → `pgs report` 出报告。
 

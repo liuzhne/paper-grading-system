@@ -1,5 +1,7 @@
 from datetime import datetime
 from datetime import timezone
+from dataclasses import dataclass
+from dataclasses import field
 from types import SimpleNamespace
 import time
 
@@ -33,7 +35,56 @@ from backend.app.services.scoring.validator import validate_score_output
 from backend.app.services.storage.local import read_json
 
 
+@dataclass
+class CriterionPlan:
+    """单个评分项的"计算计划"：评分项快照 + 预取的证据候选/校准锚点（compute 阶段不再碰 DB）。"""
+
+    criterion: SimpleNamespace
+    route: str  # findings | deterministic | hybrid | chunks
+    candidates: list = field(default_factory=list)
+    anchors: list = field(default_factory=list)
+    sub_plans: list = field(default_factory=list)  # [(sub_criterion, candidates)]
+
+
+@dataclass
+class ScoringInputs:
+    """评分所需的全部输入（已脱离 DB）；由 collect_scoring_inputs 一次性预取。"""
+
+    paper_id: str
+    paper_title: object
+    parse_quality: object
+    parsed: dict
+    structure_checks: list
+    rubric_id: str
+    rubric_total_score: object
+    rubric_version: object
+    base_coherence: list
+    format_findings: list
+    criteria: list  # [CriterionPlan]
+
+
+@dataclass
+class ScoringResult:
+    """compute_scoring 的纯输出；由 persist_scoring 落库为 ScoringRun + ScoreItem。"""
+
+    items: list
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    coherence_findings: list
+    format_findings: list
+    ai_total: object
+    final_total: object
+    grade: object
+    need_review: bool
+
+
 def score_paper(db: Session, paper_id: str, scorer=None):
+    """编排：预取(读) → 释放事务 → 纯计算(LLM，无锁) → 落库(短写)。
+
+    把 LLM 调用移出 DB 事务，使 `--workers` 真正并行、避免 sqlite 写锁/快照串行；
+    签名与返回（ScoringRun）保持不变，所有调用方（Web/CLI/eval/score_batch）无需改动。
+    """
     scorer = scorer or get_llm_scorer()
     paper = db.scalar(
         select(Paper)
@@ -47,79 +98,225 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     if not paper.parsed_text_path:
         raise ValueError("paper has no parsed text")
 
+    started_at = _utcnow()
+    inputs = collect_scoring_inputs(db, paper)
+    # 结束事务：纯计算阶段不持锁/快照（sqlite 并发关键，避免 BUSY_SNAPSHOT）。
+    # 用 commit 而非 rollback —— 保留调用方在本会话里既有的未提交改动（如 eval 批量先建的 batch/paper）。
+    db.commit()
+    result = compute_scoring(inputs, scorer)
+    return persist_scoring(db, paper_id, inputs, result, scorer, started_at)
+
+
+def collect_scoring_inputs(db: Session, paper) -> ScoringInputs:
+    """只读：加载解析结果，按评分项路由预取证据候选/校准锚点，并把评分项快照成纯对象。"""
     rubric = paper.batch.rubric
     parsed = read_json(paper.parsed_text_path)
-    structure_checks = parsed.get("structure_checks", [])
-    run = ScoringRun(
+    plans = []
+    for criterion in rubric.criteria:
+        route = _route_for(criterion)
+        snapshot = _snapshot_criterion(criterion)
+        plan = CriterionPlan(criterion=snapshot, route=route)
+        if route == "chunks":
+            plan.candidates = retrieve_for_criterion(db, paper.id, criterion, top_k=settings.SCORING_CHUNK_EVAL_TOP_K)
+            plan.anchors = get_anchors(db, rubric.id, criterion.code)  # L2 校准锚点（脱敏范文）
+        elif route == "hybrid":
+            for index, sub in enumerate(criterion.sub_checks, start=1):
+                sub_criterion = _make_sub_criterion(snapshot, sub, index)
+                candidates = (
+                    []
+                    if sub_criterion.criterion_type == "deterministic"
+                    else retrieve_for_criterion(db, paper.id, sub_criterion, top_k=settings.SCORING_CHUNK_EVAL_TOP_K)
+                )
+                plan.sub_plans.append((sub_criterion, candidates))
+        plans.append(plan)
+    return ScoringInputs(
         paper_id=paper.id,
+        paper_title=paper.title,
+        parse_quality=paper.parse_quality,
+        parsed=parsed,
+        structure_checks=parsed.get("structure_checks", []),
         rubric_id=rubric.id,
-        model_provider=scorer.provider,
-        model_name=scorer.model_name,
-        model_version=scorer.model_version,
-        status="scoring",
-        started_at=_utcnow(),
+        rubric_total_score=rubric.total_score,
+        rubric_version=rubric.version,
+        base_coherence=list(parsed.get("coherence_findings", []) or []),
+        format_findings=_compute_format_findings(paper, rubric),
+        criteria=plans,
     )
-    db.add(run)
-    db.flush()
 
+
+def compute_scoring(inputs: ScoringInputs, scorer) -> ScoringResult:
+    """纯函数（不碰主库）：篇章语义一致性 + 逐项评分 + run 级汇总。所有 LLM 调用在此。"""
+    paper_ref = SimpleNamespace(id=inputs.paper_id, title=inputs.paper_title)
     # 先算篇章/格式 findings（设计§8/§9），供"显式启用"的评分项按规则领取并转扣分。
-    coherence_findings = (parsed.get("coherence_findings", []) or []) + analyze_semantic_coherence(parsed, scorer)
-    format_findings = _compute_format_findings(paper, rubric)
-    all_findings = coherence_findings + format_findings
+    coherence_findings = inputs.base_coherence + analyze_semantic_coherence(inputs.parsed, scorer)
+    all_findings = coherence_findings + inputs.format_findings
 
     items = []
     usage_totals = _blank_usage()
-    for criterion in rubric.criteria:
-        # 按 criterion_type 路由（设计§6.2）：deterministic 走确定性检查器（不调 LLM）；
-        # llm_judgment/hybrid 走模型。hybrid 暂按 llm 路径，子检查拆分见后续阶段。
-        criterion_type = getattr(criterion, "criterion_type", "llm_judgment")
-        if is_findings_enabled(criterion):
-            # 显式启用（deterministic + 维度 + 结构化规则）：把篇章/格式发现按规则转为扣分。
+    for plan in inputs.criteria:
+        criterion = plan.criterion
+        if plan.route == "findings":
             output = score_from_findings(criterion, all_findings, criterion.deduction_rules_structured)
-        elif criterion_type == "deterministic":
-            output = run_deterministic_checker(criterion, parsed)
-        elif criterion_type == "hybrid" and getattr(criterion, "sub_checks", None):
-            output = _score_hybrid(db, scorer, paper, criterion, parsed, structure_checks, rubric.version)
+        elif plan.route == "deterministic":
+            output = run_deterministic_checker(criterion, inputs.parsed)
+        elif plan.route == "hybrid":
+            output = _compute_hybrid(
+                scorer, paper_ref, criterion, plan.sub_plans, inputs.parsed, inputs.structure_checks, inputs.rubric_version
+            )
         else:
-            candidates = retrieve_for_criterion(db, paper.id, criterion, top_k=settings.SCORING_CHUNK_EVAL_TOP_K)
-            anchors = get_anchors(db, rubric.id, criterion.code)  # L2 校准锚点（脱敏范文）
-            output = _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric.version, anchors)
+            output = _score_criterion_by_chunks(
+                scorer, paper_ref, criterion, plan.candidates, inputs.structure_checks, inputs.rubric_version, plan.anchors
+            )
         _add_usage(usage_totals, output.get("usage"))
-        item = ScoreItem(
-            scoring_run_id=run.id,
-            criterion_id=criterion.id,
-            max_score=criterion.max_score,
-            ai_score=output["score"],
-            final_score=output["score"],
-            evidence_sufficient=output["evidence_sufficient"],
-            reason=output["reason"],
-            deductions=output["deductions"],
-            deduction_items=output.get("deduction_items") or [],
-            evidence=output["evidence"],
-            band_selection=output.get("band_selection"),
-            sub_results=output.get("sub_results"),
-            suggestion=output["suggestion"],
-            confidence=output["confidence"],
-            need_manual_review=output["need_manual_review"],
-            raw_model_output=output,
+        items.append(
+            {
+                "criterion_id": criterion.id,
+                "max_score": criterion.max_score,
+                "ai_score": output["score"],
+                "final_score": output["score"],
+                "evidence_sufficient": output["evidence_sufficient"],
+                "reason": output["reason"],
+                "deductions": output["deductions"],
+                "deduction_items": output.get("deduction_items") or [],
+                "evidence": output["evidence"],
+                "band_selection": output.get("band_selection"),
+                "sub_results": output.get("sub_results"),
+                "suggestion": output["suggestion"],
+                "confidence": output["confidence"],
+                "need_manual_review": output["need_manual_review"],
+                "raw_model_output": output,
+            }
         )
-        db.add(item)
-        items.append(item)
 
-    db.flush()
-    run.prompt_tokens = usage_totals["prompt_tokens"]
-    run.completion_tokens = usage_totals["completion_tokens"]
-    run.total_tokens = usage_totals["total_tokens"]
-    # findings 已在循环前算好（并被"显式启用"项按规则消费/标记 deducted_by），此处直接存档。
-    run.coherence_findings = coherence_findings
-    run.format_findings = format_findings
-    _recalculate_run(run, items, paper.parse_quality, rubric.total_score)
-    run.status = "scored"
-    run.finished_at = _utcnow()
-    paper.status = "pending_review" if run.need_manual_review else "scored"
+    ai_total, final_total, grade, need_review = _aggregate_run_totals(items, inputs.parse_quality, inputs.rubric_total_score)
+    return ScoringResult(
+        items=items,
+        prompt_tokens=usage_totals["prompt_tokens"],
+        completion_tokens=usage_totals["completion_tokens"],
+        total_tokens=usage_totals["total_tokens"],
+        coherence_findings=coherence_findings,
+        format_findings=inputs.format_findings,
+        ai_total=ai_total,
+        final_total=final_total,
+        grade=grade,
+        need_review=need_review,
+    )
+
+
+def persist_scoring(db: Session, paper_id, inputs: ScoringInputs, result: ScoringResult, scorer, started_at) -> ScoringRun:
+    """短写：落库 ScoringRun + ScoreItem（findings 已在 compute 被启用项消费/标记），更新论文状态。"""
+    paper = db.get(Paper, paper_id)
+    run = ScoringRun(
+        paper_id=paper_id,
+        rubric_id=inputs.rubric_id,
+        model_provider=scorer.provider,
+        model_name=scorer.model_name,
+        model_version=scorer.model_version,
+        status="scored",
+        started_at=started_at,
+        finished_at=_utcnow(),
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+        coherence_findings=result.coherence_findings,
+        format_findings=result.format_findings,
+        ai_total_score=result.ai_total,
+        final_total_score=result.final_total,
+        grade=result.grade,
+        need_manual_review=result.need_review,
+    )
+    for data in result.items:
+        run.items.append(
+            ScoreItem(
+                criterion_id=data["criterion_id"],
+                max_score=data["max_score"],
+                ai_score=data["ai_score"],
+                final_score=data["final_score"],
+                evidence_sufficient=data["evidence_sufficient"],
+                reason=data["reason"],
+                deductions=data["deductions"],
+                deduction_items=data["deduction_items"],
+                evidence=data["evidence"],
+                band_selection=data["band_selection"],
+                sub_results=data["sub_results"],
+                suggestion=data["suggestion"],
+                confidence=data["confidence"],
+                need_manual_review=data["need_manual_review"],
+                raw_model_output=data["raw_model_output"],
+            )
+        )
+    paper.status = "pending_review" if result.need_review else "scored"
+    db.add(run)
     db.commit()
     db.refresh(run)
     return run
+
+
+def _route_for(criterion):
+    """按 criterion_type + findings 启用决定路由（设计§6.2）。"""
+    if is_findings_enabled(criterion):
+        return "findings"
+    criterion_type = getattr(criterion, "criterion_type", "llm_judgment")
+    if criterion_type == "deterministic":
+        return "deterministic"
+    if criterion_type == "hybrid" and getattr(criterion, "sub_checks", None):
+        return "hybrid"
+    return "chunks"
+
+
+def _snapshot_criterion(criterion):
+    """把 ORM 评分项快照成纯 SimpleNamespace，使 compute 阶段在事务释放后仍可安全读取（鸭子类型，复用现有打分器）。"""
+    return SimpleNamespace(
+        id=criterion.id,
+        code=criterion.code,
+        name=criterion.name,
+        max_score=criterion.max_score,
+        description=getattr(criterion, "description", None),
+        evidence_hints=list(getattr(criterion, "evidence_hints", None) or []),
+        deduction_rules=list(getattr(criterion, "deduction_rules", None) or []),
+        deduction_rules_structured=list(getattr(criterion, "deduction_rules_structured", None) or []),
+        criterion_type=getattr(criterion, "criterion_type", "llm_judgment"),
+        scoring_mode=getattr(criterion, "scoring_mode", "llm_direct"),
+        applies_to=getattr(criterion, "applies_to", "global"),
+        rubric_levels=list(getattr(criterion, "rubric_levels", None) or []),
+        sub_checks=list(getattr(criterion, "sub_checks", None) or []),
+        dimension=getattr(criterion, "dimension", None),
+    )
+
+
+def _compute_hybrid(scorer, paper_ref, criterion, sub_plans, parsed, structure_checks, rubric_version):
+    """混合制（纯，设计§2/§6.3）：sub_plans 已含预取候选；确定性子项走 checker，语义子项走模型，再汇总。"""
+    sub_results = []
+    usage = _blank_usage()
+    for sub_criterion, candidates in sub_plans:
+        if sub_criterion.criterion_type == "deterministic":
+            sub_output = run_deterministic_checker(sub_criterion, parsed)
+        else:
+            sub_output = _score_criterion_by_chunks(scorer, paper_ref, sub_criterion, candidates, structure_checks, rubric_version)
+        _add_usage(usage, sub_output.get("usage"))
+        sub_results.append(sub_output)
+    return _aggregate_hybrid(criterion, sub_results, usage)
+
+
+def _aggregate_run_totals(item_datas, parse_quality, total_score):
+    """从 item 数据（dict）复算 run 级汇总，与 _recalculate_run 同口径（复用 rules）。"""
+    items = [
+        SimpleNamespace(
+            id=None,
+            ai_score=data["ai_score"],
+            final_score=data["final_score"],
+            max_score=data["max_score"],
+            evidence_sufficient=data["evidence_sufficient"],
+            need_manual_review=data["need_manual_review"],
+            confidence=data["confidence"],
+        )
+        for data in item_datas
+    ]
+    final_total = calculate_total_score(items, total_score=total_score)
+    ai_total = calculate_total_score(_AiScoreProxyList(items), total_score=total_score)
+    grade = match_grade(final_total)
+    need_review = need_manual_review(final_total, items, parse_quality=parse_quality)
+    return ai_total, final_total, grade, need_review
 
 
 def score_batch(db: Session, batch_id: str, rescore: bool = False):
@@ -369,23 +566,6 @@ def _numeric_bands(criterion):
             except (TypeError, ValueError):
                 continue
     return bands
-
-
-def _score_hybrid(db, scorer, paper, criterion, parsed, structure_checks, rubric_version):
-    """混合制（设计§2/§6.3）：按 sub_checks 拆成确定性/语义子检查分别计分，再汇总。
-    确定性子项走 checker（不调 LLM），语义子项走模型；本项得分 = Σ 子项得分。"""
-    sub_results = []
-    usage = _blank_usage()
-    for index, sub in enumerate(criterion.sub_checks, start=1):
-        sub_criterion = _make_sub_criterion(criterion, sub, index)
-        if sub_criterion.criterion_type == "deterministic":
-            sub_output = run_deterministic_checker(sub_criterion, parsed)
-        else:
-            candidates = retrieve_for_criterion(db, paper.id, sub_criterion, top_k=settings.SCORING_CHUNK_EVAL_TOP_K)
-            sub_output = _score_criterion_by_chunks(scorer, paper, sub_criterion, candidates, structure_checks, rubric_version)
-        _add_usage(usage, sub_output.get("usage"))
-        sub_results.append(sub_output)
-    return _aggregate_hybrid(criterion, sub_results, usage)
 
 
 def _make_sub_criterion(parent, sub, index):

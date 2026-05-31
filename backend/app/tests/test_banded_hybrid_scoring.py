@@ -3,8 +3,12 @@ from types import SimpleNamespace
 from backend.app.services.scoring.engine import _aggregate_hybrid
 from backend.app.services.scoring.engine import _apply_banded
 from backend.app.services.scoring.engine import _blank_usage
+from backend.app.services.scoring.engine import _compute_hybrid
 from backend.app.services.scoring.engine import _make_sub_criterion
-from backend.app.services.scoring.engine import _score_hybrid
+from backend.app.services.scoring.engine import CriterionPlan
+from backend.app.services.scoring.engine import ScoringInputs
+from backend.app.services.scoring.engine import compute_scoring
+from backend.app.services.llm.mock import MockLLMScorer
 
 
 BANDS = [
@@ -77,7 +81,7 @@ def test_aggregate_hybrid_sums_subscores():
     assert out["confidence"] == 0.8  # 取最小
 
 
-def test_score_hybrid_deterministic_subchecks_end_to_end():
+def test_compute_hybrid_deterministic_subchecks_end_to_end():
     parsed = {
         "structure_checks": [],
         "full_text": "研究方法见[1]。" + "字" * 200,
@@ -96,8 +100,54 @@ def test_score_hybrid_deterministic_subchecks_end_to_end():
             {"kind": "deterministic", "max_points": 10, "name": "正文字数"},
         ],
     )
-    out = _score_hybrid(None, None, None, criterion, parsed, [], "v1.0")
+    # 6.1 解耦后：候选证据在 collect 阶段预取，compute 收 sub_plans（确定性子项候选为空）。
+    sub_plans = [(_make_sub_criterion(criterion, sub, i), []) for i, sub in enumerate(criterion.sub_checks, start=1)]
+    out = _compute_hybrid(None, None, criterion, sub_plans, parsed, [], "v1.0")
     assert out["scoring_mode"] == "hybrid"
     assert len(out["sub_results"]) == 2
     assert {s["checker_kind"] for s in out["sub_results"]} == {"citation", "word_count"}
     assert out["score"] == round(min(sum(s["score"] for s in out["sub_results"]), 20), 2)
+
+
+def test_compute_scoring_runs_without_any_db():
+    """6.1 解耦：compute_scoring 是纯函数——仅凭手搓的 ScoringInputs + scorer 即可出分，全程无 DB/会话。"""
+    criterion = SimpleNamespace(
+        id="c1",
+        code="C01",
+        name="研究方法",
+        max_score=20.0,
+        description=None,
+        evidence_hints=[],
+        deduction_rules=[],
+        deduction_rules_structured=[],
+        criterion_type="llm_judgment",
+        scoring_mode="llm_direct",
+        applies_to="global",
+        rubric_levels=[],
+        sub_checks=[],
+        dimension=None,
+    )
+    plan = CriterionPlan(
+        criterion=criterion,
+        route="chunks",
+        candidates=[{"chunk_id": "1", "location": "第三章", "section_title": "研究方法", "text": "本文采用实验法，数据来源清楚。"}],
+        anchors=[],
+    )
+    inputs = ScoringInputs(
+        paper_id="p1",
+        paper_title="测试论文",
+        parse_quality=0.9,
+        parsed={"structure_checks": [], "coherence_findings": []},
+        structure_checks=[],
+        rubric_id="r1",
+        rubric_total_score=20.0,
+        rubric_version="v1",
+        base_coherence=[],
+        format_findings=[],
+        criteria=[plan],
+    )
+    result = compute_scoring(inputs, MockLLMScorer())  # 不传任何 db/session
+    assert len(result.items) == 1
+    assert result.items[0]["criterion_id"] == "c1"
+    assert 0 <= result.final_total <= 20.0
+    assert result.grade
