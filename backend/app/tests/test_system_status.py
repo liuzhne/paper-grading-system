@@ -28,6 +28,14 @@ def test_integration_status_masks_secrets_and_reports_real_adapters(client, monk
     assert payload["frontend"]["primary"] == "static_web"
 
 
+def test_llm_check_reports_mock_without_real_call(client):
+    response = client.get("/api/system/llm-check")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["stage"] == "mock"  # 默认 mock：不发真实请求
+
+
 def test_integration_status_reports_openai_compatible_without_leaking_key(client, monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_API_KEY", "zhipu-secret")

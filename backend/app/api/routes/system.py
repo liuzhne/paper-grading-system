@@ -3,8 +3,15 @@ from pathlib import Path
 from fastapi import APIRouter
 
 from backend.app.core.config import settings
+from backend.app.services.llm.diagnostics import check_connectivity
 
 router = APIRouter(prefix="/system", tags=["system"])
+
+
+@router.get("/llm-check")
+def llm_check():
+    """LLM 连通自检（mock 直接 ok；真实 provider 发极小请求测连通+延迟）。"""
+    return check_connectivity()
 
 
 @router.get("/integrations")

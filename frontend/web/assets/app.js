@@ -77,6 +77,10 @@ const state = {
   selectedRunId: "",
   chunksById: {},
   exportLogs: [],
+  ranking: null,
+  drift: null,
+  anchors: [],
+  anchorRubricId: "",
   llmStatus: { phase: "idle" },
   llmTimer: null,
 };
@@ -157,8 +161,18 @@ async function loadAll() {
   if (!state.runs.some((run) => run.id === state.selectedRunId)) {
     state.selectedRunId = state.runs[0]?.id || "";
   }
+  state.ranking = state.selectedBatchId ? await api(`/batches/${state.selectedBatchId}/ranking`) : null;
+  state.drift = state.selectedBatchId ? await api(`/batches/${state.selectedBatchId}/drift`) : null;
+  if (!state.rubrics.some((rubric) => rubric.id === state.anchorRubricId)) {
+    state.anchorRubricId = state.rubrics[0]?.id || "";
+  }
+  await refreshAnchors();
   await refreshExportLogs();
   render();
+}
+
+async function refreshAnchors() {
+  state.anchors = state.anchorRubricId ? await api(`/calibration/anchors?rubric_id=${state.anchorRubricId}`) : [];
 }
 
 function switchPage(page) {
@@ -178,6 +192,7 @@ function render() {
   renderSharedSelects();
   renderDashboard();
   renderRubrics();
+  renderCalibration();
   renderBatches();
   renderReview();
   renderExports();
@@ -209,6 +224,38 @@ function renderDashboard() {
     ],
     state.batches,
   );
+  renderBatchAnalytics();
+}
+
+function renderBatchAnalytics() {
+  const rankingEl = document.querySelector("#batch-ranking");
+  const driftEl = document.querySelector("#batch-drift");
+  if (!rankingEl || !driftEl) return;
+  rankingEl.innerHTML = state.ranking
+    ? renderTable(
+        [
+          { label: "名次", value: (row) => row.rank },
+          { label: "论文", value: (row) => row.title || row.paper_id },
+          { label: "学生", value: (row) => row.student_name || "" },
+          { label: "总分", value: (row) => row.total },
+          { label: "百分位", value: (row) => row.percentile ?? "" },
+        ],
+        state.ranking.ranking || [],
+      )
+    : '<div class="muted">请选择批次</div>';
+  driftEl.innerHTML = state.drift
+    ? renderTable(
+        [
+          { label: "评分项", value: (row) => row.criterion_name || row.criterion_code },
+          { label: "AI 均分", value: (row) => row.mean_ai },
+          { label: "人工均分", value: (row) => row.mean_final },
+          { label: "偏移", value: (row) => `${row.bias}${row.flagged ? " ⚠" : ""}` },
+          { label: "方向", value: (row) => row.direction },
+          { label: "调整/样本", value: (row) => `${row.n_adjusted}/${row.n}` },
+        ],
+        state.drift.criteria || [],
+      )
+    : '<div class="muted">请选择批次</div>';
 }
 
 function renderIntegrationStatus() {
@@ -381,6 +428,7 @@ function renderReview() {
         <div class="metric"><span>最终总分</span><strong>${run.final_total_score ?? ""}</strong></div>
         <div class="metric"><span>等级</span><strong>${escapeHtml(run.grade || "")}</strong></div>
         <div class="metric"><span>需复核</span><strong>${run.need_manual_review ? "是" : "否"}</strong></div>
+        <div class="metric"><span>Token</span><strong>${run.total_tokens ?? 0}</strong></div>
       </div>
       <div class="review-box">
         <label>复核意见<textarea id="review-reason" placeholder="填写整体复核意见"></textarea></label>
@@ -388,6 +436,56 @@ function renderReview() {
       </div>`
     : '<div class="muted">暂无评分任务</div>';
   renderScoreItems();
+  renderRunFindings();
+}
+
+function renderRunFindings() {
+  const container = document.querySelector("#run-findings");
+  if (!container) return;
+  const run = state.runs.find((item) => item.id === state.selectedRunId);
+  if (!run) {
+    container.innerHTML = '<div class="muted">请选择评分任务</div>';
+    return;
+  }
+  const coherence = run.coherence_findings || [];
+  const format = run.format_findings || [];
+  container.innerHTML = `<h3 class="section-title">篇章一致性（${coherence.length}）</h3>${findingsTableHtml(coherence)}<h3 class="section-title">格式问题（${format.length}）</h3>${findingsTableHtml(format)}`;
+}
+
+function findingsTableHtml(findings) {
+  return renderTable(
+    [
+      { label: "级别", value: (row) => row.severity || "" },
+      { label: "类型", value: (row) => row.kind || row.field || "" },
+      { label: "说明", value: (row) => row.message || "" },
+      { label: "计入扣分", value: (row) => (row.deducted_by ? `−${row.deducted_points ?? ""}（${row.deducted_by}）` : "") },
+    ],
+    findings || [],
+  );
+}
+
+function deductionItemsHtml(items) {
+  const scored = (items || []).filter((item) => item.points != null);
+  if (!scored.length) return "";
+  const text = scored
+    .map((item) => `−${item.points} ${item.reason || ""}${item.rule_ref ? `(${item.rule_ref})` : ""}`)
+    .join("；");
+  return `<div class="muted">结构化扣分：${escapeHtml(text)}</div>`;
+}
+
+function renderCalibration() {
+  const select = document.querySelector("#anchor-rubric-select");
+  if (!select) return;
+  select.innerHTML = optionHtml(state.rubrics, "id", (item) => `${item.name} / ${item.version}`, state.anchorRubricId);
+  document.querySelector("#anchor-list").innerHTML = renderTable(
+    [
+      { label: "评分项", value: (row) => row.criterion_code },
+      { label: "档位", value: (row) => row.label || "" },
+      { label: "分/满分", value: (row) => `${row.score}/${row.max_score}` },
+      { label: "范文摘录", value: (row) => (row.excerpt || "").slice(0, 40) },
+    ],
+    state.anchors || [],
+  );
 }
 
 function renderLlmRuntimeStatus() {
@@ -509,6 +607,7 @@ function scoreItemHtml(item) {
     </div>
     <div>${escapeHtml(item.reason)}</div>
     <div class="muted">扣分：${escapeHtml((item.deductions || []).join("；"))}</div>
+    ${deductionItemsHtml(item.deduction_items)}
     <div class="muted">建议：${escapeHtml(item.suggestion || "")}</div>
     ${evidence}
     <div class="review-box">
@@ -569,6 +668,8 @@ function criteriaPayloadRows(criteria) {
       evidence_hints: item.evidence_hints || [],
       deduction_rules: item.deduction_rules || [],
       display_order: item.display_order ?? index,
+      dimension: item.dimension ?? null,
+      deduction_rules_structured: item.deduction_rules_structured || [],
     }));
 }
 
@@ -905,6 +1006,59 @@ function bindEvents() {
   document.querySelector("#report-btn").addEventListener("click", () => {
     if (!state.selectedRunId) return showToast("请选择评分任务", true);
     window.open(`${apiBase()}/scoring-runs/${state.selectedRunId}/report`, "_blank");
+  });
+
+  document.querySelector("#llm-check-btn")?.addEventListener("click", async () => {
+    const el = document.querySelector("#llm-check-result");
+    el.innerHTML = '<div class="muted">连通测试中…</div>';
+    try {
+      const result = await api("/system/llm-check");
+      el.innerHTML = `<pre class="context">${escapeHtml(JSON.stringify(result, null, 2))}</pre>`;
+      showToast(
+        result.ok ? `连通正常（${result.stage}${result.latency_ms ? `, ${result.latency_ms}ms` : ""}）` : `未通过：${result.error || result.stage}`,
+        !result.ok,
+      );
+    } catch (error) {
+      el.innerHTML = `<div class="muted">${escapeHtml(error.message)}</div>`;
+      showToast(error.message, true);
+    }
+  });
+
+  document.querySelector("#anchor-rubric-select")?.addEventListener("change", async (event) => {
+    state.anchorRubricId = event.target.value;
+    try {
+      await refreshAnchors();
+      renderCalibration();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  document.querySelector("#anchor-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      if (!state.anchorRubricId) throw new Error("请选择评分标准");
+      const form = new FormData(event.currentTarget);
+      await api("/calibration/anchors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rubric_id: state.anchorRubricId,
+          criterion_code: String(form.get("criterion_code") || "").trim(),
+          score: Number(form.get("score")),
+          max_score: Number(form.get("max_score")),
+          label: optionalText(form.get("label")),
+          excerpt: String(form.get("excerpt") || "").trim(),
+          rationale: optionalText(form.get("rationale")),
+        }),
+      });
+      event.currentTarget.reset();
+      await refreshAnchors();
+      renderCalibration();
+      showToast("锚点已添加");
+    } catch (error) {
+      showToast(error.message, true);
+    }
   });
 
   document.body.addEventListener("click", async (event) => {

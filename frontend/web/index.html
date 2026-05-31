@@ -54,9 +54,13 @@
           <section class="panel">
             <div class="panel-header">
               <h2>P0 集成状态</h2>
-              <button class="secondary" data-action="reload">刷新</button>
+              <div class="toolbar">
+                <button id="llm-check-btn" class="secondary">测试 LLM 连接</button>
+                <button class="secondary" data-action="reload">刷新</button>
+              </div>
             </div>
             <div id="integration-status" class="integration-grid"></div>
+            <div id="llm-check-result" class="result-box"></div>
           </section>
           <section class="panel">
             <div class="panel-header">
@@ -64,6 +68,16 @@
               <button class="secondary" data-action="reload">刷新</button>
             </div>
             <div id="dashboard-batches" class="table-wrap"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header">
+              <h2>批量分析（当前批次）</h2>
+              <button class="secondary" data-action="reload">刷新</button>
+            </div>
+            <h3 class="section-title">相对排名</h3>
+            <div id="batch-ranking" class="table-wrap"></div>
+            <h3 class="section-title">评分漂移（AI 分 vs 人工终分）</h3>
+            <div id="batch-drift" class="table-wrap"></div>
           </section>
         </section>
 
@@ -100,11 +114,27 @@
                   <label>版本<input name="version" /></label>
                 </div>
                 <label>说明<textarea name="description"></textarea></label>
-                <label>评分项 JSON<textarea name="criteria" class="code-input compact-code"></textarea></label>
+                <label>评分项 JSON（含 dimension / deduction_rules_structured，配置 findings→自动扣分）<textarea name="criteria" class="code-input compact-code"></textarea></label>
                 <button type="submit" class="secondary">保存草稿评分标准</button>
               </form>
             </section>
           </div>
+          <section class="panel">
+            <div class="panel-header"><h2>校准锚点（脱敏范文 few-shot）</h2></div>
+            <form id="anchor-form" class="form compact">
+              <label>评分标准<select id="anchor-rubric-select" name="rubric_id"></select></label>
+              <div class="form-row">
+                <label>评分项 code<input name="criterion_code" placeholder="如 C01" /></label>
+                <label>分数<input name="score" type="number" step="0.5" /></label>
+                <label>满分<input name="max_score" type="number" step="0.5" /></label>
+              </div>
+              <label>档位标签<input name="label" placeholder="优/良/中… 可空" /></label>
+              <label>脱敏范文摘录<textarea name="excerpt"></textarea></label>
+              <label>评分理由<textarea name="rationale"></textarea></label>
+              <button type="submit" class="secondary">添加锚点</button>
+            </form>
+            <div id="anchor-list" class="table-wrap"></div>
+          </section>
         </section>
 
         <section id="page-batches" class="page">
@@ -171,6 +201,10 @@
               <div id="score-items" class="stack"></div>
             </section>
           </div>
+          <section class="panel">
+            <div class="panel-header"><h2>篇章一致性 / 格式问题</h2></div>
+            <div id="run-findings" class="table-wrap"></div>
+          </section>
         </section>
 
         <section id="page-exports" class="page">
