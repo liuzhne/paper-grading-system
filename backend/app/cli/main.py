@@ -7,6 +7,7 @@
 import json
 import shutil
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -112,8 +113,13 @@ def init(
 
 
 @app.command()
-def check(as_json: bool = typer.Option(False, "--json", help="输出 JSON")):
+def check(
+    mock: bool = typer.Option(False, "--mock", help="强制按 Mock 自检（不读真实 provider）"),
+    as_json: bool = typer.Option(False, "--json", help="输出 JSON"),
+):
     """LLM 连通自检（mock 直接 ok；真实 provider 发极小请求测连通）。"""
+    if mock:
+        settings.LLM_PROVIDER = "mock"
     from backend.app.services.llm.diagnostics import check_connectivity
 
     result = check_connectivity()
@@ -299,6 +305,15 @@ def score(
         rows,
         style_fn=lambda row: None if str(row[5]) == "ok" else "red",
     )
+    ok_rows = [r for r in results if r["status"] == "ok"]
+    if ok_rows:
+        avg = sum(r["total"] for r in ok_rows) / len(ok_rows)
+        need = sum(1 for r in ok_rows if r.get("need_review"))
+        render.info(
+            "成功 %d/%d    平均分 %.2f    需复核 %d    失败 %d"
+            % (len(ok_rows), len(results), avg, need, len(results) - len(ok_rows))
+        )
+        render.hint("逐项明细：pgs show <run_id>    （列任务：pgs runs --batch %s）" % batch_id)
     if report_dir:
         render.hint("报告已写入：%s" % report_dir)
     raise typer.Exit(1 if any_failed else 0)
@@ -410,6 +425,209 @@ def eval_cmd(
         )
         render.info("✓ 首次运行：已固化基线 → %s" % baseline_path)
     raise typer.Exit(1 if issues else 0)
+
+
+@app.command()
+def publish(
+    rubric_id: str = typer.Argument(..., help="评分标准 id 或名称"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """发布草稿评分标准（draft → published）。"""
+    _bootstrap(db, storage)
+    from sqlalchemy import select
+
+    from backend.app.db.models import Rubric
+
+    with clidb.cli_session() as session:
+        rubric = session.get(Rubric, rubric_id)
+        if rubric is None:
+            rubric = session.scalar(
+                select(Rubric).where(Rubric.name == rubric_id).order_by(Rubric.created_at.desc())
+            )
+        if rubric is None:
+            render.error("找不到评分标准：%s（用 `pgs rubrics` 查看）" % rubric_id)
+            raise typer.Exit(2)
+        rubric.status = "published"
+        rubric.published_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.commit()
+        name, version = rubric.name, rubric.version
+    render.info("✓ 已发布：%s（%s）" % (name, version))
+
+
+@app.command()
+def batches(
+    as_json: bool = typer.Option(False, "--json"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """列出本地批次（含论文数）。"""
+    _bootstrap(db, storage)
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from backend.app.db.models import GradingBatch
+
+    with clidb.cli_session() as session:
+        items = session.scalars(
+            select(GradingBatch)
+            .options(selectinload(GradingBatch.papers), selectinload(GradingBatch.rubric))
+            .order_by(GradingBatch.created_at.desc())
+        ).all()
+        data = [
+            {
+                "id": b.id,
+                "name": b.name,
+                "rubric": b.rubric.name if b.rubric else "",
+                "papers": len(b.papers),
+                "status": b.status,
+                "created_at": str(b.created_at)[:19] if b.created_at else "",
+            }
+            for b in items
+        ]
+    if as_json:
+        render.dump_json(data)
+        return
+    if not data:
+        render.warn("（暂无批次；先 `pgs score`）")
+        return
+    render.render_table(
+        "批次",
+        ["id", "名称", "评分标准", "论文数", "状态", "创建"],
+        [(d["id"], d["name"], d["rubric"], d["papers"], d["status"], d["created_at"]) for d in data],
+    )
+
+
+@app.command()
+def runs(
+    batch: Optional[str] = typer.Option(None, "--batch", help="只看某批次 id"),
+    as_json: bool = typer.Option(False, "--json"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """列出评分任务（按时间倒序）。"""
+    _bootstrap(db, storage)
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from backend.app.db.models import Paper
+    from backend.app.db.models import ScoringRun
+
+    with clidb.cli_session() as session:
+        query = select(ScoringRun).options(selectinload(ScoringRun.paper)).order_by(ScoringRun.started_at.desc())
+        if batch:
+            query = query.join(Paper, ScoringRun.paper_id == Paper.id).where(Paper.batch_id == batch)
+        items = session.scalars(query).all()
+        data = [
+            {
+                "run_id": r.id,
+                "paper": (r.paper.title or r.paper.file_name) if r.paper else "",
+                "total": float(r.final_total_score or 0),
+                "grade": r.grade,
+                "need_review": bool(r.need_manual_review),
+                "tokens": r.total_tokens or 0,
+                "status": r.status,
+                "started_at": str(r.started_at)[:19] if r.started_at else "",
+            }
+            for r in items
+        ]
+    if as_json:
+        render.dump_json(data)
+        return
+    if not data:
+        render.warn("（暂无评分任务；先 `pgs score`）")
+        return
+    render.render_table(
+        "评分任务",
+        ["run_id", "论文", "总分", "等级", "复核", "Token", "状态", "时间"],
+        [
+            (d["run_id"], d["paper"], d["total"], d["grade"], "是" if d["need_review"] else "否", d["tokens"], d["status"], d["started_at"])
+            for d in data
+        ],
+    )
+
+
+@app.command()
+def show(
+    run_id: str = typer.Argument(..., help="评分任务 id"),
+    as_json: bool = typer.Option(False, "--json"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """查看某次评分的逐项明细 + 篇章一致性/格式问题。"""
+    _bootstrap(db, storage)
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from backend.app.db.models import ScoreItem
+    from backend.app.db.models import ScoringRun
+
+    with clidb.cli_session() as session:
+        run = session.scalar(
+            select(ScoringRun)
+            .where(ScoringRun.id == run_id)
+            .options(
+                selectinload(ScoringRun.items).selectinload(ScoreItem.criterion),
+                selectinload(ScoringRun.paper),
+            )
+        )
+        if run is None:
+            render.error("找不到评分任务：%s（用 `pgs runs` 查看）" % run_id)
+            raise typer.Exit(2)
+        header = {
+            "run_id": run.id,
+            "paper": (run.paper.title or run.paper.file_name) if run.paper else run_id,
+            "ai_total": float(run.ai_total_score or 0),
+            "final_total": float(run.final_total_score or 0),
+            "grade": run.grade,
+            "need_review": bool(run.need_manual_review),
+            "tokens": run.total_tokens or 0,
+            "status": run.status,
+        }
+        items = [
+            {
+                "code": it.criterion.code if it.criterion else "",
+                "name": it.criterion.name if it.criterion else "",
+                "score": float(it.final_score if it.final_score is not None else (it.ai_score or 0)),
+                "max": float(it.max_score or 0),
+                "evidence_sufficient": bool(it.evidence_sufficient),
+                "confidence": it.confidence,
+                "need_review": bool(it.need_manual_review),
+                "reason": it.reason or "",
+                "deductions": it.deduction_items or [],
+            }
+            for it in run.items
+        ]
+        coherence = list(run.coherence_findings or [])
+        fmt = list(run.format_findings or [])
+
+    if as_json:
+        render.dump_json({"run": header, "items": items, "coherence_findings": coherence, "format_findings": fmt})
+        return
+    render.info(
+        "论文：%s    总分(AI/终)：%.2f/%.2f    等级：%s    需复核：%s    Token：%s"
+        % (
+            header["paper"],
+            header["ai_total"],
+            header["final_total"],
+            header["grade"],
+            "是" if header["need_review"] else "否",
+            header["tokens"],
+        )
+    )
+    render.render_table(
+        "逐项评分",
+        ["code", "评分项", "得分/满分", "证据足", "置信", "复核"],
+        [
+            (i["code"], i["name"], "%.1f/%.1f" % (i["score"], i["max"]), "是" if i["evidence_sufficient"] else "否", i["confidence"], "是" if i["need_review"] else "否")
+            for i in items
+        ],
+        style_fn=lambda row: "yellow" if row[5] == "是" else None,
+    )
+    findings = [("篇章", f.get("severity", ""), f.get("kind") or f.get("field", ""), f.get("message", "")) for f in coherence]
+    findings += [("格式", f.get("severity", ""), f.get("kind") or f.get("field", ""), f.get("message", "")) for f in fmt]
+    if findings:
+        render.render_table("篇章一致性 / 格式问题", ["类别", "级别", "类型", "说明"], findings)
 
 
 def run():

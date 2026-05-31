@@ -4,6 +4,8 @@
 故本文件 autouse 强制 settings.LLM_PROVIDER=mock 并在结束后还原被 configure 改写的全局设置。
 """
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
@@ -82,3 +84,49 @@ def test_import_rubric_from_excel(tmp_path, local):
     assert result.exit_code == 0, result.output
     listing = runner.invoke(app, ["rubrics", "--json", *local])
     assert "CLI导入标准" in listing.output
+
+
+def test_runs_and_show_after_score(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    docx = tmp_path / "t.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    scored = runner.invoke(app, ["score", str(docx), "--rubric", SEED_RUBRIC, "--mock", "--json", *local])
+    assert scored.exit_code == 0, scored.output
+    run_id = json.loads(scored.output)["results"][0]["run_id"]
+
+    listed = runner.invoke(app, ["runs", "--json", *local])
+    assert listed.exit_code == 0
+    assert run_id in listed.output
+
+    shown = runner.invoke(app, ["show", run_id, "--json", *local])
+    assert shown.exit_code == 0, shown.output
+    detail = json.loads(shown.output)
+    assert detail["run"]["run_id"] == run_id
+    assert len(detail["items"]) == 7  # 种子 7 个评分项
+
+
+def test_batches_lists_after_score(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    docx = tmp_path / "t.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    runner.invoke(app, ["score", str(docx), "--rubric", SEED_RUBRIC, "--mock", *local])
+    result = runner.invoke(app, ["batches", "--json", *local])
+    assert result.exit_code == 0
+    assert json.loads(result.output)  # 非空
+
+
+def test_publish_draft_rubric(tmp_path, local):
+    rules = tmp_path / "rules.xlsx"
+    rules.write_bytes(make_rules_xlsx().getvalue())
+    assert runner.invoke(app, ["import", str(rules), "--name", "待发布标准", *local]).exit_code == 0
+    rid = next(r["id"] for r in json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output) if r["name"] == "待发布标准")
+    assert runner.invoke(app, ["publish", rid, *local]).exit_code == 0
+    after = json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output)
+    assert next(r["status"] for r in after if r["id"] == rid) == "published"
+
+
+def test_check_mock_overrides_real_provider(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")  # 即使配了真实 provider
+    result = runner.invoke(app, ["check", "--mock", "--json"])
+    assert result.exit_code == 0
+    assert '"stage": "mock"' in result.output

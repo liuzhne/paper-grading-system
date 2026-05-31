@@ -60,17 +60,22 @@ UV_CACHE_DIR=.uv-cache DATABASE_URL=sqlite+pysqlite:////private/tmp/paper_gradin
 
 ```bash
 uv run pgs init --seed                                   # 建本地库 + 默认评分标准/批次
-uv run pgs check                                         # LLM 连通自检（mock 直接 ok；真实 provider 发极小请求）
+uv run pgs check [--mock]                                # LLM 连通自检（--mock 离线、不联网）
 uv run pgs import 规则.xlsx --name 校级标准 --template 模板.docx   # 导入评分标准（复用 Web 同一解析/落库）
-uv run pgs rubrics                                       # 列出本地评分标准（--json 机器可读）
-uv run pgs score 论文.docx 目录/ --rubric "校级标准" [--mock] [--report-dir out/]   # 评分（支持多文件/目录递归）
+uv run pgs publish <rubric_id>                           # 发布草稿标准（draft → published）
+uv run pgs rubrics                                       # 列出评分标准（--json 机器可读）
+uv run pgs score 论文.docx 目录/ --rubric "校级标准" [--mock] [--report-dir out/]   # 评分（多文件/目录递归）
+uv run pgs runs [--batch <id>]                           # 列出评分任务（拿 run_id）
+uv run pgs show <run_id>                                 # 逐项明细 + 篇章一致性/格式问题
+uv run pgs batches                                       # 列出批次（拿 batch_id）
 uv run pgs report <run_id> -o 报告.html                  # 生成 HTML 报告
 uv run pgs export <batch_id> -o 成绩.xlsx                # 导出批次 Excel
-uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx   # QWK 评估 + 基线/回归门禁
+uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx   # QWK + 基线/回归门禁
 ```
 
 - LLM 由环境变量驱动（与 Web 一致，读 `.env`）；`--mock` 强制本地 Mock、不联网。
-- `score` 任一篇解析/评分失败即**非零退出**（便于脚本/CI）；`--json` 在 `score`/`rubrics`/`check` 输出机器可读结果。
+- `score` 任一篇解析/评分失败即**非零退出**（便于脚本/CI）；`--json` 在 `score`/`rubrics`/`runs`/`show`/`batches`/`check` 输出机器可读结果。
+- 闭环：`score` → 拿 run_id（或 `pgs runs`）→ `pgs show <run_id>` 看逐项明细 → `pgs report` 出报告。
 
 ## P0：真实 LLM、在线写表和正式前端
 
