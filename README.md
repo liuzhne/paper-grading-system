@@ -64,7 +64,7 @@ uv run pgs check [--mock]                                # LLM 连通自检（--
 uv run pgs import 规则.xlsx --name 校级标准 --template 模板.docx   # 导入评分标准（复用 Web 同一解析/落库）
 uv run pgs publish <rubric_id>                           # 发布草稿标准（draft → published）
 uv run pgs rubrics                                       # 列出评分标准（--json 机器可读）
-uv run pgs score 论文.docx 目录/ --rubric "校级标准" [--mock] [--report-dir out/]   # 评分（多文件/目录递归）
+uv run pgs score 论文.docx 目录/ --rubric "校级标准" [--mock] [--workers N] [--report-dir out/]   # 评分（多文件/目录递归）
 uv run pgs runs [--batch <id>]                           # 列出评分任务（拿 run_id）
 uv run pgs show <run_id>                                 # 逐项明细 + 篇章一致性/格式问题
 uv run pgs batches                                       # 列出批次（拿 batch_id）
@@ -74,6 +74,7 @@ uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx   
 ```
 
 - LLM 由环境变量驱动（与 Web 一致，读 `.env`）；`--mock` 强制本地 Mock、不联网。
+- 批量：`score --workers N` 并发评分（适合真实 LLM 批量）+ 进度条 + 等级分布汇总。注：本地 sqlite 下评分事务跨 LLM 调用持写锁，多 worker 趋于串行、加速有限；要真正并行需指向并发数据库（或后续 6.1 内核解耦）。
 - `score` 任一篇解析/评分失败即**非零退出**（便于脚本/CI）；`--json` 在 `score`/`rubrics`/`runs`/`show`/`batches`/`check` 输出机器可读结果。
 - 闭环：`score` → 拿 run_id（或 `pgs runs`）→ `pgs show <run_id>` 看逐项明细 → `pgs report` 出报告。
 

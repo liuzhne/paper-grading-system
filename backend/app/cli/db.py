@@ -12,6 +12,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -44,10 +45,31 @@ def ensure_schema():
     command.upgrade(cfg, "head")
 
 
+def make_engine(db_url=None):
+    """自建引擎；sqlite 开 WAL + 60s busy_timeout，让 `score --workers` 并发访问不直接报 locked。"""
+    url = db_url or settings.DATABASE_URL
+    is_sqlite = url.startswith("sqlite")
+    engine = create_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args={"timeout": 60} if is_sqlite else {},
+    )
+    if is_sqlite:
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_conn, _record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
+
+    return engine
+
+
 @contextmanager
 def cli_session(db_url=None):
     """对本地 sqlite 开一个会话（自建引擎，用完即弃）。"""
-    engine = create_engine(db_url or settings.DATABASE_URL, pool_pre_ping=True)
+    engine = make_engine(db_url)
     factory = sessionmaker(bind=engine, autocommit=False, autoflush=False, class_=Session)
     db = factory()
     try:

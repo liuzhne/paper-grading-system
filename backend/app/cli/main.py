@@ -93,6 +93,52 @@ def _resolve_rubric(session, rubric, rubric_file, template):
     raise typer.BadParameter("请用 --rubric <id|名称> 或 --rubric-file 指定评分标准（或先 `pgs init --seed`）")
 
 
+def _run_scoring(items, fn, workers, show_progress):
+    """对 items 跑 fn；workers>1 时线程池并发，否则顺序（多篇带进度条）。返回结果列表。"""
+    if not items:
+        return []
+    if workers <= 1:
+        if show_progress and len(items) > 1:
+            from rich.progress import track
+
+            return [fn(item) for item in track(items, description="评分中", console=render.console)]
+        return [fn(item) for item in items]
+    import concurrent.futures
+
+    out = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(fn, item) for item in items]
+        if show_progress:
+            from rich.progress import Progress
+
+            with Progress(console=render.console, transient=True) as progress:
+                task = progress.add_task("评分中", total=len(futures))
+                for future in concurrent.futures.as_completed(futures):
+                    out.append(future.result())
+                    progress.advance(task)
+        else:
+            for future in concurrent.futures.as_completed(futures):
+                out.append(future.result())
+    return out
+
+
+def _print_score_summary(results, batch_id):
+    from collections import Counter
+
+    ok_rows = [r for r in results if r["status"] == "ok"]
+    if not ok_rows:
+        return
+    avg = sum(r["total"] for r in ok_rows) / len(ok_rows)
+    need = sum(1 for r in ok_rows if r.get("need_review"))
+    grades = Counter(r.get("grade") or "?" for r in ok_rows)
+    render.info(
+        "成功 %d/%d    平均分 %.2f    需复核 %d    失败 %d"
+        % (len(ok_rows), len(results), avg, need, len(results) - len(ok_rows))
+    )
+    render.hint("等级分布：%s" % "  ".join("%s×%d" % (grade, count) for grade, count in grades.most_common()))
+    render.hint("逐项明细：pgs show <run_id>    （列任务：pgs runs --batch %s）" % batch_id)
+
+
 # ---- 命令 ----
 @app.command()
 def init(
@@ -215,12 +261,13 @@ def score(
     template: Optional[Path] = typer.Option(None, "--template", help="--rubric-file 配套 Word 模板"),
     mock: bool = typer.Option(False, "--mock", help="强制用 Mock 评分器（不调真实 LLM）"),
     report_dir: Optional[Path] = typer.Option(None, "--report-dir", help="为每篇生成 HTML 报告到该目录"),
+    workers: int = typer.Option(1, "--workers", min=1, help="并发评分线程数（>1 适合真实 LLM 批量；本地 sqlite 写串行，加速有限）"),
     as_json: bool = typer.Option(False, "--json"),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
 ):
     """对一个或多个论文文件评分（复用与 Web 同款内核）。任一篇失败则非零退出。"""
-    _bootstrap(db, storage)
+    db_url = _bootstrap(db, storage)
     files = _collect_files(paths)
     if not files:
         render.error("没有可评分的文件")
@@ -240,6 +287,9 @@ def score(
 
     results = []
     any_failed = False
+    to_score = []  # (file_name, paper_id, stem)
+
+    # 阶段 1：解析+落库（主会话，顺序）
     with clidb.cli_session() as session:
         ensure_dev_user(session)
         rub = _resolve_rubric(session, rubric, rubric_file, template)
@@ -260,28 +310,45 @@ def score(
                 if paper.status != "parsed":
                     any_failed = True
                     results.append({"file": path.name, "status": "解析失败", "error": paper.error_message})
-                    continue
-                run = score_paper(session, paper.id, scorer=scorer)
-                results.append(
-                    {
-                        "file": path.name,
-                        "status": "ok",
-                        "total": float(run.final_total_score or 0),
-                        "grade": run.grade,
-                        "need_review": bool(run.need_manual_review),
-                        "tokens": run.total_tokens or 0,
-                        "run_id": run.id,
-                        "paper_id": paper.id,
-                    }
-                )
-                if report_dir:
-                    Path(report_dir).mkdir(parents=True, exist_ok=True)
-                    html = generate_report(session, run.id)
-                    shutil.copyfile(html, Path(report_dir) / ("%s.html" % path.stem))
-            except Exception as exc:  # 单篇失败不中断整批
+                else:
+                    to_score.append((path.name, paper.id, path.stem))
+            except Exception as exc:  # 解析阶段单篇失败不中断
                 session.rollback()
                 any_failed = True
                 results.append({"file": path.name, "status": "失败", "error": str(exc)})
+
+    if workers > 1 and db_url.startswith("sqlite") and not as_json:
+        render.hint("提示：本地 sqlite 下评分事务跨 LLM 调用持写锁，多 worker 实际趋于串行；要真正并行可指向并发数据库。")
+
+    # 阶段 2：评分（每 worker 独立会话，互不串扰）
+    def _score_one(item):
+        name, paper_id, stem = item
+        with clidb.cli_session() as scoring_session:
+            try:
+                run = score_paper(scoring_session, paper_id, scorer=scorer)
+                result = {
+                    "file": name,
+                    "status": "ok",
+                    "total": float(run.final_total_score or 0),
+                    "grade": run.grade,
+                    "need_review": bool(run.need_manual_review),
+                    "tokens": run.total_tokens or 0,
+                    "run_id": run.id,
+                    "paper_id": paper_id,
+                }
+                if report_dir:
+                    Path(report_dir).mkdir(parents=True, exist_ok=True)
+                    html = generate_report(scoring_session, run.id)
+                    shutil.copyfile(html, Path(report_dir) / ("%s.html" % stem))
+                return result
+            except Exception as exc:  # 单篇失败不中断整批
+                scoring_session.rollback()
+                return {"file": name, "status": "失败", "error": str(exc)}
+
+    scored = _run_scoring(to_score, _score_one, workers, show_progress=not as_json)
+    results.extend(scored)
+    results.sort(key=lambda item: item["file"])
+    any_failed = any_failed or any(r["status"] != "ok" for r in scored)
 
     if as_json:
         render.dump_json({"rubric": rubric_label, "batch_id": batch_id, "results": results})
@@ -305,15 +372,7 @@ def score(
         rows,
         style_fn=lambda row: None if str(row[5]) == "ok" else "red",
     )
-    ok_rows = [r for r in results if r["status"] == "ok"]
-    if ok_rows:
-        avg = sum(r["total"] for r in ok_rows) / len(ok_rows)
-        need = sum(1 for r in ok_rows if r.get("need_review"))
-        render.info(
-            "成功 %d/%d    平均分 %.2f    需复核 %d    失败 %d"
-            % (len(ok_rows), len(results), avg, need, len(results) - len(ok_rows))
-        )
-        render.hint("逐项明细：pgs show <run_id>    （列任务：pgs runs --batch %s）" % batch_id)
+    _print_score_summary(results, batch_id)
     if report_dir:
         render.hint("报告已写入：%s" % report_dir)
     raise typer.Exit(1 if any_failed else 0)

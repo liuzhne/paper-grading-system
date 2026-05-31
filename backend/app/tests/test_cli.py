@@ -125,6 +125,22 @@ def test_publish_draft_rubric(tmp_path, local):
     assert next(r["status"] for r in after if r["id"] == rid) == "published"
 
 
+def test_score_multiple_with_workers(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    docs = []
+    for i in range(3):
+        d = tmp_path / ("p%d.docx" % i)
+        d.write_bytes(make_sample_docx().getvalue())
+        docs.append(str(d))
+    result = runner.invoke(
+        app, ["score", *docs, "--rubric", SEED_RUBRIC, "--mock", "--workers", "3", "--json", *local]
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert len(data["results"]) == 3
+    assert all(r["status"] == "ok" for r in data["results"])
+
+
 def test_check_mock_overrides_real_provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")  # 即使配了真实 provider
     result = runner.invoke(app, ["check", "--mock", "--json"])
