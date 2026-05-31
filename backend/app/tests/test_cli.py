@@ -141,6 +141,32 @@ def test_score_multiple_with_workers(tmp_path, local):
     assert all(r["status"] == "ok" for r in data["results"])
 
 
+def test_score_no_db_is_stateless(tmp_path):
+    rules = tmp_path / "rules.xlsx"
+    rules.write_bytes(make_rules_xlsx().getvalue())
+    docx = tmp_path / "t.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    ghost_db = tmp_path / "should_not_exist.db"  # --no-db 即便给了 --db 也不应建库
+    result = runner.invoke(
+        app,
+        ["score", str(docx), "--no-db", "--rubric-file", str(rules), "--mock", "--json", "--db", str(ghost_db)],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["stateless"] is True
+    assert len(data["results"]) == 1
+    assert data["results"][0]["status"] == "ok"
+    assert data["results"][0]["items"]  # 含逐项明细
+    assert not ghost_db.exists()  # 关键：无状态不建任何 sqlite
+
+
+def test_score_no_db_requires_rubric_file(tmp_path):
+    docx = tmp_path / "t.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    result = runner.invoke(app, ["score", str(docx), "--no-db", "--mock"])
+    assert result.exit_code != 0  # 缺 --rubric-file → 报错退出
+
+
 def test_check_mock_overrides_real_provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")  # 即使配了真实 provider
     result = runner.invoke(app, ["check", "--mock", "--json"])

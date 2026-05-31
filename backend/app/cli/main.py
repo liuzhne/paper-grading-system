@@ -139,6 +139,115 @@ def _print_score_summary(results, batch_id):
     render.hint("逐项明细：pgs show <run_id>    （列任务：pgs runs --batch %s）" % batch_id)
 
 
+def _score_stateless(files, rubric_file, template, mock, workers, report_dir, as_json):
+    """无状态评分：从 --rubric-file + 论文文件直接组装 inputs → compute，全程零 DB、零落库。"""
+    if not rubric_file:
+        raise typer.BadParameter("--no-db 需要 --rubric-file 指定评分标准（无 DB 可查）")
+    if report_dir:
+        raise typer.BadParameter("--no-db 不支持 --report-dir（报告需 DB）；改用普通模式，或用 --json 取明细")
+
+    from backend.app.services.document_parser.parser import parse_document
+    from backend.app.services.rubric_import.parser import parse_rubric_files
+    from backend.app.services.scoring.engine import collect_inputs_from_parsed
+    from backend.app.services.scoring.engine import compute_scoring
+
+    if mock:
+        from backend.app.services.llm.mock import MockLLMScorer
+
+        scorer = MockLLMScorer()
+    else:
+        scorer = _safe_scorer()
+        if scorer is None:
+            render.error("未配置可用 LLM（加 --mock，或在 .env 配置真实 provider）")
+            return 2
+
+    try:
+        imported = parse_rubric_files(
+            rules_bytes=Path(rubric_file).read_bytes(),
+            template_bytes=Path(template).read_bytes() if template else None,
+            scorer=scorer,
+        )
+    except ValueError as exc:
+        render.error("评分标准解析失败：%s" % exc)
+        return 2
+    rubric_label = "%s（%d 项，无状态）" % (Path(rubric_file).stem, len(imported.criteria))
+
+    def _score_one(path):
+        try:
+            parsed_obj = parse_document(str(path))
+            inputs = collect_inputs_from_parsed(
+                parsed_obj,
+                imported.criteria,
+                rubric_total_score=imported.total_score,
+                paper_path=str(path),
+                format_spec=imported.format_spec,
+            )
+            result = compute_scoring(inputs, scorer)
+            return {
+                "file": path.name,
+                "status": "ok",
+                "total": float(result.final_total or 0),
+                "grade": result.grade,
+                "need_review": bool(result.need_review),
+                "tokens": result.total_tokens,
+                "items": [
+                    {
+                        "criterion_id": d["criterion_id"],
+                        "score": d["ai_score"],
+                        "max": d["max_score"],
+                        "evidence_sufficient": d["evidence_sufficient"],
+                        "need_review": d["need_manual_review"],
+                    }
+                    for d in result.items
+                ],
+            }
+        except Exception as exc:  # 单篇失败不中断整批
+            return {"file": path.name, "status": "失败", "error": str(exc)}
+
+    results = _run_scoring(list(files), _score_one, workers, show_progress=not as_json)
+    results.sort(key=lambda item: item["file"])
+    any_failed = any(r["status"] != "ok" for r in results)
+
+    if as_json:
+        render.dump_json({"rubric": rubric_label, "stateless": True, "results": results})
+        return 1 if any_failed else 0
+
+    render.info("评分标准：%s    （无状态，未写任何 DB）" % rubric_label)
+    rows = [
+        (
+            r["file"],
+            r.get("total", "-"),
+            r.get("grade", "-"),
+            ("是" if r.get("need_review") else "否") if r["status"] == "ok" else "-",
+            r.get("tokens", "-"),
+            r["status"] + (("：" + str(r["error"])) if r.get("error") else ""),
+        )
+        for r in results
+    ]
+    render.render_table(
+        "评分结果（无状态）",
+        ["文件", "总分", "等级", "需复核", "Token", "状态"],
+        rows,
+        style_fn=lambda row: None if str(row[5]) == "ok" else "red",
+    )
+    ok_rows = [r for r in results if r["status"] == "ok"]
+    if ok_rows:
+        from collections import Counter
+
+        avg = sum(r["total"] for r in ok_rows) / len(ok_rows)
+        need = sum(1 for r in ok_rows if r.get("need_review"))
+        grades = Counter(r.get("grade") or "?" for r in ok_rows)
+        render.info(
+            "成功 %d/%d    平均分 %.2f    需复核 %d    失败 %d"
+            % (len(ok_rows), len(results), avg, need, len(results) - len(ok_rows))
+        )
+        render.hint(
+            "等级分布：%s    （无状态：不落库、无 run_id；--json 取逐项明细）"
+            % "  ".join("%s×%d" % (grade, count) for grade, count in grades.most_common())
+        )
+    return 1 if any_failed else 0
+
+
 # ---- 命令 ----
 @app.command()
 def init(
@@ -261,17 +370,20 @@ def score(
     template: Optional[Path] = typer.Option(None, "--template", help="--rubric-file 配套 Word 模板"),
     mock: bool = typer.Option(False, "--mock", help="强制用 Mock 评分器（不调真实 LLM）"),
     report_dir: Optional[Path] = typer.Option(None, "--report-dir", help="为每篇生成 HTML 报告到该目录"),
-    workers: int = typer.Option(1, "--workers", min=1, help="并发评分线程数（>1 适合真实 LLM 批量；本地 sqlite 写串行，加速有限）"),
+    workers: int = typer.Option(1, "--workers", min=1, help="并发评分线程数（>1 适合真实 LLM 批量；6.1 解耦后可真正并行）"),
+    no_db: bool = typer.Option(False, "--no-db", help="无状态：从文件直接评分，不建 sqlite/不落库（需 --rubric-file）"),
     as_json: bool = typer.Option(False, "--json"),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
 ):
     """对一个或多个论文文件评分（复用与 Web 同款内核）。任一篇失败则非零退出。"""
-    db_url = _bootstrap(db, storage)
     files = _collect_files(paths)
     if not files:
         render.error("没有可评分的文件")
         raise typer.Exit(2)
+    if no_db:
+        raise typer.Exit(_score_stateless(files, rubric_file, template, mock, workers, report_dir, as_json))
+    db_url = _bootstrap(db, storage)
 
     from backend.app.db.models import GradingBatch
     from backend.app.services.dev_user import ensure_dev_user

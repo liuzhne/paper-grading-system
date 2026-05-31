@@ -65,6 +65,7 @@ uv run pgs import 规则.xlsx --name 校级标准 --template 模板.docx   # 导
 uv run pgs publish <rubric_id>                           # 发布草稿标准（draft → published）
 uv run pgs rubrics                                       # 列出评分标准（--json 机器可读）
 uv run pgs score 论文.docx 目录/ --rubric "校级标准" [--mock] [--workers N] [--report-dir out/]   # 评分（多文件/目录递归）
+uv run pgs score 论文.docx --no-db --rubric-file 规则.xlsx [--template 模板.docx] [--mock]   # 无状态评分：不建库、不落任何库
 uv run pgs runs [--batch <id>]                           # 列出评分任务（拿 run_id）
 uv run pgs show <run_id>                                 # 逐项明细 + 篇章一致性/格式问题
 uv run pgs batches                                       # 列出批次（拿 batch_id）
@@ -77,6 +78,7 @@ uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx   
 - 批量：`score --workers N` 并发评分（适合真实 LLM 批量）+ 进度条 + 等级分布汇总。LLM 计算已脱离 DB 事务（6.1 解耦：collect 读 → compute 纯算 → persist 短写），多 worker 在本地 sqlite 也能并行（compute 无锁，仅末尾短写经 busy_timeout 串行）。
 - `score` 任一篇解析/评分失败即**非零退出**（便于脚本/CI）；`--json` 在 `score`/`rubrics`/`runs`/`show`/`batches`/`check` 输出机器可读结果。
 - 闭环：`score` → 拿 run_id（或 `pgs runs`）→ `pgs show <run_id>` 看逐项明细 → `pgs report` 出报告。
+- 无状态：`score --no-db --rubric-file 规则.xlsx` 从文件直接评分，**不建 sqlite、不落任何库**（隐私/一次性/脚本友好，由 6.1 纯 Core 支撑）；`--json` 取逐项明细；需 `--rubric-file`，不支持 `--report-dir`。
 
 ## P0：真实 LLM、在线写表和正式前端
 

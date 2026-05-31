@@ -27,7 +27,9 @@ from backend.app.services.checkers.findings_checker import score_from_findings
 from backend.app.services.coherence import analyze_semantic_coherence
 from backend.app.services.document_parser.format_check import compare_format
 from backend.app.services.document_parser.format_resolver import resolve_default_format
+from backend.app.services.document_parser.chunking import build_chunks
 from backend.app.services.retrieval.keyword import retrieve_for_criterion
+from backend.app.services.retrieval.keyword import retrieve_for_criterion_in_chunks
 from backend.app.services.scoring.rules import calculate_total_score
 from backend.app.services.scoring.rules import match_grade
 from backend.app.services.scoring.rules import need_manual_review
@@ -140,6 +142,64 @@ def collect_scoring_inputs(db: Session, paper) -> ScoringInputs:
         rubric_version=rubric.version,
         base_coherence=list(parsed.get("coherence_findings", []) or []),
         format_findings=_compute_format_findings(paper, rubric),
+        criteria=plans,
+    )
+
+
+def collect_inputs_from_parsed(
+    parsed_obj,
+    criteria,
+    rubric_id="stateless",
+    rubric_total_score=100,
+    rubric_version="stateless",
+    top_k=None,
+    anchors_by_code=None,
+    paper_path=None,
+    format_spec=None,
+):
+    """DB-less：从解析对象 + 评分项定义（鸭子类型，含 ImportedCriterion）直接组装 ScoringInputs。
+
+    内存分块 + 内存检索，零 DB；compute_scoring 随后纯算即可。供 `pgs score --no-db` 复用同一内核。
+    """
+    if top_k is None:
+        top_k = settings.SCORING_CHUNK_EVAL_TOP_K
+    parsed = parsed_obj.to_dict()
+    chunks = build_chunks(parsed_obj, "stateless")
+    for index, chunk in enumerate(chunks):
+        chunk.id = "c%d" % index  # 内存 chunk 未落库 → 赋合成 id 供 evidence 引用/校验
+    anchors_by_code = anchors_by_code or {}
+    plans = []
+    for criterion in criteria:
+        route = _route_for(criterion)
+        snapshot = _snapshot_criterion(criterion)
+        plan = CriterionPlan(criterion=snapshot, route=route)
+        if route == "chunks":
+            plan.candidates = retrieve_for_criterion_in_chunks(chunks, criterion, top_k=top_k)
+            plan.anchors = anchors_by_code.get(getattr(criterion, "code", None), [])
+        elif route == "hybrid":
+            for sub_index, sub in enumerate(criterion.sub_checks, start=1):
+                sub_criterion = _make_sub_criterion(snapshot, sub, sub_index)
+                candidates = (
+                    []
+                    if sub_criterion.criterion_type == "deterministic"
+                    else retrieve_for_criterion_in_chunks(chunks, sub_criterion, top_k=top_k)
+                )
+                plan.sub_plans.append((sub_criterion, candidates))
+        plans.append(plan)
+    format_findings = _compute_format_findings(
+        SimpleNamespace(file_path=paper_path or ""), SimpleNamespace(format_spec=format_spec or {})
+    )
+    return ScoringInputs(
+        paper_id="stateless",
+        paper_title=parsed.get("title"),
+        parse_quality=parsed.get("parse_quality"),
+        parsed=parsed,
+        structure_checks=parsed.get("structure_checks", []),
+        rubric_id=rubric_id,
+        rubric_total_score=rubric_total_score,
+        rubric_version=rubric_version,
+        base_coherence=list(parsed.get("coherence_findings", []) or []),
+        format_findings=format_findings,
         criteria=plans,
     )
 
@@ -267,7 +327,7 @@ def _route_for(criterion):
 def _snapshot_criterion(criterion):
     """把 ORM 评分项快照成纯 SimpleNamespace，使 compute 阶段在事务释放后仍可安全读取（鸭子类型，复用现有打分器）。"""
     return SimpleNamespace(
-        id=criterion.id,
+        id=getattr(criterion, "id", None) or getattr(criterion, "code", None),
         code=criterion.code,
         name=criterion.name,
         max_score=criterion.max_score,

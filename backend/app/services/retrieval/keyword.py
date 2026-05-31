@@ -10,26 +10,32 @@ from backend.app.db.models import RubricCriterion
 def retrieve_for_criterion(db: Session, paper_id: str, criterion: RubricCriterion, top_k: int = 8):
     """结构化定位优先（设计§7 L1）：applies_to 指向具体章节时取该章节文本块，
     否则回退关键词召回。这护住"证据定位"原则——按章节取是确定的、无漏检。"""
+    chunks = db.scalars(select(PaperChunk).where(PaperChunk.paper_id == paper_id)).all()
+    return retrieve_for_criterion_in_chunks(chunks, criterion, top_k=top_k)
+
+
+def retrieve_for_criterion_in_chunks(chunks, criterion, top_k: int = 8):
+    """对内存中的 chunk 列表做检索（DB-less CLI 复用同一逻辑，无需查库）。
+
+    chunks 元素需有 .section_title/.text/.id/.page_start/.page_end/.paragraph_ids（PaperChunk 即可）。
+    """
     applies_to = (getattr(criterion, "applies_to", "") or "global").strip()
     if applies_to and applies_to != "global":
-        section_chunks = retrieve_section_chunks(db, paper_id, applies_to)
-        if section_chunks:
-            return section_chunks[:top_k]
-    return retrieve_evidence(db, paper_id, criterion, top_k=top_k)
+        matched = _match_section_chunks(chunks, applies_to)
+        if matched:
+            return [_candidate_from_chunk(chunk) for chunk in matched[:top_k]]
+    return _rank_evidence(chunks, criterion, top_k=top_k)
 
 
-def retrieve_section_chunks(db: Session, paper_id: str, applies_to: str):
-    chunks = db.scalars(select(PaperChunk).where(PaperChunk.paper_id == paper_id)).all()
-    matched = [
+def _match_section_chunks(chunks, applies_to: str):
+    return [
         chunk
         for chunk in chunks
         if chunk.section_title and (applies_to in chunk.section_title or chunk.section_title in applies_to)
     ]
-    return [_candidate_from_chunk(chunk) for chunk in matched]
 
 
-def retrieve_evidence(db: Session, paper_id: str, criterion: RubricCriterion, top_k: int = 8):
-    chunks = db.scalars(select(PaperChunk).where(PaperChunk.paper_id == paper_id)).all()
+def _rank_evidence(chunks, criterion, top_k: int = 8):
     scored = []
     keywords = _keywords_for_criterion(criterion)
 
@@ -62,13 +68,13 @@ def _keywords_for_criterion(criterion):
     raw_keywords = [criterion.name]
     raw_keywords.extend(criterion.evidence_hints or [])
     if criterion.description:
-        raw_keywords.extend(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", criterion.description))
+        raw_keywords.extend(re.findall(r"[一-鿿A-Za-z0-9]{2,}", criterion.description))
     keywords = []
     for item in raw_keywords:
         if not item:
             continue
         keywords.append(str(item).strip())
-        keywords.extend(re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{3,}", str(item)))
+        keywords.extend(re.findall(r"[一-鿿]{2,}|[A-Za-z0-9]{3,}", str(item)))
     deduped = []
     for keyword in keywords:
         if keyword and keyword not in deduped:
@@ -94,4 +100,3 @@ def _location(chunk):
     if chunk.page_start:
         return "%s，第%s页" % (section, chunk.page_start)
     return section
-
