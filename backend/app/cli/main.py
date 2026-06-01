@@ -536,6 +536,80 @@ def export(
     render.info("✓ Excel：%s" % path)
 
 
+@app.command()
+def review(
+    run_id: str = typer.Argument(..., help="评分任务 id"),
+    set_scores: List[str] = typer.Option(None, "--set", help="覆盖单项分：CODE=分数（可重复），如 --set C01=18"),
+    note: Optional[str] = typer.Option(None, "--note", help="复核意见/理由（写入 ReviewLog）"),
+    submit: bool = typer.Option(False, "--submit", help="提交并标记该任务为已复核"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """人工复核：按评分项 code 覆盖单项分 / 提交复核（写 ReviewLog，自动重算总分）。"""
+    _bootstrap(db, storage)
+    set_scores = set_scores or []
+    if not set_scores and not submit:
+        raise typer.BadParameter("至少给一个 --set CODE=分数 或 --submit")
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from backend.app.db.models import ScoreItem
+    from backend.app.db.models import ScoringRun
+    from backend.app.services.dev_user import ensure_dev_user
+    from backend.app.services.scoring.engine import submit_review
+    from backend.app.services.scoring.engine import update_score_item
+
+    reason = note or "CLI 人工复核"
+    with clidb.cli_session() as session:
+        ensure_dev_user(session)
+        run = session.get(ScoringRun, run_id)
+        if run is None:
+            render.error("找不到评分任务：%s（用 `pgs runs` 查看）" % run_id)
+            raise typer.Exit(2)
+        items = session.scalars(
+            select(ScoreItem).where(ScoreItem.scoring_run_id == run_id).options(selectinload(ScoreItem.criterion))
+        ).all()
+        by_code = {item.criterion.code: item for item in items if item.criterion}
+
+        changes = []  # (item_id, code, score) —— 先全部解析校验，再应用
+        for spec in set_scores:
+            code, sep, raw = spec.partition("=")
+            code = code.strip()
+            if not sep:
+                raise typer.BadParameter("--set 格式应为 CODE=分数，收到：%s" % spec)
+            try:
+                score = float(raw.strip())
+            except ValueError:
+                raise typer.BadParameter("分数非法：%s" % spec)
+            item = by_code.get(code)
+            if item is None:
+                raise typer.BadParameter("该任务无评分项 code=%s（可选：%s）" % (code, ",".join(sorted(by_code))))
+            changes.append((item.id, code, score))
+
+        for item_id, code, score in changes:
+            try:
+                update_score_item(session, item_id, score, reason, settings.DEFAULT_DEV_USER_ID)
+            except ValueError as exc:
+                render.error("覆盖 %s 失败：%s" % (code, exc))
+                raise typer.Exit(2)
+        if submit:
+            submit_review(session, run_id, reason, settings.DEFAULT_DEV_USER_ID)
+
+        final = session.get(ScoringRun, run_id)
+        final_total = float(final.final_total_score or 0)
+        grade, status, need_review = final.grade, final.status, bool(final.need_manual_review)
+
+    for _, code, score in changes:
+        render.info("✓ %s → %.2f" % (code, score))
+    if submit:
+        render.info("✓ 已提交复核")
+    render.info(
+        "总分 %.2f    等级 %s    状态 %s    需复核 %s"
+        % (final_total, grade, status, "是" if need_review else "否")
+    )
+
+
 @app.command("eval")
 def eval_cmd(
     rubric_id: str = typer.Option(..., "--rubric", help="教师评分所用的 rubric id"),

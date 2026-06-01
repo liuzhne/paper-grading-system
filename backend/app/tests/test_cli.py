@@ -167,6 +167,32 @@ def test_score_no_db_requires_rubric_file(tmp_path):
     assert result.exit_code != 0  # 缺 --rubric-file → 报错退出
 
 
+def test_review_overrides_item_and_submits(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    docx = tmp_path / "t.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    run_id = json.loads(
+        runner.invoke(app, ["score", str(docx), "--rubric", SEED_RUBRIC, "--mock", "--json", *local]).output
+    )["results"][0]["run_id"]
+
+    reviewed = runner.invoke(app, ["review", run_id, "--set", "C01=9", "--note", "人工调整", "--submit", *local])
+    assert reviewed.exit_code == 0, reviewed.output
+
+    shown = json.loads(runner.invoke(app, ["show", run_id, "--json", *local]).output)
+    assert shown["run"]["status"] == "reviewed"
+    assert next(i["score"] for i in shown["items"] if i["code"] == "C01") == 9.0
+
+
+def test_review_rejects_unknown_code(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    docx = tmp_path / "t.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    run_id = json.loads(
+        runner.invoke(app, ["score", str(docx), "--rubric", SEED_RUBRIC, "--mock", "--json", *local]).output
+    )["results"][0]["run_id"]
+    assert runner.invoke(app, ["review", run_id, "--set", "ZZ=5", *local]).exit_code != 0
+
+
 def test_check_mock_overrides_real_provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")  # 即使配了真实 provider
     result = runner.invoke(app, ["check", "--mock", "--json"])
