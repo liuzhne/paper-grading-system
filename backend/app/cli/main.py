@@ -610,6 +610,32 @@ def review(
     )
 
 
+@app.command("scores-template")
+def scores_template(
+    rubric_id: str = typer.Argument(..., help="评分标准 id 或名称"),
+    output: Path = typer.Option(..., "-o", "--output", help="输出 .xlsx 路径"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """生成教师成绩表模板（列随评分项 code 自动展开），供 QWK 填写。"""
+    _bootstrap(db, storage)
+    from sqlalchemy import select
+
+    from backend.app.db.models import Rubric
+    from backend.app.eval.scores_template import build_scores_table_template
+
+    with clidb.cli_session() as session:
+        rubric = session.get(Rubric, rubric_id)
+        if rubric is None:
+            rubric = session.scalar(select(Rubric).where(Rubric.name == rubric_id).order_by(Rubric.created_at.desc()))
+        if rubric is None:
+            render.error("找不到评分标准：%s（用 `pgs rubrics` 查看）" % rubric_id)
+            raise typer.Exit(2)
+        data = build_scores_table_template(list(rubric.criteria))
+    Path(output).write_bytes(data)
+    render.info("✓ 成绩表模板：%s（按论文逐行填 文件名/总分/各 code 分）" % output)
+
+
 @app.command("eval")
 def eval_cmd(
     rubric_id: str = typer.Option(..., "--rubric", help="教师评分所用的 rubric id"),

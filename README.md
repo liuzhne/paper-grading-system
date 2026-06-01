@@ -72,6 +72,7 @@ uv run pgs review <run_id> --set C01=18 [--note "理由"] [--submit]   # 人工�
 uv run pgs batches                                       # 列出批次（拿 batch_id）
 uv run pgs report <run_id> -o 报告.html                  # 生成 HTML 报告
 uv run pgs export <batch_id> -o 成绩.xlsx                # 导出批次 Excel
+uv run pgs scores-template <rubric_id> -o 成绩表模板.xlsx   # 生成教师成绩表模板（QWK 填写用）
 uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx   # QWK + 基线/回归门禁
 ```
 

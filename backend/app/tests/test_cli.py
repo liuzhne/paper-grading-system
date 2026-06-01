@@ -193,6 +193,24 @@ def test_review_rejects_unknown_code(tmp_path, local):
     assert runner.invoke(app, ["review", run_id, "--set", "ZZ=5", *local]).exit_code != 0
 
 
+def test_scores_template_columns_match_rubric(tmp_path, local):
+    runner.invoke(app, ["init", "--seed", *local])
+    rid = next(
+        r["id"]
+        for r in json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output)
+        if r["name"] == SEED_RUBRIC
+    )
+    out = tmp_path / "tmpl.xlsx"
+    result = runner.invoke(app, ["scores-template", rid, "-o", str(out), *local])
+    assert result.exit_code == 0, result.output
+
+    from openpyxl import load_workbook
+
+    headers = [cell.value for cell in load_workbook(out)["教师评分"][1]]
+    assert headers[:2] == ["文件名", "总分"]
+    assert "C01" in headers and "C07" in headers
+
+
 def test_check_mock_overrides_real_provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")  # 即使配了真实 provider
     result = runner.invoke(app, ["check", "--mock", "--json"])
