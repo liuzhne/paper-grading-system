@@ -52,6 +52,9 @@ def parse_and_store(db: Session, paper: Paper):
     except Exception as exc:
         paper.status = "failed"
         paper.error_message = str(exc)
+    # chunk 必须对同会话的后续 SELECT 立即可见：调用方会话可能 autoflush=False（如 CLI），
+    # 不 flush 则"导入后立即评分"的检索读不到 chunk，证据为空导致全 0 分。
+    db.flush()
     return paper
 
 

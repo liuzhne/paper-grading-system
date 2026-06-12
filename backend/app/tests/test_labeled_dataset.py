@@ -1,6 +1,7 @@
 import pytest
 from openpyxl import Workbook
 from sqlalchemy import create_engine
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -8,6 +9,7 @@ from backend.app.core.config import settings
 from backend.app.db.models import Base
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCriterion
+from backend.app.db.models import ScoreItem
 from backend.app.eval.labeled_dataset import build_labeled_eval
 from backend.app.eval.labeled_dataset import load_scores_table
 from backend.app.services.llm.mock import MockLLMScorer
@@ -79,5 +81,43 @@ def test_build_labeled_eval_pipeline_runs_end_to_end(tmp_path, monkeypatch):
         assert "C01" in report["per_criterion"]
         assert report["dataset_size"] == 2
         assert report["errors"] == []
+    finally:
+        db.close()
+
+
+def test_build_labeled_eval_chunks_visible_without_autoflush(tmp_path, monkeypatch):
+    """回归：autoflush=False 会话（cli/db.py 同配置）下"导入后立即评分"必须看得到 chunk，
+    否则检索证据为空、模型全给 0 分（QWK 假塌方）。"""
+    monkeypatch.setattr(settings, "STORAGE_ROOT", tmp_path / "storage")
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False)()
+    try:
+        rubric = Rubric(name="毕设标准", version="v1.0", total_score=20)
+        rubric.criteria.append(RubricCriterion(code="C01", name="研究方法", max_score=10))
+        rubric.criteria.append(RubricCriterion(code="C02", name="参考文献", max_score=10))
+        db.add(rubric)
+        db.commit()
+
+        papers = tmp_path / "papers"
+        papers.mkdir()
+        (papers / "p0.docx").write_bytes(make_sample_docx().getvalue())
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["文件名", "总分", "C01", "C02"])
+        sheet.append(["p0.docx", 18, 9, 9])
+        scores = tmp_path / "scores.xlsx"
+        workbook.save(scores)
+
+        report = build_labeled_eval(db, rubric.id, str(papers), str(scores), scorer=MockLLMScorer())
+        assert report["errors"] == []
+        modes = [
+            (item.raw_model_output or {}).get("chunk_evaluation_mode")
+            for item in db.scalars(select(ScoreItem)).all()
+        ]
+        assert modes and "single-empty-evidence" not in modes
     finally:
         db.close()
