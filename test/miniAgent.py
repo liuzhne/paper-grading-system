@@ -10,9 +10,11 @@ load_dotenv()
 
 # 1. 初始化 Groq OpenAI-compatible 客户端
 client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("OPENAI_COMPATIBLE_API_KEY"),
+    base_url=os.getenv("OPENAI_COMPATIBLE_BASE_URL"),
 )
+
+model = os.getenv("OPENAI_COMPATIBLE_MODEL")
 
 
 # 2. 真实工具：通过 Open-Meteo 获取实时天气
@@ -184,10 +186,10 @@ def run_agent(user_prompt: str) -> str:
     max_steps = 8
 
     for step in range(max_steps):
-        print(f"\n🤖 [第 {step + 1} 轮] 请求 Llama 模型...")
+        print(f"\n🤖 [第 {step + 1} 轮] 请求 模型...")
         print(messages)
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=model,
             messages=messages,
             tools=tools_definition,
             tool_choice="auto",
@@ -252,8 +254,6 @@ def run_agent(user_prompt: str) -> str:
 
 
 if __name__ == "__main__":
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("请先在 .env 中配置 GROQ_API_KEY")
 
     final_answer = run_agent(
         "帮我查一下东京现在的温度是多少？然后把这个温度数值乘以 100 后的金额计算 15% 的税费。"
