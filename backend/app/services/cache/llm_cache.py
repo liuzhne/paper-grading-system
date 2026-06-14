@@ -18,7 +18,7 @@ from datetime import timezone
 from backend.app.core.config import settings
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-05-29-1"
+PROMPT_VERSION = "2026-06-13-1"
 
 
 def build_request(scorer, criterion, candidates, structure_checks, rubric_version, anchors=None):
