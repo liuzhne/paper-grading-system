@@ -24,6 +24,7 @@ HEADER_ALIASES = {
     "applies_to": ["适用范围", "适用章节", "作用范围", "范围", "applies_to"],
     "rubric_levels": ["分档", "档位", "等级标准", "评分档次", "rubric_levels"],
     "dimension": ["维度", "评价维度", "评分维度", "所属维度", "dimension"],
+    "sub_checks": ["子检查", "子项", "子检查项", "混合子项", "子项检查", "sub_checks"],
 }
 
 TEMPLATE_HINTS = [
@@ -204,6 +205,9 @@ def _criterion_from_row(row, mapping, order):
     rubric_levels = _parse_bands(_value(row, mapping.get("rubric_levels")))
     scoring_mode = "banded" if rubric_levels else "llm_direct"
     dimension = _value(row, mapping.get("dimension"))
+    sub_checks = _parse_sub_checks(_raw_value(row, mapping.get("sub_checks")))
+    if sub_checks:
+        criterion_type = "hybrid"  # 提供子检查即启用混合制（设计§2/§6.3）
     return ImportedCriterion(
         code=str(code),
         name=str(name),
@@ -217,6 +221,7 @@ def _criterion_from_row(row, mapping, order):
         scoring_mode=scoring_mode,
         applies_to=applies_to,
         rubric_levels=rubric_levels,
+        sub_checks=sub_checks,
         dimension=dimension,
     )
 
@@ -298,6 +303,14 @@ def _value(row, index):
     return _normalize(value)
 
 
+def _raw_value(row, index):
+    """取原始单元格文本，**保留换行**（子检查按行分隔，不能被空白折叠）。"""
+    if index is None or index >= len(row):
+        return None
+    value = row[index]
+    return None if value is None else str(value)
+
+
 def _parse_type(value):
     if not value:
         return "llm_judgment"
@@ -306,6 +319,37 @@ def _parse_type(value):
         return "deterministic"
     if any(token in text for token in ["混合", "hybrid"]):
         return "hybrid"
+    return "llm_judgment"
+
+
+def _parse_sub_checks(value):
+    """解析混合制子检查列。每行一个子检查，字段以 `|`（或 `｜`）分隔：`名称 | 类型 | 分值`。
+
+    类型缺省为语义判断（llm_judgment），含"确定/规则/自动/deterministic"则为确定性子检查（不调 LLM）。
+    产出引擎可消费的 `{kind,name,criteria,max_points}` 列表（见 engine._make_sub_criterion）。
+    """
+    if not value:
+        return []
+    items = []
+    for line in re.split(r"[\n;；]+", str(value)):
+        line = line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in re.split(r"[|｜]", line)]
+        name = parts[0] if parts else ""
+        if not name:
+            continue
+        kind = _parse_sub_kind(parts[1]) if len(parts) > 1 else "llm_judgment"
+        max_points = _parse_score(parts[2]) if len(parts) > 2 else 0.0
+        items.append(
+            {"kind": kind, "name": name, "criteria": name, "max_points": float(max_points or 0)}
+        )
+    return items
+
+
+def _parse_sub_kind(value):
+    if value and any(token in str(value) for token in ["确定", "规则", "自动", "deterministic", "det"]):
+        return "deterministic"
     return "llm_judgment"
 
 

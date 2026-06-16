@@ -10,6 +10,8 @@
 
 import re
 
+from backend.app.services.coherence.terminology import analyze_terminology
+
 AUTHOR_YEAR_RE = re.compile(r"[（(][^）)]{1,40}[，,]\s*(19|20)\d{2}[）)]")
 INTEXT_CITATION_RE = re.compile(r"\[(\d{1,3})\]")
 
@@ -19,6 +21,7 @@ def analyze_coherence(full_text, references):
     findings.extend(_reference_integrity(full_text or "", "图"))
     findings.extend(_reference_integrity(full_text or "", "表"))
     findings.extend(_citation_integrity(full_text or "", references or []))
+    findings.extend(analyze_terminology(full_text or ""))
     return findings
 
 

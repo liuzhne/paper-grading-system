@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     LLM_CACHE_ENABLED: bool = True  # L0 缓存/账本（设计§7）：按输入哈希复用 LLM 评分结果
     COHERENCE_SEMANTIC_ENABLED: bool = True  # §8 语义一致性核验（研究问题↔结论等），每篇额外一次 LLM 调用
     SCORING_DRIFT_BIAS_THRESHOLD: float = 1.0  # L2 漂移检测：|AI分−人工终分| 的人均偏移超过此值即标记（设计§7/§15.2）
+    MONITORING_REVIEW_SAMPLE_RATIO: float = 0.2  # 上线抽样复核（§15.2）：每批抽取此比例的论文做人工抽检
+    MONITORING_MIN_REVIEW_COVERAGE: float = 0.1  # 漂移监控可信门槛：人工复核覆盖率低于此值则漂移信号暂不可信
     LLM_DEBUG_LOG_ENABLED: bool = True
     LLM_DEBUG_LOG_MAX_CHARS: int = 12000
     LLM_RATE_LIMIT_SLEEP_SECONDS: float = 1.0

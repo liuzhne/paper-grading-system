@@ -16,6 +16,8 @@ from backend.app.schemas.batch import BatchUpdate
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.calibration.analytics import batch_ranking
+from backend.app.services.calibration.analytics import drift_monitor
+from backend.app.services.calibration.analytics import review_sample
 from backend.app.services.calibration.analytics import score_drift
 from backend.app.services.scoring.engine import score_batch
 
@@ -83,6 +85,22 @@ def batch_ranking_endpoint(batch_id: str, db: Session = Depends(get_db)):
 def batch_drift_endpoint(batch_id: str, db: Session = Depends(get_db)):
     try:
         return score_drift(db, batch_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{batch_id}/review-sample")
+def batch_review_sample_endpoint(batch_id: str, ratio: float = None, seed: str = "", db: Session = Depends(get_db)):
+    try:
+        return review_sample(db, batch_id, ratio=ratio, seed=seed)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{batch_id}/drift-monitor")
+def batch_drift_monitor_endpoint(batch_id: str, db: Session = Depends(get_db)):
+    try:
+        return drift_monitor(db, batch_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

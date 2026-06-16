@@ -6,6 +6,8 @@ from backend.app.services.document_parser.types import ParsedParagraph
 from backend.app.services.document_parser.types import ParsedSection
 from backend.app.services.document_parser.types import StructureCheck
 from backend.app.services.coherence import analyze_coherence
+from backend.app.services.document_parser.track_changes import parse_track_changes
+from backend.app.services.document_parser.track_changes import track_changes_findings
 
 SECTION_RE = re.compile(
     r"^("
@@ -68,6 +70,8 @@ def parse_document(file_path):
     cover_metadata = _extract_cover_metadata(paragraphs)
     references = _extract_references(sections)
     coherence_findings = analyze_coherence(full_text, references)
+    if suffix == ".docx":
+        coherence_findings = coherence_findings + _track_changes_findings(path)
     checks = _structure_checks(full_text, sections, references)
     structure_confidence = _estimate_structure_confidence(sections, heading_texts)
     checks.append(
@@ -129,18 +133,73 @@ def _extract_docx(path):
 
 
 def _extract_pdf(path):
+    """文本 PDF：用字号/加粗启发式识别标题（N3）——正文字号取全篇众数，显著偏大或整行加粗的短行视为标题。
+
+    无可用字号信息时退回纯规则启发式（返回空 heading_texts）。
+    """
     import fitz
 
     result = []
+    span_sizes = []
+    blocks_info = []  # (block_text, max_size, all_bold)
     with fitz.open(str(path)) as document:
         for page_index, page in enumerate(document, start=1):
-            text = page.get_text("text")
-            for block in re.split(r"\n\s*\n", text):
-                cleaned = block.strip()
-                if cleaned:
-                    result.append((page_index, cleaned))
-    # 文本 PDF 无样式信息，标题识别仅靠规则启发式。
-    return result, set()
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:  # 0 = 文本块（跳过图片块）
+                    continue
+                lines_text = []
+                block_max_size = 0.0
+                all_bold = True
+                has_span = False
+                for line in block.get("lines", []):
+                    parts = []
+                    for span in line.get("spans", []):
+                        span_text = span.get("text", "")
+                        if not span_text.strip():
+                            continue
+                        has_span = True
+                        parts.append(span_text)
+                        size = float(span.get("size", 0) or 0)
+                        span_sizes.append(size)
+                        block_max_size = max(block_max_size, size)
+                        if not (int(span.get("flags", 0) or 0) & 16):  # bit4(=16)=加粗
+                            all_bold = False
+                    if parts:
+                        lines_text.append("".join(parts))
+                if not has_span:
+                    continue
+                block_text = " ".join(lines_text).strip()
+                if block_text:
+                    result.append((page_index, block_text))
+                    blocks_info.append((block_text, block_max_size, all_bold))
+
+    return result, _pdf_heading_texts(blocks_info, span_sizes)
+
+
+def _pdf_heading_texts(blocks_info, span_sizes):
+    if not span_sizes:
+        return set()
+    body_size = _mode_size(span_sizes)
+    headings = set()
+    for block_text, max_size, all_bold in blocks_info:
+        norm = _normalize_text(block_text)
+        if not norm or len(norm) > 40:
+            continue
+        if norm[-1] in "。．.；;，,、":  # 以标点收尾更像正文，不当标题
+            continue
+        bigger = bool(body_size) and max_size >= body_size * 1.15
+        if bigger or all_bold:
+            headings.add(norm)
+    return headings
+
+
+def _mode_size(sizes):
+    from collections import Counter
+
+    rounded = [round(size * 2) / 2 for size in sizes if size > 0]
+    if not rounded:
+        return 0.0
+    return Counter(rounded).most_common(1)[0][0]
 
 
 def _normalize_text(text):
@@ -381,6 +440,15 @@ def _first_regex_group(pattern, text):
     if not match:
         return None
     return match.group(2).strip()
+
+
+def _track_changes_findings(path):
+    """读 docx 修订痕迹 → 篇章质量发现（best-effort，失败不影响解析主流程）。"""
+    try:
+        revisions = parse_track_changes(path.read_bytes())
+    except Exception:
+        return []
+    return track_changes_findings(revisions)
 
 
 def _extract_references(sections):
