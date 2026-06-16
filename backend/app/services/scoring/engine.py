@@ -506,7 +506,8 @@ def submit_review(db: Session, run_id: str, reason: str, reviewer_id: str):
 def _score_criterion_by_chunks(scorer, paper, criterion, candidates, structure_checks, rubric_version, anchors=None):
     mode = getattr(criterion, "scoring_mode", "llm_direct")
     # 扣分制/分档制必须对整段一次定性：逐块打分再聚合会把各块扣分累加，重复计扣（且分档无意义）。
-    single_call = mode in ("deductive", "banded")
+    # llm_direct：默认逐块判（top_k 调用）；opt-in 整体判一次（多块一次喂入）——大幅减少调用数+整体上下文。
+    single_call = mode in ("deductive", "banded") or settings.SCORING_LLM_DIRECT_SINGLE_CALL
 
     if not candidates:
         raw_output = _score_with_runtime_fallback(scorer, paper, criterion, [], structure_checks, rubric_version, anchors)

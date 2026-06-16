@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     OPENAI_COMPATIBLE_THINKING_TYPE: Optional[str] = "disabled"
     OPENAI_COMPATIBLE_TEMPERATURE: float = 0.0
     SCORING_CHUNK_EVAL_TOP_K: int = 3
+    # llm_direct 整体判分（opt-in）：True=把召回的多块证据一次性喂给模型整体判一次（~1 调用/项，整体上下文）；
+    # False(默认)=逐块各判一次再加权汇总（top_k 调用/项）。默认 off 保持既有行为/测试不变；实验用 env 开启。
+    SCORING_LLM_DIRECT_SINGLE_CALL: bool = False
     SCORING_STANDARD_CAP_RATIO: float = 0.8  # 已弃用：被证据门槛取代（见下），保留以兼容旧 .env
     SCORING_EXCEPTIONAL_RATIO: float = 0.92  # 已弃用
     # 证据门槛（取代 0.8 常规封顶）：证据不足时的得分上限、需复核的置信度/满分阈值。
