@@ -131,6 +131,10 @@ def _mode_instruction(mode):
         return (
             "本评分项为分档制(banded)：必须从 criterion.rubric_levels 选最贴切的一档，"
             "返回 band_selection={level(档位名), rationale, evidence_quote, evidence_location}。"
+            "【选档纪律·务必遵守】逐条对照每一档的 descriptor 再选档，就低不就高：证据只要不能逐条满足某档要求，"
+            "就必须降到下一档。最高档（如「优秀」）仅在论文有明确、罕见的创新且关键设计有充分验证时才给，绝大多数论文达不到；"
+            "中间档（如「中等」）才是普通合格论文的默认归属。切勿因论文结构完整、篇幅充足或读起来通顺就给高档——"
+            "这些不是高档的证据。先假定为中等档，只有看到逐条满足更高档 descriptor 的强证据才上调。"
         )
     return ""
 
