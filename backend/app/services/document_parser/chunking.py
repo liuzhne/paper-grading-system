@@ -10,11 +10,10 @@ def build_chunks(parsed_paper, paper_id, max_chars=1000, overlap_chars=120):
         page_end = None
 
         for paragraph in section.paragraphs:
-            if page_start is None:
-                page_start = paragraph.page
-            page_end = paragraph.page
             candidate = "\n".join(buffer + [paragraph.text])
             if len(candidate) > max_chars and buffer:
+                # 发射的 chunk 只含 buffer 中已纳入的段落，page_end 应反映那些段落，
+                # 而非当前尚未纳入的 paragraph（否则跨页边界处页码会被高估）。
                 chunks.append(
                     _make_chunk(paper_id, section.title, page_start, page_end, paragraph_ids, "\n".join(buffer))
                 )
@@ -22,9 +21,13 @@ def build_chunks(parsed_paper, paper_id, max_chars=1000, overlap_chars=120):
                 buffer = [overlap, paragraph.text] if overlap else [paragraph.text]
                 paragraph_ids = [paragraph.paragraph_id]
                 page_start = paragraph.page
+                page_end = paragraph.page
             else:
                 buffer.append(paragraph.text)
                 paragraph_ids.append(paragraph.paragraph_id)
+                if page_start is None:
+                    page_start = paragraph.page
+                page_end = paragraph.page
 
         if buffer:
             chunks.append(_make_chunk(paper_id, section.title, page_start, page_end, paragraph_ids, "\n".join(buffer)))

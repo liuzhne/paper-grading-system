@@ -126,7 +126,18 @@ def _extract_docx(path):
         elif isinstance(child, CT_Tbl):
             table = Table(child, document)
             for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                # python-docx 对横向合并单元格会在 row.cells 里重复返回同一 Cell，
+                # 按底层 _tc 去重，避免合并单元格文本被重复拼接。
+                seen_tc = set()
+                cells = []
+                for cell in row.cells:
+                    tc_id = id(cell._tc)
+                    if tc_id in seen_tc:
+                        continue
+                    seen_tc.add(tc_id)
+                    text = cell.text.strip()
+                    if text:
+                        cells.append(text)
                 if cells:
                     result.append((1, " | ".join(cells)))
     return result, heading_texts

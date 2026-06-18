@@ -32,7 +32,11 @@ def empty_spec():
 
 def resolve_default_format(source):
     """source 为 .docx 的 bytes 或路径。返回 FormatSpec（值为 None 表示无法确定）。"""
-    data = source if isinstance(source, (bytes, bytearray)) else open(source, "rb").read()
+    if isinstance(source, (bytes, bytearray)):
+        data = source
+    else:
+        with open(source, "rb") as f:
+            data = f.read()
     try:
         with zipfile.ZipFile(BytesIO(bytes(data))) as archive:
             names = archive.namelist()
