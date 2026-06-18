@@ -52,15 +52,16 @@ def _items_by_code(run):
     result = {}
     for item in run.items:
         code = getattr(item.criterion, "code", None) if item.criterion else None
-        if code:
-            result[code] = float(item.final_score if item.final_score is not None else item.ai_score)
+        score = item.final_score if item.final_score is not None else item.ai_score
+        if code and score is not None:  # 两个分都缺失则跳过，避免 float(None) 崩溃
+            result[code] = float(score)
     return result
 
 
 def _write_report(report):
     out_dir = settings.STORAGE_ROOT / "eval"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / ("eval_report_%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    path = out_dir / ("eval_report_%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"))
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
     return path

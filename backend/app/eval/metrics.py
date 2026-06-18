@@ -67,12 +67,16 @@ def quadratic_weighted_kappa(y_true, y_pred, min_rating=None, max_rating=None):
 
 
 def mae(y_true, y_pred):
+    if len(y_true) != len(y_pred):
+        raise ValueError("y_true and y_pred must have the same length")
     if not y_true:
         return None
     return sum(abs(float(a) - float(b)) for a, b in zip(y_true, y_pred)) / len(y_true)
 
 
 def rmse(y_true, y_pred):
+    if len(y_true) != len(y_pred):
+        raise ValueError("y_true and y_pred must have the same length")
     if not y_true:
         return None
     return math.sqrt(sum((float(a) - float(b)) ** 2 for a, b in zip(y_true, y_pred)) / len(y_true))
@@ -80,6 +84,8 @@ def rmse(y_true, y_pred):
 
 def grade_confusion(true_totals, pred_totals):
     """同档/相邻档混淆矩阵（行=人工等级，列=系统等级）。"""
+    if len(true_totals) != len(pred_totals):
+        raise ValueError("true_totals and pred_totals must have the same length")
     matrix = [[0] * NUM_GRADES for _ in range(NUM_GRADES)]
     for true_total, pred_total in zip(true_totals, pred_totals):
         matrix[grade_ordinal(true_total)][grade_ordinal(pred_total)] += 1
@@ -88,6 +94,8 @@ def grade_confusion(true_totals, pred_totals):
 
 def exact_agreement(true_totals, pred_totals):
     """同档一致率。"""
+    if len(true_totals) != len(pred_totals):
+        raise ValueError("true_totals and pred_totals must have the same length")
     if not true_totals:
         return None
     same = sum(1 for t, p in zip(true_totals, pred_totals) if grade_ordinal(t) == grade_ordinal(p))
@@ -96,6 +104,8 @@ def exact_agreement(true_totals, pred_totals):
 
 def adjacent_agreement(true_totals, pred_totals):
     """相邻档（差≤1档）一致率。"""
+    if len(true_totals) != len(pred_totals):
+        raise ValueError("true_totals and pred_totals must have the same length")
     if not true_totals:
         return None
     close = sum(1 for t, p in zip(true_totals, pred_totals) if abs(grade_ordinal(t) - grade_ordinal(p)) <= 1)

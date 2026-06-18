@@ -34,15 +34,19 @@ def load_dataset(path):
     with open(path, "r", encoding="utf-8") as handle:
         raw = json.load(handle)
     samples = []
-    for row in raw:
-        key = str(row.get("key") or row.get("paper_id") or row.get("id"))
-        samples.append(
-            EvalSample(
-                key=key,
+    for index, row in enumerate(raw):
+        key = row.get("key") or row.get("paper_id") or row.get("id")
+        if not key:
+            raise ValueError("dataset row %d is missing key/paper_id/id" % index)
+        try:
+            sample = EvalSample(
+                key=str(key),
                 human_total=float(row["human_total"]),
                 human_items={str(k): float(v) for k, v in (row.get("human_items") or {}).items()},
             )
-        )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("dataset row %d (key=%s) is invalid: %s" % (index, key, exc)) from exc
+        samples.append(sample)
     return samples
 
 

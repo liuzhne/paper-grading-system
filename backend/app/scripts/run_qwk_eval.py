@@ -40,7 +40,11 @@ def main(argv=None):
 
     issues = []
     if baseline_path.exists():
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            print("\n❌ 基线文件损坏，无法解析：%s\n  %s" % (baseline_path, exc))
+            return 1
         issues = assert_no_regression(report, baseline)
         if issues:
             print("\n❌ 回归门禁未通过：")
