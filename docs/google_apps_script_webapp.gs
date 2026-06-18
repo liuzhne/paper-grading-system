@@ -5,7 +5,11 @@ function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents || "{}");
     const expectedSecret = PropertiesService.getScriptProperties().getProperty("PAPER_GRADING_SECRET");
-    if (expectedSecret && body.secret !== expectedSecret) {
+    if (!expectedSecret) {
+      // fail-closed：未配置密钥则拒绝，避免端点无鉴权对外开放
+      return jsonResponse({ ok: false, error: "server misconfigured: secret not set" });
+    }
+    if (body.secret !== expectedSecret) {
       return jsonResponse({ ok: false, error: "unauthorized" });
     }
 
@@ -63,7 +67,9 @@ function ensureHeader(sheet, headers) {
   const current = sheet.getRange(1, 1, 1, Math.max(headers.length, sheet.getLastColumn())).getValues()[0];
   const alreadyMatches = headers.every((header, index) => current[index] === header);
   if (!alreadyMatches) {
-    sheet.insertRowBefore(1);
+    // 就地更新第 1 行表头；勿用 insertRowBefore(1)，否则旧表头被挤成孤儿数据行
+    const maxCols = Math.max(headers.length, sheet.getLastColumn());
+    sheet.getRange(1, 1, 1, maxCols).clearContent();
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     styleHeader(sheet, headers.length);
   }

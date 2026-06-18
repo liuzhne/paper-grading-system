@@ -131,10 +131,18 @@ def rubric_page():
             except json.JSONDecodeError as exc:
                 st.error("评分项 JSON 格式错误：%s" % exc)
                 return
+            if not isinstance(criteria, list) or not criteria:
+                st.error("评分项 JSON 必须是非空数组")
+                return
+            try:
+                total_score = sum(float(item["max_score"]) for item in criteria)
+            except (KeyError, TypeError, ValueError):
+                st.error("每个评分项都需含有效的 max_score")
+                return
             payload = {
                 "name": name,
                 "version": version,
-                "total_score": sum(float(item["max_score"]) for item in criteria),
+                "total_score": total_score,
                 "description": description,
                 "criteria": criteria,
             }
