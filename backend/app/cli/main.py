@@ -284,7 +284,7 @@ def init(
     storage: Optional[Path] = _STORAGE_OPT,
     seed: bool = typer.Option(False, "--seed", help="顺带造默认评分标准 + 演示批次"),
 ):
-    """初始化本地数据库（建表），可选填充演示数据。"""
+    """初始化本地数据库（建表），可选填充演示数据，并给出 provider/离线上手引导。"""
     _bootstrap(db, storage)
     if seed:
         from backend.app.scripts.seed_dev import seed as seed_dev_seed
@@ -294,6 +294,14 @@ def init(
         render.info("✓ 已填充默认评分标准与演示批次")
     render.info("✓ 本地库就绪：%s" % settings.DATABASE_URL)
     render.hint("storage: %s" % settings.STORAGE_ROOT)
+
+    from backend.app.services.llm.factory import provider_network_scope
+
+    render.info("下一步 · 选 LLM（当前 LLM_PROVIDER=%s，network=%s）：" % (settings.LLM_PROVIDER, provider_network_scope()))
+    render.hint("  • 演示/离线：保持 mock（零配置不触网）")
+    render.hint("  • 本地私有模型（推荐离线）：起 llama-server 后 `pgs score ... --provider local --base-url http://localhost:8080/v1`")
+    render.hint("  • 云厂商：`--provider openai_compatible`（需 API Key）。详见 docs/本地模型与离线部署.md")
+    render.hint("自检：`pgs check`（连通）/ `pgs doctor`（是否纯本地零外呼）")
 
 
 @app.command()
