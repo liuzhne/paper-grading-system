@@ -228,3 +228,19 @@ def test_apply_llm_overrides_local(monkeypatch):
     assert settings.LLM_PROVIDER == "local"
     assert settings.LOCAL_LLM_BASE_URL == "http://localhost:1234/v1"
     assert settings.LOCAL_LLM_MODEL == "qwen3-30b"
+
+
+def test_doctor_reports_offline_ready(monkeypatch):
+    # mock LLM + mock 表格写入 → 纯本地、零外呼。
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
+    monkeypatch.setattr(settings, "SHEET_WRITER_PROVIDER", "mock")
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0
+    assert '"offline_ready": true' in result.output
+
+
+def test_doctor_flags_cloud_touchpoint(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
+    monkeypatch.setattr(settings, "SHEET_WRITER_PROVIDER", "google_sheets")  # 外呼环节
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert '"offline_ready": false' in result.output

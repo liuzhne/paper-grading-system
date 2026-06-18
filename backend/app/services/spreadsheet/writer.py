@@ -24,6 +24,9 @@ def write_run_to_sheet(db: Session, run_id: str, target_id: str | None = None):
     provider = (settings.SHEET_WRITER_PROVIDER or "mock").lower()
     if provider == "mock":
         return write_run_to_mock_sheet(db, run_id, target_id=target_id)
+    if settings.OFFLINE_MODE and provider in {"google_sheets", "google_apps_script"}:
+        # 离线模式硬禁外呼：网络型写表禁用，引导改用本地 Excel 导出。
+        raise SpreadsheetWriteError("离线模式（OFFLINE_MODE）下禁用 Google Sheets 网络导出，请改用 Excel 导出（/export.xlsx 或 pgs export）。")
     if provider in {"google_sheets", "google_apps_script"}:
         try:
             return write_run_to_google_apps_script(db, run_id, target_id=target_id)

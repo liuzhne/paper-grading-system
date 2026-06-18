@@ -6,6 +6,8 @@ from backend.app.core.config import settings
 from backend.app.services.llm.diagnostics import check_connectivity
 from backend.app.services.llm.factory import LOCAL_PROVIDERS
 from backend.app.services.llm.factory import provider_network_scope
+from backend.app.services.offline import network_touchpoints
+from backend.app.services.offline import offline_ready
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -24,6 +26,8 @@ def integration_status():
     static_web_ready = (web_dir / "index.html").exists() and (web_dir / "assets" / "app.js").exists()
     return {
         "llm": _llm_status(llm_provider),
+        "offline_ready": offline_ready(),
+        "network_touchpoints": network_touchpoints(),
         "sheets": {
             "provider": sheet_provider,
             "active": sheet_provider in {"google_sheets", "google_apps_script"} and bool(settings.GOOGLE_SHEETS_WEBAPP_URL),

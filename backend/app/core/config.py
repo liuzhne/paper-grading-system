@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://paper:paper@localhost:5432/paper_grading"
     STORAGE_ROOT: Path = Path("storage")
     MAX_UPLOAD_SIZE_MB: int = 50
+    OFFLINE_MODE: bool = False  # True=硬禁止一切外呼（网络型导出报错提示改用 Excel）；CLI 可经 --offline 开启
     DEFAULT_DEV_USER_ID: str = "00000000-0000-0000-0000-000000000001"
     DEFAULT_DEV_USERNAME: str = "dev-user"
     LLM_PROVIDER: str = "mock"

@@ -316,9 +316,39 @@ def check(
     else:
         render.render_table("LLM 连通自检", ["字段", "值"], [(k, v) for k, v in result.items()])
         (render.info if result.get("ok") else render.error)(
-            "ok=%s  stage=%s" % (result.get("ok"), result.get("stage"))
+            "ok=%s  stage=%s  network=%s" % (result.get("ok"), result.get("stage"), result.get("network"))
         )
     raise typer.Exit(0 if result.get("ok") else 1)
+
+
+def _scope_zh(scope):
+    return {"offline": "离线·不触网", "local": "本地·连本地端口", "external": "外呼·云/网络"}.get(scope, scope)
+
+
+@app.command()
+def doctor(
+    offline: bool = typer.Option(False, "--offline", help="按离线模式预览（硬禁网络型导出）"),
+    as_json: bool = typer.Option(False, "--json", help="输出 JSON"),
+):
+    """离线就绪自检：盘点网络触点（LLM / 表格导出），判定当前配置是否纯本地、零外呼。"""
+    if offline:
+        settings.OFFLINE_MODE = True
+    from backend.app.services.offline import network_touchpoints, offline_ready
+
+    points = network_touchpoints()
+    ready = offline_ready()
+    if as_json:
+        render.dump_json({"offline_ready": ready, "offline_mode": settings.OFFLINE_MODE, "touchpoints": points})
+    else:
+        render.render_table(
+            "网络触点审计",
+            ["环节", "网络", "说明"],
+            [(p["component"], _scope_zh(p["scope"]), p["detail"]) for p in points],
+        )
+        (render.info if ready else render.error)(
+            "离线就绪：%s（OFFLINE_MODE=%s）" % ("是 ✓ 纯本地零外呼" if ready else "否 ✗ 存在外呼环节", settings.OFFLINE_MODE)
+        )
+    raise typer.Exit(0)
 
 
 @app.command()
