@@ -1,4 +1,5 @@
 from datetime import datetime
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 
 import httpx
@@ -9,6 +10,8 @@ RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
 
 def is_retryable_http_error(exc):
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
     return exc.response.status_code in RETRYABLE_STATUS_CODES
 
 
@@ -48,7 +51,8 @@ def _retry_after_seconds(value):
     except (TypeError, ValueError, IndexError, OverflowError):
         return None
     if retry_at.tzinfo is None:
-        retry_at = retry_at.astimezone()
+        # RFC 7231: HTTP-date 始终为 GMT，naive 值按 UTC 处理（而非本地时区）。
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
     return max((retry_at - datetime.now(retry_at.tzinfo)).total_seconds(), 0)
 
 

@@ -1,6 +1,14 @@
 from backend.app.services.llm.base import LLMScorer
 
 
+def _numeric(value):
+    """能转 float 的返回 float，否则 None（防止档位 points 为非数值时崩溃）。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class MockLLMScorer(LLMScorer):
     provider = "mock"
     model_name = "mock-criterion-scorer"
@@ -87,9 +95,9 @@ class MockLLMScorer(LLMScorer):
                 }
             ]
         elif mode == "banded":
-            bands = [b for b in (getattr(criterion, "rubric_levels", None) or []) if isinstance(b, dict) and b.get("points") is not None]
+            bands = [b for b in (getattr(criterion, "rubric_levels", None) or []) if isinstance(b, dict) and _numeric(b.get("points")) is not None]
             if bands:
-                chosen = min(bands, key=lambda b: abs(float(b["points"]) - score))
+                chosen = min(bands, key=lambda b: abs(_numeric(b["points"]) - score))
                 result["band_selection"] = {
                     "level": chosen.get("label"),
                     "rationale": result["reason"],

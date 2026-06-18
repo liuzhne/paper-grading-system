@@ -24,10 +24,24 @@ class OpenAICompatibleChatScorer(LLMScorer):
         self.api_key = api_key or settings.OPENAI_COMPATIBLE_API_KEY
         if not self.api_key:
             raise ValueError("OPENAI_COMPATIBLE_API_KEY is required when LLM_PROVIDER=openai_compatible")
-        self.base_url = (base_url or settings.OPENAI_COMPATIBLE_BASE_URL).rstrip("/")
+        self.base_url = base_url or settings.OPENAI_COMPATIBLE_BASE_URL
+        if not self.base_url:
+            raise ValueError("OPENAI_COMPATIBLE_BASE_URL is required when LLM_PROVIDER=openai_compatible")
+        self.base_url = self.base_url.rstrip("/")
         self.model_name = model_name or settings.OPENAI_COMPATIBLE_MODEL
         self.provider_name = provider_name or settings.OPENAI_COMPATIBLE_PROVIDER_NAME
+        self._owns_client = client is None
         self.client = client or httpx.Client(timeout=settings.OPENAI_COMPATIBLE_TIMEOUT_SECONDS)
+
+    def close(self):
+        if self._owns_client and self.client is not None:
+            self.client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
     def score_criterion(self, paper, criterion, evidence_candidates, structure_checks, anchors=None):
         payload = {
