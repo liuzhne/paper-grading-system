@@ -269,6 +269,7 @@ function renderIntegrationStatus() {
     integrationCard({
       title: "真实 LLM Adapter",
       active: integrations.llm.active,
+      network: integrations.llm.network,
       primary: integrations.llm.active ? `${llmProviderLabel(integrations.llm)} 已启用` : "Mock 评分",
       detail: llmDetail(integrations.llm),
       note: integrations.llm.active ? llmActiveNote(integrations.llm) : llmFallbackNote(integrations.llm),
@@ -290,11 +291,14 @@ function renderIntegrationStatus() {
   ].join("");
 }
 
-function integrationCard({ title, active, primary, detail, note }) {
+function integrationCard({ title, active, primary, detail, note, network }) {
+  const netBadge = network
+    ? `<span class="badge ${network === "external" ? "warn" : "ok"}">${escapeHtml(networkLabel(network))}</span>`
+    : "";
   return `<article class="integration-card">
     <div class="integration-card-title">
       <span>${escapeHtml(title)}</span>
-      <span class="badge ${active ? "ok" : "warn"}">${active ? "真实/正式" : "待配置"}</span>
+      <span>${netBadge}<span class="badge ${active ? "ok" : "warn"}">${active ? "真实/正式" : "待配置"}</span></span>
     </div>
     <strong>${escapeHtml(primary)}</strong>
     <div class="muted">${escapeHtml(detail)}</div>
@@ -302,12 +306,16 @@ function integrationCard({ title, active, primary, detail, note }) {
   </article>`;
 }
 
+function networkLabel(network) {
+  return { offline: "离线·不触网", local: "本地·连本地端口", external: "外呼·云厂商" }[network] || network || "";
+}
+
 function llmFallbackNote(llm) {
   if (llm.provider === "openai" && !llm.api_key_configured) return "已选择 OpenAI，但缺少 OPENAI_API_KEY。";
   if (["openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope"].includes(llm.provider) && !llm.api_key_configured) {
     return "已选择国内兼容模型，但缺少 OPENAI_COMPATIBLE_API_KEY。";
   }
-  if (llm.provider === "mock") return "设置 LLM_PROVIDER=openai_compatible 和智谱 API Key 后启用真实 LLM。";
+  if (llm.provider === "mock") return "设置 LLM_PROVIDER=local（本地私有模型，离线）或 openai_compatible（云，需 API Key）后启用真实 LLM。";
   if (llm.fallback_to_mock) return "真实 LLM 未配置完整，当前回退 Mock。";
   return "当前未启用真实 LLM。";
 }
@@ -325,6 +333,7 @@ function llmDetail(llm) {
 }
 
 function llmProviderLabel(llm) {
+  if (["local", "llama", "llamacpp", "llama_cpp", "vllm", "ollama"].includes(llm.provider)) return "本地私有模型";
   if (["openai_compatible", "zhipu", "bigmodel"].includes(llm.provider)) return "国内兼容模型";
   if (["qwen", "dashscope"].includes(llm.provider)) return "阿里云百炼";
   if (llm.provider === "openai") return "OpenAI";

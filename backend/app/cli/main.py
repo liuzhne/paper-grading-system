@@ -46,6 +46,35 @@ def _safe_scorer():
         return None
 
 
+_PROVIDER_OPT = typer.Option(None, "--provider", help="覆盖 LLM provider：mock / local（本地私有模型）/ openai / openai_compatible")
+_MODEL_OPT = typer.Option(None, "--model", help="覆盖模型名（本地模型/云模型通用）")
+_BASE_URL_OPT = typer.Option(None, "--base-url", help="覆盖 LLM 端点，如本地 http://localhost:8080/v1")
+
+
+def _apply_llm_overrides(provider, model, base_url):
+    """用 CLI 旗标覆盖 settings 的 LLM 选择，实现云/本地一站式切换（不写 .env）。"""
+    from backend.app.services.llm.factory import COMPATIBLE_PROVIDERS, LOCAL_PROVIDERS
+
+    if provider:
+        settings.LLM_PROVIDER = provider.lower()
+    target = (settings.LLM_PROVIDER or "mock").lower()
+    if target in LOCAL_PROVIDERS:
+        if base_url:
+            settings.LOCAL_LLM_BASE_URL = base_url
+        if model:
+            settings.LOCAL_LLM_MODEL = model
+    elif target == "openai":
+        if base_url:
+            settings.OPENAI_BASE_URL = base_url
+        if model:
+            settings.OPENAI_MODEL = model
+    elif target in COMPATIBLE_PROVIDERS:
+        if base_url:
+            settings.OPENAI_COMPATIBLE_BASE_URL = base_url
+        if model:
+            settings.OPENAI_COMPATIBLE_MODEL = model
+
+
 def _collect_files(paths):
     files = []
     for raw in paths:
@@ -270,11 +299,15 @@ def init(
 @app.command()
 def check(
     mock: bool = typer.Option(False, "--mock", help="强制按 Mock 自检（不读真实 provider）"),
+    provider: Optional[str] = _PROVIDER_OPT,
+    model: Optional[str] = _MODEL_OPT,
+    base_url: Optional[str] = _BASE_URL_OPT,
     as_json: bool = typer.Option(False, "--json", help="输出 JSON"),
 ):
     """LLM 连通自检（mock 直接 ok；真实 provider 发极小请求测连通）。"""
     if mock:
         settings.LLM_PROVIDER = "mock"
+    _apply_llm_overrides(provider, model, base_url)
     from backend.app.services.llm.diagnostics import check_connectivity
 
     result = check_connectivity()
@@ -369,6 +402,9 @@ def score(
     rubric_file: Optional[Path] = typer.Option(None, "--rubric-file", help="临时导入的 Excel 规则"),
     template: Optional[Path] = typer.Option(None, "--template", help="--rubric-file 配套 Word 模板"),
     mock: bool = typer.Option(False, "--mock", help="强制用 Mock 评分器（不调真实 LLM）"),
+    provider: Optional[str] = _PROVIDER_OPT,
+    model: Optional[str] = _MODEL_OPT,
+    base_url: Optional[str] = _BASE_URL_OPT,
     report_dir: Optional[Path] = typer.Option(None, "--report-dir", help="为每篇生成 HTML 报告到该目录"),
     workers: int = typer.Option(1, "--workers", min=1, help="并发评分线程数（>1 适合真实 LLM 批量；6.1 解耦后可真正并行）"),
     no_db: bool = typer.Option(False, "--no-db", help="无状态：从文件直接评分，不建 sqlite/不落库（需 --rubric-file）"),
@@ -377,6 +413,7 @@ def score(
     storage: Optional[Path] = _STORAGE_OPT,
 ):
     """对一个或多个论文文件评分（复用与 Web 同款内核）。任一篇失败则非零退出。"""
+    _apply_llm_overrides(provider, model, base_url)
     files = _collect_files(paths)
     if not files:
         render.error("没有可评分的文件")

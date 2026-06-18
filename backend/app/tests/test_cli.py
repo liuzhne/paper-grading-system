@@ -216,3 +216,15 @@ def test_check_mock_overrides_real_provider(monkeypatch):
     result = runner.invoke(app, ["check", "--mock", "--json"])
     assert result.exit_code == 0
     assert '"stage": "mock"' in result.output
+
+
+def test_apply_llm_overrides_local(monkeypatch):
+    from backend.app.cli.main import _apply_llm_overrides
+
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
+    monkeypatch.setattr(settings, "LOCAL_LLM_BASE_URL", "placeholder")
+    monkeypatch.setattr(settings, "LOCAL_LLM_MODEL", "placeholder")
+    _apply_llm_overrides("local", "qwen3-30b", "http://localhost:1234/v1")
+    assert settings.LLM_PROVIDER == "local"
+    assert settings.LOCAL_LLM_BASE_URL == "http://localhost:1234/v1"
+    assert settings.LOCAL_LLM_MODEL == "qwen3-30b"
