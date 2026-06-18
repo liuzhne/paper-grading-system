@@ -5,6 +5,7 @@ from fastapi import Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.api.deps import current_user_id
 from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import Rubric
@@ -26,7 +27,7 @@ router = APIRouter(prefix="/batches", tags=["batches"])
 
 
 @router.post("", response_model=BatchRead)
-def create_batch(payload: BatchCreate, db: Session = Depends(get_db)):
+def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: str = Depends(current_user_id)):
     ensure_dev_user(db)
     rubric = db.get(Rubric, payload.rubric_id)
     if rubric is None:
@@ -39,7 +40,8 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db)):
         paper_type=payload.paper_type,
         rubric_id=payload.rubric_id,
         status=payload.status,
-        created_by=settings.DEFAULT_DEV_USER_ID,
+        created_by=user_id,
+        owner_id=user_id,
     )
     db.add(batch)
     db.commit()

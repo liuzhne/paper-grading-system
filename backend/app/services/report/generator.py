@@ -56,6 +56,7 @@ def _render_html(run, review_logs, coherence_findings):
     th, td {{ border: 1px solid #d9e2ec; padding: 8px; text-align: left; vertical-align: top; }}
     th {{ background: #f5f7fa; }}
     blockquote {{ margin: 8px 0; padding: 8px 12px; background: #f8fafc; border-left: 4px solid #9fb3c8; }}
+    .note {{ color: #627d98; font-size: 13px; margin-top: 8px; }}
   </style>
 </head>
 <body>
@@ -66,6 +67,7 @@ def _render_html(run, review_logs, coherence_findings):
     <div><strong>评分标准：</strong>{rubric} / {version}</div>
     <div class="score">最终总分：{final_total} / AI 初评分：{ai_total} / 等级：{grade}</div>
     <div><strong>需要复核：</strong>{need_review}</div>
+    <div class="note">说明：本系统为"粗档辅助评分 + 人工复核"——AI 给出档位大方向（约九成落在教师评分相邻一档内），教师据证据定终分；不作为可信排名依据。标"需要复核"或近档边界处务必人工核定。</div>
   </div>
   <h2>评分明细</h2>
   {items}

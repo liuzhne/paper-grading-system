@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     OFFLINE_MODE: bool = False  # True=硬禁止一切外呼（网络型导出报错提示改用 Excel）；CLI 可经 --offline 开启
     DEFAULT_DEV_USER_ID: str = "00000000-0000-0000-0000-000000000001"
     DEFAULT_DEV_USERNAME: str = "dev-user"
+    # 单租户简单登录（opt-in）：默认 False=本地/可信网络免登录（CLI 亦免）；
+    # Web 公网部署时设 AUTH_ENABLED=true + AUTH_PASSWORD 才真正要求登录。
+    AUTH_ENABLED: bool = False
+    AUTH_USERNAME: str = "admin"
+    AUTH_PASSWORD: Optional[str] = None
+    AUTH_SECRET: str = "change-me-in-prod"  # 签发会话 token 的 HMAC 密钥，生产务必改
+    AUTH_TOKEN_TTL_SECONDS: int = 86400
     LLM_PROVIDER: str = "mock"
     LLM_FALLBACK_TO_MOCK: bool = True
     LLM_CACHE_ENABLED: bool = True  # L0 缓存/账本（设计§7）：按输入哈希复用 LLM 评分结果

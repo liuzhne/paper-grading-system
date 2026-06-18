@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from fastapi import Depends
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
@@ -8,6 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import ProgrammingError
 
+from backend.app.api.deps import enforce_auth
+from backend.app.api.routes import auth
 from backend.app.api.routes import batches
 from backend.app.api.routes import calibration
 from backend.app.api.routes import exports
@@ -50,13 +53,17 @@ def create_app():
             },
         )
 
-    app.include_router(batches.router, prefix=settings.API_PREFIX)
-    app.include_router(rubrics.router, prefix=settings.API_PREFIX)
-    app.include_router(papers.router, prefix=settings.API_PREFIX)
-    app.include_router(scoring.router, prefix=settings.API_PREFIX)
-    app.include_router(exports.router, prefix=settings.API_PREFIX)
+    # 数据类路由经 enforce_auth 门禁（opt-in：AUTH_ENABLED=False 时为 no-op）；
+    # auth / system 保持开放（登录页与状态自检需在登录前可达）。
+    guarded = [Depends(enforce_auth)]
+    app.include_router(auth.router, prefix=settings.API_PREFIX)
+    app.include_router(batches.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(rubrics.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(papers.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(scoring.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(exports.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(system.router, prefix=settings.API_PREFIX)
-    app.include_router(calibration.router, prefix=settings.API_PREFIX)
+    app.include_router(calibration.router, prefix=settings.API_PREFIX, dependencies=guarded)
 
     web_dir = Path(__file__).resolve().parents[2] / "frontend" / "web"
     assets_dir = web_dir / "assets"

@@ -97,8 +97,42 @@ function apiBase() {
   return document.querySelector("#api-base").value.replace(/\/$/, "");
 }
 
+function authToken() {
+  return window.localStorage.getItem("pgs_token") || "";
+}
+function setAuthToken(token) {
+  if (token) window.localStorage.setItem("pgs_token", token);
+  else window.localStorage.removeItem("pgs_token");
+}
+
+async function promptLogin() {
+  const username = window.prompt("用户名", "admin");
+  if (username === null) return;
+  const password = window.prompt("密码");
+  if (password === null) return;
+  const res = await fetch(`${apiBase()}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (res.ok) {
+    setAuthToken((await res.json()).token);
+    showToast("登录成功，请重试刚才的操作");
+  } else {
+    showToast("登录失败，请检查用户名/密码", true);
+  }
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(`${apiBase()}${path}`, options);
+  const headers = Object.assign({}, options.headers || {});
+  const token = authToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`${apiBase()}${path}`, Object.assign({}, options, { headers }));
+  if (response.status === 401) {
+    setAuthToken("");
+    await promptLogin();
+    throw new Error("需要登录后重试");
+  }
   if (!response.ok) {
     let detail = response.statusText;
     const text = await response.text();

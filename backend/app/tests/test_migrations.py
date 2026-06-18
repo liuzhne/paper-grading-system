@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
-    """pytest 平时用 create_all 建表，不走 Alembic；这里独立验证 0001-0007 迁移链能干净升级到 head。"""
+    """pytest 平时用 create_all 建表，不走 Alembic；这里独立验证 0001-0008 迁移链能干净升级到 head。"""
     url = "sqlite+pysqlite:///%s" % (tmp_path / "migrations.db")
     monkeypatch.setattr(settings, "DATABASE_URL", url)
 
@@ -39,5 +39,8 @@ def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
         assert {"prompt_tokens", "total_tokens", "coherence_findings", "format_findings"}.issubset(run_cols)
         # 0005 模板格式规格
         assert "format_spec" in {col["name"] for col in inspector.get_columns("rubrics")}
+        # 0008 owner_id 预留（单租户起步，为多用户铺路）
+        for table in ("rubrics", "grading_batches", "papers", "scoring_runs"):
+            assert "owner_id" in {col["name"] for col in inspector.get_columns(table)}
     finally:
         engine.dispose()

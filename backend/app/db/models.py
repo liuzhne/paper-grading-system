@@ -47,6 +47,7 @@ class Rubric(Base):
     __table_args__ = (UniqueConstraint("name", "version", name="uq_rubrics_name_version"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     version: Mapped[str] = mapped_column(String(50), nullable=False)
     total_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=100)
@@ -100,6 +101,7 @@ class GradingBatch(Base):
     __tablename__ = "grading_batches"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     department: Mapped[str] = mapped_column(String(100), nullable=True)
     major: Mapped[str] = mapped_column(String(100), nullable=True)
@@ -119,6 +121,7 @@ class Paper(Base):
     __tablename__ = "papers"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
     batch_id: Mapped[str] = mapped_column(String(36), ForeignKey("grading_batches.id"), nullable=False)
     student_id: Mapped[str] = mapped_column(String(100), nullable=True)
     student_name: Mapped[str] = mapped_column(String(100), nullable=True)
@@ -160,6 +163,7 @@ class ScoringRun(Base):
     __tablename__ = "scoring_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
     paper_id: Mapped[str] = mapped_column(String(36), ForeignKey("papers.id"), nullable=False)
     rubric_id: Mapped[str] = mapped_column(String(36), ForeignKey("rubrics.id"), nullable=False)
     model_provider: Mapped[str] = mapped_column(String(100), nullable=False, default="mock")
