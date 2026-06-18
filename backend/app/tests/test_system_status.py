@@ -34,6 +34,21 @@ def test_llm_check_reports_mock_without_real_call(client):
     payload = response.json()
     assert payload["ok"] is True
     assert payload["stage"] == "mock"  # 默认 mock：不发真实请求
+    assert payload["network"] == "offline"  # mock 不触网
+
+
+def test_integration_status_reports_network_scope(client):
+    # conftest 默认 mock → offline（零配置不触网）
+    payload = client.get("/api/system/integrations").json()
+    assert payload["llm"]["network"] == "offline"
+
+
+def test_local_provider_status_is_local(client, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "local")
+    payload = client.get("/api/system/integrations").json()["llm"]
+    assert payload["provider"] == "local"
+    assert payload["network"] == "local"  # 连本地端口、无外部依赖
+    assert payload["adapter"] == "OpenAICompatibleChatScorer"
 
 
 def test_integration_status_reports_openai_compatible_without_leaking_key(client, monkeypatch):

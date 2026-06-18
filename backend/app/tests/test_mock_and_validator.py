@@ -236,6 +236,30 @@ def test_factory_returns_openai_compatible_scorer(monkeypatch):
     assert isinstance(scorer, OpenAICompatibleChatScorer)
 
 
+def test_factory_local_provider_uses_local_defaults(monkeypatch):
+    # LLM_PROVIDER=local 走本地私有模型：OpenAI 兼容 adapter + LOCAL_LLM_* 本地端点，无需 API Key。
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "local")
+    monkeypatch.setattr(settings, "LOCAL_LLM_BASE_URL", "http://localhost:8080/v1")
+    monkeypatch.setattr(settings, "LOCAL_LLM_API_KEY", None)
+    scorer = get_llm_scorer()
+    assert isinstance(scorer, OpenAICompatibleChatScorer)
+    assert scorer.base_url == "http://localhost:8080/v1"
+
+
+def test_provider_network_scope(monkeypatch):
+    from backend.app.services.llm.factory import provider_network_scope
+
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
+    assert provider_network_scope() == "offline"
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "local")
+    assert provider_network_scope() == "local"
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+    assert provider_network_scope() == "external"
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_BASE_URL", "http://localhost:8000/v1")
+    assert provider_network_scope() == "local"
+
+
 def test_llm_runtime_error_falls_back_to_mock_and_requires_review(monkeypatch):
     monkeypatch.setattr(settings, "LLM_FALLBACK_TO_MOCK", True)
     monkeypatch.setattr(settings, "LLM_RATE_LIMIT_SLEEP_SECONDS", 0)

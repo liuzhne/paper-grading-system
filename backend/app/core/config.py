@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON: bool = False
     OPENAI_COMPATIBLE_THINKING_TYPE: Optional[str] = "disabled"
     OPENAI_COMPATIBLE_TEMPERATURE: float = 0.0
+    # 本地私有模型：LLM_PROVIDER=local（或 llama/ollama/vllm）即用本块，走 OpenAI 兼容协议连本地端口，零外呼。
+    LOCAL_LLM_BASE_URL: str = "http://localhost:8080/v1"  # llama.cpp llama-server 默认端口；Ollama 用 11434
+    LOCAL_LLM_MODEL: str = "local-model"  # llama.cpp 忽略请求名用已加载模型；Ollama/vLLM 需填实际模型名
+    LOCAL_LLM_API_KEY: Optional[str] = None  # 本地多数无需鉴权，留空即可
     SCORING_CHUNK_EVAL_TOP_K: int = 3
     # llm_direct 整体判分（opt-in）：True=把召回的多块证据一次性喂给模型整体判一次（~1 调用/项，整体上下文）；
     # False(默认)=逐块各判一次再加权汇总（top_k 调用/项）。默认 off 保持既有行为/测试不变；实验用 env 开启。

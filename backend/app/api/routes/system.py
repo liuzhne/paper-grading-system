@@ -4,6 +4,8 @@ from fastapi import APIRouter
 
 from backend.app.core.config import settings
 from backend.app.services.llm.diagnostics import check_connectivity
+from backend.app.services.llm.factory import LOCAL_PROVIDERS
+from backend.app.services.llm.factory import provider_network_scope
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -45,9 +47,24 @@ def integration_status():
 
 
 def _llm_status(provider):
+    network = provider_network_scope()  # offline(mock) / local(本地端口) / external(外呼厂商)
+    if provider in LOCAL_PROVIDERS:
+        return {
+            "provider": provider,
+            "network": network,
+            "active": bool(settings.LOCAL_LLM_BASE_URL),
+            "configured": bool(settings.LOCAL_LLM_BASE_URL),
+            "model": settings.LOCAL_LLM_MODEL,
+            "adapter": "OpenAICompatibleChatScorer",
+            "base_url": settings.LOCAL_LLM_BASE_URL,
+            "fallback_to_mock": settings.LLM_FALLBACK_TO_MOCK,
+            "debug_log_enabled": settings.LLM_DEBUG_LOG_ENABLED,
+            "api_key_configured": bool(settings.LOCAL_LLM_API_KEY),
+        }
     if provider == "openai":
         return {
             "provider": provider,
+            "network": network,
             "active": bool(settings.OPENAI_API_KEY),
             "configured": bool(settings.OPENAI_API_KEY),
             "model": settings.OPENAI_MODEL,
@@ -63,6 +80,7 @@ def _llm_status(provider):
     if provider in {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope"}:
         return {
             "provider": provider,
+            "network": network,
             "active": bool(settings.OPENAI_COMPATIBLE_API_KEY and settings.OPENAI_COMPATIBLE_BASE_URL),
             "configured": bool(settings.OPENAI_COMPATIBLE_API_KEY and settings.OPENAI_COMPATIBLE_BASE_URL),
             "model": settings.OPENAI_COMPATIBLE_MODEL,
@@ -81,6 +99,7 @@ def _llm_status(provider):
         }
     return {
         "provider": provider,
+        "network": network,
         "active": False,
         "configured": provider == "mock",
         "model": "mock",
