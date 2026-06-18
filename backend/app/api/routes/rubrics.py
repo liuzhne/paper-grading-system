@@ -234,6 +234,7 @@ def update_rubric(rubric_id: str, payload: RubricUpdate, db: Session = Depends(g
 
 @router.post("/{rubric_id}/publish", response_model=RubricRead)
 def publish_rubric(rubric_id: str, db: Session = Depends(get_db)):
+    ensure_dev_user(db)  # 与其它改写端点（create/import/clone/update）一致
     rubric = _load_rubric(db, rubric_id)
     if rubric is None:
         raise HTTPException(status_code=404, detail="rubric not found")

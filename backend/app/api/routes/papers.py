@@ -117,7 +117,11 @@ def get_parsed_paper(paper_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="paper not found")
     if not paper.parsed_text_path:
         raise HTTPException(status_code=404, detail="paper has no parsed text")
-    return {"paper_id": paper.id, "parsed": read_json(Path(paper.parsed_text_path))}
+    try:
+        parsed = read_json(Path(paper.parsed_text_path))
+    except (OSError, ValueError):  # 文件缺失/损坏(JSONDecodeError 属 ValueError)→ 明确 404 而非 500
+        raise HTTPException(status_code=404, detail="parsed text file not found or unreadable")
+    return {"paper_id": paper.id, "parsed": parsed}
 
 
 @router.get("/{paper_id}/chunks", response_model=list[PaperChunkRead])

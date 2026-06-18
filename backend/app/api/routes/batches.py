@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -90,7 +91,12 @@ def batch_drift_endpoint(batch_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{batch_id}/review-sample")
-def batch_review_sample_endpoint(batch_id: str, ratio: float = None, seed: str = "", db: Session = Depends(get_db)):
+def batch_review_sample_endpoint(
+    batch_id: str,
+    ratio: float | None = Query(default=None, ge=0.0, le=1.0),
+    seed: str = "",
+    db: Session = Depends(get_db),
+):
     try:
         return review_sample(db, batch_id, ratio=ratio, seed=seed)
     except ValueError as exc:

@@ -8,8 +8,8 @@ from pydantic import model_validator
 
 
 class RubricCriterionCreate(BaseModel):
-    code: str
-    name: str
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     max_score: float = Field(gt=0)
     weight: Optional[float] = None
     description: Optional[str] = None
@@ -26,8 +26,8 @@ class RubricCriterionCreate(BaseModel):
 
 
 class RubricCreate(BaseModel):
-    name: str
-    version: str = "v1.0"
+    name: str = Field(min_length=1)
+    version: str = Field(default="v1.0", min_length=1)
     total_score: float = Field(default=100, gt=0)
     description: Optional[str] = None
     criteria: list[RubricCriterionCreate]
@@ -46,7 +46,7 @@ class RubricCreate(BaseModel):
 
 class RubricCloneRequest(BaseModel):
     new_version: str = Field(min_length=1)
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1)
     description: Optional[str] = None
 
 

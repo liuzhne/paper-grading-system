@@ -26,7 +26,7 @@ def create_calibration_anchor(payload: CalibrationAnchorCreate, db: Session = De
 @router.get("/anchors", response_model=list[CalibrationAnchorRead])
 def list_calibration_anchors(
     rubric_id: str = Query(...),
-    criterion_code: str = Query(default=None),
+    criterion_code: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     return list_anchors(db, rubric_id, criterion_code)

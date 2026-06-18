@@ -15,6 +15,7 @@ class CalibrationAnchorCreate(BaseModel):
     excerpt: str = Field(min_length=1)
     rationale: Optional[str] = None
     source: str = "范文"
+    # score<=max_score 由路由 create_calibration_anchor 校验并返回 400（保持 API 契约）
 
 
 class CalibrationAnchorRead(BaseModel):
