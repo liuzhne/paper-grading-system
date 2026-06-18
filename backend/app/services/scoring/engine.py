@@ -81,32 +81,44 @@ class ScoringResult:
     need_review: bool
 
 
+def _close_scorer(scorer):
+    """关闭 scorer 持有的资源（真实 provider 的 httpx.Client）；mock 无 close 则跳过。"""
+    close = getattr(scorer, "close", None)
+    if callable(close):
+        close()
+
+
 def score_paper(db: Session, paper_id: str, scorer=None):
     """编排：预取(读) → 释放事务 → 纯计算(LLM，无锁) → 落库(短写)。
 
     把 LLM 调用移出 DB 事务，使 `--workers` 真正并行、避免 sqlite 写锁/快照串行；
     签名与返回（ScoringRun）保持不变，所有调用方（Web/CLI/eval/score_batch）无需改动。
     """
+    owns_scorer = scorer is None  # 自建的 scorer 用完要关其 http client，避免连接池/fd 泄漏
     scorer = scorer or get_llm_scorer()
-    paper = db.scalar(
-        select(Paper)
-        .where(Paper.id == paper_id)
-        .options(selectinload(Paper.batch), selectinload(Paper.chunks))
-    )
-    if paper is None:
-        raise ValueError("paper not found")
-    if paper.status == "failed":
-        raise ValueError("paper parse failed: %s" % (paper.error_message or "unknown"))
-    if not paper.parsed_text_path:
-        raise ValueError("paper has no parsed text")
+    try:
+        paper = db.scalar(
+            select(Paper)
+            .where(Paper.id == paper_id)
+            .options(selectinload(Paper.batch), selectinload(Paper.chunks))
+        )
+        if paper is None:
+            raise ValueError("paper not found")
+        if paper.status == "failed":
+            raise ValueError("paper parse failed: %s" % (paper.error_message or "unknown"))
+        if not paper.parsed_text_path:
+            raise ValueError("paper has no parsed text")
 
-    started_at = _utcnow()
-    inputs = collect_scoring_inputs(db, paper)
-    # 结束事务：纯计算阶段不持锁/快照（sqlite 并发关键，避免 BUSY_SNAPSHOT）。
-    # 用 commit 而非 rollback —— 保留调用方在本会话里既有的未提交改动（如 eval 批量先建的 batch/paper）。
-    db.commit()
-    result = compute_scoring(inputs, scorer)
-    return persist_scoring(db, paper_id, inputs, result, scorer, started_at)
+        started_at = _utcnow()
+        inputs = collect_scoring_inputs(db, paper)
+        # 结束事务：纯计算阶段不持锁/快照（sqlite 并发关键，避免 BUSY_SNAPSHOT）。
+        # 用 commit 而非 rollback —— 保留调用方在本会话里既有的未提交改动（如 eval 批量先建的 batch/paper）。
+        db.commit()
+        result = compute_scoring(inputs, scorer)
+        return persist_scoring(db, paper_id, inputs, result, scorer, started_at)
+    finally:
+        if owns_scorer:
+            _close_scorer(scorer)
 
 
 def collect_scoring_inputs(db: Session, paper) -> ScoringInputs:
@@ -401,28 +413,32 @@ def score_batch(db: Session, batch_id: str, rescore: bool = False):
     batch.status = "scoring"
     db.commit()
 
-    for paper in papers:
-        if paper.status == "failed" or not paper.parsed_text_path:
-            result["failed_count"] += 1
-            result["errors"].append(
-                {
-                    "paper_id": paper.id,
-                    "file_name": paper.file_name,
-                    "error": paper.error_message or "paper is not parsed",
-                }
-            )
-            continue
-        if paper.scoring_runs and not rescore:
-            result["skipped_count"] += 1
-            continue
-        try:
-            run = score_paper(db, paper.id)
-        except (ValueError, LLMScoringError) as exc:
-            result["failed_count"] += 1
-            result["errors"].append({"paper_id": paper.id, "file_name": paper.file_name, "error": str(exc)})
-            continue
-        result["scored_count"] += 1
-        result["run_ids"].append(run.id)
+    scorer = get_llm_scorer()  # 整批复用一个 scorer（连接池跨论文复用），结束时统一关闭
+    try:
+        for paper in papers:
+            if paper.status == "failed" or not paper.parsed_text_path:
+                result["failed_count"] += 1
+                result["errors"].append(
+                    {
+                        "paper_id": paper.id,
+                        "file_name": paper.file_name,
+                        "error": paper.error_message or "paper is not parsed",
+                    }
+                )
+                continue
+            if paper.scoring_runs and not rescore:
+                result["skipped_count"] += 1
+                continue
+            try:
+                run = score_paper(db, paper.id, scorer=scorer)
+            except (ValueError, LLMScoringError) as exc:
+                result["failed_count"] += 1
+                result["errors"].append({"paper_id": paper.id, "file_name": paper.file_name, "error": str(exc)})
+                continue
+            result["scored_count"] += 1
+            result["run_ids"].append(run.id)
+    finally:
+        _close_scorer(scorer)
 
     batch = db.get(GradingBatch, batch_id)
     if result["failed_count"]:
