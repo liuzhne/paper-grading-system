@@ -1,3 +1,4 @@
+from backend.app.core.config import settings
 from backend.app.services.coherence.semantic import _findings_from_verification
 from backend.app.services.coherence.semantic import analyze_semantic_coherence
 from backend.app.services.llm.mock import MockLLMScorer
@@ -32,7 +33,9 @@ def test_missing_sections_returns_empty():
     assert analyze_semantic_coherence(parsed, MockLLMScorer()) == []
 
 
-def test_fake_scorer_unanswered_produces_finding():
+def test_fake_scorer_unanswered_produces_finding(monkeypatch):
+    monkeypatch.setattr(settings, "COHERENCE_SEMANTIC_ENABLED", True)  # 默认 opt-in，测试显式开启
+
     class FakeScorer:
         def complete_json(self, instructions, payload):
             return {"research_questions": [{"text": "研究问题A", "answered": False}], "conclusion_claims": []}
@@ -41,7 +44,9 @@ def test_fake_scorer_unanswered_produces_finding():
     assert any(f["kind"] == "research_question_unanswered" for f in findings)
 
 
-def test_scorer_error_degrades_gracefully():
+def test_scorer_error_degrades_gracefully(monkeypatch):
+    monkeypatch.setattr(settings, "COHERENCE_SEMANTIC_ENABLED", True)  # 默认 opt-in，测试显式开启
+
     class BoomScorer:
         def complete_json(self, instructions, payload):
             raise RuntimeError("boom")
@@ -49,3 +54,8 @@ def test_scorer_error_degrades_gracefully():
     findings = analyze_semantic_coherence(_parsed(), BoomScorer())
     assert findings and findings[0]["kind"] == "coherence_semantic_skipped"
     assert findings[0]["severity"] == "info"
+
+
+def test_disabled_by_default_returns_empty():
+    findings = analyze_semantic_coherence(_parsed(), MockLLMScorer())
+    assert findings == []  # COHERENCE_SEMANTIC_ENABLED 默认 False

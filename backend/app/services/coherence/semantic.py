@@ -24,7 +24,7 @@ INSTRUCTIONS = (
 
 
 def analyze_semantic_coherence(parsed, scorer):
-    if not getattr(settings, "COHERENCE_SEMANTIC_ENABLED", True):
+    if not getattr(settings, "COHERENCE_SEMANTIC_ENABLED", False):
         return []
     intro = _section_text(parsed, INTRO_KEYWORDS)
     conclusion = _section_text(parsed, CONCLUSION_KEYWORDS)
