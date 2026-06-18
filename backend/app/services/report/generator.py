@@ -29,7 +29,7 @@ def generate_report(db: Session, run_id: str):
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
     html = _render_html(run, review_logs, _coherence_for(run))
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
-    path = settings.reports_dir / ("scoring_report_%s.html" % run_id)
+    path = settings.reports_dir / ("scoring_report_%s.html" % run.id)  # 用已校验的 DB 值，杜绝路径穿越
     path.write_text(html, encoding="utf-8")
     return path
 

@@ -51,13 +51,15 @@ def batch_ranking(db: Session, batch_id: str):
     scored.sort(key=lambda row: row["total"], reverse=True)
     count = len(scored)
     rank = 0
+    rank_index = 0
     previous = None
     for index, row in enumerate(scored):
         if previous is None or row["total"] != previous:
             rank = index + 1  # 标准竞赛并列名次
+            rank_index = index  # 并列组首位下标，使同名次同百分位
             previous = row["total"]
         row["rank"] = rank
-        row["percentile"] = round(100 * (count - index) / count, 1) if count else None
+        row["percentile"] = round(100 * (count - rank_index) / count, 1) if count else None
 
     return {
         "batch_id": batch_id,
@@ -88,6 +90,8 @@ def score_drift(db: Session, batch_id: str):
         if run is None:
             continue
         for item in run.items:
+            if item.ai_score is None:  # 未评分项无法计算漂移，跳过
+                continue
             code = item.criterion.code if item.criterion else item.criterion_id
             bucket = buckets.setdefault(
                 code,

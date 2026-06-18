@@ -49,7 +49,7 @@ def _match_rule(finding, rules):
 
 def score_from_findings(criterion, all_findings, rules):
     """显式启用的评分项：按维度领取 warning 发现 + 命中规则扣分。返回与其它执行器一致的输出。"""
-    max_score = float(criterion.max_score)
+    max_score = float(getattr(criterion, "max_score", None) or 0)
     relevant = [f for f in findings_for_dimension(getattr(criterion, "dimension", None), all_findings) if f.get("severity") == "warning"]
     code = getattr(criterion, "code", None)
 
@@ -59,9 +59,10 @@ def score_from_findings(criterion, all_findings, rules):
         rule = _match_rule(finding, rules)
         if rule is None:
             continue  # 维度相关但无规则匹配 → 不自动扣，留报告
+        points = float(rule.get("points") or 0)
         deduction_items.append(
             {
-                "points": float(rule["points"]),
+                "points": points,
                 "reason": rule.get("reason") or finding.get("message") or "",
                 "rule_ref": code,
                 "evidence_location": finding.get("location") or "",
@@ -70,7 +71,7 @@ def score_from_findings(criterion, all_findings, rules):
         )
         evidence.append({"quote": finding.get("message") or "", "location": finding.get("location") or "", "chunk_id": None})
         finding["deducted_by"] = code  # 标记已转扣分（同一 dict 也在 run.coherence/format_findings 里）
-        finding["deducted_points"] = float(rule["points"])
+        finding["deducted_points"] = points
 
     total = sum(item["points"] for item in deduction_items)
     awarded = round(max(0.0, min(max_score - total, max_score)), 2)

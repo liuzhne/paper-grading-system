@@ -47,7 +47,7 @@ def build_request(scorer, criterion, candidates, structure_checks, rubric_versio
             "applies_to": getattr(criterion, "applies_to", None),
             "rubric_levels": list(getattr(criterion, "rubric_levels", None) or []),
         },
-        "candidates": [{"chunk_id": c.get("chunk_id"), "text": c.get("text")} for c in (candidates or [])],
+        "candidates": [{"chunk_id": c.get("chunk_id"), "text": c.get("text")} for c in (candidates or []) if isinstance(c, dict)],
         "structure_checks": structure_checks,
         "calibration_anchors": anchors or [],
     }
@@ -95,7 +95,8 @@ def put(key, request, response, model=""):
 def _connect():
     root = settings.STORAGE_ROOT
     root.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(root / "llm_cache.sqlite"))
+    conn = sqlite3.connect(str(root / "llm_cache.sqlite"), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")  # 多进程评分并发写共享缓存，避免 SQLITE_BUSY
     conn.execute(
         "CREATE TABLE IF NOT EXISTS llm_cache ("
         "key TEXT PRIMARY KEY, model TEXT, request TEXT, response TEXT, created_at TEXT)"

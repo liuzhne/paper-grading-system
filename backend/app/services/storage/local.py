@@ -12,7 +12,7 @@ def ensure_storage_dirs():
         path.mkdir(parents=True, exist_ok=True)
 
 
-def safe_filename(filename):
+def safe_filename(filename: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", filename).strip("._")
     return cleaned or "uploaded_paper"
 
