@@ -14,6 +14,7 @@ from backend.app.db.session import get_db
 from backend.app.schemas.export import ExportLogRead
 from backend.app.schemas.export import WriteSheetRequest
 from backend.app.services.report.generator import generate_report
+from backend.app.services.report.json_export import build_run_export
 from backend.app.services.spreadsheet.excel import export_batch_excel
 from backend.app.services.spreadsheet.writer import SpreadsheetWriteError
 from backend.app.services.spreadsheet.writer import write_run_to_sheet
@@ -66,3 +67,12 @@ def report(run_id: str, db: Session = Depends(get_db)):
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return FileResponse(path, media_type="text/html; charset=utf-8", filename=path.name)
+
+
+@router.get("/scoring-runs/{run_id}/export.json")
+def export_run_json(run_id: str, db: Session = Depends(get_db)):
+    """结构化 JSON 导出（运行/论文/逐项/扣分/证据/篇章·格式发现/复核），供下游二次处理。"""
+    try:
+        return build_run_export(db, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

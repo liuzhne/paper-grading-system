@@ -560,15 +560,31 @@ def score(
 @app.command()
 def report(
     run_id: str = typer.Argument(..., help="评分任务 id"),
-    output: Optional[Path] = typer.Option(None, "-o", "--output", help="输出 HTML 路径"),
+    output: Optional[Path] = typer.Option(None, "-o", "--output", help="输出路径"),
+    fmt: str = typer.Option("html", "--format", help="html（默认）或 json（结构化导出，供下游处理）"),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
 ):
-    """生成某次评分的 HTML 报告。"""
+    """生成某次评分的报告：HTML（人读）或 JSON（结构化导出）。"""
     _bootstrap(db, storage)
-    from backend.app.services.report.generator import generate_report
 
     with clidb.cli_session() as session:
+        if fmt == "json":
+            from backend.app.services.report.json_export import build_run_export
+
+            try:
+                data = build_run_export(session, run_id)
+            except ValueError as exc:
+                render.error(str(exc))
+                raise typer.Exit(2)
+            if output:
+                Path(output).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                render.info("✓ 结构化 JSON：%s" % output)
+            else:
+                render.dump_json(data)
+            return
+        from backend.app.services.report.generator import generate_report
+
         try:
             path = Path(generate_report(session, run_id))
         except ValueError as exc:
