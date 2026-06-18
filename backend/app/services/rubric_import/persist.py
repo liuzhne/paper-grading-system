@@ -6,6 +6,7 @@
 """
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
@@ -32,7 +33,11 @@ def persist_imported_rubric(db: Session, name, version, description, imported):
     for index, criterion in enumerate(imported.criteria):
         rubric.criteria.append(build_criterion(criterion, index))
     db.add(rubric)
-    db.commit()
+    try:
+        db.commit()  # 依赖 uq_rubrics_name_version 兜底并发：预检查与提交之间若被插队，由唯一约束拦截
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError("rubric name and version already exist") from exc
     db.refresh(rubric)
     return load_rubric(db, rubric.id)
 
@@ -50,7 +55,7 @@ def build_criterion(criterion, index):
         description=criterion.description,
         evidence_hints=criterion.evidence_hints,
         deduction_rules=criterion.deduction_rules,
-        display_order=criterion.display_order if criterion.display_order is not None else index,
+        display_order=getattr(criterion, "display_order", None) if getattr(criterion, "display_order", None) is not None else index,
         **extra_criterion_fields(criterion),
     )
 

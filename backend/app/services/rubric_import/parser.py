@@ -199,7 +199,8 @@ def _criterion_from_row(row, mapping, order):
     evidence_hints = _split_items(_value(row, mapping.get("evidence_hints")))
     deduction_rules = _split_items(_value(row, mapping.get("deduction_rules")))
     weight = _parse_score(_value(row, mapping.get("weight"))) if "weight" in mapping else None
-    display_order = int(_parse_score(_value(row, mapping.get("display_order"))) or order)
+    parsed_order = _parse_score(_value(row, mapping.get("display_order")))
+    display_order = int(parsed_order if parsed_order is not None else order)
     criterion_type = _parse_type(_value(row, mapping.get("criterion_type")))
     applies_to = _parse_applies_to(_value(row, mapping.get("applies_to")))
     rubric_levels = _parse_bands(_value(row, mapping.get("rubric_levels")))
