@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
-    """pytest 平时用 create_all 建表，不走 Alembic；这里独立验证 0001-0006 迁移链能干净升级到 head。"""
+    """pytest 平时用 create_all 建表，不走 Alembic；这里独立验证 0001-0007 迁移链能干净升级到 head。"""
     url = "sqlite+pysqlite:///%s" % (tmp_path / "migrations.db")
     monkeypatch.setattr(settings, "DATABASE_URL", url)
 

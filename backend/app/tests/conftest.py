@@ -50,6 +50,7 @@ def client(tmp_path):
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    engine.dispose()  # 释放该用例的引擎连接，避免跨用例连接堆积
     settings.STORAGE_ROOT = original_storage_root
     for key, value in original_runtime_settings.items():
         setattr(settings, key, value)
