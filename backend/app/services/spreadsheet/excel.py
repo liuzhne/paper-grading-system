@@ -121,19 +121,26 @@ def export_batch_excel(db: Session, batch_id: str):
 
     settings.exports_dir.mkdir(parents=True, exist_ok=True)
     path = settings.exports_dir / ("batch_%s_scores.xlsx" % batch_id)
-    workbook.save(path)
-
-    for run in runs:
-        db.add(
-            SpreadsheetWriteLog(
-                scoring_run_id=run.id,
-                target_type="excel",
-                target_id=str(path),
-                status="success",
-                response={"path": str(path)},
+    # 先写临时文件 → 落库提交 → 原子改名为最终文件：commit 失败不会留下孤儿导出文件。
+    tmp_path = path.with_name(path.name + ".tmp")
+    workbook.save(tmp_path)
+    try:
+        for run in runs:
+            db.add(
+                SpreadsheetWriteLog(
+                    scoring_run_id=run.id,
+                    target_type="excel",
+                    target_id=str(path),
+                    status="success",
+                    response={"path": str(path)},
+                )
             )
-        )
-    db.commit()
+        db.commit()
+    except Exception:
+        db.rollback()
+        tmp_path.unlink(missing_ok=True)
+        raise
+    tmp_path.replace(path)
     return path
 
 

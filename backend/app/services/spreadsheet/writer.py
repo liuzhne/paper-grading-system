@@ -63,37 +63,44 @@ def write_run_to_google_apps_script(db: Session, run_id: str, target_id: str | N
         "payload": payload,
     }
     http_client = client or httpx.Client(timeout=settings.GOOGLE_SHEETS_TIMEOUT_SECONDS)
+    owns_client = client is None  # 自建的 client 用完要关，避免连接池/fd 泄漏
     try:
-        response = http_client.post(settings.GOOGLE_SHEETS_WEBAPP_URL, json=request_payload)
-        response.raise_for_status()
-        response_payload = response.json()
-        if response_payload.get("ok") is False:
-            raise ValueError(response_payload.get("error") or "google sheets endpoint returned ok=false")
-    except Exception as exc:
+        try:
+            response = http_client.post(settings.GOOGLE_SHEETS_WEBAPP_URL, json=request_payload)
+            response.raise_for_status()
+            response_payload = response.json()
+            if response_payload.get("ok") is False:
+                raise ValueError(response_payload.get("error") or "google sheets endpoint returned ok=false")
+        except Exception as exc:
+            log = SpreadsheetWriteLog(
+                scoring_run_id=run.id,
+                target_type="google_sheets",
+                target_id=target_id,
+                status="failed",
+                response={"request": payload},
+                error_message=str(exc),
+            )
+            db.add(log)
+            db.commit()
+            db.refresh(log)
+            raise SpreadsheetWriteError("google sheets write failed: %s" % exc) from exc
+
         log = SpreadsheetWriteLog(
             scoring_run_id=run.id,
             target_type="google_sheets",
-            target_id=target_id,
-            status="failed",
-            response=payload,
-            error_message=str(exc),
+            target_id=target_id or response_payload.get("spreadsheet_id") or response_payload.get("target_id"),
+            status="success",
+            response={"request": payload, "provider_response": response_payload},
         )
         db.add(log)
         db.commit()
         db.refresh(log)
-        raise SpreadsheetWriteError("google sheets write failed: %s" % exc) from exc
-
-    log = SpreadsheetWriteLog(
-        scoring_run_id=run.id,
-        target_type="google_sheets",
-        target_id=target_id or response_payload.get("spreadsheet_id") or response_payload.get("target_id"),
-        status="success",
-        response={"request": payload, "provider_response": response_payload},
-    )
-    db.add(log)
-    db.commit()
-    db.refresh(log)
-    return log
+        return log
+    finally:
+        if owns_client:
+            close = getattr(http_client, "close", None)
+            if callable(close):
+                close()
 
 
 def _load_run(db, run_id):
