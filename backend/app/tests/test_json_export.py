@@ -1,5 +1,6 @@
 """结构化 JSON 导出端点（/scoring-runs/{id}/export.json）自包含测试。"""
 
+from backend.app.core.config import settings
 from backend.app.tests.conftest import make_sample_docx
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -32,5 +33,7 @@ def test_run_json_export(client):
     assert len(data["items"]) == 1
     assert data["items"][0]["criterion_code"] == "C1"
     assert "review_logs" in data and "paper" in data
+    # owner_id 自 batch→paper→run 贯通（单租户=dev 用户）
+    assert data["run"]["owner_id"] == settings.DEFAULT_DEV_USER_ID
 
     assert client.get("/api/scoring-runs/does-not-exist/export.json").status_code == 404

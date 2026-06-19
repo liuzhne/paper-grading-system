@@ -15,12 +15,16 @@ from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCriterion
 
 
-def persist_imported_rubric(db: Session, name, version, description, imported):
-    """把导入结果落库为 draft Rubric；name+version 重复抛 ValueError（调用方转 400/退出码）。"""
+def persist_imported_rubric(db: Session, name, version, description, imported, created_by=None):
+    """把导入结果落库为 draft Rubric；name+version 重复抛 ValueError（调用方转 400/退出码）。
+
+    created_by 默认 DEFAULT_DEV_USER_ID（CLI/单租户），Web 路由传登录用户。
+    """
     exists = db.scalar(select(Rubric).where(Rubric.name == name, Rubric.version == version))
     if exists is not None:
         raise ValueError("rubric name and version already exist")
 
+    created_by = created_by or settings.DEFAULT_DEV_USER_ID
     rubric = Rubric(
         name=name,
         version=version,
@@ -28,7 +32,8 @@ def persist_imported_rubric(db: Session, name, version, description, imported):
         description=import_description(description, imported.template_summary),
         format_spec=imported.format_spec,
         status="draft",
-        created_by=settings.DEFAULT_DEV_USER_ID,
+        created_by=created_by,
+        owner_id=created_by,
     )
     for index, criterion in enumerate(imported.criteria):
         rubric.criteria.append(build_criterion(criterion, index))

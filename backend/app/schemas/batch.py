@@ -37,6 +37,7 @@ class BatchRead(BaseModel):
     paper_type: Optional[str] = None
     rubric_id: str
     status: str
+    owner_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

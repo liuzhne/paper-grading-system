@@ -137,11 +137,13 @@ def list_paper_chunks(paper_id: str, db: Session = Depends(get_db)):
 def _save_and_parse_upload(db: Session, batch_id: str, file: UploadFile, strict_type: bool):
     suffix = Path(file.filename or "").suffix.lower()
     filename = safe_filename(file.filename or "paper%s" % suffix)
+    owner_id = db.scalar(select(GradingBatch.owner_id).where(GradingBatch.id == batch_id))  # 继承批次归属
     if suffix not in [".docx", ".pdf"]:
         if strict_type:
             raise HTTPException(status_code=400, detail="only .docx and text PDF files are supported")
         paper = Paper(
             batch_id=batch_id,
+            owner_id=owner_id,
             file_name=filename,
             file_path="",
             status="failed",
@@ -154,6 +156,7 @@ def _save_and_parse_upload(db: Session, batch_id: str, file: UploadFile, strict_
     ensure_storage_dirs()
     paper = Paper(
         batch_id=batch_id,
+        owner_id=owner_id,
         file_name=filename,
         file_path="",
         status="uploaded",

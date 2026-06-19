@@ -280,6 +280,7 @@ def persist_scoring(db: Session, paper_id, inputs: ScoringInputs, result: Scorin
     paper = db.get(Paper, paper_id)
     run = ScoringRun(
         paper_id=paper_id,
+        owner_id=getattr(paper, "owner_id", None),  # 继承论文归属
         rubric_id=inputs.rubric_id,
         model_provider=scorer.provider,
         model_name=scorer.model_name,

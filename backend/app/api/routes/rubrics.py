@@ -23,6 +23,7 @@ from backend.app.schemas.rubric import RubricCloneRequest
 from backend.app.schemas.rubric import RubricImportResult
 from backend.app.schemas.rubric import RubricRead
 from backend.app.schemas.rubric import RubricUpdate
+from backend.app.api.deps import current_user_id
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.eval.scores_template import build_scores_table_template
@@ -36,7 +37,7 @@ router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
 
 @router.post("", response_model=RubricRead)
-def create_rubric(payload: RubricCreate, db: Session = Depends(get_db)):
+def create_rubric(payload: RubricCreate, db: Session = Depends(get_db), user_id: str = Depends(current_user_id)):
     ensure_dev_user(db)
     exists = db.scalar(select(Rubric).where(Rubric.name == payload.name, Rubric.version == payload.version))
     if exists is not None:
@@ -48,7 +49,8 @@ def create_rubric(payload: RubricCreate, db: Session = Depends(get_db)):
         total_score=payload.total_score,
         description=payload.description,
         status="draft",
-        created_by=settings.DEFAULT_DEV_USER_ID,
+        created_by=user_id,
+        owner_id=user_id,
     )
     for index, criterion in enumerate(payload.criteria):
         rubric.criteria.append(
@@ -105,6 +107,7 @@ def import_rubric_from_files(
     rules_file: UploadFile = File(...),
     template_file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
 ):
     ensure_dev_user(db)
     if not _is_excel_file(rules_file.filename or ""):
@@ -125,7 +128,7 @@ def import_rubric_from_files(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    rubric = persist_imported_rubric(db, name, version, description, imported)
+    rubric = persist_imported_rubric(db, name, version, description, imported, created_by=user_id)
     return {
         "rubric": rubric,
         "warnings": imported.warnings,
@@ -134,7 +137,12 @@ def import_rubric_from_files(
 
 
 @router.post("/{rubric_id}/clone", response_model=RubricRead)
-def clone_rubric(rubric_id: str, payload: RubricCloneRequest, db: Session = Depends(get_db)):
+def clone_rubric(
+    rubric_id: str,
+    payload: RubricCloneRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
     ensure_dev_user(db)
     original = _load_rubric(db, rubric_id)
     if original is None:
@@ -151,7 +159,8 @@ def clone_rubric(rubric_id: str, payload: RubricCloneRequest, db: Session = Depe
         total_score=original.total_score,
         status="draft",
         description=payload.description if payload.description is not None else original.description,
-        created_by=settings.DEFAULT_DEV_USER_ID,
+        created_by=user_id,
+        owner_id=user_id,
     )
     for criterion in original.criteria:
         cloned.criteria.append(

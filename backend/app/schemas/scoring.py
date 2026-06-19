@@ -55,6 +55,7 @@ class ScoringRunRead(BaseModel):
     id: str
     paper_id: str
     rubric_id: str
+    owner_id: Optional[str] = None
     model_provider: str
     model_name: str
     model_version: Optional[str] = None

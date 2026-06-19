@@ -96,7 +96,7 @@ def export_batch_excel(db: Session, batch_id: str):
                 "是" if changed else "否",
                 "是" if run.need_manual_review else "否",
                 run.finished_at.isoformat(sep=" ") if run.finished_at else "",
-                "dev-user" if run.status == "reviewed" else "",
+                _reviewer(review_logs_by_run.get(run.id, [])) if run.status == "reviewed" else "",
                 _review_notes(review_logs_by_run.get(run.id, [])),
                 "/api/scoring-runs/%s/report" % run.id,
             ]
@@ -163,6 +163,14 @@ def _review_logs_by_run(db, runs):
     for log in logs:
         result.setdefault(log.scoring_run_id, []).append(log)
     return result
+
+
+def _reviewer(review_logs):
+    """取最近一条复核日志的 reviewer_id（实际复核人，非硬编码）。"""
+    for log in reversed(review_logs):
+        if getattr(log, "reviewer_id", None):
+            return log.reviewer_id
+    return ""
 
 
 def _review_notes(review_logs):
