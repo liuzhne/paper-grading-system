@@ -29,15 +29,14 @@ def parse_and_store(db: Session, paper: Paper):
     existing_department = paper.department
     existing_major = paper.major
     existing_advisor = paper.advisor
-    db.execute(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
-    paper.parsed_text_path = None
-    paper.parse_quality = None
     paper.error_message = None
     paper.status = "parsing"
     try:
         parsed = parse_document(paper.file_path)
         parsed_path = settings.parsed_dir / ("%s.json" % paper.id)
         write_json(parsed_path, parsed.to_dict())
+        # 解析成功后才删旧 chunks / 更新元数据，避免重解析失败时永久丢失既有数据
+        db.execute(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
         paper.title = existing_title or parsed.title
         paper.student_id = existing_student_id or parsed.student_id
         paper.student_name = existing_student_name or parsed.student_name
@@ -68,8 +67,13 @@ def ingest_file(db: Session, batch_id: str, file_path, file_name: str = None):
     db.flush()
 
     destination = settings.uploads_dir / ("%s_%s" % (paper.id, name))
-    with open(source, "rb") as handle:
-        save_binary(handle, destination)
+    try:
+        with open(source, "rb") as handle:
+            save_binary(handle, destination)
+    except Exception:
+        db.delete(paper)  # 拷贝失败则清理孤儿 Paper（无有效文件），再抛给调用方
+        db.flush()
+        raise
     paper.file_path = str(destination)
     parse_and_store(db, paper)
     return paper
