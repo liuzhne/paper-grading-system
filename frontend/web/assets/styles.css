@@ -563,3 +563,13 @@ th {
     grid-template-columns: 1fr;
   }
 }
+
+/* 登录遮罩（单租户简单登录，opt-in） */
+.login-overlay { position: fixed; inset: 0; background: rgba(16, 42, 67, 0.55); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.login-overlay.hidden { display: none; }
+.login-card { background: #fff; padding: 28px 32px; border-radius: 12px; width: 320px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.25); }
+.login-card h2 { margin: 0; }
+.login-card label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.login-card input { padding: 8px; border: 1px solid #cbd2d9; border-radius: 6px; }
+.login-error { color: #c0392b; font-size: 13px; }
+.login-error.hidden { display: none; }

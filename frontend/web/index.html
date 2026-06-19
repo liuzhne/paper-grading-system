@@ -39,6 +39,7 @@
             <label for="api-base">API</label>
             <input id="api-base" type="text" value="/api" />
             <button id="refresh-btn" class="icon-button" title="刷新数据">刷新</button>
+            <button id="logout-btn" class="icon-button hidden" title="登出">登出</button>
           </div>
         </header>
 
@@ -228,6 +229,16 @@
         </section>
       </main>
     </div>
-    <script src="/assets/app.js?v=20260522-chunk-scoring-policy"></script>
+    <div id="login-overlay" class="login-overlay hidden">
+      <form id="login-form" class="login-card">
+        <h2>登录</h2>
+        <p class="muted">本系统已启用访问鉴权，请登录后使用。</p>
+        <label>用户名<input id="login-username" type="text" value="admin" autocomplete="username" /></label>
+        <label>密码<input id="login-password" type="password" autocomplete="current-password" /></label>
+        <button type="submit" class="primary">登录</button>
+        <div id="login-error" class="login-error hidden"></div>
+      </form>
+    </div>
+    <script src="/assets/app.js?v=20260619-auth-login"></script>
   </body>
 </html>

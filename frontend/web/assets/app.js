@@ -105,21 +105,54 @@ function setAuthToken(token) {
   else window.localStorage.removeItem("pgs_token");
 }
 
-async function promptLogin() {
-  const username = window.prompt("用户名", "admin");
-  if (username === null) return;
-  const password = window.prompt("密码");
-  if (password === null) return;
-  const res = await fetch(`${apiBase()}/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
-  });
-  if (res.ok) {
-    setAuthToken((await res.json()).token);
-    showToast("登录成功，请重试刚才的操作");
-  } else {
-    showToast("登录失败，请检查用户名/密码", true);
+function showLogin(message) {
+  const overlay = document.querySelector("#login-overlay");
+  if (!overlay) return;
+  const err = document.querySelector("#login-error");
+  if (err) {
+    if (message) {
+      err.textContent = message;
+      err.classList.remove("hidden");
+    } else {
+      err.classList.add("hidden");
+    }
+  }
+  overlay.classList.remove("hidden");
+  const pwd = document.querySelector("#login-password");
+  if (pwd) pwd.value = "";
+}
+
+function hideLogin() {
+  const overlay = document.querySelector("#login-overlay");
+  if (overlay) overlay.classList.add("hidden");
+}
+
+function setLogoutVisible(visible) {
+  const btn = document.querySelector("#logout-btn");
+  if (btn) btn.classList.toggle("hidden", !visible);
+}
+
+async function refreshAuthState() {
+  // 返回 true=可进入应用；false=需登录（已弹出登录框）。
+  try {
+    const status = await (await fetch(`${apiBase()}/auth/status`)).json();
+    if (!status.auth_required) {
+      setLogoutVisible(false);
+      return true;
+    }
+    const token = authToken();
+    if (token) {
+      const me = await fetch(`${apiBase()}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+      if (me.ok) {
+        setLogoutVisible(true);
+        return true;
+      }
+      setAuthToken("");
+    }
+    showLogin();
+    return false;
+  } catch (_) {
+    return true; // 自检失败不阻塞（如离线/旧后端）
   }
 }
 
@@ -130,7 +163,8 @@ async function api(path, options = {}) {
   const response = await fetch(`${apiBase()}${path}`, Object.assign({}, options, { headers }));
   if (response.status === 401) {
     setAuthToken("");
-    await promptLogin();
+    setLogoutVisible(false);
+    showLogin("登录已失效，请重新登录");
     throw new Error("需要登录后重试");
   }
   if (!response.ok) {
@@ -1124,5 +1158,45 @@ function bindEvents() {
   });
 }
 
+function bindAuth() {
+  const form = document.querySelector("#login-form");
+  if (form) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const username = document.querySelector("#login-username").value.trim();
+      const password = document.querySelector("#login-password").value;
+      try {
+        const res = await fetch(`${apiBase()}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!res.ok) {
+          showLogin("用户名或密码错误");
+          return;
+        }
+        setAuthToken((await res.json()).token);
+        hideLogin();
+        setLogoutVisible(true);
+        await loadAll();
+      } catch (error) {
+        showLogin(error.message);
+      }
+    });
+  }
+  const logout = document.querySelector("#logout-btn");
+  if (logout) {
+    logout.addEventListener("click", () => {
+      setAuthToken("");
+      setLogoutVisible(false);
+      showLogin("已登出");
+    });
+  }
+}
+
 bindEvents();
-loadAll().catch((error) => showToast(error.message, true));
+bindAuth();
+(async () => {
+  const ready = await refreshAuthState();
+  if (ready) loadAll().catch((error) => showToast(error.message, true));
+})();
