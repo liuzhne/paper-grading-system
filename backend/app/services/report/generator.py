@@ -27,19 +27,41 @@ def generate_report(db: Session, run_id: str):
         raise ValueError("scoring run not found")
 
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
-    html = _render_html(run, review_logs, _coherence_for(run))
+    html = _render_html(run, review_logs, _coherence_for(run), _section_summaries_for(run.paper))
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
     path = settings.reports_dir / ("scoring_report_%s.html" % run.id)  # 用已校验的 DB 值，杜绝路径穿越
     path.write_text(html, encoding="utf-8")
     return path
 
 
-def _render_html(run, review_logs, coherence_findings):
+def _section_summaries_for(paper):
+    if not getattr(paper, "parsed_text_path", None):
+        return []
+    try:
+        from backend.app.services.document_parser.summary import section_summaries
+
+        return section_summaries(read_json(paper.parsed_text_path))
+    except Exception:
+        return []
+
+
+def _render_section_summary(summaries):
+    if not summaries:
+        return "<p class=\"muted\">（无章节摘要）</p>"
+    rows = "\n".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td></tr>" % (escape(s["title"]), s["paragraphs"], s["chars"])
+        for s in summaries
+    )
+    return "<table><tr><th>章节</th><th>段落数</th><th>字符数</th></tr>%s</table>" % rows
+
+
+def _render_html(run, review_logs, coherence_findings, section_summaries=None):
     paper = run.paper
     item_html = "\n".join(_render_item(item) for item in run.items)
     item_names = {item.id: item.criterion.name for item in run.items}
     review_html = _render_review_logs(review_logs, item_names)
     coherence_html = _render_coherence(coherence_findings)
+    summary_html = _render_section_summary(section_summaries or [])
     format_html = _render_format(getattr(run, "format_findings", None) or [])
     return """<!doctype html>
 <html lang="zh-CN">
@@ -71,6 +93,8 @@ def _render_html(run, review_logs, coherence_findings):
   </div>
   <h2>评分明细</h2>
   {items}
+  <h2>章节数字摘要</h2>
+  {summary}
   <h2>篇章一致性发现</h2>
   {coherence}
   <h2>格式问题</h2>
@@ -90,6 +114,7 @@ def _render_html(run, review_logs, coherence_findings):
         grade=escape(run.grade or ""),
         need_review="是" if run.need_manual_review else "否",
         items=item_html,
+        summary=summary_html,
         coherence=coherence_html,
         format=format_html,
         reviews=review_html,
