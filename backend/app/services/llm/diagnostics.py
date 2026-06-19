@@ -4,10 +4,33 @@ mock 直接返回 ok（不发请求）；真实 provider 发一个极小请求�
 不抛异常，永远返回结构化结果。
 """
 
+from contextlib import contextmanager
 from time import perf_counter
 
+from backend.app.core.config import settings
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.services.llm.factory import provider_network_scope
+
+
+@contextmanager
+def _probe_mode():
+    """探针模式：单次尝试、静音调试日志——连通自检应快速失败、输出干净（不刷重试日志、不污染 --json）。"""
+    saved = (
+        settings.LLM_DEBUG_LOG_ENABLED,
+        settings.OPENAI_MAX_RETRIES,
+        settings.OPENAI_COMPATIBLE_MAX_RETRIES,
+    )
+    settings.LLM_DEBUG_LOG_ENABLED = False
+    settings.OPENAI_MAX_RETRIES = 0
+    settings.OPENAI_COMPATIBLE_MAX_RETRIES = 0
+    try:
+        yield
+    finally:
+        (
+            settings.LLM_DEBUG_LOG_ENABLED,
+            settings.OPENAI_MAX_RETRIES,
+            settings.OPENAI_COMPATIBLE_MAX_RETRIES,
+        ) = saved
 
 PING_INSTRUCTIONS = "你是连通自检助手。只返回一个 JSON 对象，不要任何多余文字。"
 PING_PAYLOAD = {"task": "ping", "instruction": '请返回 {"ok": true}'}
@@ -32,7 +55,8 @@ def check_connectivity():
 
     started = perf_counter()
     try:
-        result = scorer.complete_json(PING_INSTRUCTIONS, PING_PAYLOAD)
+        with _probe_mode():  # 单次尝试、静音日志：快速失败、输出干净
+            result = scorer.complete_json(PING_INSTRUCTIONS, PING_PAYLOAD)
         return {
             "ok": True,
             "stage": "model",

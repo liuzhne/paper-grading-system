@@ -51,6 +51,23 @@ def test_local_provider_status_is_local(client, monkeypatch):
     assert payload["adapter"] == "OpenAICompatibleChatScorer"
 
 
+def test_check_connectivity_local_unreachable_gives_hint(monkeypatch):
+    from backend.app.services.llm import diagnostics
+
+    class _Boom:
+        provider = "openai_compatible"
+        model_name = "local-model"
+
+        def complete_json(self, *args):
+            raise ConnectionError("Connection refused")
+
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "local")
+    monkeypatch.setattr(diagnostics, "get_llm_scorer", lambda: _Boom())
+    res = diagnostics.check_connectivity()
+    assert res["ok"] is False and res["network"] == "local"
+    assert "本地模型" in res["error"]  # 友好提示
+
+
 def test_integration_status_reports_openai_compatible_without_leaking_key(client, monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_API_KEY", "zhipu-secret")
