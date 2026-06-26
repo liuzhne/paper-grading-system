@@ -1,0 +1,14 @@
+{
+  "theme": "default",
+  "themeVariables": {
+    "fontSize": "26px",
+    "fontFamily": "PingFang SC, Microsoft YaHei, Arial, sans-serif"
+  },
+  "flowchart": {
+    "htmlLabels": true,
+    "nodeSpacing": 55,
+    "rankSpacing": 80,
+    "padding": 16,
+    "useMaxWidth": false
+  }
+}

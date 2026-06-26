@@ -1,0 +1,112 @@
+%% 毕业论文智能评分系统 — 架构与评分流程图
+%% 由代码结构分析生成（backend/app + alembic）。在 https://mermaid.live 或支持 mermaid 的 Markdown 中渲染。
+%% 节点点击可跳转到对应源码（默认分支 main）。
+flowchart TD
+
+  %% ========== 客户端 ==========
+  subgraph CLIENT["客户端"]
+    WEB["Web 前端<br/>frontend/web"]
+    CLI["命令行 pgs<br/>backend/app/cli/main.py"]
+  end
+
+  %% ========== API 层 ==========
+  subgraph API["API 层 · FastAPI（backend/app/main.py）"]
+    direction LR
+    R_AUTH["auth 登录"]
+    R_RUB["rubrics 评分标准"]
+    R_BAT["batches 批次"]
+    R_PAP["papers 论文"]
+    R_SCO["scoring 评分/复核"]
+    R_EXP["exports 导出"]
+    R_CAL["calibration 校准"]
+    R_SYS["system 状态/自检"]
+  end
+
+  %% ========== 服务层 ==========
+  subgraph SVC["服务层 · backend/app/services"]
+    RI["rubric_import<br/>parser · docx_comments<br/>compiler · persist · template"]
+    DP["document_parser<br/>parser · chunking<br/>format_resolver · format_check"]
+    ING["papers/ingestion<br/>解析+落库共享服务"]
+    ENG["scoring/engine ★核心<br/>score_paper 编排<br/>rules · validator"]
+    RET["retrieval/keyword<br/>证据召回 top_k"]
+    CHK["checkers<br/>deterministic · findings_checker"]
+    COH["coherence<br/>checker · semantic · terminology"]
+    CALIB["calibration<br/>library(L2锚点) · analytics · curate"]
+    LLM["llm/factory<br/>mock · openai · compatible · local<br/>retry · diagnostics · debug_logging"]
+    REP["report<br/>generator(HTML) · json_export"]
+    SS["spreadsheet<br/>excel · writer"]
+    STO["storage/local"]
+  end
+
+  CACHE[("cache/llm_cache<br/>L0 复用")]
+
+  %% ========== 外部模型 ==========
+  subgraph EXT["模型提供方（按 env 切换）"]
+    MMOCK["Mock（默认·离线）"]
+    MLOCAL["本地私有模型<br/>llama.cpp / Ollama"]
+    MCLOUD["云厂商<br/>zhipu / openai"]
+  end
+
+  %% ========== 数据层 ==========
+  subgraph DATA["数据与持久化"]
+    MODELS["SQLAlchemy 模型<br/>backend/app/db/models.py"]
+    ALMB["Alembic 迁移<br/>alembic/versions 0001→0008"]
+    DB[("数据库<br/>SQLite(测试) / Postgres")]
+  end
+
+  %% ========== 评估/脚本 ==========
+  subgraph EVAL["评估与运维脚本"]
+    QWK["eval QWK<br/>metrics · runner · labeled_dataset"]
+    SCRIPTS["scripts<br/>seed_dev · build_anchors<br/>run_qwk_eval · diagnose_llm"]
+  end
+
+  %% ========== 入口 ==========
+  WEB --> API
+  CLI --> SVC
+
+  %% ========== 评分主流程 ==========
+  R_RUB -->|"Excel + Word 批注"| RI --> MODELS
+  R_PAP -->|"上传 docx/PDF"| ING --> DP --> MODELS
+  R_BAT --> MODELS
+
+  R_SCO --> ENG
+  ENG -->|"召回证据块"| RET --> ENG
+  ENG -->|"确定性/findings 扣分"| CHK
+  ENG -->|"篇章/格式核验"| COH
+  ENG -->|"LLM 判分<br/>deductive/banded/llm_direct"| LLM
+  ENG -.->|"注入 L2 锚点"| CALIB
+  CALIB -.-> LLM
+  LLM <-->|"命中即复用"| CACHE
+  LLM --> EXT
+  ENG -->|"ScoringRun / ScoreItem<br/>+ coherence/format findings"| MODELS
+
+  R_SCO -->|"人工复核 ReviewLog"| MODELS
+  R_EXP --> REP --> STO
+  R_EXP --> SS
+  R_CAL --> CALIB
+
+  %% ========== 数据收口 ==========
+  MODELS --> DB
+  ALMB --> DB
+  QWK -.->|"读评分结果"| DB
+  SCRIPTS -.-> DB
+
+  %% ========== 可点击跳转源码 ==========
+  click ENG "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/services/scoring/engine.py" "engine.py"
+  click RI "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/rubric_import" "rubric_import"
+  click DP "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/document_parser" "document_parser"
+  click CHK "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/checkers" "checkers"
+  click COH "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/coherence" "coherence"
+  click CALIB "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/calibration" "calibration"
+  click LLM "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/llm" "llm"
+  click CACHE "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/services/cache/llm_cache.py" "llm_cache.py"
+  click REP "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/report" "report"
+  click MODELS "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/db/models.py" "models.py"
+  click ALMB "https://github.com/liuzhne/paper-grading-system/tree/main/alembic/versions" "alembic/versions"
+  click API "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/main.py" "main.py"
+
+  %% ========== 样式 ==========
+  classDef core fill:#7c3aed,stroke:#4c1d95,color:#fff,font-weight:bold;
+  classDef data fill:#e0e7ff,stroke:#6366f1,color:#1e1b4b;
+  class ENG core;
+  class MODELS,DB,CACHE data;

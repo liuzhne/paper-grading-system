@@ -1,0 +1,48 @@
+%% 毕业论文智能评分系统 — 评分流程图（竖向·精简版）
+%% 渲染：https://mermaid.live ，或 npx @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png
+flowchart TD
+
+  %% ---------- 入口 ----------
+  ENTRY["客户端<br/>Web 前端 / 命令行 pgs"]
+  API["API 层 · FastAPI（backend/app/main.py）<br/>auth · rubrics · batches · papers<br/>scoring · exports · calibration · system"]
+  ENTRY --> API
+
+  %% ---------- 主流程 ----------
+  API --> STEP1["① 评分标准导入　services/rubric_import<br/>Excel 规则 + Word 批注 → 编译结构化扣分规则"]
+  STEP1 --> STEP2["② 论文摄取与解析　papers/ingestion + document_parser<br/>docx / PDF → 分块 chunking + 格式解析"]
+  STEP2 --> ENG["③ 评分引擎 ★核心　scoring/engine.score_paper<br/>按 criterion_type + scoring_mode 路由"]
+
+  ENG --> RET["证据召回　retrieval/keyword（top_k）"]
+  RET --> ROUTE{"判分路由"}
+  ROUTE -->|"确定性"| DET["checkers<br/>deterministic · findings_checker"]
+  ROUTE -->|"LLM"| LLM["LLM 判分　llm/factory<br/>deductive · banded · llm_direct"]
+
+  LLM -.->|"注入 L2 锚点"| CALIB["calibration<br/>library · analytics"]
+  LLM <-.->|"命中即复用"| CACHE[("L0 缓存<br/>cache/llm_cache")]
+  LLM --> MODELS_PROV["模型提供方（按 env）<br/>Mock · 本地 llama.cpp · 云 zhipu/openai"]
+
+  DET --> COH["④ 篇章一致性 + 格式核验<br/>coherence + document_parser/format_check"]
+  LLM --> COH
+  COH --> AGG["⑤ 汇总落库　db/models<br/>ScoringRun + ScoreItem + findings"]
+
+  AGG --> REVIEW["⑥ 人工复核　ReviewLog"]
+  REVIEW --> OUT["⑦ 报告 / 导出<br/>report/generator(HTML) · spreadsheet(Excel)"]
+
+  AGG --> DB[("数据库<br/>SQLite(测试) / Postgres<br/>结构由 alembic/versions 管理")]
+
+  %% ---------- 跳转源码 ----------
+  click ENG "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/services/scoring/engine.py" "engine.py"
+  click STEP1 "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/rubric_import" "rubric_import"
+  click STEP2 "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/document_parser" "document_parser"
+  click DET "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/checkers" "checkers"
+  click LLM "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/llm" "llm"
+  click COH "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/coherence" "coherence"
+  click AGG "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/db/models.py" "models.py"
+
+  %% ---------- 样式 ----------
+  classDef core fill:#7c3aed,stroke:#4c1d95,color:#fff,font-weight:bold;
+  classDef step fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
+  classDef data fill:#fef9c3,stroke:#ca8a04,color:#713f12;
+  class ENG core;
+  class STEP1,STEP2,COH,AGG,REVIEW,OUT step;
+  class DB,CACHE data;
