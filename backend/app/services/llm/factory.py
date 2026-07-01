@@ -4,7 +4,7 @@ from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleC
 from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
 
 # 云·OpenAI 兼容厂商别名（走 OPENAI_COMPATIBLE_*）
-COMPATIBLE_PROVIDERS = {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope"}
+COMPATIBLE_PROVIDERS = {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope", "google", "gemini", "google_ai_studio"}
 # 本地私有模型别名（走 LOCAL_LLM_*，OpenAI 兼容协议连本地端口）
 LOCAL_PROVIDERS = {"local", "llama", "llamacpp", "llama_cpp", "vllm", "ollama"}
 

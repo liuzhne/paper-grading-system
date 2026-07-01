@@ -380,6 +380,9 @@ function networkLabel(network) {
 
 function llmFallbackNote(llm) {
   if (llm.provider === "openai" && !llm.api_key_configured) return "已选择 OpenAI，但缺少 OPENAI_API_KEY。";
+  if (isGoogleGemini(llm) && !llm.api_key_configured) {
+    return "已选择 Google AI Studio/Gemini，但缺少 OPENAI_COMPATIBLE_API_KEY。";
+  }
   if (["openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope"].includes(llm.provider) && !llm.api_key_configured) {
     return "已选择国内兼容模型，但缺少 OPENAI_COMPATIBLE_API_KEY。";
   }
@@ -401,11 +404,18 @@ function llmDetail(llm) {
 }
 
 function llmProviderLabel(llm) {
+  if (isGoogleGemini(llm)) return "Google AI Studio / Gemini";
   if (["local", "llama", "llamacpp", "llama_cpp", "vllm", "ollama"].includes(llm.provider)) return "本地私有模型";
   if (["openai_compatible", "zhipu", "bigmodel"].includes(llm.provider)) return "国内兼容模型";
   if (["qwen", "dashscope"].includes(llm.provider)) return "阿里云百炼";
   if (llm.provider === "openai") return "OpenAI";
   return llm.provider || "LLM";
+}
+
+function isGoogleGemini(llm) {
+  const provider = String(llm.provider || "").toLowerCase();
+  const compatible = String(llm.compatible_provider || "").toLowerCase();
+  return ["google", "gemini", "google_ai_studio"].includes(provider) || ["google", "gemini", "google_ai_studio"].includes(compatible);
 }
 
 function sheetFallbackNote(sheets) {

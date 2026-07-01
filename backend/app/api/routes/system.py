@@ -81,7 +81,7 @@ def _llm_status(provider):
             "retry_429_delay_seconds": settings.LLM_429_RETRY_DELAY_SECONDS,
             "api_key_configured": bool(settings.OPENAI_API_KEY),
         }
-    if provider in {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope"}:
+    if provider in {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope", "google", "gemini", "google_ai_studio"}:
         return {
             "provider": provider,
             "network": network,

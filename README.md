@@ -2,7 +2,7 @@
 
 这是一个核心功能优先的本地系统，实现“评分标准 -> 批次 -> 上传论文 -> 解析 -> 证据召回 -> AI 逐项评分 -> 人工复核 -> Excel/HTML 报告导出 -> 在线写表”的闭环。
 
-当前版本暂不实现登录、JWT、RBAC、Celery、OCR 和 pgvector；真实 LLM 与在线写表通过环境变量启用，未配置时可自动回退到本地 Mock。
+当前版本提供单租户简单登录（opt-in），暂不实现完整 JWT/RBAC/Celery/OCR/pgvector；真实 LLM 与在线写表通过环境变量启用，未配置时可自动回退到本地 Mock。
 
 ## 技术栈
 
@@ -182,7 +182,8 @@ uv run python -m backend.app.scripts.run_qwk_eval \
 
 ## 部署与运维要点
 
-- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0007`；测试用 `create_all`，生产必须走迁移）。
+- **内网试点 Docker 栈**：复制 `.env.intranet.example` 为 `.env.intranet`，改强密码与站点名后运行 `docker compose --env-file .env.intranet up -d --build`。详见 [docs/部署.md](docs/部署.md)。
+- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0008`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。
 - **持久化状态**在 `storage/`：`uploads/`(原文)、`parsed/`(解析 JSON)、`reports/`、`exports/`、`llm_cache.sqlite`(L0 缓存/账本)、`eval/`(评估报告/基线)。除占位 `.gitkeep` 外均已 gitignore。
 - **真实 LLM**：设 `LLM_PROVIDER=openai_compatible` + `OPENAI_COMPATIBLE_*`（见上）；上线前用 `uv run python -m backend.app.scripts.diagnose_llm` 自检连通。未配置自动回退 Mock（评分项标人工复核）。
 - **可复现/降本**：`LLM_CACHE_ENABLED=true` 命中即复用；改 prompt 需 bump `cache/llm_cache.PROMPT_VERSION`。

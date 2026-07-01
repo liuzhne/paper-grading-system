@@ -3,19 +3,71 @@ services:
     image: postgres:16-alpine
     container_name: paper-grading-db
     environment:
-      POSTGRES_DB: paper_grading
-      POSTGRES_USER: paper
-      POSTGRES_PASSWORD: paper
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB:-paper_grading}
+      POSTGRES_USER: ${POSTGRES_USER:-paper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.intranet}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U paper -d paper_grading"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: paper-grading-app
+    env_file:
+      - ${APP_ENV_FILE:-.env.intranet}
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paper}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.intranet}@db:5432/${POSTGRES_DB:-paper_grading}
+      STORAGE_ROOT: /app/storage
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in .env.intranet}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env.intranet}
+      LLM_DEBUG_LOG_ENABLED: ${LLM_DEBUG_LOG_ENABLED:-false}
+    volumes:
+      - app_storage:/app/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/integrations', timeout=5).read()\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: paper-grading-proxy
+    environment:
+      PAPER_GRADING_SITE: ${PAPER_GRADING_SITE:-https://localhost}
+      CADDY_MAX_UPLOAD_SIZE: ${CADDY_MAX_UPLOAD_SIZE:-50MB}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
-
+  app_storage:
+  caddy_data:
+  caddy_config:

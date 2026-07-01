@@ -1,0 +1,17 @@
+{$PAPER_GRADING_SITE:https://localhost} {
+    tls internal
+    encode zstd gzip
+
+    request_body {
+        max_size {$CADDY_MAX_UPLOAD_SIZE:50MB}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+    }
+
+    reverse_proxy app:8000
+}
