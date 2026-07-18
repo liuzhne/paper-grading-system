@@ -104,7 +104,19 @@ band criterion 在 v1 **恰好包含一个** `direction=band, effect_type=score`
 
 mutex group 只作用于同一 criterion 内的多个非 band AtomicRule，组内至少两个成员；跨 criterion、单成员组或 band 上的 mutex 在发布时失败。组内零个规则触发合法，恰好一个触发合法，多个触发则相关 criterion fail closed。最后由 policy 计算 contribution，并聚合未舍入 contribution。
 
-`occurrence_id` 是 Core 按 `occurrence-id-v1` 计算的 SHA-256 小写十六进制：输入使用 `core-canonical-json-v1`，固定含 scheme、document snapshot hash、rubric hash scheme+hash、criterion code、rule code、可空（JSON `null`）finding code、排序去重后的稳定 evidence-unit IDs 与规范化 locator；模型/Checker 提供的 occurrence ID 仅作原始审计字段。`locator-v1` 是有 discriminator 的封闭联合，只允许 `text_span(evidence_unit_id,start,end)`、`section(section_path)`、`document_structure(structure_code,ordinal)`、`page_region(page_index,bbox)` 或 `metadata(field_path)`；offset 基于归一化文本的 Unicode code point，path segment 做 NFC+trim，bbox Decimal 用无指数十进制字符串，禁止自由文本、数据库 ID 和未声明字段。run 必须保存 canonical occurrence payload；同一 digest 对应不同 payload 视为 hash collision 并 fail closed。相同 occurrence 必须去重。所有 level/score 必须位于 `0..criterion.max_score`，越界为 `invalid`，不得用 clamp 掩盖规则错误。
+`occurrence_id` 是 Core 按 `occurrence-id-v1` 计算的 SHA-256 小写十六进制：输入使用 `core-canonical-json-v1`，固定含 scheme、document snapshot hash、rubric hash scheme+hash、criterion code、rule code、可空（JSON `null`）finding code、排序去重后的稳定 evidence-unit IDs 与规范化 locator。模型/Checker 提供的 occurrence ID、finding code 和 locator 只作原始审计字段，Core 不直接对它们取 hash。
+
+finding code 必须先授权：deterministic rule 只能使用对应 CheckerRegistry observation schema 的枚举值；semantic rule 只能使用已发布 `AtomicRule.evidence_policy.allowed_finding_codes` 的枚举值；未声明枚举时固定为 JSON `null`。未知/自由文本 code 为 `invalid`，不能通过换 code 绕过去重。
+
+`locator-v1` 是验证后由 Core 构造、有 discriminator 的封闭联合：
+
+- `text_span(evidence_unit_id,start,end)` 指向 `source-quote-normalization-v1(evidence_unit.normalized_text)`，start/end 是 0-based Unicode code-point、半开区间 `[start,end)`，切片必须与已验证 normalized quote 完全相等。quote 唯一出现时 Core 可推导 span；出现多次却没有有效 span 时为 `invalid`。
+- `section(section_path,section_ordinal)` 使用从根到叶的完整 path，segment 仅做 NFC+trim 并保留大小写；section_ordinal 是该 section 在 snapshot canonical document order 中的 0-based 全局序号。二者必须同时匹配，因而同名/同层级章节仍可区分。
+- `document_structure(structure_code,ordinal)` 的 ordinal 是该 code 在 snapshot canonical document order 中的 0-based 序号。
+- `page_region(page_index,bbox)` 的 page_index 是 snapshot 中 0-based 页序；bbox 固定为 `[x0,y0,x1,y1]`，原点左上、坐标除以页宽/高归一到 `0..1`，四值使用 canonical Decimal 字符串且满足 `x0 < x1, y0 < y1`。
+- `metadata(field_path)` 是指向冻结 `SubmissionSnapshot.metadata` 中已存在、schema 声明为 scoring-relevant 字段的 RFC 6901 JSON Pointer。
+
+自由文本 locator、越界坐标、数据库 ID、未声明字段或与 evidence/observation 不一致的 locator 均为 `invalid`。run 必须保存 canonical occurrence payload；同一 digest 对应不同 payload 视为 hash collision 并 fail closed。相同 occurrence 必须去重。所有 level/score 必须位于 `0..criterion.max_score`，越界为 `invalid`，不得用 clamp 掩盖规则错误。
 
 direction/effect 合法矩阵固定为：
 
@@ -153,7 +165,7 @@ AI 输出、RuleDecision、证据验证结果和 calculated score 不可变。�
 
 - `source_artifact_hash`（`source-artifact-sha256-v1`）只对上传原始字节做 SHA-256；文件名、路径和上传时间不进入。
 - `normalized_content_hash`（即 `DocumentSnapshot.content_hash`，scheme=`normalized-content-v1`）对 normalizer version、按文档顺序排列的 section path/heading/normalized text，以及按 section/ordinal 排列但**尚不含 evidence_unit_id** 的 unit normalized text 做 canonical hash；原始字节、存储引用、parser diagnostics 和业务 metadata 不进入。
-- evidence_unit_id 由上述 content hash、section path、稳定 ordinal 与 unit text hash 派生，避免循环定义。
+- evidence_unit_id 按 `evidence-unit-id-v1` 派生：对 `{scheme, normalized_content_hash, section_path, section_ordinal, unit_ordinal, unit_text_hash}` 使用 `core-canonical-json-v1` 后取 SHA-256 小写十六进制。section_path 是从根到叶、segment 经 NFC+trim 的数组；section_ordinal 是该 section 在 snapshot canonical document order 中的 0-based 全局序号，用于区分同名/同层级章节；unit_ordinal 是过滤归一化后空 unit 以后，该 section 内 canonical document order 的 0-based 序号；unit_text_hash 是 unit normalized_text UTF-8 字节的 SHA-256。canonical payload 必须随 snapshot 保存并在 digest 冲突时逐项核对。ID 输入不包含自身，避免循环定义。
 - `document_snapshot_hash`（`document-snapshot-v1`）对 schema version、business profile key/version、parser/normalizer version、content hash、section 层级与 unit IDs/locator、确定性 metrics、format facts、parse quality、schema 声明的 scoring-relevant `profile_extensions`，以及会影响评分/复核的规范化 diagnostics 做 canonical hash；storage ref、文件名、时间戳、数据库/legacy chunk ID 和非评分 provenance 不进入。
 - SubmissionSnapshot 另存 business metadata 与 source artifact identity；这些字段不得偷偷混入 document hash。run 同时固定 submission、artifact、content 和 document snapshot identity，不能用其中一个代替另一个。
 
