@@ -265,7 +265,7 @@ class SourceRule(Base):
 
 
 class RubricVersion(Base):
-    """由一次编译发布出的内容寻址评分标准版本。"""
+    """由一次编译产生的内容寻址评分标准版本；仅父来源图发布后可执行。"""
 
     __tablename__ = "rubric_versions"
     __table_args__ = (

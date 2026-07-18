@@ -1,0 +1,68 @@
+{
+  "adjusted_item": {
+    "ai_score": 9.45,
+    "created_at": "<TIMESTAMP>",
+    "criterion_code": "HYB-COMPLIANCE",
+    "criterion_id": "<UUID>",
+    "criterion_name": "研究规范综合检查",
+    "final_score": 16.0,
+    "id": "<UUID>",
+    "max_score": 20.0,
+    "need_manual_review": false,
+    "scoring_run_id": "<UUID>"
+  },
+  "review_logs": [
+    {
+      "after_score": 16.0,
+      "before_score": 9.45,
+      "created_at": "<TIMESTAMP>",
+      "id": "<UUID>",
+      "reason": "M0 golden：教师核对原文后调整混合项。",
+      "reviewer_id": "00000000-0000-0000-0000-000000000001",
+      "score_item_id": "<UUID>",
+      "scoring_run_id": "<UUID>"
+    },
+    {
+      "after_score": 62.8,
+      "before_score": 56.25,
+      "created_at": "<TIMESTAMP>",
+      "id": "<UUID>",
+      "reason": "M0 golden：人工复核完成。",
+      "reviewer_id": "00000000-0000-0000-0000-000000000001",
+      "score_item_id": null,
+      "scoring_run_id": "<UUID>"
+    }
+  ],
+  "run": {
+    "ai_total_score": 56.25,
+    "coherence_findings": [
+      {
+        "kind": "reference_uncited",
+        "location": null,
+        "message": "参考文献[1]未被正文引用",
+        "refs": [
+          1
+        ],
+        "severity": "info"
+      }
+    ],
+    "completion_tokens": 0,
+    "created_at": "<TIMESTAMP>",
+    "final_total_score": 62.8,
+    "finished_at": "<TIMESTAMP>",
+    "format_findings": [],
+    "grade": "及格",
+    "id": "<UUID>",
+    "model_name": "mock-criterion-scorer",
+    "model_provider": "mock",
+    "model_version": "v1",
+    "need_manual_review": false,
+    "owner_id": "00000000-0000-0000-0000-000000000001",
+    "paper_id": "<UUID>",
+    "prompt_tokens": 0,
+    "rubric_id": "<UUID>",
+    "started_at": "<TIMESTAMP>",
+    "status": "reviewed",
+    "total_tokens": 0
+  }
+}

@@ -59,7 +59,7 @@ class ScoringInputs:
     structure_checks: list
     rubric_id: str
     rubric_total_score: object
-    rubric_version: object
+    rubric_version: object  # legacy Rubric.version 显示标签，不是 RubricVersion identity
     base_coherence: list
     format_findings: list
     criteria: list  # [CriterionPlan]

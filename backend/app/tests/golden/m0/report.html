@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>论文评分报告</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 40px; line-height: 1.6; color: #1f2933; }
+    h1, h2 { color: #102a43; }
+    .meta { background: #f5f7fa; padding: 16px; border-radius: 8px; }
+    .score { font-size: 24px; font-weight: 700; }
+    .item { border-top: 1px solid #d9e2ec; padding: 18px 0; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #d9e2ec; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f5f7fa; }
+    blockquote { margin: 8px 0; padding: 8px 12px; background: #f8fafc; border-left: 4px solid #9fb3c8; }
+    .note { color: #627d98; font-size: 13px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>毕业论文智能评分报告</h1>
+  <div class="meta">
+    <div><strong>论文题目：</strong>M0 代表性毕业论文</div>
+    <div><strong>学生：</strong>M0 测试学生（M0001）</div>
+    <div><strong>评分标准：</strong>M0 论文评分兼容基线 / legacy-v1</div>
+    <div class="score">最终总分：62.8 / AI 初评分：56.25 / 等级：及格</div>
+    <div><strong>需要复核：</strong>否</div>
+    <div class="note">说明：本系统为"粗档辅助评分 + 人工复核"——AI 给出档位大方向（约九成落在教师评分相邻一档内），教师据证据定终分；不作为可信排名依据。标"需要复核"或近档边界处务必人工核定。</div>
+  </div>
+  <h2>评分明细</h2>
+
+<section class="item">
+  <h3>参考文献规范: 15.0/15.0</h3>
+  <p><strong>AI 得分：</strong>15.0；<strong>置信度：</strong>1.0</p>
+  <p><strong>评分说明：</strong>参考文献规范：编号制引文-参考文献双向核对，发现 0 处问题。</p>
+  <p><strong>扣分原因：</strong></p>
+  <p><strong>修改建议：</strong></p>
+  <div><strong>原文依据：</strong><blockquote>文中编号引用 1 处，参考文献 1 条<br><small>参考文献</small></blockquote></div>
+</section>
+
+
+<section class="item">
+  <h3>研究方法: 16.8/20.0</h3>
+  <p><strong>AI 得分：</strong>16.8；<strong>置信度：</strong>0.79</p>
+  <p><strong>评分说明：</strong>研究方法 按扣分制核算：满分 20.00，扣分合计 3.20，得 16.80/20.00。</p>
+  <p><strong>扣分原因：</strong>相关论述篇幅较短，支撑材料有限。（-3.2分）</p>
+  <p><strong>修改建议：</strong>建议围绕研究方法补充更明确的论证、数据或引用依据。</p>
+  <div><strong>原文依据：</strong><blockquote>本文采用问卷调查、数据清洗、回归分析和分类模型对教学质量进行建模。<br><small>第三章 研究方法，第1页</small></blockquote><blockquote>本文围绕教学质量评价问题展开研究，说明研究背景、研究意义和应用价值。 关键词：教学质量；机器学习；评价模型<br><small>中文摘要，第1页</small></blockquote><blockquote>基于机器学习的教学质量评价研究 姓名：张三 学号：20260001<br><small>未命名开头，第1页</small></blockquote></div>
+</section>
+
+
+<section class="item">
+  <h3>创新性: 15.0/20.0</h3>
+  <p><strong>AI 得分：</strong>15.0；<strong>置信度：</strong>0.79</p>
+  <p><strong>评分说明：</strong>创新性 按分档制核算：选档「良好」=15.00/20.00。</p>
+  <p><strong>扣分原因：</strong>相关论述篇幅较短，支撑材料有限。</p>
+  <p><strong>修改建议：</strong>建议围绕创新性补充更明确的论证、数据或引用依据。</p>
+  <div><strong>原文依据：</strong><blockquote>本文提出改进的指标加权方法，并增强评价结果解释能力。<br><small>第五章 创新点，第1页</small></blockquote><blockquote>本文围绕教学质量评价问题展开研究，说明研究背景、研究意义和应用价值。 关键词：教学质量；机器学习；评价模型<br><small>中文摘要，第1页</small></blockquote><blockquote>基于机器学习的教学质量评价研究 姓名：张三 学号：20260001<br><small>未命名开头，第1页</small></blockquote></div>
+</section>
+
+
+<section class="item">
+  <h3>研究规范综合检查: 16.0/20.0</h3>
+  <p><strong>AI 得分：</strong>9.45；<strong>置信度：</strong>0.553</p>
+  <p><strong>评分说明：</strong>研究规范综合检查 按混合制核算：2 个子检查合计 9.45/20.00。</p>
+  <p><strong>扣分原因：</strong>正文约 367 字，低于下限 3000（-7.02分）；当前评分项可用原文证据不足。；相关论述篇幅较短，支撑材料有限。；证据中对研究方法、数据来源或实验设计的描述不充分。</p>
+  <p><strong>修改建议：</strong>混合制：确定性子项由规则核验，语义子项由模型评分。</p>
+  <div><strong>原文依据：</strong><blockquote>正文约 367 字<br><small>全文</small></blockquote><blockquote>本文采用问卷调查、数据清洗、回归分析和分类模型对教学质量进行建模。<br><small>第三章 研究方法，第1页</small></blockquote><blockquote>本文围绕教学质量评价问题展开研究，说明研究背景、研究意义和应用价值。 关键词：教学质量；机器学习；评价模型<br><small>中文摘要，第1页</small></blockquote><blockquote>基于机器学习的教学质量评价研究 姓名：张三 学号：20260001<br><small>未命名开头，第1页</small></blockquote></div>
+</section>
+
+  <h2>章节数字摘要</h2>
+  <table><tr><th>章节</th><th>段落数</th><th>字符数</th></tr><tr><td>未命名开头</td><td>3</td><td>31</td></tr>
+<tr><td>中文摘要</td><td>2</td><td>52</td></tr>
+<tr><td>目录</td><td>0</td><td>0</td></tr>
+<tr><td>第一章 绪论</td><td>1</td><td>27</td></tr>
+<tr><td>第二章 文献综述</td><td>1</td><td>31</td></tr>
+<tr><td>第三章 研究方法</td><td>1</td><td>33</td></tr>
+<tr><td>第四章 实验结果与分析</td><td>1</td><td>32</td></tr>
+<tr><td>第五章 创新点</td><td>1</td><td>26</td></tr>
+<tr><td>结论</td><td>1</td><td>30</td></tr>
+<tr><td>参考文献</td><td>1</td><td>33</td></tr></table>
+  <h2>篇章一致性发现</h2>
+  <table><thead><tr><th>级别</th><th>类型</th><th>说明</th><th>计入扣分</th></tr></thead><tbody><tr><td>info</td><td>reference_uncited</td><td>参考文献[1]未被正文引用</td><td></td></tr></tbody></table>
+  <h2>格式问题</h2>
+  <p>未发现格式问题（或模板未规定格式 / 非 docx 提交无法判定）。</p>
+  <h2>人工复核记录</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>时间</th>
+      <th>类型</th>
+      <th>评分项</th>
+      <th>修改前</th>
+      <th>修改后</th>
+      <th>复核人</th>
+      <th>复核说明</th>
+    </tr>
+  </thead>
+  <tbody>
+
+<tr>
+  <td><TIMESTAMP></td>
+  <td>单项分数调整</td>
+  <td>研究规范综合检查</td>
+  <td>9.45</td>
+  <td>16.0</td>
+  <td>00000000-0000-0000-0000-000000000001</td>
+  <td>M0 golden：教师核对原文后调整混合项。</td>
+</tr>
+
+
+<tr>
+  <td><TIMESTAMP></td>
+  <td>整体验收复核</td>
+  <td></td>
+  <td>56.25</td>
+  <td>62.8</td>
+  <td>00000000-0000-0000-0000-000000000001</td>
+  <td>M0 golden：人工复核完成。</td>
+</tr>
+
+  </tbody>
+</table>
+
+</body>
+</html>

@@ -4,6 +4,8 @@
 编写日期：2026-05-18  
 适用对象：后端工程师、前端工程师、算法工程师、测试工程师、运维工程师
 
+> **M0 语义说明（2026-07-18）**：本文描述的是当前论文 legacy 实现。固定论文 prompt、模型自报 score/evidence、`chunk_id`、硬编码等级/复核边界及无条件人工重算，仅用于理解旧路径，不定义新通用 Core。新实现必须遵循 [`docs/adr/0001-general-scoring-core-foundations.md`](docs/adr/0001-general-scoring-core-foundations.md) 中的 AtomicRule 授权、稳定 evidence unit、冻结 policy、fail-closed 和 Profile 边界。
+
 ## 1. 技术目标
 
 本系统的技术目标是构建一套可审计、可扩展、可人工复核的 AI 论文评分平台。系统不只输出分数，还必须输出评分依据、原文位置、扣分原因和修改建议，并将结果稳定写入工作表。
