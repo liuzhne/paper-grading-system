@@ -1,22 +1,6 @@
-import re
+import math
 
-
-# 论文正文/证据文本属于不可信数据；命中以下特征视为疑似提示注入，标记人工复核（绝不据其改分）。
-INJECTION_PATTERNS = [
-    re.compile(r"忽略(以上|上述|前面|之前|前述).{0,8}(指令|提示|要求|规则|内容)"),
-    re.compile(r"(请|务必|必须|麻烦|帮我).{0,6}(给|打|评).{0,4}(满分|最高分|高分)"),
-    re.compile(r"(直接)?(给|打).{0,2}(满分|最高分)"),
-    re.compile(r"(忽略|无视).{0,6}(评分|扣分)(标准|规则)"),
-    re.compile(r"ignore\s+(the\s+)?(previous|above|prior|all).{0,24}instruction", re.IGNORECASE),
-    re.compile(r"(full|maximum|perfect)\s+(marks?|score)", re.IGNORECASE),
-    re.compile(r"system\s+prompt|you\s+are\s+now", re.IGNORECASE),
-]
-
-
-def detect_injection(text):
-    if not text:
-        return False
-    return any(pattern.search(str(text)) for pattern in INJECTION_PATTERNS)
+from backend.app.services.scoring.core.evidence import detect_injection
 
 
 REQUIRED_SCORE_KEYS = {
@@ -49,9 +33,13 @@ def validate_score_output(output, criterion, evidence_candidates):
 
     score = float(output["score"])
     max_score = float(criterion.max_score)
+    if not math.isfinite(score) or not math.isfinite(max_score):
+        raise ValueError("score and max_score must be finite")
     if score < 0 or score > max_score:
         raise ValueError("score %.2f out of range 0..%.2f" % (score, max_score))
     confidence = float(output["confidence"])
+    if not math.isfinite(confidence):
+        raise ValueError("confidence must be finite")
     if confidence < 0 or confidence > 1:
         raise ValueError("confidence must be between 0 and 1")
 
@@ -123,13 +111,15 @@ def _coerce_points(value):
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
 
 
 def coerce_deduction_items(value, fallback_strings=None):
-    """归一化为结构化扣分项 [{points, reason, rule_ref, evidence_location, evidence_quote}]。
+    """归一化结构化扣分项，并保留权威路径使用的 evidence_refs。
+
     模型若只给字符串 deductions（如 mock/历史输出），则按 fallback_strings 兜底，points 置空。"""
     items = []
     if isinstance(value, list):
@@ -137,17 +127,27 @@ def coerce_deduction_items(value, fallback_strings=None):
             if isinstance(entry, dict):
                 reason = str(entry.get("reason") or entry.get("text") or entry.get("deduction") or "").strip()
                 points = _coerce_points(entry.get("points"))
-                if not reason and points is None:
+                rule_ref = str(entry.get("rule_ref")) if entry.get("rule_ref") else None
+                if not reason and points is None and rule_ref is None:
                     continue
-                items.append(
-                    {
-                        "points": points,
-                        "reason": reason,
-                        "rule_ref": str(entry.get("rule_ref")) if entry.get("rule_ref") else None,
-                        "evidence_location": str(entry.get("evidence_location") or ""),
-                        "evidence_quote": str(entry.get("evidence_quote") or ""),
-                    }
-                )
+                normalized = {
+                    "points": points,
+                    "reason": reason,
+                    "rule_ref": rule_ref,
+                    "evidence_location": str(entry.get("evidence_location") or ""),
+                    "evidence_quote": str(entry.get("evidence_quote") or ""),
+                }
+                if "evidence_refs" in entry:
+                    raw_refs = entry.get("evidence_refs")
+                    evidence_refs = []
+                    if isinstance(raw_refs, (list, tuple)):
+                        for raw_ref in raw_refs:
+                            if not isinstance(raw_ref, str) or not raw_ref.strip():
+                                evidence_refs = []
+                                break
+                            evidence_refs.append(raw_ref.strip())
+                    normalized["evidence_refs"] = evidence_refs
+                items.append(normalized)
             elif isinstance(entry, str) and entry.strip():
                 items.append(_blank_deduction(entry))
     if not items:

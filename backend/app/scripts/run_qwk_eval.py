@@ -64,6 +64,10 @@ def _print_summary(report, report_path):
     print("样本 n=%s（数据集 %s，错误 %s）" % (report.get("n"), report.get("dataset_size"), len(report.get("errors") or [])))
     print("QWK=%s  MAE=%s  RMSE=%s" % (report.get("qwk"), report.get("mae"), report.get("rmse")))
     print("同档一致率=%s  相邻档一致率=%s" % (report.get("exact_grade_agreement"), report.get("adjacent_grade_agreement")))
+    print(
+        "复核率=%s  阻断率=%s"
+        % (report.get("review_rate"), report.get("blocked_rate"))
+    )
     per_criterion = report.get("per_criterion") or {}
     if per_criterion:
         print("逐维度 bias（>0 偏宽 / <0 偏严）：")

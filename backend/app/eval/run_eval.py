@@ -25,22 +25,41 @@ def run_evaluation(db, dataset_path, scorer=None, baseline=None):
     samples = load_dataset(dataset_path)
     predictions = []
     errors = []
+    completed_runs = 0
+    review_required_runs = 0
+    blocked_runs = 0
     for sample in samples:
         try:
             run = score_paper(db, sample.key, scorer=scorer)
         except Exception as exc:  # 单篇失败不应中断整批评估
             errors.append({"key": sample.key, "error": str(exc)})
             continue
+        completed_runs += 1
+        review_required_runs += int(bool(run.need_manual_review))
+        if run.final_total_score is None:
+            blocked_runs += 1
+            errors.append(
+                {
+                    "key": sample.key,
+                    "error": "自动总分因 invalid/blocked 评分项为空；该样本未进入指标",
+                }
+            )
+            continue
         predictions.append(
             EvalPrediction(
                 key=sample.key,
-                system_total=float(run.final_total_score or 0),
+                system_total=float(run.final_total_score),
                 system_items=_items_by_code(run),
             )
         )
 
     report = evaluate(predictions, samples)
     report["errors"] = errors
+    report["completed_runs"] = completed_runs
+    report["review_rate"] = (
+        review_required_runs / completed_runs if completed_runs else None
+    )
+    report["blocked_rate"] = blocked_runs / completed_runs if completed_runs else None
     report["generated_at"] = datetime.now(timezone.utc).isoformat()
     if baseline is not None:
         report["regression_issues"] = assert_no_regression(report, baseline)

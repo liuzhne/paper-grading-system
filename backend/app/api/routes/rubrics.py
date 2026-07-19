@@ -32,6 +32,7 @@ from backend.app.services.rubric_import.persist import build_criterion
 from backend.app.services.rubric_import.persist import extra_criterion_fields
 from backend.app.services.rubric_import.persist import persist_imported_rubric
 from backend.app.services.rubric_import.template import build_rubric_import_template
+from backend.app.services.scoring.core.policy import validate_weight_configuration
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
@@ -39,6 +40,7 @@ router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 @router.post("", response_model=RubricRead)
 def create_rubric(payload: RubricCreate, db: Session = Depends(get_db), user_id: str = Depends(current_user_id)):
     ensure_dev_user(db)
+    _validate_criteria_total(payload.total_score, payload.criteria)
     exists = db.scalar(select(Rubric).where(Rubric.name == payload.name, Rubric.version == payload.version))
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
@@ -128,7 +130,10 @@ def import_rubric_from_files(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    rubric = persist_imported_rubric(db, name, version, description, imported, created_by=user_id)
+    try:
+        rubric = persist_imported_rubric(db, name, version, description, imported, created_by=user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {
         "rubric": rubric,
         "warnings": imported.warnings,
@@ -176,6 +181,8 @@ def clone_rubric(
                 **extra_criterion_fields(criterion),
             )
         )
+
+    _validate_criteria_total(cloned.total_score, cloned.criteria)
 
     db.add(cloned)
     db.commit()
@@ -247,6 +254,7 @@ def publish_rubric(rubric_id: str, db: Session = Depends(get_db)):
     rubric = _load_rubric(db, rubric_id)
     if rubric is None:
         raise HTTPException(status_code=404, detail="rubric not found")
+    _validate_criteria_total(rubric.total_score, rubric.criteria)
     rubric.status = "published"
     rubric.published_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
@@ -267,13 +275,10 @@ def _safe_scorer():
 
 
 def _validate_criteria_total(total_score, criteria):
-    max_sum = round(sum(item.max_score for item in criteria), 2)
-    target_total = round(float(total_score), 2)
-    if max_sum == target_total:
-        return
-    weighted_sum = round(sum(item.weight or 0 for item in criteria), 2)
-    if weighted_sum != target_total:
-        raise HTTPException(status_code=400, detail="criterion max_score sum or weight sum must equal total_score")
+    try:
+        return validate_weight_configuration(criteria, total_score=total_score)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _is_excel_file(filename):

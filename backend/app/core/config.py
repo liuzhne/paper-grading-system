@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     AUTH_SECRET: str = "change-me-in-prod"  # 签发会话 token 的 HMAC 密钥，生产务必改
     AUTH_TOKEN_TTL_SECONDS: int = 86400
     LLM_PROVIDER: str = "mock"
+    # M3 rollout switch.  ``legacy`` remains the production-safe default;
+    # ``compare`` executes a non-authoritative Core candidate and ``core`` is
+    # reserved for explicitly isolated vertical validation until M8.
+    SCORING_ENGINE_MODE: Literal["legacy", "compare", "core"] = "legacy"
     LLM_FALLBACK_TO_MOCK: bool = True
     LLM_CACHE_ENABLED: bool = True  # L0 缓存/账本（设计§7）：按输入哈希复用 LLM 评分结果
     COHERENCE_SEMANTIC_ENABLED: bool = False  # §8 语义一致性核验（研究问题↔结论等）：每篇额外一次 LLM 调用，故默认 opt-in（设计「LLM 按需」）

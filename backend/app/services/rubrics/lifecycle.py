@@ -128,7 +128,19 @@ def _canonical_version_hash(
     compilation: models.RubricCompilation,
     version: models.RubricVersion,
 ) -> str:
-    """对发布所消费的完整、去 ID 版本图计算稳定 SHA-256。"""
+    """按版本声明的 scheme 对完整、去 ID 来源图计算稳定 SHA-256。
+
+    ``rubric-content-v1`` 的字节投影在 0011 已经发布，必须继续使用当时
+    的显式字段集合；0013 新增的 profile 和 scheme 不能悄然改变历史 hash。
+    ``rubric-content-v2`` 仅把业务 profile 纳入 version 子对象，scheme
+    自身是解释投影的元数据，不属于 hash 内容。
+    """
+
+    hash_scheme = version.hash_scheme or "rubric-content-v1"
+    if hash_scheme not in {"rubric-content-v1", "rubric-content-v2"}:
+        raise RubricLifecycleError(
+            f"不支持的 RubricVersion hash scheme: {hash_scheme!r}"
+        )
 
     graph = _load_source_graph(session, rubric.id)
     artifacts = [
@@ -289,12 +301,19 @@ def _canonical_version_hash(
                 "compilation_id",
                 "version",
                 "version_hash",
+                "hash_scheme",
+                "business_profile_key",
                 "created_by",
                 "created_at",
             },
         ),
         "rules": _stable_rows(rule_payloads),
     }
+    if hash_scheme == "rubric-content-v2":
+        graph_profile = version.business_profile_key
+        if not isinstance(graph_profile, str) or not graph_profile.strip():
+            raise RubricLifecycleError("rubric-content-v2 必须绑定非空 business profile")
+        payload["version"]["business_profile_key"] = graph_profile
     serialized = json.dumps(
         _canonical_value(payload),
         ensure_ascii=False,

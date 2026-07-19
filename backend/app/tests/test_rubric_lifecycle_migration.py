@@ -107,6 +107,12 @@ def test_0011_hash_foreign_key_cascades_and_downgrades_without_data_loss(
                 workflow_profile="template_driven",
                 global_policy={},
                 version_hash=old_hash,
+                # The test upgrades to the current head before exercising the
+                # historical 0011 cascade.  M3 makes these replay identities
+                # mandatory for every new version row; the v1/thesis values
+                # remain losslessly representable when the test downgrades.
+                business_profile_key="thesis",
+                hash_scheme="rubric-content-v1",
                 created_by="p103-user",
                 created_at=now,
             )

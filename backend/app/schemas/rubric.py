@@ -6,6 +6,8 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import model_validator
 
+from backend.app.services.scoring.core.policy import validate_weight_configuration
+
 
 class RubricCriterionCreate(BaseModel):
     code: str = Field(min_length=1)
@@ -34,13 +36,7 @@ class RubricCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_score_sum(self):
-        if not self.criteria:
-            raise ValueError("rubric must contain at least one criterion")
-        max_sum = round(sum(item.max_score for item in self.criteria), 2)
-        if max_sum != round(self.total_score, 2):
-            weighted_sum = round(sum(item.weight or 0 for item in self.criteria), 2)
-            if weighted_sum != round(self.total_score, 2):
-                raise ValueError("criterion max_score sum or weight sum must equal total_score")
+        validate_weight_configuration(self.criteria, total_score=self.total_score)
         return self
 
 
@@ -61,6 +57,8 @@ class RubricUpdate(BaseModel):
     def validate_criteria_when_present(self):
         if self.criteria is not None and not self.criteria:
             raise ValueError("rubric must contain at least one criterion")
+        if self.criteria is not None and self.total_score is not None:
+            validate_weight_configuration(self.criteria, total_score=self.total_score)
         return self
 
 

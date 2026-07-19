@@ -43,6 +43,9 @@ def build_labeled_eval(db: Session, rubric_id: str, papers_dir, scores_path, sco
     samples = []
     predictions = []
     errors = []
+    completed_runs = 0
+    review_required_runs = 0
+    blocked_runs = 0
     for entry in table:
         source = base_dir / entry["filename"]
         if not source.exists():
@@ -57,10 +60,25 @@ def build_labeled_eval(db: Session, rubric_id: str, papers_dir, scores_path, sco
         except Exception as exc:  # 单篇失败不中断整批
             errors.append({"filename": entry["filename"], "error": str(exc)})
             continue
+        completed_runs += 1
+        review_required_runs += int(bool(run.need_manual_review))
+        if run.final_total_score is None:
+            blocked_runs += 1
+            errors.append(
+                {
+                    "filename": entry["filename"],
+                    "error": "自动总分因 invalid/blocked 评分项为空；该样本未进入指标",
+                }
+            )
+            continue
         human_items = {code: value for code, value in entry["items"].items() if code in rubric_codes}
         samples.append(EvalSample(key=paper.id, human_total=entry["total"], human_items=human_items))
         predictions.append(
-            EvalPrediction(key=paper.id, system_total=float(run.final_total_score or 0), system_items=_items_by_code(run))
+            EvalPrediction(
+                key=paper.id,
+                system_total=float(run.final_total_score),
+                system_items=_items_by_code(run),
+            )
         )
     db.commit()
 
@@ -68,6 +86,11 @@ def build_labeled_eval(db: Session, rubric_id: str, papers_dir, scores_path, sco
     report["errors"] = errors
     report["rubric_id"] = rubric_id
     report["dataset_size"] = len(table)
+    report["completed_runs"] = completed_runs
+    report["review_rate"] = (
+        review_required_runs / completed_runs if completed_runs else None
+    )
+    report["blocked_rate"] = blocked_runs / completed_runs if completed_runs else None
     return report
 
 

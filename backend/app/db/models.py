@@ -24,6 +24,7 @@ from sqlalchemy.ext.mutable import MutableList
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import foreign
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 
@@ -38,6 +39,29 @@ def utcnow():
 
 class Base(DeclarativeBase):
     pass
+
+
+def _lower_hex_digest_check(column_name):
+    """生成 SQLite/PostgreSQL 都可执行的小写十六进制摘要约束。"""
+
+    stripped = column_name
+    for character in "0123456789abcdef":
+        stripped = "replace(%s, '%s', '')" % (stripped, character)
+    return "length(%s) = 64 AND length(%s) = 0" % (column_name, stripped)
+
+
+def _json_null_check(column_name):
+    return "(%s IS NULL OR CAST(%s AS TEXT) = 'null')" % (
+        column_name,
+        column_name,
+    )
+
+
+def _json_present_check(column_name):
+    return "(%s IS NOT NULL AND CAST(%s AS TEXT) <> 'null')" % (
+        column_name,
+        column_name,
+    )
 
 
 class User(Base):
@@ -79,6 +103,9 @@ class Rubric(Base):
         cascade="all, delete-orphan",
         order_by="RubricCriterion.display_order",
     )
+    # 建立 ORM flush 依赖顺序；只填写 created_by ID 且 User 同批新增时，
+    # SQLite 外键开启后也必须先 INSERT users，再 INSERT rubrics。
+    creator: Mapped["User | None"] = relationship(foreign_keys=[created_by])
 
 
 class RubricCriterion(Base):
@@ -280,6 +307,16 @@ class RubricVersion(Base):
             name="fk_rubric_versions_compilation_hash",
             onupdate="CASCADE",
         ),
+        # M3 的 batch/run 外键同时约束版本必须属于同一 rubric，并冻结
+        # version hash/hash scheme。SQLite 要求复合父键具有显式唯一约束。
+        UniqueConstraint("id", "rubric_id", name="uq_rubric_versions_id_rubric"),
+        UniqueConstraint(
+            "id",
+            "rubric_id",
+            "version_hash",
+            "hash_scheme",
+            name="uq_rubric_versions_replay_identity",
+        ),
         UniqueConstraint("compilation_id", name="uq_rubric_versions_compilation"),
         UniqueConstraint("rubric_id", "version", name="uq_rubric_versions_rubric_version"),
     )
@@ -296,9 +333,24 @@ class RubricVersion(Base):
         server_default=sql_text("'{}'"),
     )
     version_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Python defaults only preserve legacy callers that construct the ORM model
+    # directly.  The migration deliberately installs no server defaults: every
+    # future database write must state its profile/hash scheme explicitly.
+    business_profile_key: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="thesis"
+    )
+    hash_scheme: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="rubric-content-v1"
+    )
     created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
+    # 两个复合数据库外键共同冻结 compilation identity；此窄关系只负责
+    # ORM UnitOfWork 的 INSERT 顺序，完整一致性仍由数据库复合外键裁决。
+    compilation: Mapped["RubricCompilation"] = relationship(
+        primaryjoin=foreign(compilation_id) == RubricCompilation.id,
+        foreign_keys=[compilation_id],
+    )
     atomic_rules: Mapped[list["AtomicRule"]] = relationship(back_populates="rubric_version")
 
 
@@ -1132,6 +1184,117 @@ def _p103_validate_publish_signoff(session, rubric, candidates):
         raise ValueError("发布版本的来源或内容哈希不一致")
 
 
+def _p103_is_lower_hex_digest(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _p103_validate_atomic_published_import(session, rubric, candidates):
+    """校验一次 flush 中导入的、已经签核且被批次锁定的冻结版本图。
+
+    这是创建期的窄例外，不使用可遗留在 ``session.info`` 的 bypass 标志：
+    rubric、compilation、version 和 pinned batch 必须同时是 pending INSERT，
+    且完整身份互相匹配。对象一旦持久化，后续任何内容或状态修改仍走原有
+    published immutable guard。
+    """
+
+    if rubric not in session.new or rubric.status != "published":
+        raise ValueError("带 provenance 的新评分标准必须从 draft 开始")
+    if (
+        rubric.published_at is None
+        or not rubric.created_by
+        or _session_entity(session, User, rubric.created_by) is None
+    ):
+        raise ValueError("原子导入的已发布评分标准缺少创建者或发布时间")
+
+    compilations = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, RubricCompilation)
+        and candidate in session.new
+        and candidate not in session.deleted
+        and _p103_current_rubric_id(session, candidate) == rubric.id
+    ]
+    if len(compilations) != 1:
+        raise ValueError("原子导入必须且只能包含一个新 compilation")
+    compilation = compilations[0]
+    if (
+        compilation.rubric_id != rubric.id
+        or compilation.status != "validated"
+        or not compilation.created_by
+        or _session_entity(session, User, compilation.created_by) is None
+        or not compilation.reviewed_by
+        or _session_entity(session, User, compilation.reviewed_by) is None
+        or compilation.reviewed_at is None
+        or compilation.published_at is None
+        or compilation.reviewed_at != rubric.published_at
+        or compilation.published_at != rubric.published_at
+        or not _p103_is_lower_hex_digest(compilation.final_version_hash)
+    ):
+        raise ValueError("原子导入的 compilation 签核字段不完整或不一致")
+
+    versions = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, RubricVersion)
+        and candidate in session.new
+        and candidate not in session.deleted
+        and candidate.compilation_id == compilation.id
+    ]
+    if len(versions) != 1:
+        raise ValueError("原子导入的 compilation 必须对应且只对应一个新版本")
+    version = versions[0]
+    profile = version.business_profile_key
+    scheme = version.hash_scheme
+    if (
+        version.rubric_id != rubric.id
+        or version.compilation_id != compilation.id
+        or version.version_hash != compilation.final_version_hash
+        or not isinstance(version.workflow_profile, str)
+        or not version.workflow_profile.strip()
+        or not isinstance(profile, str)
+        or not profile.strip()
+        or scheme not in {"rubric-content-v1", "rubric-content-v2"}
+        or (scheme == "rubric-content-v1" and profile != "thesis")
+        or not version.created_by
+        or _session_entity(session, User, version.created_by) is None
+    ):
+        raise ValueError("原子导入的版本来源、profile 或内容哈希不一致")
+
+    pinned_batches = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, GradingBatch)
+        and candidate in session.new
+        and candidate not in session.deleted
+        and (
+            candidate.rubric_id == rubric.id
+            or candidate.rubric_version_id == version.id
+        )
+    ]
+    if not pinned_batches or any(
+        batch.rubric_id != rubric.id
+        or batch.rubric_version_id != version.id
+        for batch in pinned_batches
+    ):
+        raise ValueError("原子导入必须包含与 rubric/version 完整匹配的 pinned batch")
+
+    graph_candidates = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, _P103_CONTENT_TYPES)
+        and rubric.id in _p103_rubric_ids(session, candidate)
+    ]
+    if any(
+        candidate not in session.new or candidate in session.deleted
+        for candidate in graph_candidates
+    ):
+        raise ValueError("原子导入不能混入已持久化或待删除的版本图对象")
+
+
 @event.listens_for(Session, "before_flush")
 def _protect_published_rubric_graph(session, _flush_context, _instances):
     """P1-03：严格保护带 provenance 的评分标准；legacy 评分标准保持兼容。"""
@@ -1147,7 +1310,13 @@ def _protect_published_rubric_graph(session, _flush_context, _instances):
         if candidate.status not in _P103_STATUSES:
             raise ValueError("评分标准状态必须是 draft、review 或 published")
         if candidate in session.new:
-            if candidate.status != "draft":
+            if candidate.status == "published":
+                _p103_validate_atomic_published_import(
+                    session,
+                    candidate,
+                    candidates,
+                )
+            elif candidate.status != "draft":
                 raise ValueError("带 provenance 的新评分标准必须从 draft 开始")
             continue
         previous_status = _p103_database_rubric_status(session, candidate.id)
@@ -1185,6 +1354,14 @@ def _protect_published_rubric_graph(session, _flush_context, _instances):
 
 class GradingBatch(Base):
     __tablename__ = "grading_batches"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["rubric_version_id", "rubric_id"],
+            ["rubric_versions.id", "rubric_versions.rubric_id"],
+            name="fk_grading_batches_rubric_version_rubric",
+            ondelete="RESTRICT",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
@@ -1194,12 +1371,18 @@ class GradingBatch(Base):
     academic_year: Mapped[str] = mapped_column(String(20), nullable=True)
     paper_type: Mapped[str] = mapped_column(String(50), nullable=True)
     rubric_id: Mapped[str] = mapped_column(String(36), ForeignKey("rubrics.id"), nullable=False)
+    rubric_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="draft")
     created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
     rubric: Mapped["Rubric"] = relationship()
+    # 同理，仅用 version id 建立 flush 依赖；rubric 一致性由复合 FK 保证。
+    rubric_version: Mapped["RubricVersion | None"] = relationship(
+        primaryjoin=foreign(rubric_version_id) == RubricVersion.id,
+        foreign_keys=[rubric_version_id],
+    )
     papers: Mapped[list["Paper"]] = relationship(back_populates="batch", cascade="all, delete-orphan")
 
 
@@ -1247,6 +1430,99 @@ class PaperChunk(Base):
 
 class ScoringRun(Base):
     __tablename__ = "scoring_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "(%s AND policy_hash IS NULL AND policy_schema_version IS NULL) "
+            "OR (%s AND policy_hash IS NOT NULL "
+            "AND policy_schema_version IS NOT NULL AND length(policy_schema_version) > 0 "
+            "AND %s)"
+            % (
+                _json_null_check("policy_snapshot"),
+                _json_present_check("policy_snapshot"),
+                _lower_hex_digest_check("policy_hash"),
+            ),
+            name="ck_scoring_runs_policy_identity",
+        ),
+        CheckConstraint(
+            "(rubric_source_kind IS NULL "
+            "AND rubric_snapshot_hash IS NULL "
+            "AND rubric_version_id IS NULL "
+            "AND rubric_version_hash IS NULL "
+            "AND rubric_hash_scheme IS NULL "
+            "AND business_profile_key IS NULL "
+            "AND workflow_profile IS NULL "
+            "AND execution_plan_snapshot IS NULL "
+            "AND execution_plan_hash IS NULL "
+            "AND plan_schema_version IS NULL "
+            "AND checker_manifest IS NULL "
+            "AND source_artifact_hash IS NULL "
+            "AND normalized_content_hash IS NULL "
+            "AND document_snapshot_ref IS NULL "
+            "AND document_snapshot_hash IS NULL "
+            "AND document_schema_version IS NULL "
+            "AND engine_version IS NULL "
+            "AND rescore_generation IS NULL "
+            "AND idempotency_key IS NULL) "
+            "OR (rubric_source_kind IS NOT NULL "
+            "AND rubric_source_kind IN ('published_version', 'legacy_unversioned') "
+            "AND rubric_snapshot_hash IS NOT NULL AND %s "
+            "AND business_profile_key IS NOT NULL AND length(business_profile_key) > 0 "
+            "AND workflow_profile IS NOT NULL AND length(workflow_profile) > 0 "
+            "AND execution_plan_snapshot IS NOT NULL "
+            "AND execution_plan_hash IS NOT NULL AND %s "
+            "AND plan_schema_version IS NOT NULL AND length(plan_schema_version) > 0 "
+            "AND checker_manifest IS NOT NULL "
+            "AND source_artifact_hash IS NOT NULL AND %s "
+            "AND normalized_content_hash IS NOT NULL AND %s "
+            "AND document_snapshot_ref IS NOT NULL AND length(document_snapshot_ref) > 0 "
+            "AND document_snapshot_hash IS NOT NULL AND %s "
+            "AND document_schema_version IS NOT NULL AND length(document_schema_version) > 0 "
+            "AND engine_version IS NOT NULL AND length(engine_version) > 0 "
+            "AND rescore_generation IS NOT NULL AND rescore_generation >= 0 "
+            "AND idempotency_key IS NOT NULL AND %s "
+            "AND policy_snapshot IS NOT NULL "
+            "AND policy_hash IS NOT NULL AND %s "
+            "AND policy_schema_version IS NOT NULL AND length(policy_schema_version) > 0 "
+            "AND ((rubric_source_kind = 'legacy_unversioned' "
+            "AND rubric_version_id IS NULL AND rubric_version_hash IS NULL "
+            "AND rubric_hash_scheme IS NULL) "
+            "OR (rubric_source_kind = 'published_version' "
+            "AND rubric_version_id IS NOT NULL "
+            "AND rubric_version_hash IS NOT NULL AND %s "
+            "AND rubric_hash_scheme IS NOT NULL AND length(rubric_hash_scheme) > 0)))"
+            % tuple(
+                _lower_hex_digest_check(name)
+                for name in (
+                    "rubric_snapshot_hash",
+                    "execution_plan_hash",
+                    "source_artifact_hash",
+                    "normalized_content_hash",
+                    "document_snapshot_hash",
+                    "idempotency_key",
+                    "policy_hash",
+                    "rubric_version_hash",
+                )
+            ),
+            name="ck_scoring_runs_core_replay_identity",
+        ),
+        ForeignKeyConstraint(
+            [
+                "rubric_version_id",
+                "rubric_id",
+                "rubric_version_hash",
+                "rubric_hash_scheme",
+            ],
+            [
+                "rubric_versions.id",
+                "rubric_versions.rubric_id",
+                "rubric_versions.version_hash",
+                "rubric_versions.hash_scheme",
+            ],
+            name="fk_scoring_runs_rubric_version_identity",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("idempotency_key", name="uq_scoring_runs_idempotency_key"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
@@ -1267,6 +1543,32 @@ class ScoringRun(Base):
     coherence_findings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     # 格式问题清单（设计§9）：被评论文有效格式 vs 模板 FormatSpec 的比对发现。
     format_findings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    policy_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    policy_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_schema_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    rubric_source_kind: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    rubric_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rubric_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    rubric_version_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rubric_hash_scheme: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    business_profile_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    workflow_profile: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    execution_plan_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    execution_plan_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    plan_schema_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    checker_manifest: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    source_artifact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    normalized_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    document_snapshot_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    document_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    document_schema_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    engine_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    rescore_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
@@ -1282,12 +1584,32 @@ class ScoringRun(Base):
 
 class ScoreItem(Base):
     __tablename__ = "score_items"
+    __table_args__ = (
+        CheckConstraint(
+            "(%s AND aggregation_schema_version IS NULL "
+            "AND auto_score_status IS NULL AND ai_score IS NOT NULL) "
+            "OR (%s AND aggregation_schema_version IS NOT NULL "
+            "AND length(aggregation_schema_version) > 0 "
+            "AND auto_score_status IS NOT NULL "
+            "AND auto_score_status IN ('calculated', 'invalid', 'blocked') "
+            "AND ((auto_score_status = 'calculated' AND ai_score IS NOT NULL) "
+            "OR (auto_score_status IN ('invalid', 'blocked') AND ai_score IS NULL)))"
+            % (_json_null_check("aggregation"), _json_present_check("aggregation")),
+            name="ck_score_items_aggregation_state",
+        ),
+        CheckConstraint(
+            "(rule_results IS NULL AND rule_results_schema_version IS NULL) "
+            "OR (rule_results IS NOT NULL AND rule_results_schema_version IS NOT NULL "
+            "AND length(rule_results_schema_version) > 0)",
+            name="ck_score_items_rule_results_identity",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     scoring_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("scoring_runs.id"), nullable=False)
     criterion_id: Mapped[str] = mapped_column(String(36), ForeignKey("rubric_criteria.id"), nullable=False)
     max_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
-    ai_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
+    ai_score: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
     final_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=True)
     evidence_sufficient: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1302,6 +1624,15 @@ class ScoreItem(Base):
     confidence: Mapped[float] = mapped_column(Numeric(5, 3), nullable=True)
     need_manual_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     raw_model_output: Mapped[dict] = mapped_column(JSON, nullable=True)
+    aggregation: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    aggregation_schema_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    auto_score_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    rule_results: Mapped[list | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    rule_results_schema_version: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     scoring_run: Mapped["ScoringRun"] = relationship(back_populates="items")
@@ -1318,6 +1649,16 @@ class ScoreItem(Base):
 
 class ReviewLog(Base):
     __tablename__ = "review_logs"
+    __table_args__ = (
+        CheckConstraint(
+            "(policy_hash IS NULL AND resolution_type IS NULL) "
+            "OR (policy_hash IS NOT NULL AND %s "
+            "AND resolution_type IS NOT NULL "
+            "AND resolution_type IN ('ordinary_override', 'resolve_validation', "
+            "'resolve_block', 'rescore'))" % _lower_hex_digest_check("policy_hash"),
+            name="ck_review_logs_policy_resolution",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     scoring_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("scoring_runs.id"), nullable=False)
@@ -1326,6 +1667,8 @@ class ReviewLog(Base):
     before_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=True)
     after_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=True)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolution_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
 

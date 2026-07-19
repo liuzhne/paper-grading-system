@@ -4,6 +4,7 @@ from backend.app.eval.runner import EvalSample
 from backend.app.eval.runner import assert_no_regression
 from backend.app.eval.runner import baseline_from_report
 from backend.app.eval.runner import evaluate
+from backend.app.eval import run_eval
 
 
 def test_qwk_perfect_agreement_is_one():
@@ -80,3 +81,27 @@ def test_regression_gate_passes_and_fails():
     assert issues and "QWK 回退" in issues[0]
     mae_issues = assert_no_regression({"qwk": 0.96, "mae": 3.5}, baseline, mae_rise_tol=1.0)
     assert mae_issues and "MAE 上升" in mae_issues[0]
+
+
+def test_blocked_final_total_is_excluded_instead_of_becoming_zero(tmp_path, monkeypatch):
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(
+        '[{"key":"paper-1","human_total":88,"human_items":{}}]',
+        encoding="utf-8",
+    )
+
+    class BlockedRun:
+        final_total_score = None
+        need_manual_review = True
+        items = []
+
+    monkeypatch.setattr(run_eval, "score_paper", lambda *_args, **_kwargs: BlockedRun())
+    monkeypatch.setattr(run_eval, "_write_report", lambda _report: tmp_path / "report.json")
+
+    report = run_eval.run_evaluation(object(), dataset)
+
+    assert report["n"] == 0
+    assert report["completed_runs"] == 1
+    assert report["review_rate"] == 1.0
+    assert report["blocked_rate"] == 1.0
+    assert report["errors"] and "未进入指标" in report["errors"][0]["error"]
