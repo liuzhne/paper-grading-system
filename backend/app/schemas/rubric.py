@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from typing import Optional
 
 from pydantic import BaseModel
@@ -44,6 +45,87 @@ class RubricCloneRequest(BaseModel):
     new_version: str = Field(min_length=1)
     name: Optional[str] = Field(default=None, min_length=1)
     description: Optional[str] = None
+
+
+class RubricLifecycleReason(BaseModel):
+    reason: str = Field(default="人工生命周期操作", min_length=1)
+
+
+class RubricPublishRequest(RubricLifecycleReason):
+    compilation_id: Optional[str] = None
+
+
+class AtomicRuleEditRequest(RubricLifecycleReason):
+    changes: dict
+
+
+class RubricDraftRecompileRequest(RubricLifecycleReason):
+    supersedes_compilation_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    criteria: list[RubricCriterionCreate] = Field(min_length=1)
+    global_policy: dict = Field(default_factory=dict)
+    workflow_profile: str = Field(default="manual_json", min_length=1)
+    business_profile_key: str = Field(default="thesis", min_length=1)
+
+
+class ExecutionDraftVersionRead(BaseModel):
+    id: str
+    version: str
+    workflow_profile: str
+    business_profile_key: str
+
+
+class ExecutionDraftRuleRead(BaseModel):
+    id: str
+    rule_code: str
+    name: str
+    direction: str
+    effect_type: str
+    judge_type: str
+    status: str
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+
+
+class ExecutionDraftTemplateLinkRead(BaseModel):
+    id: str
+    rule_code: str
+    review_status: str
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+
+
+class ExecutionDraftCompilationRead(BaseModel):
+    id: str
+    status: str
+    blockers: list[Any] = Field(default_factory=list)
+    warnings: list[Any] = Field(default_factory=list)
+    version: Optional[ExecutionDraftVersionRead] = None
+    rules: list[ExecutionDraftRuleRead] = Field(default_factory=list)
+    template_links: list[ExecutionDraftTemplateLinkRead] = Field(default_factory=list)
+
+
+class ExecutionDraftCompilationSummaryRead(BaseModel):
+    id: str
+    status: str
+    is_active: bool
+    blocker_count: int
+    created_at: datetime
+    published_at: Optional[datetime] = None
+
+
+class RubricExecutionDraftRead(BaseModel):
+    rubric_id: str
+    rubric_status: str
+    active_compilation: Optional[ExecutionDraftCompilationRead] = None
+    compilations: list[ExecutionDraftCompilationSummaryRead] = Field(
+        default_factory=list
+    )
+    ambiguity: Optional[str] = None
+
+
+class TemplateLinkReviewRequest(RubricLifecycleReason):
+    decision: str
 
 
 class RubricUpdate(BaseModel):

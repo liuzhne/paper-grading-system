@@ -34,6 +34,9 @@ _VERSION_CONTENT_FIELDS = {
     "version",
     "rules",
 }
+_M4_COMPILER_VERSIONS = frozenset(
+    {"atomic-rule-compiler@1", "legacy-upgrade@1"}
+)
 
 
 def _require_closed(value, fields: set[str], label: str) -> dict:
@@ -53,6 +56,26 @@ def _assessment_mode(scoring_mode: object) -> object:
         "deductive": "deduct",
         "banded": "band",
     }.get(scoring_mode, scoring_mode)
+
+
+def _atomic_rule_schema_version(compiler_version: object) -> str:
+    if compiler_version in _M4_COMPILER_VERSIONS:
+        return "atomic-rule-snapshot@2"
+    return "atomic-rule-snapshot@1"
+
+
+def _rule_evidence_policy(source: Mapping[str, object], schema_version: str) -> dict:
+    policy = deepcopy(source["evidence_policy"])
+    if (
+        schema_version == "atomic-rule-snapshot@2"
+        and source["judge_type"] == "semantic"
+        and not policy.get("allowed_finding_codes")
+    ):
+        # M4 finding authorization is frozen into the executable rule.  Older
+        # imported graphs did not expose a separate finding-code column, so
+        # their immutable rule identity is the deterministic fallback enum.
+        policy["allowed_finding_codes"] = [source["rule_code"]]
+    return policy
 
 
 def _compiled_from_version_content(
@@ -75,12 +98,15 @@ def _compiled_from_version_content(
         }
         for item in content["criteria"]
     ]
+    atomic_rule_schema_version = _atomic_rule_schema_version(
+        content["compilation"].get("compiler_version")
+    )
     rules = []
     for item in content["rules"]:
         source = item["rule"]
         rules.append(
             {
-                "schema_version": "atomic-rule-snapshot@1",
+                "schema_version": atomic_rule_schema_version,
                 "rule_code": source["rule_code"],
                 "criterion_code": item["criterion_code"],
                 "direction": source["direction"],
@@ -89,7 +115,9 @@ def _compiled_from_version_content(
                 "checker_key": source["checker_key"],
                 "checker_version": None,
                 "checker_params": deepcopy(source["checker_params"]),
-                "evidence_policy": deepcopy(source["evidence_policy"]),
+                "evidence_policy": _rule_evidence_policy(
+                    source, atomic_rule_schema_version
+                ),
                 "max_points": source["max_points"],
                 "repeat_policy": source["repeat_policy"],
                 "cap_points": source["cap_points"],
@@ -291,6 +319,9 @@ class CompiledRubricSnapshotLoader:
             for item in criteria_rows
         ]
         rules = []
+        atomic_rule_schema_version = _atomic_rule_schema_version(
+            compilation.compiler_version
+        )
         for item in rule_rows:
             criterion = next(
                 (candidate for candidate in criteria_rows if candidate.id == item.criterion_id),
@@ -305,7 +336,7 @@ class CompiledRubricSnapshotLoader:
             ).all()
             rules.append(
                 {
-                    "schema_version": "atomic-rule-snapshot@1",
+                    "schema_version": atomic_rule_schema_version,
                     "rule_code": item.rule_code,
                     "criterion_code": criterion.code,
                     "direction": item.direction,
@@ -314,7 +345,14 @@ class CompiledRubricSnapshotLoader:
                     "checker_key": item.checker_key,
                     "checker_version": None,
                     "checker_params": deepcopy(item.checker_params),
-                    "evidence_policy": deepcopy(item.evidence_policy),
+                    "evidence_policy": _rule_evidence_policy(
+                        {
+                            "rule_code": item.rule_code,
+                            "judge_type": item.judge_type,
+                            "evidence_policy": item.evidence_policy,
+                        },
+                        atomic_rule_schema_version,
+                    ),
                     "max_points": item.max_points,
                     "repeat_policy": item.repeat_policy,
                     "cap_points": item.cap_points,

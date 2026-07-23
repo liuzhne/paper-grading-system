@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.core.config import settings
+from backend.app.tests.conftest import create_legacy_unversioned_rubric_fixture
 from backend.app.tests.conftest import make_sample_docx
 
 
@@ -96,9 +97,7 @@ def m0_scored_run(client, monkeypatch):
     monkeypatch.setattr(settings, "SCORING_FULL_SCORE_REVIEW_RATIO", 0.95)
     monkeypatch.setattr(settings, "SCORING_HIGH_CONFIDENCE", 0.85)
 
-    rubric_response = client.post("/api/rubrics", json=M0_RUBRIC)
-    assert rubric_response.status_code == 200, rubric_response.text
-    rubric_id = rubric_response.json()["id"]
+    rubric_id = create_legacy_unversioned_rubric_fixture(client, M0_RUBRIC)
 
     batch_response = client.post(
         "/api/batches",

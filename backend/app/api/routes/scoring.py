@@ -21,6 +21,7 @@ from backend.app.schemas.scoring import ScoringRunRead
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.llm.base import LLMScoringError
 from backend.app.services.scoring.engine import score_paper
+from backend.app.services.scoring.engine import retry_score_paper
 from backend.app.services.scoring.engine import submit_review
 from backend.app.services.scoring.engine import update_score_item
 
@@ -77,7 +78,7 @@ def retry_scoring_run(run_id: str, db: Session = Depends(get_db)):
     if run is None:
         raise HTTPException(status_code=404, detail="scoring run not found")
     try:
-        return score_paper(db, run.paper_id)
+        return retry_score_paper(db, run.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except LLMScoringError as exc:

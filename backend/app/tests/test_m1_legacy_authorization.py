@@ -24,11 +24,15 @@ from sqlalchemy import select
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricVersion
+from backend.app.db.models import Paper
 from backend.app.db.models import ScoreItem
+from backend.app.db.models import ScoringRun
 from backend.app.db.session import get_db
 from backend.app.main import app
 from backend.app.services.scoring import engine as engine_module
 from backend.app.tests.conftest import make_sample_docx
+from backend.app.tests.conftest import publish_rubric_via_api
+from backend.app.tests.conftest import review_rubric_via_api
 
 
 _LEGACY_TARGET = "backend.app.services.scoring.adapters.legacy_rubric"
@@ -146,8 +150,7 @@ def _create_published_paper(client, name, *, criterion=None):
     )
     assert rubric_response.status_code == 200, rubric_response.text
     rubric_id = rubric_response.json()["id"]
-    publish_response = client.post(f"/api/rubrics/{rubric_id}/publish")
-    assert publish_response.status_code == 200, publish_response.text
+    publish_rubric_via_api(client, rubric_id)
     batch_response = client.post(
         "/api/batches",
         json={"name": f"{name}-batch", "rubric_id": rubric_id},
@@ -816,7 +819,7 @@ def test_any_existing_provenance_cannot_fall_back_to_legacy_unversioned(legacy_s
 
 
 @requires_legacy_executor
-def test_real_scoring_entry_fails_closed_when_rubric_has_unpublished_provenance(request):
+def test_locked_published_version_is_not_displaced_by_unpublished_compilation(request):
     _require_legacy_executor()
     client = request.getfixturevalue("client")
     rubric_id, paper_id = _create_published_paper(client, "M1-unpublished-provenance")
@@ -850,65 +853,22 @@ def test_real_scoring_entry_fails_closed_when_rubric_has_unpublished_provenance(
         db_generator.close()
 
     score_response = client.post(f"/api/papers/{paper_id}/score")
-    assert score_response.status_code in {400, 409, 422}, score_response.text
-    assert re.search("provenance|legacy|compilation|发布|来源|编译", score_response.text, re.IGNORECASE)
-    runs_response = client.get("/api/scoring-runs", params={"paper_id": paper_id})
-    assert runs_response.status_code == 200, runs_response.text
-    assert runs_response.json() == []
+    assert score_response.status_code == 200, score_response.text
+    with client.session_factory() as db:
+        paper = db.get(Paper, paper_id)
+        run = db.get(ScoringRun, score_response.json()["id"])
+        assert paper.batch.rubric_version_id is not None
+        assert run.rubric_version_id == paper.batch.rubric_version_id
 
 
 @requires_legacy_executor
 def test_formal_version_scoring_never_reaches_the_old_arbitrary_points_function(request, monkeypatch):
     _require_legacy_executor()
     client = request.getfixturevalue("client")
-    rubric_id, paper_id = _create_published_paper(client, "M1-formal-no-arbitrary-points")
-    version_hash = "f" * 64
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-
-    db_generator, db = _db_session_from_client_fixture()
-    try:
-        rubric = db.scalar(select(Rubric).where(Rubric.id == rubric_id))
-        db.execute(
-            RubricCompilation.__table__.insert().values(
-                id="m1-published-compilation",
-                rubric_id=rubric_id,
-                status="published",
-                parser_version="m1-contract-parser-v1",
-                compiler_version="m1-contract-compiler-v1",
-                model_provider=None,
-                model_name=None,
-                sampling_params={},
-                prompt_version="m1-contract-prompt-v1",
-                raw_parse_output={},
-                raw_model_output={},
-                validation_result={"valid": True},
-                blockers=[],
-                warnings=[],
-                human_changes=[],
-                created_by=rubric.created_by,
-                reviewed_by=rubric.created_by,
-                reviewed_at=now,
-                published_at=now,
-                final_version_hash=version_hash,
-            )
-        )
-        db.execute(
-            RubricVersion.__table__.insert().values(
-                id="m1-formal-version",
-                rubric_id=rubric_id,
-                compilation_id="m1-published-compilation",
-                version="1.0.0",
-                workflow_profile="excel_only",
-                global_policy={},
-                version_hash=version_hash,
-                created_by=rubric.created_by,
-                created_at=now,
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
-        db_generator.close()
+    _rubric_id, paper_id = _create_published_paper(
+        client,
+        "M1-formal-no-arbitrary-points",
+    )
 
     if hasattr(engine_module, "_apply_deductive"):
         def old_arbitrary_points_forbidden(*_args, **_kwargs):
@@ -917,13 +877,12 @@ def test_formal_version_scoring_never_reaches_the_old_arbitrary_points_function(
         monkeypatch.setattr(engine_module, "_apply_deductive", old_arbitrary_points_forbidden)
 
     response = client.post(f"/api/papers/{paper_id}/score")
-    assert response.status_code in {400, 409, 422}, response.text
-    assert re.search("formal|version|atomic|rule|正式|版本|规则", response.text, re.IGNORECASE)
-    assert client.get("/api/scoring-runs", params={"paper_id": paper_id}).json() == []
+    assert response.status_code == 200, response.text
+    assert client.get("/api/scoring-runs", params={"paper_id": paper_id}).json()
 
 
 @requires_legacy_executor
-def test_published_historical_deductive_rule_persists_a_blocked_run_instead_of_full_score(
+def test_published_m4_deductive_rule_persists_auditable_block_instead_of_full_score(
     request,
 ):
     _require_legacy_executor()
@@ -952,10 +911,11 @@ def test_published_historical_deductive_rule_persists_a_blocked_run_instead_of_f
             select(ScoreItem).where(ScoreItem.scoring_run_id == run["id"])
         )
         assert stored is not None
-        issues = (stored.raw_model_output or {}).get("validation_issues") or []
-        assert any(
-            issue.get("code") == "LEGACY_RULE_REVIEW_ONLY"
-            for issue in issues
+        assert stored.rule_results_schema_version == "rule-results@2"
+        assert stored.rule_results
+        assert all(
+            result.get("rule_code")
+            for result in stored.rule_results
         )
     finally:
         db.close()
@@ -1001,26 +961,48 @@ def test_published_historical_deductive_rule_persists_a_blocked_run_instead_of_f
         ),
     ],
 )
-def test_authoritative_api_gate_rejects_unsupported_criteria_without_partial_run(
+def test_publish_gate_rejects_unsupported_criteria_before_batch_creation(
     request,
     case_name,
     criterion,
     message,
 ):
     client = request.getfixturevalue("client")
-    _rubric_id, paper_id = _create_published_paper(
-        client,
-        f"M1-authoritative-gate-{case_name}",
-        criterion=criterion,
+    create_response = client.post(
+        "/api/rubrics",
+        json={
+            "name": f"M1-authoritative-gate-{case_name}",
+            "version": "v1.0",
+            "total_score": 10,
+            "criteria": [criterion],
+        },
+    )
+    assert create_response.status_code == 200, create_response.text
+    rubric_id = create_response.json()["id"]
+    identity = review_rubric_via_api(client, rubric_id)
+
+    response = client.post(
+        f"/api/rubrics/{rubric_id}/publish",
+        json={
+            "compilation_id": identity["compilation_id"],
+            "reason": "不支持的旧评分项必须在发布前被拦截",
+        },
     )
 
-    response = client.post(f"/api/papers/{paper_id}/score")
-
     assert response.status_code == 400, response.text
-    assert message.lower() in response.text.lower()
-    runs = client.get("/api/scoring-runs", params={"paper_id": paper_id})
-    assert runs.status_code == 200, runs.text
-    assert runs.json() == []
+    assert "validated" in response.text.lower() or "不可发布" in response.text
+    with client.session_factory() as db:
+        compilation = db.get(RubricCompilation, identity["compilation_id"])
+        assert compilation.status == "blocked"
+        assert any(
+            blocker.get("code") == "MISSING_EXECUTABLE_SCORING_MODE"
+            for blocker in compilation.blockers
+        )
+    batch = client.post(
+        "/api/batches",
+        json={"name": f"{case_name}-batch", "rubric_id": rubric_id},
+    )
+    assert batch.status_code == 400, batch.text
 
 
 @requires_legacy_executor

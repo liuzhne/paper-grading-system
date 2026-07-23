@@ -188,6 +188,7 @@ class LegacyPaperAdapter:
         profile_version: str,
         parser_version: str,
         normalizer_version: str,
+        submission_instance_key: str | None = None,
     ) -> LegacyPaperSnapshots:
         # ``chunks`` are intentionally not an identity source.  Legacy chunk
         # row IDs and boundaries are mutable retrieval artifacts; normalized
@@ -204,13 +205,26 @@ class LegacyPaperAdapter:
             raise ValueError("legacy adapter versions and profile must be non-empty")
 
         metadata = _business_metadata(paper, parsed)
-        submission_identity = canonical_sha256(
-            {
+        if submission_instance_key is None:
+            submission_identity_input = {
                 "scheme": "legacy-submission-id-v1",
                 "profile_key": profile_key,
                 "metadata": metadata,
             }
-        )
+        else:
+            instance_key = _text(submission_instance_key)
+            if not instance_key:
+                raise ValueError("submission instance key must be non-empty")
+            # Multiple uploaded Paper rows may intentionally contain identical
+            # bytes and metadata.  Keep their request idempotency scopes
+            # distinct without leaking the database identifier into the Core
+            # snapshot or turning it into a document content identity.
+            submission_identity_input = {
+                "scheme": "legacy-submission-instance-id-v1",
+                "profile_key": profile_key,
+                "instance_key": instance_key,
+            }
+        submission_identity = canonical_sha256(submission_identity_input)
         submission = SubmissionSnapshot.from_mapping(
             {
                 "schema_version": "submission-snapshot@1",

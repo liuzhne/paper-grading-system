@@ -1,8 +1,7 @@
-"""Pure M3 scoring vertical slice.
+"""Pure Core scoring entry point with versioned execution paths.
 
-The module intentionally executes only the two rule shapes admitted by M3:
-one deterministic, once-only deduction and one semantic band selection.  The
-general AtomicRule state machine remains an M4 concern.  All infrastructure is
+Frozen AtomicRule @1 plans retain the M3 compatibility path.  Plans containing
+AtomicRule @2 delegate to the complete M4 rule executor.  All infrastructure is
 supplied through explicit arguments, so scoring is deterministic and replayable.
 """
 
@@ -15,11 +14,12 @@ from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3, ScoringRequest
 from backend.app.services.scoring.core.policy import aggregate_scores, compile_scoring_policy
 from backend.app.services.scoring.core.results import ScoringOutcome
+from backend.app.services.scoring.core.rule_executor import execute_rule_plan
 
 
 # This value is deliberately mirrored by services.cache.llm_cache.  Importing
 # that adapter from Core would violate the M2 dependency boundary.
-PROMPT_VERSION = "2026-07-19-6"
+PROMPT_VERSION = "2026-07-20-7"
 
 
 def _plain(value):
@@ -211,13 +211,70 @@ def _blocked_outcome(
 
 
 def score_submission(*, request, checker_registry, llm_runtime, profile) -> ScoringOutcome:
-    """Score the deliberately small M3 rule subset without infrastructure I/O."""
+    """Score a frozen request without database, filesystem, or wall-clock I/O."""
 
     dto = ScoringRequest.from_mapping(_plain(request))
     value = dto.to_mapping()
     _validate_profile(profile, value)
 
     plan = value["plan"]
+    if any(
+        node["atomic_rule_snapshot"]["schema_version"]
+        == "atomic-rule-snapshot@2"
+        for node in plan["nodes"]
+    ):
+        execution = execute_rule_plan(
+            request=dto,
+            checker_registry=checker_registry,
+            llm_runtime=llm_runtime,
+            profile=profile,
+        )
+        executed = execution.to_mapping()
+        unrounded_total = None
+        final_total = None
+        grade = None
+        if executed["status"] == "completed":
+            criteria_by_code = {
+                node["criterion_code"]: node["criterion_snapshot"]
+                for node in plan["nodes"]
+            }
+            aggregate_items = []
+            for outcome in executed["criterion_outcomes"]:
+                criterion = criteria_by_code[outcome["criterion_code"]]
+                aggregate_items.append(
+                    {
+                        "criterion_code": outcome["criterion_code"],
+                        "max_score": criterion["max_score"],
+                        "weight": criterion["weight"],
+                        "raw_score": outcome["auto_score"],
+                        "final_score": outcome["final_score"],
+                        "auto_score_status": "calculated",
+                    }
+                )
+            policy = compile_scoring_policy(
+                plan["policy_snapshot"],
+                total_score=plan["policy_snapshot"]["aggregation"]["total_score"],
+            )
+            aggregated = aggregate_scores(policy, aggregate_items)
+            unrounded_total = _decimal_text(aggregated.unrounded_total)
+            final_total = _decimal_text(aggregated.rounded_total)
+            grade = aggregated.grade
+        return ScoringOutcome.from_mapping(
+            {
+                "schema_version": "scoring-outcome@2",
+                "request_identity": _request_identity(value),
+                "criterion_outcomes": executed["criterion_outcomes"],
+                "rule_decisions": executed["rule_decisions"],
+                "score_contributions": executed["score_contributions"],
+                "review_issues": executed["review_issues"],
+                "unrounded_total": unrounded_total,
+                "final_total": final_total,
+                "grade": grade,
+                "status": executed["status"],
+                "audit_identity": _plain(value["runtime_identity"]),
+            }
+        )
+
     nodes_by_code = {node["rule_code"]: node for node in plan["nodes"]}
     if set(nodes_by_code) != set(plan["dependency_order"]):
         raise ValueError("execution plan dependency order does not match its nodes")

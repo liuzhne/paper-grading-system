@@ -1,5 +1,3 @@
-from datetime import datetime
-from datetime import timezone
 from typing import Optional
 
 from fastapi import APIRouter
@@ -13,15 +11,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
-from backend.app.core.config import settings
 from backend.app.db.models import Rubric
-from backend.app.db.models import RubricCriterion
+from backend.app.db.models import RubricCompilation
 from backend.app.db.models import ScoringRun
 from backend.app.db.session import get_db
 from backend.app.schemas.rubric import RubricCreate
 from backend.app.schemas.rubric import RubricCloneRequest
+from backend.app.schemas.rubric import AtomicRuleEditRequest
 from backend.app.schemas.rubric import RubricImportResult
+from backend.app.schemas.rubric import RubricLifecycleReason
+from backend.app.schemas.rubric import RubricPublishRequest
 from backend.app.schemas.rubric import RubricRead
+from backend.app.schemas.rubric import RubricDraftRecompileRequest
+from backend.app.schemas.rubric import RubricExecutionDraftRead
+from backend.app.schemas.rubric import TemplateLinkReviewRequest
 from backend.app.schemas.rubric import RubricUpdate
 from backend.app.api.deps import current_user_id
 from backend.app.services.dev_user import ensure_dev_user
@@ -30,9 +33,11 @@ from backend.app.eval.scores_template import build_scores_table_template
 from backend.app.services.rubric_import.parser import parse_rubric_files
 from backend.app.services.rubric_import.persist import build_criterion
 from backend.app.services.rubric_import.persist import extra_criterion_fields
-from backend.app.services.rubric_import.persist import persist_imported_rubric
 from backend.app.services.rubric_import.template import build_rubric_import_template
 from backend.app.services.scoring.core.policy import validate_weight_configuration
+from backend.app.services.rubric_import import pipeline as rubric_pipeline
+from backend.app.services.rubrics import lifecycle as rubric_lifecycle
+from backend.app.services.rubrics.draft_graph import read_execution_draft
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
@@ -45,33 +50,19 @@ def create_rubric(payload: RubricCreate, db: Session = Depends(get_db), user_id:
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
 
-    rubric = Rubric(
-        name=payload.name,
-        version=payload.version,
-        total_score=payload.total_score,
-        description=payload.description,
-        status="draft",
-        created_by=user_id,
-        owner_id=user_id,
-    )
-    for index, criterion in enumerate(payload.criteria):
-        rubric.criteria.append(
-            RubricCriterion(
-                code=criterion.code,
-                name=criterion.name,
-                max_score=criterion.max_score,
-                weight=criterion.weight,
-                description=criterion.description,
-                evidence_hints=criterion.evidence_hints,
-                deduction_rules=criterion.deduction_rules,
-                display_order=criterion.display_order or index,
-                **extra_criterion_fields(criterion),
-            )
+    db.commit()  # pipeline owns a short, clean transaction
+    try:
+        prepared = rubric_pipeline.prepare_manual_json_import(
+            command=_manual_import_command(payload)
         )
-    db.add(rubric)
-    db.commit()
-    db.refresh(rubric)
-    return _load_rubric(db, rubric.id)
+        identity = rubric_pipeline.persist_prepared_import(
+            session=db,
+            prepared=prepared,
+            actor_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _load_rubric(db, identity.rubric_id)
 
 
 @router.get("", response_model=list[RubricRead])
@@ -121,21 +112,42 @@ def import_rubric_from_files(
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
 
+    rules_bytes = rules_file.file.read()
+    template_bytes = template_file.file.read() if template_file else None
     try:
+        # Keep the established response summary while persistence is delegated
+        # to the two-phase M4 import pipeline below.
         imported = parse_rubric_files(
-            rules_bytes=rules_file.file.read(),
-            template_bytes=template_file.file.read() if template_file else None,
-            scorer=_safe_scorer(),  # §5 扣分规则归一化（无显式规则时）；构造失败则不调小模型
+            rules_bytes=rules_bytes,
+            template_bytes=template_bytes,
+            scorer=None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     try:
-        rubric = persist_imported_rubric(db, name, version, description, imported, created_by=user_id)
+        db.commit()
+        prepared = rubric_pipeline.prepare_file_import(
+            command=_file_import_command(
+                name=name,
+                version=version,
+                description=description,
+                rules_file_name=rules_file.filename or "rules.xlsx",
+                template_file_name=(template_file.filename if template_file else None),
+            ),
+            rules_bytes=rules_bytes,
+            template_bytes=template_bytes,
+            scorer=None,
+        )
+        identity = rubric_pipeline.persist_prepared_import(
+            session=db,
+            prepared=prepared,
+            actor_id=user_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {
-        "rubric": rubric,
+        "rubric": _load_rubric(db, identity.rubric_id),
         "warnings": imported.warnings,
         "template_summary": imported.template_summary,
     }
@@ -158,35 +170,19 @@ def clone_rubric(
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
 
-    cloned = Rubric(
-        name=new_name,
-        version=payload.new_version,
-        total_score=original.total_score,
-        status="draft",
-        description=payload.description if payload.description is not None else original.description,
-        created_by=user_id,
-        owner_id=user_id,
-    )
-    for criterion in original.criteria:
-        cloned.criteria.append(
-            RubricCriterion(
-                code=criterion.code,
-                name=criterion.name,
-                max_score=criterion.max_score,
-                weight=criterion.weight,
-                description=criterion.description,
-                evidence_hints=list(criterion.evidence_hints or []),
-                deduction_rules=list(criterion.deduction_rules or []),
-                display_order=criterion.display_order,
-                **extra_criterion_fields(criterion),
-            )
+    try:
+        cloned = rubric_lifecycle.clone_published_rubric(
+            db,
+            rubric_id,
+            payload.new_version,
+            user_id,
+            name=payload.name,
+            description=payload.description,
         )
-
-    _validate_criteria_total(cloned.total_score, cloned.criteria)
-
-    db.add(cloned)
-    db.commit()
-    db.refresh(cloned)
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _load_rubric(db, cloned.id)
 
 
@@ -196,6 +192,218 @@ def get_rubric(rubric_id: str, db: Session = Depends(get_db)):
     if rubric is None:
         raise HTTPException(status_code=404, detail="rubric not found")
     return rubric
+
+
+@router.get(
+    "/{rubric_id}/execution-draft",
+    response_model=RubricExecutionDraftRead,
+)
+def get_rubric_execution_draft(
+    rubric_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return read_execution_draft(session=db, rubric_id=rubric_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{rubric_id}/submit-review", response_model=RubricRead)
+def submit_rubric_review(rubric_id: str, db: Session = Depends(get_db)):
+    ensure_dev_user(db)
+    try:
+        rubric_lifecycle.submit_for_review(db, rubric_id)
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _load_rubric(db, rubric_id)
+
+
+@router.post("/{rubric_id}/return-to-draft", response_model=RubricRead)
+def return_rubric_to_draft(rubric_id: str, db: Session = Depends(get_db)):
+    ensure_dev_user(db)
+    try:
+        rubric_lifecycle.return_to_draft(db, rubric_id)
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _load_rubric(db, rubric_id)
+
+
+@router.post("/{rubric_id}/recompile", response_model=RubricRead)
+def recompile_rubric_draft(
+    rubric_id: str,
+    payload: RubricDraftRecompileRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    """Create a complete successor graph for a blocked/unpublished draft."""
+
+    ensure_dev_user(db)
+    rubric = _load_rubric(db, rubric_id)
+    if rubric is None:
+        raise HTTPException(status_code=404, detail="rubric not found")
+    if rubric.status != "draft":
+        raise HTTPException(
+            status_code=400,
+            detail="only a draft rubric can be recompiled",
+        )
+    _validate_criteria_total(rubric.total_score, payload.criteria)
+    command = _manual_recompile_command(rubric, payload)
+    try:
+        # Preparation is DB-free.  End the read transaction before the
+        # persistence service takes its short lock/commit transaction.
+        db.commit()
+        prepared = rubric_pipeline.prepare_manual_json_recompile(command=command)
+        identity = rubric_pipeline.persist_prepared_import(
+            session=db,
+            prepared=prepared,
+            actor_id=user_id,
+            target_rubric_id=rubric_id,
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _load_rubric(db, identity.rubric_id)
+
+
+@router.post("/{rubric_id}/rules/{rule_code}/submit-review")
+def submit_atomic_rule_review(
+    rubric_id: str,
+    rule_code: str,
+    payload: RubricLifecycleReason,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    try:
+        rule = rubric_lifecycle.submit_atomic_rule_for_review(
+            db, rubric_id, rule_code, user_id, payload.reason
+        )
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
+@router.patch("/{rubric_id}/rules/{rule_code}")
+def patch_atomic_rule(
+    rubric_id: str,
+    rule_code: str,
+    payload: AtomicRuleEditRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    try:
+        rule = rubric_lifecycle.edit_atomic_rule(
+            db,
+            rubric_id,
+            rule_code,
+            payload.changes,
+            user_id,
+            payload.reason,
+        )
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
+@router.post("/{rubric_id}/rules/{rule_code}/approve")
+def approve_atomic_rule_review(
+    rubric_id: str,
+    rule_code: str,
+    payload: RubricLifecycleReason,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    try:
+        rule = rubric_lifecycle.approve_atomic_rule(
+            db, rubric_id, rule_code, user_id, payload.reason
+        )
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
+@router.post("/{rubric_id}/rules/{rule_code}/reject")
+def reject_atomic_rule_review(
+    rubric_id: str,
+    rule_code: str,
+    payload: RubricLifecycleReason,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    try:
+        rule = rubric_lifecycle.reject_atomic_rule(
+            db, rubric_id, rule_code, user_id, payload.reason
+        )
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
+@router.post("/{rubric_id}/rules/{rule_code}/reopen")
+def reopen_atomic_rule_review(
+    rubric_id: str,
+    rule_code: str,
+    payload: RubricLifecycleReason,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    try:
+        rule = rubric_lifecycle.reopen_atomic_rule(
+            db, rubric_id, rule_code, user_id, payload.reason
+        )
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
+@router.post("/{rubric_id}/template-links/{link_id}/review")
+def review_atomic_rule_template_link(
+    rubric_id: str,
+    link_id: str,
+    payload: TemplateLinkReviewRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    try:
+        link = rubric_lifecycle.review_template_link(
+            db,
+            rubric_id,
+            link_id,
+            user_id,
+            payload.decision,
+            payload.reason,
+        )
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "id": link.id,
+        "rule_id": link.rule_id,
+        "review_status": link.review_status,
+        "reviewed_by": link.reviewed_by,
+        "reviewed_at": link.reviewed_at,
+    }
 
 
 @router.patch("/{rubric_id}", response_model=RubricRead)
@@ -208,6 +416,19 @@ def update_rubric(rubric_id: str, payload: RubricUpdate, db: Session = Depends(g
         raise HTTPException(status_code=400, detail="only draft rubrics can be edited; clone published rubrics first")
 
     updates = payload.model_dump(exclude_unset=True)
+    versioned = db.scalar(
+        select(RubricCompilation.id)
+        .where(RubricCompilation.rubric_id == rubric.id)
+        .limit(1)
+    )
+    if versioned is not None and updates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "versioned rubric content must be changed through AtomicRule "
+                "editing/recompilation or clone-for-edit"
+            ),
+        )
     scored_run_id = db.scalar(select(ScoringRun.id).where(ScoringRun.rubric_id == rubric.id).limit(1))
     if scored_run_id and {"name", "version", "total_score", "criteria"}.intersection(updates):
         raise HTTPException(status_code=400, detail="cannot change scoring rubric fields after scoring runs exist; clone first")
@@ -249,21 +470,137 @@ def update_rubric(rubric_id: str, payload: RubricUpdate, db: Session = Depends(g
 
 
 @router.post("/{rubric_id}/publish", response_model=RubricRead)
-def publish_rubric(rubric_id: str, db: Session = Depends(get_db)):
-    ensure_dev_user(db)  # 与其它改写端点（create/import/clone/update）一致
-    rubric = _load_rubric(db, rubric_id)
-    if rubric is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
-    _validate_criteria_total(rubric.total_score, rubric.criteria)
-    rubric.status = "published"
-    rubric.published_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.commit()
-    db.refresh(rubric)
+def publish_rubric(
+    rubric_id: str,
+    payload: RubricPublishRequest | None = None,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    compilation_id = payload.compilation_id if payload else None
+    if not compilation_id:
+        has_provenance = db.scalar(
+            select(RubricCompilation.id)
+            .where(RubricCompilation.rubric_id == rubric_id)
+            .limit(1)
+        )
+        if has_provenance is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "legacy draft must be explicitly upgraded to provenance "
+                    "before publication"
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="compilation_id is required for provenance publication",
+        )
+    try:
+        rubric_lifecycle.publish_rubric(
+            db,
+            rubric_id,
+            compilation_id,
+            user_id,
+        )
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _load_rubric(db, rubric_id)
 
 
 def _load_rubric(db, rubric_id):
     return db.scalar(select(Rubric).where(Rubric.id == rubric_id).options(selectinload(Rubric.criteria)))
+
+
+def _compiler_identity(parser_version: str) -> dict:
+    return {
+        "parser_version": parser_version,
+        "compiler_version": "atomic-rule-compiler@1",
+        "prompt_version": "m4-import-no-llm@1",
+        "model_provider": None,
+        "model_name": None,
+        "sampling_params": {},
+    }
+
+
+def _manual_import_command(payload: RubricCreate) -> dict:
+    return {
+        "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
+        "source_kind": "manual_json",
+        "rubric": payload.model_dump(mode="json"),
+        "compiler": _compiler_identity("manual-json-parser@1"),
+        "version": {"hash_scheme": "rubric-content-v2"},
+    }
+
+
+def _manual_recompile_command(rubric: Rubric, payload: RubricDraftRecompileRequest) -> dict:
+    return {
+        "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
+        "source_kind": "manual_json",
+        "rubric": {
+            "name": rubric.name,
+            "version": rubric.version,
+            "description": rubric.description,
+            "total_score": float(rubric.total_score),
+            "format_spec": dict(rubric.format_spec or {}),
+            "criteria": [
+                item.model_dump(mode="json") for item in payload.criteria
+            ],
+            "business_profile_key": payload.business_profile_key,
+            "workflow_profile": payload.workflow_profile,
+            "global_policy": dict(payload.global_policy),
+        },
+        "compiler": _compiler_identity("manual-json-parser@1"),
+        "version": {
+            "hash_scheme": "rubric-content-v2",
+            "version": payload.version,
+        },
+        "draft_recompile": {
+            "mode": "supersede_unpublished",
+            "supersedes_compilation_id": payload.supersedes_compilation_id,
+        },
+    }
+
+
+def _file_import_command(
+    *,
+    name: str,
+    version: str,
+    description: str | None,
+    rules_file_name: str,
+    template_file_name: str | None,
+) -> dict:
+    return {
+        "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
+        "source_kind": "file_import",
+        "rubric": {
+            "name": name,
+            "version": version,
+            "description": description,
+            "business_profile_key": "thesis",
+            "workflow_profile": (
+                "template_driven" if template_file_name else "manual_json"
+            ),
+        },
+        "files": {
+            "rules_file_name": rules_file_name,
+            "template_file_name": template_file_name,
+        },
+        "compiler": _compiler_identity("excel-word-parser@1"),
+        "version": {"hash_scheme": "rubric-content-v2"},
+    }
+
+
+def _rule_response(rule) -> dict:
+    return {
+        "id": rule.id,
+        "rule_code": rule.rule_code,
+        "status": rule.status,
+        "reviewed_by": rule.reviewed_by,
+        "reviewed_at": rule.reviewed_at,
+    }
 
 
 def _safe_scorer():

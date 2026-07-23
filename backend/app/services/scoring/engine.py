@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import time
 
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
@@ -53,6 +54,7 @@ from backend.app.services.scoring.core.engine import (
 from backend.app.services.scoring.core.engine import score_submission
 from backend.app.services.scoring.core.identity import hash_source_artifact
 from backend.app.services.scoring.core.evidence import validate_evidence
+from backend.app.services.scoring.core.execution_plan import RuleExecutionPlanBuilder
 from backend.app.services.scoring.core.policy import AGGREGATION_SCHEMA_VERSION
 from backend.app.services.scoring.core.policy import aggregate_scores
 from backend.app.services.scoring.core.policy import build_corrected_thesis_policy
@@ -68,6 +70,9 @@ from backend.app.services.scoring.adapters.comparison import (
 )
 from backend.app.services.scoring.adapters.legacy_paper import LegacyPaperAdapter
 from backend.app.services.scoring.adapters.legacy_rubric import LegacyRubricAdapter
+from backend.app.services.scoring.adapters.rubric_snapshot import (
+    CompiledRubricSnapshotLoader,
+)
 from backend.app.services.scoring.adapters.persistence import (
     CoreRunPersistence,
     LocalDocumentSnapshotStore,
@@ -138,6 +143,17 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     scorer = scorer or get_llm_scorer()
     try:
         mode = settings.SCORING_ENGINE_MODE
+        if mode not in {"legacy", "compare", "core"}:
+            # Settings validates this already; retaining a fail-closed runtime
+            # check protects callers that mutate the singleton in-process.
+            raise ValueError("unsupported scoring engine mode: %s" % mode)
+
+        # A batch-locked RubricVersion is a formal M4 graph.  Such a graph must
+        # never be projected back through the legacy arbitrary-points path,
+        # even while the global rollout flag remains on ``legacy`` until M8.
+        # Legacy/unversioned batches continue to obey SCORING_ENGINE_MODE.
+        if _has_locked_formal_version(db, paper_id):
+            return _score_paper_core(db, paper_id, scorer)
         if mode == "legacy":
             return _score_paper_legacy(db, paper_id, scorer)
         if mode == "compare":
@@ -151,9 +167,49 @@ def score_paper(db: Session, paper_id: str, scorer=None):
             return legacy_run
         if mode == "core":
             return _score_paper_core(db, paper_id, scorer)
-        # Settings validates this already; retaining a fail-closed runtime
-        # check protects callers that mutate the singleton in-process.
-        raise ValueError("unsupported scoring engine mode: %s" % mode)
+    finally:
+        if owns_scorer:
+            _close_scorer(scorer)
+
+
+def _has_locked_formal_version(db: Session, paper_id: str) -> bool:
+    return (
+        db.scalar(
+            select(GradingBatch.rubric_version_id)
+            .join(Paper, Paper.batch_id == GradingBatch.id)
+            .where(Paper.id == paper_id)
+        )
+        is not None
+    )
+
+
+def retry_score_paper(db: Session, run_id: str, scorer=None):
+    """Create the next immutable scoring generation for an existing run."""
+
+    previous = db.get(ScoringRun, run_id)
+    if previous is None:
+        raise ValueError("scoring run not found")
+    # Historical non-Core runs have no replay identity and retain their
+    # original behavior: every invocation creates an independent legacy run.
+    if previous.rubric_source_kind is None:
+        return score_paper(db, previous.paper_id, scorer=scorer)
+
+    owns_scorer = scorer is None
+    scorer = scorer or get_llm_scorer()
+    try:
+        maximum = db.scalar(
+            select(func.max(ScoringRun.rescore_generation)).where(
+                ScoringRun.paper_id == previous.paper_id,
+                ScoringRun.rescore_generation.is_not(None),
+            )
+        )
+        generation = int(maximum if maximum is not None else -1) + 1
+        return _score_paper_core(
+            db,
+            previous.paper_id,
+            scorer,
+            rescore_generation=generation,
+        )
     finally:
         if owns_scorer:
             _close_scorer(scorer)
@@ -231,12 +287,18 @@ def _validate_legacy_checker_params(params):
 
 
 def _legacy_required_fields_checker(*, document, params):
-    del params
     text = str(document.get("full_text") or "")
+    present = any(marker in text for marker in ("负责人", "责任人", "owner"))
     return {
-        "triggered": not any(
-            marker in text for marker in ("负责人", "责任人", "owner")
-        )
+        "observation_code": "REQUIRED_FIELD_MISSING",
+        "measured_value": present,
+        "expected_value": True,
+        "triggered": not present,
+        "locator": {
+            "kind": "document_structure",
+            "structure_code": "required_owner:%s" % params["applies_to"],
+            "ordinal": 0,
+        },
     }
 
 
@@ -468,7 +530,56 @@ def _request_idempotency_projection(value):
     }
 
 
-def _core_request_context(db, paper_id, scorer):
+def _published_core_version(*, db, paper, rubric, compilations):
+    """Resolve formal provenance to one exact version or fail closed."""
+
+    if not compilations:
+        return None
+    compilation_by_id = {item.id: item for item in compilations}
+    locked_version_id = getattr(paper.batch, "rubric_version_id", None)
+    if locked_version_id is not None:
+        version = db.get(RubricVersion, locked_version_id)
+        if version is None or version.rubric_id != rubric.id:
+            raise ValueError("batch rubric version identity is invalid")
+        compilation = compilation_by_id.get(version.compilation_id)
+        if not (
+            getattr(rubric, "status", None) == "published"
+            and getattr(rubric, "published_at", None) is not None
+            and compilation is not None
+            and compilation.rubric_id == rubric.id
+            and compilation.status == "validated"
+            and compilation.published_at is not None
+            and compilation.published_at == rubric.published_at
+            and compilation.final_version_hash == version.version_hash
+        ):
+            raise ValueError(
+                "batch-locked rubric version is not consistently published"
+            )
+        return version
+
+    candidates = []
+    for version in db.scalars(
+        select(RubricVersion).where(RubricVersion.rubric_id == rubric.id)
+    ).all():
+        compilation = compilation_by_id.get(version.compilation_id)
+        if (
+            compilation is not None
+            and getattr(rubric, "status", None) == "published"
+            and getattr(rubric, "published_at", None) is not None
+            and compilation.status == "validated"
+            and compilation.published_at is not None
+            and compilation.published_at == rubric.published_at
+            and compilation.final_version_hash == version.version_hash
+        ):
+            candidates.append(version)
+    if len(candidates) != 1:
+        raise ValueError(
+            "formal rubric requires a batch-locked or unique published version"
+        )
+    return candidates[0]
+
+
+def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
     paper = _load_scoreable_paper(db, paper_id)
     rubric = paper.batch.rubric
     parsed = read_json(paper.parsed_text_path)
@@ -486,14 +597,7 @@ def _core_request_context(db, paper_id, scorer):
         profile_version=profile.profile_version,
         parser_version="legacy-document-parser@1",
         normalizer_version="legacy-normalizer@1",
-    )
-    weight_validation = validate_weight_configuration(
-        rubric.criteria,
-        total_score=rubric.total_score,
-    )
-    policy = build_corrected_thesis_policy(
-        rubric.total_score,
-        weight_validation.mode,
+        submission_instance_key=paper.id,
     )
     compilations = list(
         db.scalars(
@@ -502,34 +606,63 @@ def _core_request_context(db, paper_id, scorer):
             )
         ).all()
     )
-    # API-created legacy rubrics may still be draft in compare mode.  The
-    # candidate is explicitly non-authoritative, so freeze the current legacy
-    # graph as a published-shaped compatibility snapshot without modifying DB.
-    rubric_projection = {
-        "name": rubric.name,
-        "status": "published",
-        "total_score": rubric.total_score,
-    }
-    rubric_snapshot = LegacyRubricAdapter().adapt(
-        rubric=rubric_projection,
-        criteria=list(rubric.criteria),
-        policy_snapshot=_plain_contract(policy),
-        business_profile_key=profile.profile_key,
-        compilation_rows=compilations,
-    )
     registry = _legacy_checker_registry()
-    plan = _build_legacy_execution_plan(
-        rubric_snapshot=rubric_snapshot,
-        profile=profile,
-        registry=registry,
+    formal_version = _published_core_version(
+        db=db,
+        paper=paper,
+        rubric=rubric,
+        compilations=compilations,
     )
+    if formal_version is not None:
+        rubric_snapshot = CompiledRubricSnapshotLoader().load_from_session(
+            session=db,
+            rubric_version_id=formal_version.id,
+            expected_profile_key=profile.profile_key,
+        )
+        plan = RuleExecutionPlanBuilder(
+            checker_registry=registry,
+            policy_compiler_version="scoring-policy-compiler@1",
+            engine_contract_version="scoring-core@1",
+        ).build(
+            rubric=rubric_snapshot,
+            profile=profile,
+            document_schema_version="document-snapshot@1",
+        )
+        workflow_profile = formal_version.workflow_profile
+    else:
+        weight_validation = validate_weight_configuration(
+            rubric.criteria,
+            total_score=rubric.total_score,
+        )
+        policy = build_corrected_thesis_policy(
+            rubric.total_score,
+            weight_validation.mode,
+        )
+        rubric_projection = {
+            "name": rubric.name,
+            "status": "published",
+            "total_score": rubric.total_score,
+        }
+        rubric_snapshot = LegacyRubricAdapter().adapt(
+            rubric=rubric_projection,
+            criteria=list(rubric.criteria),
+            policy_snapshot=_plain_contract(policy),
+            business_profile_key=profile.profile_key,
+            compilation_rows=(),
+        )
+        plan = _build_legacy_execution_plan(
+            rubric_snapshot=rubric_snapshot,
+            profile=profile,
+            registry=registry,
+        )
+        workflow_profile = "template_driven"
     request = {
         "schema_version": "scoring-request@2",
         "submission": paper_snapshots.submission.to_mapping(),
         "document": paper_snapshots.document.to_mapping(),
         "plan": plan.to_mapping(),
         "runtime_identity": _runtime_identity(scorer=scorer, profile=profile),
-        "rescore_generation": 0,
+        "rescore_generation": rescore_generation,
     }
     request["idempotency_key"] = canonical_sha256(
         _request_idempotency_projection(request)
@@ -540,12 +673,29 @@ def _core_request_context(db, paper_id, scorer):
         profile,
         rubric,
         paper,
+        workflow_profile,
     )
 
 
-def _score_paper_core(db: Session, paper_id: str, scorer):
-    request, registry, profile, rubric, paper = _core_request_context(
-        db, paper_id, scorer
+def _score_paper_core(
+    db: Session,
+    paper_id: str,
+    scorer,
+    *,
+    rescore_generation: int = 0,
+):
+    (
+        request,
+        registry,
+        profile,
+        rubric,
+        paper,
+        workflow_profile,
+    ) = _core_request_context(
+        db,
+        paper_id,
+        scorer,
+        rescore_generation=rescore_generation,
     )
     outcome = score_submission(
         request=request,
@@ -555,6 +705,10 @@ def _score_paper_core(db: Session, paper_id: str, scorer):
     )
     snapshot_store = LocalDocumentSnapshotStore()
     document_snapshot_ref = snapshot_store.put(request.document)
+    parsed = read_json(paper.parsed_text_path)
+    coherence_findings = list(parsed.get("coherence_findings", []) or [])
+    coherence_findings.extend(analyze_semantic_coherence(parsed, scorer))
+    format_findings = _compute_format_findings(paper, rubric)
     return CoreRunPersistence(
         db, document_snapshot_store=snapshot_store
     ).persist(
@@ -565,8 +719,10 @@ def _score_paper_core(db: Session, paper_id: str, scorer):
         criterion_id_by_code={
             criterion.code: criterion.id for criterion in rubric.criteria
         },
-        workflow_profile="template_driven",
+        workflow_profile=workflow_profile,
         document_snapshot_ref=document_snapshot_ref,
+        coherence_findings=coherence_findings,
+        format_findings=format_findings,
     )
 
 
@@ -591,7 +747,14 @@ def _comparison_diff(legacy_run, candidate_outcome):
 
 
 def _record_core_comparison(*, db, paper_id, scorer, legacy_run):
-    request, registry, profile, _rubric, _paper = _core_request_context(
+    (
+        request,
+        registry,
+        profile,
+        _rubric,
+        _paper,
+        _workflow_profile,
+    ) = _core_request_context(
         db, paper_id, scorer
     )
     outcome = score_submission(
@@ -1265,7 +1428,14 @@ def score_batch(db: Session, batch_id: str, rescore: bool = False):
                 result["skipped_count"] += 1
                 continue
             try:
-                run = score_paper(db, paper.id, scorer=scorer)
+                if rescore and paper.scoring_runs:
+                    previous = max(
+                        paper.scoring_runs,
+                        key=lambda item: (item.created_at, item.id),
+                    )
+                    run = retry_score_paper(db, previous.id, scorer=scorer)
+                else:
+                    run = score_paper(db, paper.id, scorer=scorer)
             except (ValueError, LLMScoringError) as exc:
                 result["failed_count"] += 1
                 result["errors"].append({"paper_id": paper.id, "file_name": paper.file_name, "error": str(exc)})
@@ -2407,13 +2577,32 @@ def _short_error(exc):
 def _recalculate_run(run, items, parse_quality, total_score):
     if run.policy_snapshot is not None:
         policy = _compiled_policy(run.policy_snapshot)
-        ai_rows = [_stored_policy_item(item, use_final=False) for item in items]
-        final_rows = [_stored_policy_item(item, use_final=True) for item in items]
+        frozen_weights = _frozen_criterion_weights(run)
+        ai_rows = [
+            _stored_policy_item(
+                item,
+                use_final=False,
+                frozen_weights=frozen_weights,
+            )
+            for item in items
+        ]
+        final_rows = [
+            _stored_policy_item(
+                item,
+                use_final=True,
+                frozen_weights=frozen_weights,
+            )
+            for item in items
+        ]
         ai_result = aggregate_scores(policy, ai_rows)
         final_result = aggregate_scores(policy, final_rows)
         for item, aggregate_item in zip(items, final_result.items, strict=True):
-            item.aggregation = _aggregation_projection(aggregate_item)
-            item.aggregation_schema_version = AGGREGATION_SCHEMA_VERSION
+            if item.aggregation_schema_version not in {
+                "criterion-aggregation@1",
+                "criterion-aggregation@2",
+            }:
+                item.aggregation = _aggregation_projection(aggregate_item)
+                item.aggregation_schema_version = AGGREGATION_SCHEMA_VERSION
         run.ai_total_score = ai_result.rounded_total
         run.final_total_score = final_result.rounded_total
         run.grade = final_result.grade
@@ -2452,19 +2641,54 @@ def _require_recalculable_run(run):
                 "golden/compare policy cannot be recalculated as an authoritative run"
             )
         for item in getattr(run, "items", ()) or ():
-            if item.aggregation_schema_version != AGGREGATION_SCHEMA_VERSION:
+            schema_version = item.aggregation_schema_version
+            if schema_version not in {
+                AGGREGATION_SCHEMA_VERSION,
+                "criterion-aggregation@1",
+                "criterion-aggregation@2",
+            }:
                 raise ValueError(
                     "score item aggregation schema does not match the frozen run"
                 )
+            if schema_version.startswith("criterion-aggregation@"):
+                aggregation = item.aggregation or {}
+                if aggregation.get("schema_version") != schema_version:
+                    raise ValueError(
+                        "Core criterion aggregation identity does not match the score item"
+                    )
 
 
-def _stored_policy_item(item, *, use_final):
+def _frozen_criterion_weights(run):
+    plan = run.execution_plan_snapshot or {}
+    weights = {}
+    for node in plan.get("nodes", ()) or ():
+        criterion = node.get("criterion_snapshot") or {}
+        code = criterion.get("criterion_code")
+        if not code:
+            continue
+        weight = criterion.get("weight")
+        if code in weights and weights[code] != weight:
+            raise ValueError("execution plan contains inconsistent criterion weights")
+        weights[code] = weight
+    return weights
+
+
+def _stored_policy_item(item, *, use_final, frozen_weights=None):
     aggregation = item.aggregation or {}
+    criterion_code = (
+        aggregation.get("criterion_code")
+        or item.criterion_code
+        or item.criterion_id
+    )
+    if "weight" in aggregation:
+        weight = aggregation.get("weight")
+    else:
+        weight = (frozen_weights or {}).get(criterion_code)
     row = {
-        "criterion_code": aggregation.get("criterion_code") or item.criterion_code or item.criterion_id,
+        "criterion_code": criterion_code,
         "raw_score": item.ai_score,
         "max_score": item.max_score,
-        "weight": aggregation.get("weight"),
+        "weight": weight,
         "auto_score_status": item.auto_score_status or "calculated",
     }
     if use_final:

@@ -9,6 +9,8 @@ from backend.app.api.deps import current_user_id
 from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import Rubric
+from backend.app.db.models import RubricCompilation
+from backend.app.db.models import RubricVersion
 from backend.app.db.session import get_db
 from backend.app.schemas.batch import BatchCreate
 from backend.app.schemas.batch import BatchRead
@@ -26,12 +28,77 @@ from backend.app.services.scoring.engine import score_batch
 router = APIRouter(prefix="/batches", tags=["batches"])
 
 
+def _is_frozen_version(db: Session, rubric: Rubric, version: RubricVersion) -> bool:
+    compilation = db.get(RubricCompilation, version.compilation_id)
+    return bool(
+        rubric.status == "published"
+        and rubric.published_at is not None
+        and version.rubric_id == rubric.id
+        and compilation is not None
+        and compilation.rubric_id == rubric.id
+        and compilation.status == "validated"
+        and compilation.reviewed_by is not None
+        and compilation.reviewed_at is not None
+        and compilation.published_at is not None
+        and compilation.reviewed_at == compilation.published_at
+        and compilation.published_at == rubric.published_at
+        and compilation.final_version_hash == version.version_hash
+    )
+
+
+def _resolve_batch_version(
+    db: Session,
+    rubric: Rubric,
+    requested_version_id: str | None,
+) -> RubricVersion | None:
+    if requested_version_id is not None:
+        version = db.get(RubricVersion, requested_version_id)
+        if version is None:
+            raise HTTPException(status_code=400, detail="rubric version not found")
+        if version.rubric_id != rubric.id:
+            raise HTTPException(
+                status_code=400,
+                detail="rubric version does not belong to selected rubric",
+            )
+        if not _is_frozen_version(db, rubric, version):
+            raise HTTPException(
+                status_code=400,
+                detail="rubric version is not a consistently frozen published version",
+            )
+        return version
+
+    formal_versions = db.scalars(
+        select(RubricVersion).where(RubricVersion.rubric_id == rubric.id)
+    ).all()
+    if not formal_versions:
+        return None
+    eligible = [
+        version
+        for version in formal_versions
+        if _is_frozen_version(db, rubric, version)
+    ]
+    if len(eligible) == 1:
+        return eligible[0]
+    if not eligible:
+        raise HTTPException(
+            status_code=400,
+            detail="formal rubric has no consistently frozen published version",
+        )
+    raise HTTPException(
+        status_code=400,
+        detail="multiple frozen versions exist; rubric_version_id is required",
+    )
+
+
 @router.post("", response_model=BatchRead)
 def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: str = Depends(current_user_id)):
     ensure_dev_user(db)
     rubric = db.get(Rubric, payload.rubric_id)
     if rubric is None:
         raise HTTPException(status_code=404, detail="rubric not found")
+    rubric_version = _resolve_batch_version(
+        db, rubric, payload.rubric_version_id
+    )
     batch = GradingBatch(
         name=payload.name,
         department=payload.department,
@@ -39,6 +106,7 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
         academic_year=payload.academic_year,
         paper_type=payload.paper_type,
         rubric_id=payload.rubric_id,
+        rubric_version_id=(rubric_version.id if rubric_version else None),
         status=payload.status,
         created_by=user_id,
         owner_id=user_id,
@@ -121,14 +189,36 @@ def update_batch(batch_id: str, payload: BatchUpdate, db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="batch not found")
 
     updates = payload.model_dump(exclude_unset=True)
-    rubric_id = updates.pop("rubric_id", None)
-    if rubric_id and rubric_id != batch.rubric_id:
+    rubric_id_present = "rubric_id" in updates
+    version_id_present = "rubric_version_id" in updates
+    requested_rubric_id = updates.pop("rubric_id", batch.rubric_id)
+    requested_version_id = updates.pop(
+        "rubric_version_id",
+        None if rubric_id_present else batch.rubric_version_id,
+    )
+    identity_changed = (
+        requested_rubric_id != batch.rubric_id
+        or requested_version_id != batch.rubric_version_id
+        or version_id_present
+    )
+    if identity_changed:
         if batch.papers:
-            raise HTTPException(status_code=400, detail="cannot change rubric after papers have been uploaded")
-        rubric = db.get(Rubric, rubric_id)
+            raise HTTPException(
+                status_code=400,
+                detail="cannot change rubric/version after papers have been uploaded",
+            )
+        rubric = db.get(Rubric, requested_rubric_id)
         if rubric is None:
             raise HTTPException(status_code=404, detail="rubric not found")
-        batch.rubric_id = rubric_id
+        resolved_version = _resolve_batch_version(
+            db, rubric, requested_version_id
+        )
+        # Assign the composite identity only after every check succeeds so a
+        # cross-rubric or unfrozen request cannot leave a partial pin.
+        batch.rubric_id = rubric.id
+        batch.rubric_version_id = (
+            resolved_version.id if resolved_version is not None else None
+        )
 
     for field, value in updates.items():
         setattr(batch, field, value)

@@ -990,16 +990,33 @@ def _normalize_document_snapshot(value):
     return {**normalized, "document_snapshot_hash": snapshot_hash}
 
 
-def _normalize_rule_evidence_policy(value, path):
-    fields = {"mode", "requirement", "minimum_coverage"}
-    _assert_closed_mapping(value, fields=fields, path=path)
-    return {
+def _normalize_rule_evidence_policy(value, path, *, schema_version):
+    base_fields = {"mode", "requirement", "minimum_coverage"}
+    if schema_version == "atomic-rule-snapshot@1":
+        fields = base_fields
+    else:
+        fields = base_fields | {"allowed_finding_codes"}
+    _assert_closed_mapping(
+        value,
+        fields=fields,
+        required=base_fields,
+        path=path,
+    )
+    normalized = {
         "mode": _assert_text(value["mode"], path + ".mode"),
         "requirement": _assert_text(value["requirement"], path + ".requirement"),
         "minimum_coverage": _decimal_text(
             value["minimum_coverage"], path + ".minimum_coverage"
         ),
     }
+    if "allowed_finding_codes" in value:
+        codes = _assert_text_array_preserving_order(
+            value["allowed_finding_codes"], path + ".allowed_finding_codes"
+        )
+        if len(codes) != len(set(codes)):
+            raise ValueError(path + ".allowed_finding_codes must be unique")
+        normalized["allowed_finding_codes"] = codes
+    return normalized
 
 
 def _normalize_rule_level(value, path):
@@ -1042,7 +1059,11 @@ def _normalize_atomic_rule_snapshot(value):
         "levels",
     }
     _assert_closed_mapping(value, fields=fields, path="AtomicRuleSnapshot")
-    if value["schema_version"] != "atomic-rule-snapshot@1":
+    schema_version = value["schema_version"]
+    if schema_version not in {
+        "atomic-rule-snapshot@1",
+        "atomic-rule-snapshot@2",
+    }:
         raise ValueError("unsupported AtomicRuleSnapshot schema_version")
     checker_params = _assert_json_value(
         value["checker_params"], "AtomicRuleSnapshot.checker_params"
@@ -1075,7 +1096,7 @@ def _normalize_atomic_rule_snapshot(value):
     if judge_type == "semantic" and checker_key is not None:
         raise ValueError("AtomicRuleSnapshot semantic rule must not declare checker_key")
     return {
-        "schema_version": "atomic-rule-snapshot@1",
+        "schema_version": schema_version,
         "rule_code": _assert_text(value["rule_code"], "AtomicRuleSnapshot.rule_code"),
         "criterion_code": _assert_text(
             value["criterion_code"], "AtomicRuleSnapshot.criterion_code"
@@ -1087,7 +1108,9 @@ def _normalize_atomic_rule_snapshot(value):
         "checker_version": checker_version,
         "checker_params": checker_params,
         "evidence_policy": _normalize_rule_evidence_policy(
-            value["evidence_policy"], "AtomicRuleSnapshot.evidence_policy"
+            value["evidence_policy"],
+            "AtomicRuleSnapshot.evidence_policy",
+            schema_version=schema_version,
         ),
         "max_points": max_points,
         "repeat_policy": repeat_policy,
@@ -1099,6 +1122,90 @@ def _normalize_atomic_rule_snapshot(value):
             value["mutex_group"], "AtomicRuleSnapshot.mutex_group"
         ),
         "levels": levels,
+    }
+
+
+def _normalize_semantic_rule_response_v2(value):
+    required = {
+        "schema_version",
+        "rule_code",
+        "status",
+        "level_code",
+        "occurrences",
+    }
+    fields = required | {"points", "calculated_effect", "rule_ref"}
+    _assert_closed_mapping(
+        value,
+        fields=fields,
+        required=required,
+        path="SemanticRuleResponseV2",
+    )
+    if value["schema_version"] != "semantic-rule-response@2":
+        raise ValueError("unsupported SemanticRuleResponseV2 schema_version")
+    raw_occurrences = value["occurrences"]
+    if not isinstance(raw_occurrences, (list, tuple)):
+        raise TypeError("SemanticRuleResponseV2.occurrences must be an array")
+    occurrences = []
+    occurrence_fields = {
+        "finding_code",
+        "evidence",
+        "locator",
+        "occurrence_id",
+        "points",
+    }
+    for index, occurrence in enumerate(raw_occurrences):
+        path = "SemanticRuleResponseV2.occurrences[%s]" % index
+        _assert_closed_mapping(
+            occurrence,
+            fields=occurrence_fields,
+            required={"finding_code", "evidence", "locator"},
+            path=path,
+        )
+        occurrences.append(_assert_json_value(occurrence, path))
+    normalized = {
+        "schema_version": "semantic-rule-response@2",
+        "rule_code": _assert_text(
+            value["rule_code"], "SemanticRuleResponseV2.rule_code"
+        ),
+        "status": _assert_text(value["status"], "SemanticRuleResponseV2.status"),
+        # Selection type/authorization is deliberately decided by RuleExecutor.
+        "level_code": _assert_json_value(
+            value["level_code"], "SemanticRuleResponseV2.level_code"
+        ),
+        "occurrences": occurrences,
+    }
+    for field in ("points", "calculated_effect", "rule_ref"):
+        if field in value:
+            normalized[field] = _assert_json_value(
+                value[field], "SemanticRuleResponseV2." + field
+            )
+    return normalized
+
+
+def _normalize_deterministic_checker_result_v1(value):
+    fields = {"schema_version", "observations"}
+    _assert_closed_mapping(value, fields=fields, path="DeterministicCheckerResultV1")
+    if value["schema_version"] != "deterministic-checker-result@1":
+        raise ValueError("unsupported DeterministicCheckerResultV1 schema_version")
+    observations = value["observations"]
+    if not isinstance(observations, (list, tuple)):
+        raise TypeError("DeterministicCheckerResultV1.observations must be an array")
+    normalized = []
+    for index, observation in enumerate(observations):
+        if not isinstance(observation, Mapping):
+            raise TypeError(
+                "DeterministicCheckerResultV1.observations[%s] must be an object"
+                % index
+            )
+        normalized.append(
+            _assert_json_value(
+                observation,
+                "DeterministicCheckerResultV1.observations[%s]" % index,
+            )
+        )
+    return {
+        "schema_version": "deterministic-checker-result@1",
+        "observations": normalized,
     }
 
 
@@ -1397,6 +1504,41 @@ def _normalize_checker_manifest_entry(value, path):
         "observation_schema",
     }
     _assert_closed_mapping(value, fields=fields, path=path)
+    observation_schema = value["observation_schema"]
+    if isinstance(observation_schema, str):
+        normalized_observation_schema = _assert_text(
+            observation_schema, path + ".observation_schema"
+        )
+    else:
+        observation_fields = {
+            "schema_version",
+            "allowed_observation_codes",
+            "allowed_finding_codes",
+        }
+        _assert_closed_mapping(
+            observation_schema,
+            fields=observation_fields,
+            path=path + ".observation_schema",
+        )
+        if observation_schema["schema_version"] != "deterministic-observation-schema@1":
+            raise ValueError("unsupported deterministic observation schema")
+        observation_codes = _assert_text_array_preserving_order(
+            observation_schema["allowed_observation_codes"],
+            path + ".observation_schema.allowed_observation_codes",
+        )
+        finding_codes = _assert_text_array_preserving_order(
+            observation_schema["allowed_finding_codes"],
+            path + ".observation_schema.allowed_finding_codes",
+        )
+        if len(observation_codes) != len(set(observation_codes)):
+            raise ValueError("observation codes must be unique")
+        if len(finding_codes) != len(set(finding_codes)):
+            raise ValueError("finding codes must be unique")
+        normalized_observation_schema = {
+            "schema_version": "deterministic-observation-schema@1",
+            "allowed_observation_codes": observation_codes,
+            "allowed_finding_codes": finding_codes,
+        }
     return {
         "checker_version": _assert_text(value["checker_version"], path + ".checker_version"),
         "implementation_hash": _assert_sha256(value["implementation_hash"], path + ".implementation_hash"),
@@ -1407,7 +1549,7 @@ def _normalize_checker_manifest_entry(value, path):
         "supported_profiles": _assert_text_array_preserving_order(
             value["supported_profiles"], path + ".supported_profiles"
         ),
-        "observation_schema": _assert_text(value["observation_schema"], path + ".observation_schema"),
+        "observation_schema": normalized_observation_schema,
     }
 
 
@@ -1901,6 +2043,20 @@ class AtomicRuleSnapshot(_ImmutableContract):
     _normalizer = staticmethod(_normalize_atomic_rule_snapshot)
 
 
+class SemanticRuleResponseV2(_ImmutableContract):
+    """Closed semantic provider response; score-like fields remain untrusted."""
+
+    __slots__ = ()
+    _normalizer = staticmethod(_normalize_semantic_rule_response_v2)
+
+
+class DeterministicCheckerResultV1(_ImmutableContract):
+    """Checker observations without any score authority."""
+
+    __slots__ = ()
+    _normalizer = staticmethod(_normalize_deterministic_checker_result_v1)
+
+
 class CompiledRubricSnapshot(_ImmutableContract):
     __slots__ = ()
     _normalizer = staticmethod(_normalize_compiled_rubric_snapshot)
@@ -1927,10 +2083,12 @@ __all__ = [
     "AtomicRuleSnapshot",
     "CompiledRubricSnapshot",
     "DocumentSnapshot",
+    "DeterministicCheckerResultV1",
     "PromptEnvelopeV1",
     "PromptEnvelopeV2",
     "PromptEnvelopeV3",
     "RuleExecutionPlan",
     "ScoringRequest",
+    "SemanticRuleResponseV2",
     "SubmissionSnapshot",
 ]

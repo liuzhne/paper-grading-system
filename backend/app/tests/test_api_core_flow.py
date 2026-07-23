@@ -2,10 +2,13 @@ import json
 from io import BytesIO
 
 from openpyxl import load_workbook
+from sqlalchemy import select
 
 from backend.app.core.config import settings
+from backend.app.db import models
 from backend.app.services.spreadsheet import writer as writer_module
 from backend.app.tests.conftest import make_sample_docx
+from backend.app.tests.conftest import publish_rubric_via_api
 
 
 def test_core_api_flow(client, monkeypatch):
@@ -18,16 +21,44 @@ def test_core_api_flow(client, monkeypatch):
                 "code": "C01",
                 "name": "研究方法",
                 "max_score": 15,
+                "criterion_type": "deterministic",
                 "evidence_hints": ["研究方法", "实验设计", "数据来源"],
                 "deduction_rules": ["方法说明不足扣分"],
+                "scoring_mode": "deductive",
+                "deduction_rules_structured": [
+                    {
+                        "match": "方法说明不足",
+                        "points": 15,
+                        "reason": "方法说明不足扣分",
+                        "checker_key": "thesis.legacy_required_fields.v1",
+                        "checker_params": {
+                            "criterion_code": "C01",
+                            "applies_to": "global",
+                        },
+                    }
+                ],
                 "display_order": 1,
             },
             {
                 "code": "C02",
                 "name": "参考文献",
                 "max_score": 15,
+                "criterion_type": "deterministic",
                 "evidence_hints": ["参考文献", "引用"],
                 "deduction_rules": ["参考文献不足扣分"],
+                "scoring_mode": "deductive",
+                "deduction_rules_structured": [
+                    {
+                        "match": "参考文献不足",
+                        "points": 15,
+                        "reason": "参考文献不足扣分",
+                        "checker_key": "thesis.legacy_required_fields.v1",
+                        "checker_params": {
+                            "criterion_code": "C02",
+                            "applies_to": "global",
+                        },
+                    }
+                ],
                 "display_order": 2,
             },
         ],
@@ -64,15 +95,21 @@ def test_core_api_flow(client, monkeypatch):
             },
         ],
     }
-    rubric_update_response = client.patch("/api/rubrics/%s" % rubric_id, json=rubric_update_payload)
-    assert rubric_update_response.status_code == 200, rubric_update_response.text
-    updated_rubric = rubric_update_response.json()
-    assert updated_rubric["name"] == "测试评分标准-草稿"
-    assert updated_rubric["criteria"][0]["max_score"] == 12
+    # M4 create immediately establishes an immutable provenance graph.  Its
+    # content is edited through AtomicRule/recompilation (or clone-for-edit),
+    # never through the legacy whole-rubric PATCH facade.
+    rubric_update_response = client.patch(
+        "/api/rubrics/%s" % rubric_id,
+        json=rubric_update_payload,
+    )
+    assert rubric_update_response.status_code == 400, rubric_update_response.text
+    assert "AtomicRule" in rubric_update_response.json()["detail"]
+    unchanged = client.get("/api/rubrics/%s" % rubric_id).json()
+    assert unchanged["name"] == rubric_payload["name"]
+    assert unchanged["criteria"][0]["max_score"] == 15
 
-    publish_response = client.post("/api/rubrics/%s/publish" % rubric_id)
-    assert publish_response.status_code == 200, publish_response.text
-    assert publish_response.json()["status"] == "published"
+    publish_response, _identity = publish_rubric_via_api(client, rubric_id)
+    assert publish_response["status"] == "published"
 
     update_published_response = client.patch("/api/rubrics/%s" % rubric_id, json={"description": "发布后修改"})
     assert update_published_response.status_code == 400
@@ -182,14 +219,32 @@ def test_core_api_flow(client, monkeypatch):
     items = items_response.json()
     assert len(items) == 2
     assert items[0]["criterion_name"] in {"研究方法", "参考文献"}
-    evidence_chunk_ids = {
-        evidence["chunk_id"]
-        for item in items
-        for evidence in item.get("evidence", [])
-        if evidence.get("chunk_id")
-    }
-    assert evidence_chunk_ids
-    assert evidence_chunk_ids.issubset(chunk_ids)
+    with client.session_factory() as db:
+        stored_items = [db.get(models.ScoreItem, item["id"]) for item in items]
+        assert all(
+            item.rule_results_schema_version == "rule-results@2"
+            for item in stored_items
+        )
+        rule_results = [
+            result
+            for item in stored_items
+            for result in item.rule_results
+        ]
+    evidence_refs = [
+        evidence_ref
+        for result in rule_results
+        for evidence_ref in result["evidence_refs"]
+    ]
+    assert evidence_refs
+    assert all(
+        evidence_ref["evidence_type"] == "deterministic_observation"
+        for evidence_ref in evidence_refs
+    )
+    assert all(
+        evidence_ref["locator"]["kind"] == "document_structure"
+        and evidence_ref["locator"]["structure_code"].startswith("required_owner:")
+        for evidence_ref in evidence_refs
+    )
 
     second_docx = make_sample_docx()
     second_upload_response = client.post(
@@ -208,6 +263,7 @@ def test_core_api_flow(client, monkeypatch):
     )
     assert second_upload_response.status_code == 200, second_upload_response.text
     assert second_upload_response.json()[0]["status"] == "parsed"
+    second_paper_id = second_upload_response.json()[0]["id"]
 
     batch_score_response = client.post("/api/batches/%s/score" % batch_id)
     assert batch_score_response.status_code == 200, batch_score_response.text
@@ -223,6 +279,36 @@ def test_core_api_flow(client, monkeypatch):
     start_result = start_response.json()
     assert start_result["scored_count"] == 0
     assert start_result["skipped_count"] == 2
+
+    before_rescore = client.get(
+        "/api/scoring-runs", params={"batch_id": batch_id}
+    ).json()
+    batch_rescore_response = client.post(
+        "/api/batches/%s/score?rescore=true" % batch_id
+    )
+    assert batch_rescore_response.status_code == 200, batch_rescore_response.text
+    batch_rescore = batch_rescore_response.json()
+    assert batch_rescore["scored_count"] == 2
+    assert batch_rescore["skipped_count"] == 0
+    assert batch_rescore["failed_count"] == 0
+    assert len(set(batch_rescore["run_ids"])) == 2
+    assert set(batch_rescore["run_ids"]).isdisjoint(
+        {item["id"] for item in before_rescore}
+    )
+    with client.session_factory() as db:
+        generations = {
+            target: sorted(
+                run.rescore_generation
+                for run in db.scalars(
+                    select(models.ScoringRun).where(
+                        models.ScoringRun.paper_id == target
+                    )
+                ).all()
+            )
+            for target in (paper["id"], second_paper_id)
+        }
+    assert generations[paper["id"]] == [0, 1, 2]
+    assert generations[second_paper_id] == [0, 1]
 
     summary_response = client.get("/api/batches/%s/summary" % batch_id)
     assert summary_response.status_code == 200, summary_response.text

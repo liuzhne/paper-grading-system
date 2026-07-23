@@ -154,6 +154,17 @@ class RuleExecutionPlanBuilder:
         for rule in rules.values():
             if rule["criterion_code"] not in criteria:
                 raise ValueError("atomic rule references an unknown criterion")
+            if (
+                rule["schema_version"] == "atomic-rule-snapshot@2"
+                and rule["judge_type"] == "semantic"
+                and not rule["evidence_policy"].get("allowed_finding_codes")
+            ):
+                # M4 plans must carry a closed semantic finding enum.  The
+                # rule code is the stable fallback for provenance graphs that
+                # predate a dedicated import column.
+                rule["evidence_policy"]["allowed_finding_codes"] = [
+                    rule["rule_code"]
+                ]
             rule["levels"] = sorted(
                 rule["levels"],
                 key=lambda item: (item["display_order"], item["level_code"]),

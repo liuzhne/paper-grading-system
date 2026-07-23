@@ -17,6 +17,7 @@ import pytest
 from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.db.models import ReviewLog
 from backend.app.db.models import RubricCriterion
@@ -28,6 +29,8 @@ from backend.app.schemas.scoring import ReviewLogRead
 from backend.app.schemas.scoring import ScoreItemRead
 from backend.app.schemas.scoring import ScoringRunRead
 from backend.app.tests.conftest import make_sample_docx
+from backend.app.tests.conftest import publish_rubric_via_api
+from backend.app.tests.conftest import review_rubric_via_api
 from backend.app.tests.test_m1_policy import POLICY_API_AVAILABLE
 from backend.app.tests.test_m1_policy import _decimal
 from backend.app.tests.test_m1_policy import _field
@@ -110,8 +113,21 @@ def _criterion(code: str, *, weight, max_score=10) -> dict:
         "name": f"评分项-{code}",
         "max_score": max_score,
         "weight": weight,
-        "scoring_mode": "llm_direct",
+        "criterion_type": "deterministic",
+        "scoring_mode": "deductive",
         "evidence_hints": ["研究", "结论"],
+        "deduction_rules_structured": [
+            {
+                "match": f"{code} 论述不足",
+                "points": max_score,
+                "reason": f"{code} 论述不足",
+                "checker_key": "thesis.legacy_required_fields.v1",
+                "checker_params": {
+                    "criterion_code": code,
+                    "applies_to": "global",
+                },
+            }
+        ],
     }
 
 
@@ -147,11 +163,7 @@ def _create_scored_run(
     assert rubric_response.status_code == 200, rubric_response.text
     rubric = rubric_response.json()
 
-    # 无 provenance 的旧 Rubric 只有在显式发布后才可作为 legacy_unversioned
-    # 权威输入；先发布再建立批次，避免测试绕过真实纵向入口。
-    publish_response = client.post(f"/api/rubrics/{rubric['id']}/publish")
-    assert publish_response.status_code == 200, publish_response.text
-    rubric = publish_response.json()
+    rubric, _identity = publish_rubric_via_api(client, rubric["id"])
     assert rubric["status"] == "published"
 
     batch_response = client.post(
@@ -184,14 +196,33 @@ def _policy_key(snapshot) -> str:
     return str(_field(snapshot, "policy_key", "name", "key"))
 
 
-def _item_contribution(item) -> Decimal | None:
-    # API 可额外投影 contribution，但 0012 的权威持久化位置是 aggregation JSON。
-    projected = _field(item, "contribution", default=None)
-    if projected is not None:
-        return _decimal(projected)
+def _item_contributions(item) -> list[dict]:
+    """Read the immutable M4 automatic-score contribution audit."""
+
     aggregation = _field(item, "aggregation")
-    value = _field(aggregation, "contribution")
-    return None if value is None else _decimal(value)
+    assert _field(item, "aggregation_schema_version") == "criterion-aggregation@2"
+    assert _field(aggregation, "schema_version") == "criterion-aggregation@2"
+    assert _field(aggregation, "criterion_code") == _field(item, "criterion_code")
+    contributions = _field(aggregation, "contributions")
+    assert isinstance(contributions, list)
+    assert all(
+        {
+            "criterion_code",
+            "rule_code",
+            "occurrence_id",
+            "kind",
+            "amount",
+        }.issubset(contribution)
+        for contribution in contributions
+    )
+    return contributions
+
+
+def _item_auto_score_from_contributions(item) -> Decimal:
+    return sum(
+        (_decimal(contribution["amount"]) for contribution in _item_contributions(item)),
+        Decimal("0"),
+    )
 
 
 def _assert_sha256(value: str) -> None:
@@ -247,7 +278,7 @@ def _force_mixed_weights(client, rubric_id: str) -> None:
 
 
 @requires_policy_api
-def test_rubric_create_and_update_accept_weight_scale_independent_configuration(client):
+def test_rubric_create_accepts_weight_scale_independent_configuration(client):
     _require_policy_api()
     create_response = client.post(
         "/api/rubrics",
@@ -257,32 +288,33 @@ def test_rubric_create_and_update_accept_weight_scale_independent_configuration(
     rubric = create_response.json()
     assert [row["weight"] for row in rubric["criteria"]] == [8, 2]
 
-    # 更新走与 create 相同的验证器；权重无需凑成 100 或 total_score。
-    update_response = client.patch(
-        f"/api/rubrics/{rubric['id']}",
-        json={
-            "total_score": 100,
-            "criteria": [
-                _criterion("C1", weight=80),
-                _criterion("C2", weight=20),
-            ],
-        },
+    # M4 versioned content is immutable; exercise the same accepted weight
+    # scales through independent provenance imports instead of whole-rubric
+    # PATCH, which is intentionally fail-closed.
+    percentage_response = client.post(
+        "/api/rubrics",
+        json=_rubric_payload("M1-weight-percentage", weights=(80, 20)),
     )
-    assert update_response.status_code == 200, update_response.text
-    assert [row["weight"] for row in update_response.json()["criteria"]] == [80, 20]
+    assert percentage_response.status_code == 200, percentage_response.text
+    assert [row["weight"] for row in percentage_response.json()["criteria"]] == [80, 20]
 
-    points_response = client.patch(
-        f"/api/rubrics/{rubric['id']}",
-        json={
-            "total_score": 20,
-            "criteria": [
-                _criterion("C1", weight=None),
-                _criterion("C2", weight=None),
-            ],
-        },
+    points_response = client.post(
+        "/api/rubrics",
+        json=_rubric_payload(
+            "M1-weight-points",
+            weights=(None, None),
+            total_score=20,
+        ),
     )
     assert points_response.status_code == 200, points_response.text
     assert all(row["weight"] is None for row in points_response.json()["criteria"])
+
+    immutable_update = client.patch(
+        f"/api/rubrics/{rubric['id']}",
+        json={"description": "legacy whole-rubric patch"},
+    )
+    assert immutable_update.status_code == 400, immutable_update.text
+    assert "AtomicRule" in immutable_update.json()["detail"]
 
 
 @requires_policy_api
@@ -361,14 +393,21 @@ def test_publish_revalidates_weight_configuration_instead_of_trusting_create(cli
     )
     assert create_response.status_code == 200, create_response.text
     rubric_id = create_response.json()["id"]
+    identity = review_rubric_via_api(client, rubric_id)
     _force_mixed_weights(client, rubric_id)
 
-    publish_response = client.post(f"/api/rubrics/{rubric_id}/publish")
+    publish_response = client.post(
+        f"/api/rubrics/{rubric_id}/publish",
+        json={
+            "compilation_id": identity["compilation_id"],
+            "reason": "验证发布阶段重新检查权重",
+        },
+    )
     _assert_error_mentions_weight(publish_response)
 
 
 @requires_policy_api
-def test_scoring_start_revalidates_weights_and_creates_no_partial_run(client):
+def test_published_version_rejects_projection_drift_before_scoring(client):
     _require_policy_api()
     rubric_response = client.post(
         "/api/rubrics",
@@ -382,9 +421,8 @@ def test_scoring_start_revalidates_weights_and_creates_no_partial_run(client):
     assert rubric_response.status_code == 200, rubric_response.text
     rubric_id = rubric_response.json()["id"]
 
-    publish_response = client.post(f"/api/rubrics/{rubric_id}/publish")
-    assert publish_response.status_code == 200, publish_response.text
-    assert publish_response.json()["status"] == "published"
+    published, _identity = publish_rubric_via_api(client, rubric_id)
+    assert published["status"] == "published"
 
     batch_response = client.post(
         "/api/batches",
@@ -399,9 +437,8 @@ def test_scoring_start_revalidates_weights_and_creates_no_partial_run(client):
     assert upload_response.status_code == 200, upload_response.text
     paper_id = upload_response.json()["id"]
 
-    _force_mixed_weights(client, rubric_id)
-    score_response = client.post(f"/api/papers/{paper_id}/score")
-    _assert_error_mentions_weight(score_response)
+    with pytest.raises(ValueError, match="已发布评分标准不可修改"):
+        _force_mixed_weights(client, rubric_id)
     runs_response = client.get("/api/scoring-runs", params={"paper_id": paper_id})
     assert runs_response.status_code == 200, runs_response.text
     assert runs_response.json() == []
@@ -431,24 +468,30 @@ def test_new_authoritative_run_freezes_corrected_policy_and_item_contributions(c
 
     assert len(items) == 2
     assert {item["auto_score_status"] for item in items} == {"calculated"}
-    assert all(item["aggregation_schema_version"] == "score-item-aggregation@1" for item in items)
-    assert all(_item_contribution(item) is not None for item in items)
     assert all(
-        {"raw", "max", "weight", "contribution"}.issubset(item["aggregation"])
+        _item_auto_score_from_contributions(item) == _decimal(item["ai_score"])
         for item in items
     )
-    assert sum(_item_contribution(item) for item in items) == _decimal(run["ai_total_score"])
+    by_code = {item["criterion_code"]: item for item in items}
+    expected_total = (
+        _decimal(by_code["C1"]["ai_score"])
+        / _decimal(by_code["C1"]["max_score"])
+        * Decimal("80")
+        + _decimal(by_code["C2"]["ai_score"])
+        / _decimal(by_code["C2"]["max_score"])
+        * Decimal("20")
+    )
+    assert expected_total == _decimal(run["ai_total_score"])
 
 
 @requires_policy_persistence
-def test_cross_request_item_review_uses_frozen_policy_after_rubric_weights_drift(client):
+def test_cross_request_item_review_uses_frozen_policy(client):
     _require_policy_persistence()
     run, items, _paper_id = _create_scored_weighted_run(client, name="M1-frozen-review")
     frozen_hash = run["policy_hash"]
 
-    # 模拟评分后可变 ORM 标准发生漂移。若人工改单项/submit_review 错误地
-    # 重读当前 20/80 权重，下面两个分数会聚合为 90；冻结的 80/20 口径应为 60。
-    _force_weights(client, run["rubric_id"], (20, 80))
+    # M4 published graphs are immutable, so cross-request review must consume
+    # the policy already frozen on the run rather than re-reading rubric rows.
 
     by_code = {item["criterion_code"]: item for item in items}
     first_override = client.patch(
@@ -456,14 +499,24 @@ def test_cross_request_item_review_uses_frozen_policy_after_rubric_weights_drift
         json={"final_score": 5, "reason": "普通人工改单项"},
     )
     assert first_override.status_code == 200, first_override.text
-    assert _item_contribution(first_override.json()) == Decimal("40")
+    first_item = first_override.json()
+    assert _decimal(first_item["final_score"]) == Decimal("5")
+    assert first_item["aggregation"] == by_code["C1"]["aggregation"]
+    assert _item_auto_score_from_contributions(first_item) == _decimal(
+        by_code["C1"]["ai_score"]
+    )
 
     second_override = client.patch(
         f"/api/score-items/{by_code['C2']['id']}",
         json={"final_score": 10, "reason": "普通人工改单项"},
     )
     assert second_override.status_code == 200, second_override.text
-    assert _item_contribution(second_override.json()) == Decimal("20")
+    second_item = second_override.json()
+    assert _decimal(second_item["final_score"]) == Decimal("10")
+    assert second_item["aggregation"] == by_code["C2"]["aggregation"]
+    assert _item_auto_score_from_contributions(second_item) == _decimal(
+        by_code["C2"]["ai_score"]
+    )
 
     review_response = client.post(
         f"/api/scoring-runs/{run['id']}/review",
@@ -487,7 +540,7 @@ def test_cross_request_item_review_uses_frozen_policy_after_rubric_weights_drift
 
 
 @requires_policy_persistence
-def test_published_legacy_non_100_full_score_uses_percentage_grade_scale(client):
+def test_published_version_non_100_full_score_uses_percentage_grade_scale(client):
     _require_policy_persistence()
     run, items, _paper_id = _create_scored_run(
         client,
@@ -504,7 +557,12 @@ def test_published_legacy_non_100_full_score_uses_percentage_grade_scale(client)
             json={"final_score": 10, "reason": "非百分制满分纵向复核"},
         )
         assert override_response.status_code == 200, override_response.text
-        assert _item_contribution(override_response.json()) == Decimal("10")
+        overridden = override_response.json()
+        assert _decimal(overridden["final_score"]) == Decimal("10")
+        assert overridden["aggregation"] == item["aggregation"]
+        assert _item_auto_score_from_contributions(overridden) == _decimal(
+            item["ai_score"]
+        )
 
     review_response = client.post(
         f"/api/scoring-runs/{run['id']}/review",
@@ -517,7 +575,7 @@ def test_published_legacy_non_100_full_score_uses_percentage_grade_scale(client)
 
 
 @requires_policy_identity
-def test_item_override_and_submit_review_use_frozen_half_up_rounding(client):
+def test_item_override_and_submit_review_use_frozen_rounding(client):
     _require_policy_identity()
     run, items, _paper_id = _create_scored_run(
         client,
@@ -526,31 +584,7 @@ def test_item_override_and_submit_review_use_frozen_half_up_rounding(client):
         total_score=20,
     )
 
-    # 该运行代表“创建时即冻结为 half_up / 1 位”的合法历史事实。直接写入
-    # 测试数据库只用于构造不同于部署默认值的冻结策略；后续 API 请求不得重读默认值。
-    snapshot = deepcopy(run["policy_snapshot"])
-    snapshot["rounding"] = {**snapshot["rounding"], "mode": "half_up", "digits": 1}
-    snapshot_without_hash = deepcopy(snapshot)
-    snapshot_without_hash.pop("policy_hash", None)
-    frozen_hash = _canonical_sha256(snapshot_without_hash)
-    if "policy_hash" in snapshot:
-        snapshot["policy_hash"] = frozen_hash
-
-    db_generator, db = _db_session_from_client_fixture()
-    try:
-        db.execute(
-            update(ScoringRun)
-            .where(ScoringRun.id == run["id"])
-            .values(
-                policy_snapshot=snapshot,
-                policy_hash=frozen_hash,
-                policy_schema_version=snapshot["schema_version"],
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
-        db_generator.close()
+    frozen_hash = run["policy_hash"]
 
     by_code = {item["criterion_code"]: item for item in items}
     first = client.patch(
@@ -567,7 +601,7 @@ def test_item_override_and_submit_review_use_frozen_half_up_rounding(client):
     after_override_response = client.get(f"/api/scoring-runs/{run['id']}")
     assert after_override_response.status_code == 200, after_override_response.text
     after_override = after_override_response.json()
-    assert _decimal(after_override["final_total_score"]) == Decimal("2.3")
+    assert _decimal(after_override["final_total_score"]) == Decimal("2.25")
     assert after_override["policy_hash"] == frozen_hash
 
     reviewed_response = client.post(
@@ -576,7 +610,7 @@ def test_item_override_and_submit_review_use_frozen_half_up_rounding(client):
     )
     assert reviewed_response.status_code == 200, reviewed_response.text
     reviewed = reviewed_response.json()
-    assert _decimal(reviewed["final_total_score"]) == Decimal("2.3")
+    assert _decimal(reviewed["final_total_score"]) == Decimal("2.25")
     assert reviewed["policy_hash"] == frozen_hash
 
     logs_response = client.get(f"/api/scoring-runs/{run['id']}/review-logs")
@@ -609,7 +643,7 @@ def test_new_retry_run_does_not_rewrite_historical_run_policy_or_scores(client):
 
 
 @requires_policy_persistence
-def test_historical_run_without_policy_snapshot_cannot_recalculate_across_requests(client):
+def test_core_run_replay_identity_prevents_erasing_frozen_policy(client):
     _require_policy_persistence()
     run, items, _paper_id = _create_scored_weighted_run(client, name="M1-legacy-null-policy")
 
@@ -619,34 +653,17 @@ def test_historical_run_without_policy_snapshot_cannot_recalculate_across_reques
         historical.policy_snapshot = None
         historical.policy_hash = None
         historical.policy_schema_version = None
-        db.commit()
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
     finally:
         db.close()
         db_generator.close()
 
-    # 普通改单项会触发跨请求聚合；没有冻结口径时必须 fail closed，不能采用
-    # 此刻部署的 corrected_thesis_policy 重写历史事实。
-    override_response = client.patch(
-        f"/api/score-items/{items[0]['id']}",
-        json={"final_score": 5, "reason": "历史 run 不得按当前 policy 重算"},
-    )
-    assert override_response.status_code in {400, 409, 422}, override_response.text
-    assert "policy" in override_response.text.lower(), override_response.text
-
     historical_after = client.get(f"/api/scoring-runs/{run['id']}")
     assert historical_after.status_code == 200, historical_after.text
-    assert historical_after.json()["policy_snapshot"] is None
-    assert historical_after.json()["policy_hash"] is None
-
-    # 显式 retry 创建新的 rescore generation；新 run 必须拥有 corrected policy，
-    # 原历史 run 仍保持空快照，不做伪回填。
-    retry_response = client.post(f"/api/scoring-runs/{run['id']}/retry")
-    assert retry_response.status_code == 200, retry_response.text
-    retried = retry_response.json()
-    assert retried["id"] != run["id"]
-    assert _policy_key(retried["policy_snapshot"]) == "corrected_thesis_policy"
-    _assert_sha256(retried["policy_hash"])
-    assert client.get(f"/api/scoring-runs/{run['id']}").json()["policy_snapshot"] is None
+    assert historical_after.json()["policy_snapshot"] == run["policy_snapshot"]
+    assert historical_after.json()["policy_hash"] == run["policy_hash"]
 
 
 @requires_policy_persistence
@@ -664,14 +681,8 @@ def test_ordinary_override_cannot_clear_persisted_invalid_or_blocked_status(clie
         stored_item.ai_score = None
         stored_item.final_score = None
         aggregation = dict(stored_item.aggregation or {})
-        aggregation.update(
-            {
-                "raw": None,
-                "max": str(stored_item.max_score),
-                "weight": aggregation.get("weight"),
-                "contribution": None,
-            }
-        )
+        aggregation["status"] = status
+        aggregation["contributions"] = []
         stored_item.aggregation = aggregation
         stored_item.need_manual_review = True
         stored_run.ai_total_score = None

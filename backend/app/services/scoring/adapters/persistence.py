@@ -65,6 +65,14 @@ def _outcome_mapping(value) -> dict:
     return ScoringOutcome.from_mapping(raw).to_mapping()
 
 
+def _finding_list(value, *, label: str) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{label} must be an array")
+    return deepcopy(list(value))
+
+
 def _validate_document_snapshot(*, store, ref, request_document: Mapping) -> None:
     if not isinstance(ref, str) or not ref.strip():
         raise ValueError("document snapshot ref is required for replay")
@@ -162,26 +170,82 @@ def _group_rule_results(request: Mapping, outcome: Mapping) -> dict[str, list[di
         node["rule_code"]: node["criterion_code"]
         for node in request["plan"]["nodes"]
     }
+    criterion_codes = set(criterion_by_rule.values())
+    m4 = outcome["schema_version"] == "scoring-outcome@2"
+    decisions_by_rule = {}
+    expected_version_hash = (
+        request["plan"].get("rubric_version_hash")
+        or request["plan"]["rubric_snapshot_hash"]
+    )
+    for decision in outcome["rule_decisions"]:
+        rule_code = decision["rule_code"]
+        expected_criterion = criterion_by_rule.get(rule_code)
+        if expected_criterion is None:
+            raise ValueError(f"outcome contains unknown rule identity: {rule_code}")
+        if rule_code in decisions_by_rule:
+            raise ValueError(f"outcome contains duplicate rule identity: {rule_code}")
+        if m4 and decision["criterion_code"] != expected_criterion:
+            raise ValueError("outcome rule/criterion identity does not match scoring plan")
+        if m4 and decision["version_hash"] != expected_version_hash:
+            raise ValueError("outcome rule version identity does not match scoring plan")
+        decisions_by_rule[rule_code] = decision
+    if m4 and set(decisions_by_rule) != set(criterion_by_rule):
+        raise ValueError("outcome rule identities do not match scoring plan")
+
     contributions_by_rule: dict[str | None, list[dict]] = {}
     for contribution in outcome["score_contributions"]:
+        if m4:
+            rule_code = contribution.get("rule_code")
+            occurrence_id = contribution.get("occurrence_id")
+            if rule_code is None:
+                if occurrence_id is not None:
+                    raise ValueError("rule-less contribution cannot name an occurrence")
+                if contribution["criterion_code"] not in criterion_codes:
+                    raise ValueError("outcome contribution criterion is unknown")
+            else:
+                decision = decisions_by_rule.get(rule_code)
+                if decision is None:
+                    raise ValueError("outcome contribution rule identity is unknown")
+                if contribution["criterion_code"] != decision["criterion_code"]:
+                    raise ValueError("outcome contribution criterion does not match its rule")
+                occurrence_ids = {
+                    item["occurrence_id"] for item in decision["occurrences"]
+                }
+                if occurrence_id is not None and occurrence_id not in occurrence_ids:
+                    raise ValueError("outcome contribution occurrence is not audited")
+                if contribution["kind"] == "deduction" and occurrence_id is None:
+                    raise ValueError("deduction contribution requires an audited occurrence")
         contributions_by_rule.setdefault(contribution.get("rule_code"), []).append(
             deepcopy(contribution)
         )
     grouped: dict[str, list[dict]] = {}
     for decision in outcome["rule_decisions"]:
         rule_code = decision["rule_code"]
-        criterion_code = criterion_by_rule.get(rule_code)
-        if criterion_code is None:
-            raise ValueError(f"outcome contains unknown rule identity: {rule_code}")
-        grouped.setdefault(criterion_code, []).append(
-            {
+        criterion_code = criterion_by_rule[rule_code]
+        if m4:
+            result = {
+                "schema_version": "rule-result@2",
+                "version_hash": decision["version_hash"],
+                "rule_code": rule_code,
+                "criterion_code": decision["criterion_code"],
+                "direction": decision["direction"],
+                "effect_type": decision["effect_type"],
+                "status": decision["status"],
+                "selected_level_code": decision["selected_level_code"],
+                "evidence_refs": deepcopy(decision["evidence_refs"]),
+                "occurrences": deepcopy(decision["occurrences"]),
+                "calculated_effect": decision["calculated_effect"],
+                "score_contributions": contributions_by_rule.get(rule_code, []),
+            }
+        else:
+            result = {
                 "schema_version": "rule-result@1",
                 "rule_code": rule_code,
                 "status": decision["status"],
                 "evidence_refs": deepcopy(decision["evidence_refs"]),
                 "score_contributions": contributions_by_rule.get(rule_code, []),
             }
-        )
+        grouped.setdefault(criterion_code, []).append(result)
     return grouped
 
 
@@ -199,12 +263,23 @@ def _score_items(
         ).append(deepcopy(contribution))
 
     items = []
+    m4 = outcome["schema_version"] == "scoring-outcome@2"
+    rule_results_schema = "rule-results@2" if m4 else "rule-results@1"
+    aggregation_schema = "criterion-aggregation@2" if m4 else "criterion-aggregation@1"
     for criterion in outcome["criterion_outcomes"]:
         code = criterion["criterion_code"]
         criterion_id = criterion_id_by_code.get(code)
         if criterion_id is None:
             raise ValueError(f"outcome criterion identity is unknown: {code}")
         status = criterion["status"]
+        # ``review_required`` is a Core criterion outcome, not a persisted
+        # score-calculation failure.  The automatic score remains valid and
+        # reviewability is represented by ``need_manual_review`` plus a null
+        # final score.  The legacy table deliberately limits this column to
+        # calculated/invalid/blocked.
+        auto_score_status = (
+            status if status in {"invalid", "blocked"} else "calculated"
+        )
         evidence_refs = [
             deepcopy(ref)
             for result in rule_results.get(code, [])
@@ -216,7 +291,7 @@ def _score_items(
             if entry["kind"] == "deduction"
         ]
         aggregation = {
-            "schema_version": "criterion-aggregation@1",
+            "schema_version": aggregation_schema,
             "criterion_code": code,
             "status": status,
             "contributions": contributions_by_criterion.get(code, []),
@@ -256,10 +331,10 @@ def _score_items(
                     "rule_results": deepcopy(rule_results.get(code, [])),
                 },
                 aggregation=aggregation,
-                aggregation_schema_version="criterion-aggregation@1",
-                auto_score_status=status,
+                aggregation_schema_version=aggregation_schema,
+                auto_score_status=auto_score_status,
                 rule_results=rule_results.get(code, []),
-                rule_results_schema_version="rule-results@1",
+                rule_results_schema_version=rule_results_schema,
             )
         )
     if set(criterion_id_by_code) != {
@@ -286,6 +361,8 @@ class CoreRunPersistence:
         criterion_id_by_code: Mapping[str, str],
         workflow_profile: str,
         document_snapshot_ref: str,
+        coherence_findings=None,
+        format_findings=None,
     ) -> ScoringRun:
         request_mapping = _request_mapping(request)
         outcome_mapping = _outcome_mapping(outcome)
@@ -302,6 +379,16 @@ class CoreRunPersistence:
             raise ValueError("paper identity does not exist")
         if paper.batch.rubric_id != rubric_id:
             raise ValueError("paper/rubric identity mismatch")
+        locked_version_id = getattr(paper.batch, "rubric_version_id", None)
+        plan = request_mapping["plan"]
+        if plan["rubric_source_kind"] == "published_version":
+            if (
+                locked_version_id is not None
+                and locked_version_id != plan["rubric_version_id"]
+            ):
+                raise ValueError("paper batch lock does not match scoring rubric version")
+        elif locked_version_id is not None:
+            raise ValueError("version-locked paper cannot persist a legacy scoring plan")
 
         existing = self.db.scalar(
             select(ScoringRun).where(
@@ -313,11 +400,16 @@ class CoreRunPersistence:
                 raise ValueError("idempotency key collision with different replay identity")
             return existing
 
-        plan = request_mapping["plan"]
         document = request_mapping["document"]
         submission = request_mapping["submission"]
         runtime = request_mapping["runtime_identity"]
         provider = runtime["provider"]
+        stored_coherence_findings = _finding_list(
+            coherence_findings, label="coherence findings"
+        )
+        stored_format_findings = _finding_list(
+            format_findings, label="format findings"
+        )
         now = _utcnow()
         run = ScoringRun(
             paper_id=paper_id,
@@ -332,8 +424,8 @@ class CoreRunPersistence:
             prompt_tokens=0,
             completion_tokens=0,
             total_tokens=0,
-            coherence_findings=[],
-            format_findings=[],
+            coherence_findings=stored_coherence_findings,
+            format_findings=stored_format_findings,
             ai_total_score=(
                 None
                 if outcome_mapping["unrounded_total"] is None
@@ -380,7 +472,7 @@ class CoreRunPersistence:
             )
         )
         self.db.add(run)
-        paper.status = "scored"
+        paper.status = "pending_review" if run.need_manual_review else "scored"
         try:
             self.db.commit()
         except IntegrityError as exc:

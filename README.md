@@ -61,9 +61,14 @@ UV_CACHE_DIR=.uv-cache DATABASE_URL=sqlite+pysqlite:////private/tmp/paper_gradin
 ```bash
 uv run pgs init --seed                                   # 建本地库 + 默认评分标准/批次
 uv run pgs check [--mock]                                # LLM 连通自检（--mock 离线、不联网）
-uv run pgs import 规则.xlsx --name 校级标准 --template 模板.docx   # 导入评分标准（复用 Web 同一解析/落库）
-uv run pgs publish <rubric_id>                           # 发布草稿标准（draft → published）
+uv run pgs import 规则.xlsx --name 校级标准 --template 模板.docx   # 导入 M4 provenance 草稿图
 uv run pgs rubrics                                       # 列出评分标准（--json 机器可读）
+uv run pgs rubric-graph <rubric_id> --json               # 查看活动 compilation/version/rule/link 状态
+uv run pgs rule-submit <rubric_id> <rule_code> --reason "送审"
+uv run pgs rule-approve <rubric_id> <rule_code> --reason "核对通过"  # 逐条规则人工签核
+uv run pgs template-link-review <rubric_id> <link_id> --decision confirmed --reason "映射无误"
+uv run pgs rubric-submit-review <rubric_id>               # rubric draft → review
+uv run pgs publish <rubric_id> --compilation-id <id>     # 严格校验后发布冻结版本
 uv run pgs score 论文.docx 目录/ --rubric "校级标准" [--mock] [--workers N] [--report-dir out/]   # 评分（多文件/目录递归）
 uv run pgs score 论文.docx --no-db --rubric-file 规则.xlsx [--template 模板.docx] [--mock]   # 无状态评分：不建库、不落任何库
 uv run pgs runs [--batch <id>]                           # 列出评分任务（拿 run_id）
@@ -79,6 +84,8 @@ uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx   
 - LLM 由环境变量驱动（与 Web 一致，读 `.env`）；`--mock` 强制本地 Mock、不联网。
 - 批量：`score --workers N` 并发评分（适合真实 LLM 批量）+ 进度条 + 等级分布汇总。LLM 计算已脱离 DB 事务（6.1 解耦：collect 读 → compute 纯算 → persist 短写），多 worker 在本地 sqlite 也能并行（compute 无锁，仅末尾短写经 busy_timeout 串行）。
 - `score` 任一篇解析/评分失败即**非零退出**（便于脚本/CI）；`--json` 在 `score`/`rubrics`/`runs`/`show`/`batches`/`check` 输出机器可读结果。
+- M4 发布不会自动批准规则、确认模板映射或清除 blocker。驳回规则用 `rule-reopen`，审核中标准用 `rubric-return-draft`，旧的未版本化草稿须先显式执行 `rubric-upgrade --reason ...`。
+- 正式标准的 batch 会锁定唯一已发布 `rubric_version_id`，评分时必然使用 AtomicRule Core；全局 `SCORING_ENGINE_MODE` 在 M8 前仍默认 `legacy`，只影响未版本化兼容路径。
 - 闭环：`score` → 拿 run_id（或 `pgs runs`）→ `pgs show <run_id>` 看逐项明细 → `pgs review` 改分/提交（写 ReviewLog、重算总分）→ `pgs report` 出报告。
 - 无状态：`score --no-db --rubric-file 规则.xlsx` 从文件直接评分，**不建 sqlite、不落任何库**（隐私/一次性/脚本友好，由 6.1 纯 Core 支撑）；`--json` 取逐项明细；需 `--rubric-file`，不支持 `--report-dir`。
 
@@ -125,7 +132,13 @@ Google Apps Script 写表端模板位于 [docs/google_apps_script_webapp.gs](doc
 - `GET /api/rubrics/import-template.xlsx`
 - `POST /api/rubrics/import-files`
 - `PATCH /api/rubrics/{id}`
-- `POST /api/rubrics/{id}/publish`
+- `GET /api/rubrics/{id}/execution-draft`
+- `POST /api/rubrics/{id}/submit-review`、`POST /api/rubrics/{id}/return-to-draft`
+- `POST /api/rubrics/{id}/recompile`
+- `PATCH /api/rubrics/{id}/rules/{rule_code}`
+- `POST /api/rubrics/{id}/rules/{rule_code}/submit-review|approve|reject|reopen`
+- `POST /api/rubrics/{id}/template-links/{link_id}/review`
+- `POST /api/rubrics/{id}/publish`（body 必须指定 `compilation_id`）
 - `POST /api/rubrics/{id}/clone`
 - `POST/GET /api/batches`
 - `PATCH /api/batches/{id}`
@@ -183,7 +196,7 @@ uv run python -m backend.app.scripts.run_qwk_eval \
 ## 部署与运维要点
 
 - **内网试点 Docker 栈**：复制 `.env.intranet.example` 为 `.env.intranet`，改强密码与站点名后运行 `docker compose --env-file .env.intranet up -d --build`。详见 [docs/部署.md](docs/部署.md)。
-- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0008`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。
+- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0013_core_replay_identity`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。
 - **持久化状态**在 `storage/`：`uploads/`(原文)、`parsed/`(解析 JSON)、`reports/`、`exports/`、`llm_cache.sqlite`(L0 缓存/账本)、`eval/`(评估报告/基线)。除占位 `.gitkeep` 外均已 gitignore。
 - **真实 LLM**：设 `LLM_PROVIDER=openai_compatible` + `OPENAI_COMPATIBLE_*`（见上）；上线前用 `uv run python -m backend.app.scripts.diagnose_llm` 自检连通。未配置自动回退 Mock（评分项标人工复核）。
 - **可复现/降本**：`LLM_CACHE_ENABLED=true` 命中即复用；改 prompt 需 bump `cache/llm_cache.PROMPT_VERSION`。

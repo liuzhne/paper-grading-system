@@ -31,7 +31,9 @@ from backend.app.services.scoring.core.contracts import (
     SubmissionSnapshot,
 )
 from backend.app.services.scoring.core.results import ScoringOutcome
+from backend.app.tests.conftest import create_legacy_unversioned_rubric_fixture
 from backend.app.tests.conftest import make_sample_docx
+from backend.app.tests.conftest import publish_rubric_via_api
 from backend.app.tests.m2_contract_fixtures import (
     document_snapshot_projection,
     technical_policy_snapshot_payload,
@@ -1097,6 +1099,11 @@ M3_CORE_ROUTE_RUBRIC = {
                     "points": "10",
                     "reason": "Risk owner is missing.",
                     "source": "M3 core route fixture",
+                    "checker_key": "thesis.legacy_required_fields.v1",
+                    "checker_params": {
+                        "criterion_code": "RISK_CONTROL",
+                        "applies_to": "risk_control",
+                    },
                     "evidence_mode": "scoped_absence",
                     "absence_target": "risk_owner",
                 }
@@ -1298,8 +1305,11 @@ def test_core_mode_route_persists_one_complete_authoritative_vertical_run(
     rubric_response = client.post("/api/rubrics", json=M3_CORE_ROUTE_RUBRIC)
     assert rubric_response.status_code == 200, rubric_response.text
     rubric_id = rubric_response.json()["id"]
-    publish_response = client.post(f"/api/rubrics/{rubric_id}/publish")
-    assert publish_response.status_code == 200, publish_response.text
+    _published, published_identity = publish_rubric_via_api(
+        client,
+        rubric_id,
+        session_factory=session_factory,
+    )
     batch_response = client.post(
         "/api/batches",
         json={
@@ -1318,7 +1328,8 @@ def test_core_mode_route_persists_one_complete_authoritative_vertical_run(
     assert score_response.status_code == 200, score_response.text
     assert len(calls) == 1
     request = calls[0]
-    assert request["plan"]["rubric_source_kind"] == "legacy_unversioned"
+    assert request["plan"]["rubric_source_kind"] == "published_version"
+    assert request["plan"]["rubric_version_id"] == published_identity["rubric_version_id"]
     assert request["submission"]["profile_key"] == "thesis"
     assert request["document"]["profile_key"] == "thesis"
     assert request["plan"]["business_profile_key"] == "thesis"
@@ -1338,11 +1349,11 @@ def test_core_mode_route_persists_one_complete_authoritative_vertical_run(
         submission = request["submission"]
         document = request["document"]
         runtime = request["runtime_identity"]
-        assert run.rubric_source_kind == "legacy_unversioned"
+        assert run.rubric_source_kind == "published_version"
         assert run.rubric_snapshot_hash == plan["rubric_snapshot_hash"]
-        assert run.rubric_version_id is None
-        assert run.rubric_version_hash is None
-        assert run.rubric_hash_scheme is None
+        assert run.rubric_version_id == published_identity["rubric_version_id"]
+        assert run.rubric_version_hash == plan["rubric_version_hash"]
+        assert run.rubric_hash_scheme == "rubric-content-v2"
         assert run.business_profile_key == "thesis"
         assert isinstance(run.workflow_profile, str) and run.workflow_profile
         assert run.policy_snapshot == plan["policy_snapshot"]
@@ -1495,13 +1506,12 @@ def test_compare_executes_core_once_but_keeps_legacy_as_the_only_official_artifa
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
 
-    rubric_response = client.post("/api/rubrics", json=M0_RUBRIC)
-    assert rubric_response.status_code == 200, rubric_response.text
+    rubric_id = create_legacy_unversioned_rubric_fixture(client, M0_RUBRIC)
     batch_response = client.post(
         "/api/batches",
         json={
             "name": "M3 mode compatibility",
-            "rubric_id": rubric_response.json()["id"],
+            "rubric_id": rubric_id,
         },
     )
     assert batch_response.status_code == 200, batch_response.text

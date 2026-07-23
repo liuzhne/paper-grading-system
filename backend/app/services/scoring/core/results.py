@@ -9,6 +9,7 @@ import re
 from backend.app.services.scoring.core.contracts import (
     _ImmutableContract,
     _assert_closed_mapping,
+    _assert_json_value,
     _assert_optional_decimal,
     _assert_optional_text,
     _assert_sha256,
@@ -22,6 +23,7 @@ _RULE_DECISION_STATUSES = frozenset(
     {"triggered", "not_triggered", "not_applicable", "invalid", "skipped"}
 )
 _CRITERION_STATUSES = frozenset({"calculated", "invalid", "blocked"})
+_CRITERION_STATUSES_V2 = _CRITERION_STATUSES | {"review_required"}
 _OUTCOME_STATUSES = frozenset({"completed", "review_required", "blocked"})
 _REVIEW_SEVERITIES = frozenset({"info", "warning", "review", "block", "error"})
 _CONTRIBUTION_KINDS = frozenset(
@@ -180,10 +182,14 @@ def _normalize_request_identity(value, path):
     }
 
 
-def _normalize_criterion_outcome(value, path):
+def _normalize_criterion_outcome(value, path, *, v2=False):
     fields = {"criterion_code", "status", "auto_score", "final_score", "max_score"}
     _assert_closed_mapping(value, fields=fields, path=path)
-    status = _assert_enum(value["status"], path + ".status", _CRITERION_STATUSES)
+    status = _assert_enum(
+        value["status"],
+        path + ".status",
+        _CRITERION_STATUSES_V2 if v2 else _CRITERION_STATUSES,
+    )
     max_score = _required_decimal(value["max_score"], path + ".max_score")
     if Decimal(max_score) <= 0:
         raise ValueError("%s.max_score must be positive" % path)
@@ -197,6 +203,8 @@ def _normalize_criterion_outcome(value, path):
         auto_score is not None or final_score is not None
     ):
         raise ValueError("%s criterion must keep auto_score and final_score null" % status)
+    if status == "review_required" and final_score is not None:
+        raise ValueError("review_required criterion must keep final_score null")
     return {
         "criterion_code": _assert_text(value["criterion_code"], path + ".criterion_code"),
         "status": status,
@@ -242,12 +250,97 @@ def _normalize_rule_decision(value, path):
     }
 
 
+def _normalize_occurrence(value, path):
+    fields = {
+        "occurrence_id",
+        "occurrence_payload",
+        "evidence_refs",
+        "calculated_effect",
+    }
+    _assert_closed_mapping(value, fields=fields, path=path)
+    payload = value["occurrence_payload"]
+    if not isinstance(payload, Mapping):
+        raise TypeError(path + ".occurrence_payload must be an object")
+    normalized_payload = _assert_json_value(payload, path + ".occurrence_payload")
+    return {
+        "occurrence_id": _assert_sha256(
+            value["occurrence_id"], path + ".occurrence_id"
+        ),
+        "occurrence_payload": normalized_payload,
+        "evidence_refs": _assert_mapping_array(
+            value["evidence_refs"], path + ".evidence_refs", _normalize_evidence_ref
+        ),
+        "calculated_effect": _assert_optional_decimal(
+            value["calculated_effect"], path + ".calculated_effect"
+        ),
+    }
+
+
+def _normalize_rule_decision_v2(value, path):
+    fields = {
+        "version_hash",
+        "rule_code",
+        "criterion_code",
+        "direction",
+        "effect_type",
+        "status",
+        "selected_level_code",
+        "evidence_refs",
+        "occurrences",
+        "calculated_effect",
+    }
+    _assert_closed_mapping(value, fields=fields, path=path)
+    return {
+        "version_hash": _assert_sha256(value["version_hash"], path + ".version_hash"),
+        "rule_code": _assert_text(value["rule_code"], path + ".rule_code"),
+        "criterion_code": _assert_text(
+            value["criterion_code"], path + ".criterion_code"
+        ),
+        "direction": _assert_text(value["direction"], path + ".direction"),
+        "effect_type": _assert_text(value["effect_type"], path + ".effect_type"),
+        "status": _assert_enum(
+            value["status"], path + ".status", _RULE_DECISION_STATUSES
+        ),
+        "selected_level_code": _assert_optional_text(
+            value["selected_level_code"], path + ".selected_level_code"
+        ),
+        "evidence_refs": _assert_mapping_array(
+            value["evidence_refs"], path + ".evidence_refs", _normalize_evidence_ref
+        ),
+        "occurrences": _assert_mapping_array(
+            value["occurrences"], path + ".occurrences", _normalize_occurrence
+        ),
+        "calculated_effect": _assert_optional_decimal(
+            value["calculated_effect"], path + ".calculated_effect"
+        ),
+    }
+
+
 def _normalize_score_contribution(value, path):
     fields = {"criterion_code", "rule_code", "kind", "amount"}
     _assert_closed_mapping(value, fields=fields, path=path)
     return {
         "criterion_code": _assert_text(value["criterion_code"], path + ".criterion_code"),
         "rule_code": _assert_optional_text(value["rule_code"], path + ".rule_code"),
+        "kind": _assert_enum(value["kind"], path + ".kind", _CONTRIBUTION_KINDS),
+        "amount": _assert_optional_decimal(value["amount"], path + ".amount"),
+    }
+
+
+def _normalize_score_contribution_v2(value, path):
+    fields = {"criterion_code", "rule_code", "occurrence_id", "kind", "amount"}
+    _assert_closed_mapping(value, fields=fields, path=path)
+    occurrence_id = _assert_optional_text(
+        value["occurrence_id"], path + ".occurrence_id"
+    )
+    if occurrence_id is not None:
+        occurrence_id = _assert_sha256(occurrence_id, path + ".occurrence_id")
+    return {
+        "criterion_code": _assert_text(
+            value["criterion_code"], path + ".criterion_code"
+        ),
+        "rule_code": _assert_optional_text(value["rule_code"], path + ".rule_code"),
+        "occurrence_id": occurrence_id,
         "kind": _assert_enum(value["kind"], path + ".kind", _CONTRIBUTION_KINDS),
         "amount": _assert_optional_decimal(value["amount"], path + ".amount"),
     }
@@ -286,8 +379,10 @@ def _normalize_scoring_outcome(value):
         "audit_identity",
     }
     _assert_closed_mapping(value, fields=fields, path="ScoringOutcome")
-    if value["schema_version"] != "scoring-outcome@1":
+    schema_version = value["schema_version"]
+    if schema_version not in {"scoring-outcome@1", "scoring-outcome@2"}:
         raise ValueError("unsupported ScoringOutcome schema_version")
+    v2 = schema_version == "scoring-outcome@2"
     status = _assert_enum(value["status"], "ScoringOutcome.status", _OUTCOME_STATUSES)
     unrounded_total = _assert_nonnegative_optional_decimal(
         value["unrounded_total"], "ScoringOutcome.unrounded_total"
@@ -307,17 +402,17 @@ def _normalize_scoring_outcome(value):
     criterion_outcomes = _assert_mapping_array(
         value["criterion_outcomes"],
         "ScoringOutcome.criterion_outcomes",
-        _normalize_criterion_outcome,
+        lambda item, path: _normalize_criterion_outcome(item, path, v2=v2),
     )
     rule_decisions = _assert_mapping_array(
         value["rule_decisions"],
         "ScoringOutcome.rule_decisions",
-        _normalize_rule_decision,
+        _normalize_rule_decision_v2 if v2 else _normalize_rule_decision,
     )
     score_contributions = _assert_mapping_array(
         value["score_contributions"],
         "ScoringOutcome.score_contributions",
-        _normalize_score_contribution,
+        _normalize_score_contribution_v2 if v2 else _normalize_score_contribution,
     )
     review_issues = _assert_mapping_array(
         value["review_issues"],
@@ -335,6 +430,10 @@ def _normalize_scoring_outcome(value):
         unrounded_total is None or final_total is None
     ):
         raise ValueError("completed ScoringOutcome requires both totals")
+    if v2 and status == "review_required" and (
+        unrounded_total is not None or final_total is not None or grade is not None
+    ):
+        raise ValueError("review_required ScoringOutcome must keep totals and grade null")
     if any(
         item["status"] in {"invalid", "blocked"}
         for item in criterion_outcomes
@@ -342,7 +441,7 @@ def _normalize_scoring_outcome(value):
         raise ValueError("invalid or blocked criterion requires blocked ScoringOutcome")
 
     return {
-        "schema_version": "scoring-outcome@1",
+        "schema_version": schema_version,
         "request_identity": request_identity,
         "criterion_outcomes": criterion_outcomes,
         "rule_decisions": rule_decisions,
@@ -356,6 +455,57 @@ def _normalize_scoring_outcome(value):
     }
 
 
+def _normalize_rule_execution_result(value):
+    fields = {
+        "schema_version",
+        "status",
+        "criterion_outcomes",
+        "rule_decisions",
+        "score_contributions",
+        "review_issues",
+    }
+    _assert_closed_mapping(value, fields=fields, path="RuleExecutionResult")
+    if value["schema_version"] != "rule-execution-result@1":
+        raise ValueError("unsupported RuleExecutionResult schema_version")
+    status = _assert_enum(
+        value["status"], "RuleExecutionResult.status", _OUTCOME_STATUSES
+    )
+    criteria = _assert_mapping_array(
+        value["criterion_outcomes"],
+        "RuleExecutionResult.criterion_outcomes",
+        lambda item, path: _normalize_criterion_outcome(item, path, v2=True),
+    )
+    decisions = _assert_mapping_array(
+        value["rule_decisions"],
+        "RuleExecutionResult.rule_decisions",
+        _normalize_rule_decision_v2,
+    )
+    contributions = _assert_mapping_array(
+        value["score_contributions"],
+        "RuleExecutionResult.score_contributions",
+        _normalize_score_contribution_v2,
+    )
+    issues = _assert_mapping_array(
+        value["review_issues"],
+        "RuleExecutionResult.review_issues",
+        _normalize_review_issue,
+    )
+    if any(item["status"] in {"invalid", "blocked"} for item in criteria):
+        if status != "blocked":
+            raise ValueError("invalid or blocked criterion requires blocked result")
+    if any(item["status"] == "review_required" for item in criteria):
+        if status == "completed":
+            raise ValueError("review_required criterion requires review result")
+    return {
+        "schema_version": "rule-execution-result@1",
+        "status": status,
+        "criterion_outcomes": criteria,
+        "rule_decisions": decisions,
+        "score_contributions": contributions,
+        "review_issues": issues,
+    }
+
+
 class ScoringOutcome(_ImmutableContract):
     """Complete replay/audit result without transport or thesis-specific fields."""
 
@@ -363,4 +513,11 @@ class ScoringOutcome(_ImmutableContract):
     _normalizer = staticmethod(_normalize_scoring_outcome)
 
 
-__all__ = ["ScoringOutcome"]
+class RuleExecutionResult(_ImmutableContract):
+    """Complete M4 rule audit before policy aggregation/persistence."""
+
+    __slots__ = ()
+    _normalizer = staticmethod(_normalize_rule_execution_result)
+
+
+__all__ = ["RuleExecutionResult", "ScoringOutcome"]
