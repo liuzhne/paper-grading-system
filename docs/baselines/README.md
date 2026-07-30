@@ -8,3 +8,10 @@ M0 同时冻结两类证据：
 2. `m0-thesis-evaluation.json` 是 2026-06-16 A4 真实模型评估的**历史转录**。原始论文、教师分数、运行报告、数据库与 `/tmp` 基线均未留在仓库，因此它不可重算、不可作为自动门禁，也不能补造缺失 hash。`archive_record_version` 只版本化这份仓库内元数据记录，不是、也不能代替当时未记录的 dataset version。
 
 新的可门禁评估基线必须在运行时一并保存：去标识化 dataset manifest/version/hash、真值 hash、RubricVersion snapshot/hash、DocumentSnapshot manifest hash、model/provider artifact identity、policy/plan/prompt/anchor/checker identity、代码 revision、完整精度指标与逐样本报告。任一必需 identity 缺失时，`gating_eligible` 必须为 `false`。
+
+PGS-8 的正式流程见 [`pgs-8-release-gate-runbook.md`](pgs-8-release-gate-runbook.md)。发布门禁采用两阶段批准：
+
+1. 有权限的维护者在仓库外运行真实留出集，生成私有 manifest、逐样本报告和仓库安全的 candidate。
+2. 负责人完成隐私/锚点排除复核，并用 candidate 的精确 hash 批准基线、验收阈值和未来回退容差；对原 candidate 离线 finalize 后才可能得到 `gate_passed=true`。
+
+普通 `pgs eval` / `run_qwk_eval` 首跑生成的聚合 `baseline.json` 会明确标记 `reproducible=false`、`gating_eligible=false`，只用于本地实验对比，不能替代上述发布门禁。

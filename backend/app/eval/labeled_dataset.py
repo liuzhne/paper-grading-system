@@ -18,6 +18,8 @@ from backend.app.eval.run_eval import _items_by_code
 from backend.app.eval.runner import EvalPrediction
 from backend.app.eval.runner import EvalSample
 from backend.app.eval.runner import evaluate
+from backend.app.eval.gating import evaluation_sha256
+from backend.app.services.calibration.library import get_anchors
 from backend.app.services.papers.ingestion import ingest_file
 from backend.app.services.scoring.engine import score_paper
 
@@ -25,7 +27,14 @@ FILENAME_HEADERS = ("文件名", "文件", "论文", "filename", "file", "paper"
 TOTAL_HEADERS = ("总分", "总成绩", "总评", "total", "score")
 
 
-def build_labeled_eval(db: Session, rubric_id: str, papers_dir, scores_path, scorer=None):
+def build_labeled_eval(
+    db: Session,
+    rubric_id: str,
+    papers_dir,
+    scores_path,
+    scorer=None,
+    sample_ids_by_filename=None,
+):
     """从论文文件夹 + 教师成绩表构建评估：逐篇导入+评分，与人工真值比对（设计§15）。"""
     rubric = db.get(Rubric, rubric_id)
     if rubric is None:
@@ -46,38 +55,78 @@ def build_labeled_eval(db: Session, rubric_id: str, papers_dir, scores_path, sco
     completed_runs = 0
     review_required_runs = 0
     blocked_runs = 0
+    per_sample = []
+    sample_ids_by_filename = sample_ids_by_filename or {}
     for entry in table:
         source = base_dir / entry["filename"]
+        sample_id = sample_ids_by_filename.get(entry["filename"])
+        error_identity = (
+            {"sample_id": sample_id}
+            if sample_id
+            else {"filename": entry["filename"]}
+        )
         if not source.exists():
-            errors.append({"filename": entry["filename"], "error": "未找到论文文件"})
+            errors.append({**error_identity, "error": "未找到论文文件"})
             continue
         try:
             paper = ingest_file(db, batch.id, str(source), entry["filename"])
             if paper.status != "parsed":
-                errors.append({"filename": entry["filename"], "error": paper.error_message or "解析失败"})
+                errors.append(
+                    {
+                        **error_identity,
+                        "error": paper.error_message or "解析失败",
+                    }
+                )
                 continue
             run = score_paper(db, paper.id, scorer=scorer)
         except Exception as exc:  # 单篇失败不中断整批
-            errors.append({"filename": entry["filename"], "error": str(exc)})
+            errors.append({**error_identity, "error": str(exc)})
             continue
         completed_runs += 1
         review_required_runs += int(bool(run.need_manual_review))
+        system_items = _items_by_code(run)
+        human_items = {
+            code: value
+            for code, value in entry["items"].items()
+            if code in rubric_codes
+        }
+        private_sample = {
+            "sample_id": sample_id or paper.id,
+            "human_total": entry["total"],
+            "system_total": (
+                float(run.final_total_score)
+                if run.final_total_score is not None
+                else None
+            ),
+            "human_items": human_items,
+            "system_items": system_items,
+            "need_manual_review": bool(run.need_manual_review),
+            "blocked": run.final_total_score is None,
+            "run_identity": _run_identity_projection(run),
+        }
+        per_sample.append(private_sample)
         if run.final_total_score is None:
             blocked_runs += 1
             errors.append(
                 {
-                    "filename": entry["filename"],
+                    **error_identity,
                     "error": "自动总分因 invalid/blocked 评分项为空；该样本未进入指标",
                 }
             )
             continue
-        human_items = {code: value for code, value in entry["items"].items() if code in rubric_codes}
-        samples.append(EvalSample(key=paper.id, human_total=entry["total"], human_items=human_items))
+        sample_key = sample_id or paper.id
+        samples.append(
+            EvalSample(
+                key=sample_key,
+                human_total=entry["total"],
+                human_items=human_items,
+            )
+        )
         predictions.append(
             EvalPrediction(
-                key=paper.id,
+                key=sample_key,
                 system_total=float(run.final_total_score),
-                system_items=_items_by_code(run),
+                system_items=system_items,
             )
         )
     db.commit()
@@ -91,7 +140,47 @@ def build_labeled_eval(db: Session, rubric_id: str, papers_dir, scores_path, sco
         review_required_runs / completed_runs if completed_runs else None
     )
     report["blocked_rate"] = blocked_runs / completed_runs if completed_runs else None
+    report["per_sample"] = per_sample
+    anchors = []
+    for code in sorted(rubric_codes):
+        selected = get_anchors(db, rubric.id, code)
+        anchors.append({"criterion_code": code, "anchors": selected})
+    report["anchors_identity"] = {
+        "schema": "paper-grading/anchor-manifest@1",
+        "count": sum(len(item["anchors"]) for item in anchors),
+        "manifest_sha256": evaluation_sha256(anchors),
+        # CalibrationAnchor currently lacks a source-sample identity, so this
+        # cannot be machine-proven and must be supplied by the approval review.
+        "holdout_exclusion_proven": False,
+    }
     return report
+
+
+def _run_identity_projection(run):
+    checker_manifest = run.checker_manifest
+    return {
+        "rubric_version_id": run.rubric_version_id,
+        "rubric_version_hash": run.rubric_version_hash,
+        "rubric_hash_scheme": run.rubric_hash_scheme,
+        "rubric_snapshot_hash": run.rubric_snapshot_hash,
+        "policy_hash": run.policy_hash,
+        "execution_plan_hash": run.execution_plan_hash,
+        "plan_schema_version": run.plan_schema_version,
+        "checker_manifest_sha256": (
+            evaluation_sha256(checker_manifest)
+            if checker_manifest is not None
+            else None
+        ),
+        "business_profile_key": run.business_profile_key,
+        "workflow_profile": run.workflow_profile,
+        "model_provider": run.model_provider,
+        "model_name": run.model_name,
+        "model_version": run.model_version,
+        "engine_version": run.engine_version,
+        "source_artifact_hash": run.source_artifact_hash,
+        "normalized_content_hash": run.normalized_content_hash,
+        "document_snapshot_hash": run.document_snapshot_hash,
+    }
 
 
 def load_scores_table(path):

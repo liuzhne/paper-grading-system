@@ -189,7 +189,9 @@ uv run python -m backend.app.scripts.run_qwk_eval \
     --rubric-id <rubric_id> --papers-dir /路径/论文文件夹 --scores /路径/成绩表.xlsx
 ```
 
-输出 QWK/MAE/等级一致率/逐维度偏宽偏严；首跑写 `storage/eval/baseline.json`，之后重跑做回归门禁（指标回退则非零退出，可接 CI/cron）。
+输出 QWK/MAE/等级一致率/逐维度偏宽偏严；普通首跑写 `storage/eval/baseline.json`，之后重跑做实验回归检查。该聚合基线明确 `gating_eligible=false`。
+
+M1/M5/M8 真实发布门禁必须使用 `run_qwk_eval --release-gate` 的仓库外私有归档、完整 identity 和两阶段人工批准流程，见 `docs/baselines/pgs-8-release-gate-runbook.md`。
 
 > 必须用**真实教师评分**作真值（mock 仅验证管线连通）；学生论文与成绩**放仓库外**，仅聚合 `baseline.json` 可提交。细节见 [backend/app/eval/README.md](backend/app/eval/README.md)。
 

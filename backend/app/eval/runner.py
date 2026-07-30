@@ -96,9 +96,15 @@ def _per_criterion_errors(paired):
 
 
 def baseline_from_report(report):
-    """从报告抽取可固化为回归基线的**聚合指标**（无任何学生内容，可安全提交仓库）。"""
+    """抽取普通实验的聚合基线；它明确不具备发布门禁资格。"""
     keys = ("qwk", "mae", "rmse", "exact_grade_agreement", "adjacent_grade_agreement")
-    return {key: report.get(key) for key in keys}
+    return {
+        "schema": "paper-grading/evaluation-aggregate-baseline@1",
+        "provenance": "aggregate_only_non_release",
+        "reproducible": False,
+        "gating_eligible": False,
+        **{key: report.get(key) for key in keys},
+    }
 
 
 def assert_no_regression(report, baseline, qwk_drop_tol=0.02, mae_rise_tol=1.0):

@@ -64,6 +64,10 @@ def test_baseline_from_report_extracts_aggregate_only():
         "per_criterion": {"C01": {"bias": -1}}, "errors": [], "n": 5,
     }
     assert baseline_from_report(report) == {
+        "schema": "paper-grading/evaluation-aggregate-baseline@1",
+        "provenance": "aggregate_only_non_release",
+        "reproducible": False,
+        "gating_eligible": False,
         "qwk": 0.8, "mae": 2.0, "rmse": 3.0, "exact_grade_agreement": 0.7, "adjacent_grade_agreement": 0.9,
     }
 

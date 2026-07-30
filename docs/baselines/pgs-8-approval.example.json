@@ -1,0 +1,40 @@
+{
+  "schema": "paper-grading/evaluation-gate-approval@1",
+  "candidate_sha256": "<copy-exact-candidate-sha256>",
+  "approved_by": "<authorized-maintainer>",
+  "approved_at": "2026-07-30T12:00:00+08:00",
+  "privacy_review": {
+    "dataset_deidentified": true,
+    "repository_scan_passed": true,
+    "anchors_exclude_holdout": true,
+    "teacher_truth_external_only": true
+  },
+  "accepted_baseline": {
+    "metrics": {
+      "qwk": 0.0,
+      "mae": 0.0,
+      "rmse": 0.0,
+      "exact_grade_agreement": 0.0,
+      "adjacent_grade_agreement": 0.0,
+      "review_rate": 0.0,
+      "blocked_rate": 0.0
+    },
+    "acceptance_thresholds": {
+      "minimum_qwk": 0.0,
+      "maximum_mae": 0.0,
+      "maximum_rmse": 0.0,
+      "minimum_exact_grade_agreement": 0.0,
+      "minimum_adjacent_grade_agreement": 0.0,
+      "maximum_review_rate": 0.0,
+      "maximum_blocked_rate": 0.0
+    },
+    "regression_tolerances": {
+      "qwk_drop": 0.0,
+      "mae_rise": 0.0,
+      "rmse_rise": 0.0,
+      "exact_grade_agreement_drop": 0.0,
+      "adjacent_grade_agreement_drop": 0.0,
+      "review_rate_rise": 0.0
+    }
+  }
+}
