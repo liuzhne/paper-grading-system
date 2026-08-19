@@ -17,17 +17,28 @@ from backend.app.core.config import settings
 from backend.app.eval.runner import EvalPrediction
 from backend.app.eval.runner import assert_no_regression
 from backend.app.eval.runner import evaluate
+from backend.app.eval.runner import evidence_quality_counts
 from backend.app.eval.runner import load_dataset
 from backend.app.services.scoring.engine import score_paper
 
 
-def run_evaluation(db, dataset_path, scorer=None, baseline=None):
+def run_evaluation(
+    db,
+    dataset_path,
+    scorer=None,
+    baseline=None,
+    *,
+    scoring_policy=None,
+    grade_scale=None,
+):
     samples = load_dataset(dataset_path)
     predictions = []
     errors = []
     completed_runs = 0
     review_required_runs = 0
     blocked_runs = 0
+    invalid_evidence_items = 0
+    evaluated_items = 0
     for sample in samples:
         try:
             run = score_paper(db, sample.key, scorer=scorer)
@@ -36,6 +47,9 @@ def run_evaluation(db, dataset_path, scorer=None, baseline=None):
             continue
         completed_runs += 1
         review_required_runs += int(bool(run.need_manual_review))
+        invalid_count, item_count = evidence_quality_counts(run)
+        invalid_evidence_items += invalid_count
+        evaluated_items += item_count
         if run.final_total_score is None:
             blocked_runs += 1
             errors.append(
@@ -53,13 +67,23 @@ def run_evaluation(db, dataset_path, scorer=None, baseline=None):
             )
         )
 
-    report = evaluate(predictions, samples)
+    evaluation_options = {}
+    if scoring_policy is not None:
+        evaluation_options["scoring_policy"] = scoring_policy
+    if grade_scale is not None:
+        evaluation_options["grade_scale"] = grade_scale
+    report = evaluate(predictions, samples, **evaluation_options)
     report["errors"] = errors
     report["completed_runs"] = completed_runs
     report["review_rate"] = (
         review_required_runs / completed_runs if completed_runs else None
     )
     report["blocked_rate"] = blocked_runs / completed_runs if completed_runs else None
+    report["invalid_evidence_item_count"] = invalid_evidence_items
+    report["evaluated_item_count"] = evaluated_items
+    report["invalid_evidence_rate"] = (
+        invalid_evidence_items / evaluated_items if evaluated_items else None
+    )
     report["generated_at"] = datetime.now(timezone.utc).isoformat()
     if baseline is not None:
         report["regression_issues"] = assert_no_regression(report, baseline)

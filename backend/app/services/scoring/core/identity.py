@@ -113,6 +113,33 @@ def hash_source_artifact(raw_bytes: bytes) -> str:
     return hashlib.sha256(raw_bytes).hexdigest()
 
 
+def scoring_request_idempotency_projection(value: Mapping) -> dict:
+    """Return the shared replay identity used by every Core adapter."""
+
+    request = _mapping(value, label="scoring request")
+    submission = _mapping(request["submission"], label="submission snapshot")
+    document = _mapping(request["document"], label="document snapshot")
+    plan = _mapping(request["plan"], label="rule execution plan")
+    return {
+        "scheme": "scoring-request-idempotency-v1",
+        "submission_snapshot_hash": canonical_sha256(submission),
+        "source_artifact_hash": submission["source_artifact_hash"],
+        "document_snapshot_hash": document["document_snapshot_hash"],
+        "normalized_content_hash": document["content_hash"],
+        "rubric_source_kind": plan["rubric_source_kind"],
+        "rubric_version_id": plan["rubric_version_id"],
+        "rubric_version_hash": plan["rubric_version_hash"],
+        "rubric_hash_scheme": plan["rubric_hash_scheme"],
+        "rubric_snapshot_hash": plan["rubric_snapshot_hash"],
+        "execution_plan_hash": plan["plan_hash"],
+        "policy_hash": plan["policy_hash"],
+        "business_profile_key": submission["profile_key"],
+        "business_profile_version": document["profile_version"],
+        "runtime_identity": request["runtime_identity"],
+        "rescore_generation": request["rescore_generation"],
+    }
+
+
 def _normalized_content_projection(value) -> dict:
     source = _closed_mapping(
         value,
@@ -609,4 +636,5 @@ __all__ = [
     "hash_document_snapshot",
     "hash_normalized_content",
     "hash_source_artifact",
+    "scoring_request_idempotency_projection",
 ]

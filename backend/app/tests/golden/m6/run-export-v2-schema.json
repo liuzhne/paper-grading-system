@@ -1,0 +1,98 @@
+{
+  "criterion_keys": [
+    "aggregation",
+    "ai_score",
+    "automatic_status",
+    "criterion_code",
+    "criterion_id",
+    "criterion_name",
+    "evidence",
+    "evidence_sufficient",
+    "final_score",
+    "max_score",
+    "need_manual_review",
+    "reason",
+    "rules"
+  ],
+  "html_markers": [
+    "评分运行报告",
+    "运行身份",
+    "评分项与规则",
+    "证据",
+    "人工复核记录",
+    "Profile 扩展"
+  ],
+  "identity_keys": [
+    "business_profile_key",
+    "business_profile_version",
+    "document_snapshot_hash",
+    "engine_version",
+    "execution_plan_hash",
+    "idempotency_key",
+    "model",
+    "normalized_content_hash",
+    "plan_schema_version",
+    "policy_hash",
+    "policy_schema_version",
+    "prompt_version",
+    "rescore_generation",
+    "rubric_hash_scheme",
+    "rubric_snapshot_hash",
+    "rubric_version_hash",
+    "rubric_version_id",
+    "runtime_identity",
+    "source_artifact_hash",
+    "workflow_profile"
+  ],
+  "profile_extension_keys": [
+    "findings",
+    "metadata"
+  ],
+  "review_log_keys": [
+    "after_score",
+    "before_score",
+    "created_at",
+    "policy_hash",
+    "reason",
+    "resolution_type",
+    "reviewer_id",
+    "score_item_id"
+  ],
+  "rule_keys": [
+    "calculated_effect",
+    "criterion_code",
+    "direction",
+    "effect_type",
+    "evidence",
+    "level_code",
+    "observations",
+    "rule_code",
+    "status",
+    "version_hash"
+  ],
+  "schema": "grading-core/run-export@2",
+  "sheet_names": [
+    "运行摘要",
+    "评分项",
+    "规则结果",
+    "证据",
+    "复核记录",
+    "Profile扩展"
+  ],
+  "submission_keys": [
+    "artifact",
+    "document_snapshot_id",
+    "evaluation_batch_id",
+    "file",
+    "id"
+  ],
+  "top_level_keys": [
+    "criteria",
+    "identity",
+    "profile_extensions",
+    "review_logs",
+    "run",
+    "schema",
+    "submission"
+  ]
+}

@@ -6,8 +6,10 @@
 
 import json
 import shutil
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List
 from typing import Optional
 
@@ -372,6 +374,369 @@ def _score_stateless(files, rubric_file, template, mock, workers, report_dir, as
     return 1 if any_failed else 0
 
 
+def _score_stateless_profiled(
+    files,
+    rubric_file,
+    template,
+    mock,
+    workers,
+    report_dir,
+    as_json,
+    *,
+    profile_key,
+    profile_version,
+):
+    """Run the legacy file rubric through an explicit Profile/Core request."""
+
+    if profile_key != "thesis":
+        raise typer.BadParameter(
+            "--no-db currently supports only the explicit thesis Profile; "
+            "other Profiles require a published RubricVersion in local SQLite"
+        )
+    if not rubric_file:
+        raise typer.BadParameter("--no-db 需要 --rubric-file 指定评分标准（无 DB 可查）")
+    if report_dir:
+        raise typer.BadParameter(
+            "--no-db 不支持 --report-dir（报告需 DB）；改用普通模式，或用 --json 取明细"
+        )
+
+    from backend.app.services.document_parser.parser import parse_document
+    from backend.app.services.rubric_import.parser import parse_rubric_files
+    from backend.app.services.scoring.adapters.legacy_rubric import (
+        LegacyRubricAdapter,
+    )
+    from backend.app.services.scoring.core.canonical import canonical_sha256
+    from backend.app.services.scoring.core.contracts import ScoringRequest
+    from backend.app.services.scoring.core.engine import score_submission
+    from backend.app.services.scoring.core.identity import hash_source_artifact
+    from backend.app.services.scoring.core.identity import (
+        scoring_request_idempotency_projection,
+    )
+    from backend.app.services.scoring.core.policy import (
+        build_corrected_thesis_policy,
+    )
+    from backend.app.services.scoring.core.policy import (
+        validate_weight_configuration,
+    )
+    from backend.app.services.scoring.engine import _build_legacy_execution_plan
+    from backend.app.services.scoring.profiles.registry import get_profile
+
+    if mock:
+        from backend.app.services.llm.mock import MockLLMScorer
+
+        scorer = MockLLMScorer()
+    else:
+        scorer = _safe_scorer()
+        if scorer is None:
+            render.error("未配置可用 LLM（加 --mock，或在 .env 配置真实 provider）")
+            return 2
+
+    profile = get_profile(
+        profile_key=profile_key,
+        profile_version=profile_version,
+    )
+    try:
+        imported = parse_rubric_files(
+            rules_bytes=Path(rubric_file).read_bytes(),
+            template_bytes=Path(template).read_bytes() if template else None,
+            scorer=scorer,
+        )
+    except ValueError as exc:
+        render.error("评分标准解析失败：%s" % exc)
+        return 2
+    weights = validate_weight_configuration(
+        imported.criteria,
+        total_score=imported.total_score,
+    )
+    policy = build_corrected_thesis_policy(
+        imported.total_score,
+        weights.mode,
+    )
+    adapter = LegacyRubricAdapter()
+    rubric_snapshot = adapter.adapt(
+        rubric={
+            "name": Path(rubric_file).stem,
+            "status": "published",
+            "total_score": imported.total_score,
+        },
+        criteria=imported.criteria,
+        policy_snapshot=policy.to_mapping(),
+        business_profile_key=profile.profile_key,
+        compilation_rows=(),
+    )
+    registry = profile.build_checker_registry()
+    plan = _build_legacy_execution_plan(
+        rubric_snapshot=rubric_snapshot,
+        profile=profile,
+        registry=registry,
+        compatibility_nodes=adapter.adapt_compatibility_nodes(
+            criteria=imported.criteria,
+            rubric_source_kind="legacy_unversioned",
+        ),
+    )
+
+    def _score_one(path):
+        try:
+            raw_bytes = Path(path).read_bytes()
+            artifact_hash = hash_source_artifact(raw_bytes)
+            parsed = parse_document(str(path)).to_dict()
+            paper = SimpleNamespace(
+                id="stateless:" + artifact_hash,
+                title=parsed.get("title") or path.stem,
+                parse_quality=parsed.get("parse_quality"),
+                student_id=None,
+                student_name=None,
+                department=None,
+                major=None,
+                advisor=None,
+            )
+            snapshots = profile.adapt_paper(
+                paper=paper,
+                parsed=parsed,
+                source_artifact_hash=artifact_hash,
+            )
+            request_mapping = {
+                "schema_version": "scoring-request@2",
+                "submission": snapshots.submission.to_mapping(),
+                "document": snapshots.document.to_mapping(),
+                "plan": plan.to_mapping(),
+                "runtime_identity": profile.build_runtime_identity(scorer),
+                "rescore_generation": 0,
+            }
+            request_mapping["idempotency_key"] = canonical_sha256(
+                scoring_request_idempotency_projection(request_mapping)
+            )
+            outcome = score_submission(
+                request=ScoringRequest.from_mapping(request_mapping),
+                checker_registry=registry,
+                llm_runtime=profile.build_llm_runtime(scorer),
+                profile=profile,
+            ).to_mapping()
+            identity = {
+                **deepcopy(outcome["request_identity"]),
+                "profile_version": profile.profile_version,
+                "runtime_identity": deepcopy(outcome["audit_identity"]),
+            }
+            return {
+                "file": path.name,
+                "status": "ok" if outcome["status"] == "completed" else outcome["status"],
+                "total": (
+                    None
+                    if outcome["final_total"] is None
+                    else float(outcome["final_total"])
+                ),
+                "grade": outcome["grade"],
+                "need_review": bool(outcome["review_issues"]),
+                "tokens": 0,
+                "items": deepcopy(outcome["criterion_outcomes"]),
+                "identity": identity,
+            }
+        except Exception as exc:
+            return {"file": path.name, "status": "失败", "error": str(exc)}
+
+    results = _run_scoring(list(files), _score_one, workers, show_progress=not as_json)
+    results.sort(key=lambda item: item["file"])
+    any_failed = any(item["status"] != "ok" for item in results)
+    payload = {
+        "contract": "scoring-core@1",
+        "rubric": "%s（%d 项，无状态）"
+        % (Path(rubric_file).stem, len(imported.criteria)),
+        "stateless": True,
+        "profile": {
+            "key": profile.profile_key,
+            "version": profile.profile_version,
+        },
+        "results": results,
+    }
+    if as_json:
+        render.dump_json(payload)
+    else:
+        render.info(
+            "Profile：%s / %s（无状态 Core）"
+            % (profile.profile_key, profile.profile_version)
+        )
+        render.render_table(
+            "评分结果（无状态 Core）",
+            ["文件", "总分", "等级", "需复核", "状态"],
+            [
+                (
+                    item["file"],
+                    item.get("total", "-"),
+                    item.get("grade", "-"),
+                    "是" if item.get("need_review") else "否",
+                    item["status"],
+                )
+                for item in results
+            ],
+        )
+    return 1 if any_failed else 0
+
+
+def _score_profiled(
+    *,
+    files,
+    rubric,
+    rubric_file,
+    template,
+    mock,
+    workers,
+    report_dir,
+    as_json,
+    db,
+    storage,
+    profile_key,
+    profile_version,
+    metadata,
+):
+    """Local SQLite v2 Submission → Profile → Core scoring flow."""
+
+    _bootstrap(db, storage)
+    from backend.app.schemas.submission import EvaluationBatchCreate
+    from backend.app.services.dev_user import ensure_dev_user
+    from backend.app.services.report.generic_export import build_run_export_v2
+    from backend.app.services.report.generic_generator import generate_report_v2
+    from backend.app.services.scoring.profiles.registry import get_profile
+    from backend.app.services.scoring.profiles.registry import get_profile_by_key
+    from backend.app.services.submissions.lifecycle import create_evaluation_batch
+    from backend.app.services.submissions.lifecycle import ingest_submission
+    from backend.app.services.submissions.lifecycle import score_generic_submission
+
+    selected = (
+        get_profile(
+            profile_key=profile_key,
+            profile_version=profile_version,
+        )
+        if profile_version
+        else get_profile_by_key(profile_key)
+    )
+    exact_version = selected.profile_version
+    scorer = None
+    if mock:
+        from backend.app.services.llm.mock import MockLLMScorer
+
+        scorer = MockLLMScorer()
+    else:
+        scorer = _safe_scorer()
+        if scorer is None:
+            render.error("未配置可用 LLM（加 --mock，或在 .env 配置真实 provider）")
+            return 2
+
+    submissions = []
+    with clidb.cli_session() as session:
+        user = ensure_dev_user(session)
+        rub = _resolve_rubric(session, rubric, rubric_file, template)
+        version = _resolve_cli_frozen_version(session, rub)
+        if version is None:
+            raise typer.BadParameter(
+                "显式 Profile 评分需要唯一、持续一致发布的 RubricVersion"
+            )
+        if version.business_profile_key != profile_key:
+            raise typer.BadParameter(
+                "评分标准 RubricVersion 与 --profile 不匹配"
+            )
+        batch = create_evaluation_batch(
+            session,
+            EvaluationBatchCreate(
+                name="CLI-v2-%s" % datetime.now().strftime("%Y%m%d-%H%M%S"),
+                rubric_version_id=version.id,
+                business_profile_key=profile_key,
+                business_profile_version=exact_version,
+            ),
+            creator_id=user.id,
+        )
+        rubric_label = "%s / %s" % (rub.name, rub.version)
+        for path in files:
+            try:
+                submission, _snapshot = ingest_submission(
+                    session,
+                    evaluation_batch_id=batch.id,
+                    file_name=path.name,
+                    uploaded_media_type=None,
+                    raw_bytes=path.read_bytes(),
+                    metadata=deepcopy(metadata),
+                    creator_id=user.id,
+                )
+                submissions.append((path.name, path.stem, submission.id))
+            except Exception as exc:
+                session.rollback()
+                submissions.append((path.name, path.stem, None, str(exc)))
+        batch_id = batch.id
+        rubric_version_id = version.id
+
+    def _score_one(item):
+        if len(item) == 4:
+            return {"file": item[0], "status": "失败", "error": item[3]}
+        name, stem, submission_id = item
+        with clidb.cli_session() as session:
+            try:
+                run = score_generic_submission(
+                    session,
+                    submission_id,
+                    rescore_generation=0,
+                    scorer=scorer,
+                )
+                exported = build_run_export_v2(session, run.id)
+                if report_dir:
+                    Path(report_dir).mkdir(parents=True, exist_ok=True)
+                    html = generate_report_v2(session, run.id)
+                    shutil.copyfile(html, Path(report_dir) / (stem + ".html"))
+                return {
+                    "file": name,
+                    "status": "ok",
+                    "total": exported["run"]["final_total_score"],
+                    "grade": exported["run"]["grade"],
+                    "need_review": exported["run"]["need_manual_review"],
+                    "run_id": run.id,
+                    "submission_id": submission_id,
+                    "document_snapshot_id": exported["submission"][
+                        "document_snapshot_id"
+                    ],
+                    "identity": exported["identity"],
+                }
+            except Exception as exc:
+                session.rollback()
+                return {"file": name, "status": "失败", "error": str(exc)}
+
+    results = _run_scoring(
+        submissions,
+        _score_one,
+        workers,
+        show_progress=not as_json,
+    )
+    results.sort(key=lambda item: item["file"])
+    any_failed = any(item["status"] != "ok" for item in results)
+    payload = {
+        "contract": "grading-core/cli-profile-score@1",
+        "rubric": rubric_label,
+        "rubric_version_id": rubric_version_id,
+        "batch_id": batch_id,
+        "profile": {"key": profile_key, "version": exact_version},
+        "results": results,
+    }
+    if as_json:
+        render.dump_json(payload)
+    else:
+        render.info(
+            "Profile：%s / %s    RubricVersion：%s"
+            % (profile_key, exact_version, rubric_version_id)
+        )
+        render.render_table(
+            "v2 Profile/Core 评分结果",
+            ["文件", "总分", "等级", "需复核", "状态"],
+            [
+                (
+                    item["file"],
+                    item.get("total", "-"),
+                    item.get("grade", "-"),
+                    "是" if item.get("need_review") else "否",
+                    item["status"],
+                )
+                for item in results
+            ],
+        )
+    return 1 if any_failed else 0
+
+
 # ---- 命令 ----
 @app.command()
 def init(
@@ -452,6 +817,50 @@ def doctor(
             "离线就绪：%s（OFFLINE_MODE=%s）" % ("是 ✓ 纯本地零外呼" if ready else "否 ✗ 存在外呼环节", settings.OFFLINE_MODE)
         )
     raise typer.Exit(0)
+
+
+@app.command("core-cutover-audit")
+def core_cutover_audit(
+    as_json: bool = typer.Option(False, "--json", help="输出稳定 JSON 报告"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """只读盘点活跃 Rubric 的 Core 可执行性；有 blocker 时退出 1。"""
+
+    _bootstrap(db, storage)
+    from backend.app.services.deployment.cutover_inventory import (
+        build_core_cutover_inventory,
+    )
+
+    with clidb.cli_session() as session:
+        report = build_core_cutover_inventory(session)
+    if as_json:
+        render.dump_json(report)
+    else:
+        rows = [
+            (
+                item["rubric_id"],
+                item["rubric_source_kind"],
+                item["rubric_version_id"] or "-",
+                item["status"],
+                ",".join(item["blocker_codes"]) or "-",
+                len(item["affected_batches"]),
+            )
+            for item in report["targets"]
+        ]
+        render.render_table(
+            "Core 默认切换 Rubric 盘点",
+            ["Rubric", "来源", "Version", "状态", "Blocker", "批次数"],
+            rows,
+        )
+        message = (
+            "Rubric 盘点通过（仅代表 inventory scope，不代表生产发布批准）"
+            if report["inventory_clear"]
+            else "Rubric 盘点存在 %s 个 blocker"
+            % report["summary"]["blockers"]
+        )
+        (render.info if report["inventory_clear"] else render.error)(message)
+    raise typer.Exit(0 if report["inventory_clear"] else 1)
 
 
 @app.command()
@@ -579,6 +988,21 @@ def score(
     report_dir: Optional[Path] = typer.Option(None, "--report-dir", help="为每篇生成 HTML 报告到该目录"),
     workers: int = typer.Option(1, "--workers", min=1, help="并发评分线程数（>1 适合真实 LLM 批量；6.1 解耦后可真正并行）"),
     no_db: bool = typer.Option(False, "--no-db", help="无状态：从文件直接评分，不建 sqlite/不落库（需 --rubric-file）"),
+    profile_key: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help="显式业务 Profile；不传保持默认 thesis 兼容路径",
+    ),
+    profile_version: Optional[str] = typer.Option(
+        None,
+        "--profile-version",
+        help="显式 Profile 版本；省略时解析该 key 唯一注册版本",
+    ),
+    metadata_json: str = typer.Option(
+        "{}",
+        "--metadata-json",
+        help="显式 Profile 的业务元数据 JSON 对象",
+    ),
     as_json: bool = typer.Option(False, "--json"),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
@@ -589,6 +1013,63 @@ def score(
     if not files:
         render.error("没有可评分的文件")
         raise typer.Exit(2)
+    try:
+        metadata = json.loads(metadata_json)
+    except (TypeError, ValueError) as exc:
+        raise typer.BadParameter("--metadata-json 必须是 JSON 对象") from exc
+    if not isinstance(metadata, dict):
+        raise typer.BadParameter("--metadata-json 必须是 JSON 对象")
+    if profile_key:
+        if no_db:
+            from backend.app.services.scoring.profiles.registry import (
+                get_profile,
+            )
+            from backend.app.services.scoring.profiles.registry import (
+                get_profile_by_key,
+            )
+
+            selected = (
+                get_profile(
+                    profile_key=profile_key,
+                    profile_version=profile_version,
+                )
+                if profile_version
+                else get_profile_by_key(profile_key)
+            )
+            raise typer.Exit(
+                _score_stateless_profiled(
+                    files,
+                    rubric_file,
+                    template,
+                    mock,
+                    workers,
+                    report_dir,
+                    as_json,
+                    profile_key=profile_key,
+                    profile_version=selected.profile_version,
+                )
+            )
+        raise typer.Exit(
+            _score_profiled(
+                files=files,
+                rubric=rubric,
+                rubric_file=rubric_file,
+                template=template,
+                mock=mock,
+                workers=workers,
+                report_dir=report_dir,
+                as_json=as_json,
+                db=db,
+                storage=storage,
+                profile_key=profile_key,
+                profile_version=profile_version,
+                metadata=metadata,
+            )
+        )
+    if profile_version:
+        raise typer.BadParameter("--profile-version 需要同时指定 --profile")
+    if metadata:
+        raise typer.BadParameter("--metadata-json 仅用于显式 --profile 路径")
     if no_db:
         raise typer.Exit(_score_stateless(files, rubric_file, template, mock, workers, report_dir, as_json))
     db_url = _bootstrap(db, storage)
@@ -643,7 +1124,7 @@ def score(
                 results.append({"file": path.name, "status": "失败", "error": str(exc)})
 
     if workers > 1 and db_url.startswith("sqlite") and not as_json:
-        render.hint("提示：本地 sqlite 下评分事务跨 LLM 调用持写锁，多 worker 实际趋于串行；要真正并行可指向并发数据库。")
+        render.hint("提示：本地 SQLite 已启用 WAL + busy_timeout；worker 可并行计算，持久化采用短事务并由幂等键防止重复权威 run。")
 
     # 阶段 2：评分（每 worker 独立会话，互不串扰）
     def _score_one(item):
@@ -715,8 +1196,20 @@ def report(
     _bootstrap(db, storage)
 
     with clidb.cli_session() as session:
+        from backend.app.db.models import ScoringRun
+
+        run = session.get(ScoringRun, run_id)
+        if run is None:
+            render.error("评分任务不存在")
+            raise typer.Exit(2)
+        is_submission_run = run.submission_id is not None
         if fmt == "json":
-            from backend.app.services.report.json_export import build_run_export
+            if is_submission_run:
+                from backend.app.services.report.generic_export import (
+                    build_run_export_v2 as build_run_export,
+                )
+            else:
+                from backend.app.services.report.json_export import build_run_export
 
             try:
                 data = build_run_export(session, run_id)
@@ -729,7 +1222,12 @@ def report(
             else:
                 render.dump_json(data)
             return
-        from backend.app.services.report.generator import generate_report
+        if is_submission_run:
+            from backend.app.services.report.generic_generator import (
+                generate_report_v2 as generate_report,
+            )
+        else:
+            from backend.app.services.report.generator import generate_report
 
         try:
             path = Path(generate_report(session, run_id))
@@ -871,6 +1369,16 @@ def eval_cmd(
     papers_dir: Path = typer.Option(..., "--papers-dir", help="真实论文文件夹（仓库外）"),
     scores: Path = typer.Option(..., "--scores", help="教师成绩表 .xlsx/.csv"),
     baseline: Optional[Path] = typer.Option(None, "--baseline", help="基线 JSON（默认 storage/eval/baseline.json）"),
+    profile_key: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help="评估使用的业务 Profile；默认保持 thesis 兼容",
+    ),
+    profile_version: Optional[str] = typer.Option(
+        None,
+        "--profile-version",
+        help="显式 Profile 版本；省略时锁定该 key 的注册版本",
+    ),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
 ):
@@ -880,9 +1388,46 @@ def eval_cmd(
     from backend.app.eval.run_eval import _write_report
     from backend.app.eval.runner import assert_no_regression
     from backend.app.eval.runner import baseline_from_report
+    from backend.app.services.scoring.profiles.registry import get_profile
+    from backend.app.services.scoring.profiles.registry import get_profile_by_key
+
+    if profile_version and not profile_key:
+        raise typer.BadParameter("--profile-version 需要同时指定 --profile")
 
     with clidb.cli_session() as session:
-        data = build_labeled_eval(session, rubric_id, str(papers_dir), str(scores))
+        rubric = _resolve_rubric(session, rubric_id, None, None)
+        version = _resolve_cli_frozen_version(session, rubric)
+        selected_key = profile_key or (
+            version.business_profile_key if version is not None else "thesis"
+        )
+        if version is not None and version.business_profile_key != selected_key:
+            raise typer.BadParameter(
+                "评分标准 RubricVersion 与 --profile 不匹配"
+            )
+        try:
+            profile = (
+                get_profile(
+                    profile_key=selected_key,
+                    profile_version=profile_version,
+                )
+                if profile_version
+                else get_profile_by_key(selected_key)
+            )
+        except (LookupError, ValueError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if profile.profile_key != "thesis":
+            raise typer.BadParameter(
+                "当前教师留出集导入仅支持 thesis Profile；"
+                "其他 Profile 需提供对应的标注数据适配器"
+            )
+        kwargs = {"rubric_version_id": version.id} if version is not None else {}
+        data = build_labeled_eval(
+            session,
+            rubric.id,
+            str(papers_dir),
+            str(scores),
+            **kwargs,
+        )
     report_path = _write_report(data)
     render.render_table(
         "QWK 评估",
@@ -904,6 +1449,26 @@ def eval_cmd(
             "逐维度 bias（>0 偏宽 / <0 偏严）",
             ["code", "bias", "mae", "n"],
             [(code, s["bias"], s["mae"], s["n"]) for code, s in per.items()],
+        )
+    identity = data.get("evaluation_identity") or {}
+    if identity:
+        rounding = identity.get("rounding") or {}
+        render.render_table(
+            "评估身份（可复现）",
+            ["字段", "值"],
+            [
+                ("Profile", "%s / %s" % (
+                    identity.get("business_profile_key") or profile.profile_key,
+                    identity.get("business_profile_version") or profile.profile_version,
+                )),
+                ("RubricVersion", identity.get("rubric_version_id") or (version.id if version else "legacy")),
+                ("Policy hash", identity.get("policy_hash") or "-"),
+                ("GradeScale hash", identity.get("grade_scale_sha256") or "-"),
+                ("Rounding", "%s / %s" % (
+                    rounding.get("mode", "-"),
+                    rounding.get("digits", "-"),
+                )),
+            ],
         )
     render.hint("报告：%s" % report_path)
 

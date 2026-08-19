@@ -46,13 +46,12 @@ from backend.app.services.document_parser.chunking import build_chunks
 from backend.app.services.retrieval.keyword import retrieve_for_criterion
 from backend.app.services.retrieval.keyword import retrieve_for_criterion_in_chunks
 from backend.app.services.scoring.core.canonical import canonical_sha256
-from backend.app.services.scoring.core.checker_registry import VersionedCheckerRegistry
 from backend.app.services.scoring.core.contracts import RuleExecutionPlan, ScoringRequest
-from backend.app.services.scoring.core.engine import (
-    PROMPT_VERSION as CORE_PROMPT_VERSION,
-)
 from backend.app.services.scoring.core.engine import score_submission
 from backend.app.services.scoring.core.identity import hash_source_artifact
+from backend.app.services.scoring.core.identity import (
+    scoring_request_idempotency_projection,
+)
 from backend.app.services.scoring.core.evidence import validate_evidence
 from backend.app.services.scoring.core.execution_plan import RuleExecutionPlanBuilder
 from backend.app.services.scoring.core.policy import AGGREGATION_SCHEMA_VERSION
@@ -64,11 +63,10 @@ from backend.app.services.scoring.rules import calculate_total_score
 from backend.app.services.scoring.rules import match_grade
 from backend.app.services.scoring.rules import need_manual_review
 from backend.app.services.scoring.validator import validate_score_output
-from backend.app.services.storage.local import read_json
+from backend.app.services.storage.local import materialize, read_json
 from backend.app.services.scoring.adapters.comparison import (
     get_comparison_artifact_sink,
 )
-from backend.app.services.scoring.adapters.legacy_paper import LegacyPaperAdapter
 from backend.app.services.scoring.adapters.legacy_rubric import LegacyRubricAdapter
 from backend.app.services.scoring.adapters.rubric_snapshot import (
     CompiledRubricSnapshotLoader,
@@ -77,6 +75,7 @@ from backend.app.services.scoring.adapters.persistence import (
     CoreRunPersistence,
     LocalDocumentSnapshotStore,
 )
+from backend.app.services.scoring.profiles.thesis import ThesisProfile
 
 
 @dataclass
@@ -241,108 +240,6 @@ def _score_paper_legacy(db: Session, paper_id: str, scorer):
     return persist_scoring(db, paper_id, inputs, result, scorer, started_at)
 
 
-class _LegacyThesisProfile:
-    profile_key = "thesis"
-    profile_version = "thesis-legacy-profile@1"
-    prompt_version = "thesis-core-prompt@1"
-
-    def select_prompt_metadata(self, *, metadata):
-        allowed = {
-            "student_id",
-            "student_name",
-            "title",
-            "department",
-            "major",
-            "advisor",
-        }
-        return {
-            key: deepcopy(value)
-            for key, value in metadata.items()
-            if key in allowed
-        }
-
-    def build_prompt_extensions(self, *, submission_snapshot, document_snapshot):
-        return {
-            "metadata": self.select_prompt_metadata(
-                metadata=submission_snapshot.get("metadata", {})
-            ),
-            "profile_extensions": deepcopy(
-                document_snapshot.get("profile_extensions", {}).get(
-                    self.profile_key, {}
-                )
-            ),
-        }
-
-
-def _validate_legacy_checker_params(params):
-    if not isinstance(params, Mapping) or set(params) != {
-        "criterion_code",
-        "applies_to",
-    }:
-        raise ValueError(
-            "legacy checker params require criterion_code and applies_to"
-        )
-    if any(not isinstance(value, str) or not value for value in params.values()):
-        raise ValueError("legacy checker params must be non-empty strings")
-
-
-def _legacy_required_fields_checker(*, document, params):
-    text = str(document.get("full_text") or "")
-    present = any(marker in text for marker in ("负责人", "责任人", "owner"))
-    return {
-        "observation_code": "REQUIRED_FIELD_MISSING",
-        "measured_value": present,
-        "expected_value": True,
-        "triggered": not present,
-        "locator": {
-            "kind": "document_structure",
-            "structure_code": "required_owner:%s" % params["applies_to"],
-            "ordinal": 0,
-        },
-    }
-
-
-def _legacy_checker_registry():
-    checker_key = "thesis.legacy_required_fields.v1"
-    checker_version = "1.0.0"
-    artifacts = [
-        {
-            "path": "services/scoring/engine.py",
-            "sha256": canonical_sha256(
-                {
-                    "scheme": "legacy-checker-artifact-v1",
-                    "behavior": "required-owner-keyword-observation",
-                }
-            ),
-        }
-    ]
-    package = {
-        "scheme": "checker-package-sha256-v1",
-        "checker_key": checker_key,
-        "checker_version": checker_version,
-        "entrypoint": "scoring.engine:legacy_required_fields_checker",
-        "runtime_contract_version": "checker-runtime@1",
-        "dependency_manifest_hash": canonical_sha256([]),
-        "artifact_manifest": artifacts,
-    }
-    registration = {
-        "schema_version": "checker-registration@1",
-        **package,
-        "implementation_hash": canonical_sha256(package),
-        "params_schema": "legacy-required-fields-params@1",
-        "supported_document_schemas": ["document-snapshot@1"],
-        "supported_profiles": ["thesis"],
-        "observation_schema": "legacy-required-fields-observation@1",
-    }
-    registry = VersionedCheckerRegistry()
-    registry.register(
-        registration=registration,
-        checker=_legacy_required_fields_checker,
-        validate_params=_validate_legacy_checker_params,
-    )
-    return registry
-
-
 def _legacy_plan_hash_projection(value):
     return {
         "scheme": value["hash_scheme"],
@@ -363,7 +260,9 @@ def _legacy_plan_hash_projection(value):
     }
 
 
-def _build_legacy_execution_plan(*, rubric_snapshot, profile, registry):
+def _build_legacy_execution_plan(
+    *, rubric_snapshot, profile, registry, compatibility_nodes=()
+):
     rubric = rubric_snapshot.to_mapping()
     criteria = {
         item["criterion_code"]: deepcopy(item) for item in rubric["criteria"]
@@ -374,10 +273,16 @@ def _build_legacy_execution_plan(*, rubric_snapshot, profile, registry):
             document_schema_version="document-snapshot@1",
         )
     )
+    compatibility = [item.to_mapping() for item in compatibility_nodes]
+    compatibility_criteria = {
+        item["criterion_code"] for item in compatibility
+    }
     used_manifest = {}
     rules = {}
     for raw_rule in rubric["atomic_rules"]:
         rule = deepcopy(raw_rule)
+        if rule["criterion_code"] in compatibility_criteria:
+            continue
         checker_key = rule["checker_key"]
         if rule["judge_type"] == "deterministic":
             entry = available_manifest.get(checker_key)
@@ -393,8 +298,7 @@ def _build_legacy_execution_plan(*, rubric_snapshot, profile, registry):
             )
             used_manifest[checker_key] = deepcopy(entry)
         rules[rule["rule_code"]] = rule
-    order = sorted(rules)
-    nodes = [
+    atomic_nodes = [
         {
             "node_kind": "atomic_rule",
             "criterion_code": rules[code]["criterion_code"],
@@ -404,10 +308,17 @@ def _build_legacy_execution_plan(*, rubric_snapshot, profile, registry):
             ),
             "atomic_rule_snapshot": deepcopy(rules[code]),
         }
-        for code in order
+        for code in sorted(rules)
     ]
+    nodes = sorted(
+        atomic_nodes + [deepcopy(item) for item in compatibility],
+        key=lambda item: item["rule_code"],
+    )
+    order = [item["rule_code"] for item in nodes]
     plan = {
-        "schema_version": "rule-execution-plan@2",
+        "schema_version": (
+            "rule-execution-plan@3" if compatibility else "rule-execution-plan@2"
+        ),
         "hash_scheme": "rule-execution-plan-v1",
         "rubric_source_kind": "legacy_unversioned",
         "rubric_version_id": None,
@@ -430,104 +341,8 @@ def _build_legacy_execution_plan(*, rubric_snapshot, profile, registry):
     return RuleExecutionPlan.from_mapping(plan)
 
 
-class _LegacyScorerRuntime:
-    def __init__(self, scorer):
-        self.scorer = scorer
-
-    def score(self, *, envelope):
-        explicit = getattr(self.scorer, "score_core_envelope", None)
-        if callable(explicit):
-            return explicit(envelope=envelope)
-        if getattr(self.scorer, "provider", None) != "mock":
-            raise LLMScoringError(
-                "selected provider does not implement PromptEnvelopeV3 Core scoring"
-            )
-        value = envelope.to_mapping()
-        rule = value["atomic_rule_snapshot"]
-        levels = sorted(
-            rule["levels"],
-            key=lambda item: (item["display_order"], item["level_code"]),
-        )
-        evidence_units = value["evidence_units"]
-        if not levels or not evidence_units:
-            return {}
-        evidence = evidence_units[0]
-        return {
-            "schema_version": "semantic-rule-response@1",
-            "rule_code": rule["rule_code"],
-            "status": "triggered",
-            "level_code": levels[0]["level_code"],
-            "evidence": [
-                {
-                    "type": "source_quote",
-                    "evidence_unit_id": evidence["evidence_unit_id"],
-                    "quote": evidence["normalized_text"],
-                    "location": " / ".join(evidence["section_path"]),
-                }
-            ],
-        }
-
-
-def _runtime_identity(*, scorer, profile):
-    provider_name = str(getattr(scorer, "provider", "unknown"))
-    model_name = str(getattr(scorer, "model_name", "unknown"))
-    model_version = str(getattr(scorer, "model_version", "unknown"))
-    provider_artifact = canonical_sha256(
-        {
-            "scheme": "legacy-core-provider-artifact-v1",
-            "provider": provider_name,
-            "model": model_name,
-            "model_version": model_version,
-            "adapter": type(scorer).__module__ + "." + type(scorer).__qualname__,
-        }
-    )
-    return {
-        "engine_contract_version": "scoring-core@1",
-        "engine_version": "legacy-core-adapter@1",
-        "profile_key": profile.profile_key,
-        "profile_version": profile.profile_version,
-        "prompt_version": CORE_PROMPT_VERSION,
-        "provider": {
-            "name": provider_name,
-            "model": model_name,
-            "model_version": model_version,
-            "sampling": {
-                "temperature": "0",
-                "top_p": "1",
-                "seed": 0,
-                "max_tokens": 512,
-            },
-            "thinking": {"enabled": False, "type": None},
-            "response_format": "json_schema",
-            "response_schema": "atomic-rule-decisions@1",
-            "artifact_hash": provider_artifact,
-        },
-        "calibration_anchors_hash": canonical_sha256([]),
-    }
-
-
 def _request_idempotency_projection(value):
-    submission = value["submission"]
-    document = value["document"]
-    plan = value["plan"]
-    return {
-        "scheme": "scoring-request-idempotency-v1",
-        "submission_snapshot_hash": canonical_sha256(submission),
-        "source_artifact_hash": submission["source_artifact_hash"],
-        "document_snapshot_hash": document["document_snapshot_hash"],
-        "normalized_content_hash": document["content_hash"],
-        "rubric_source_kind": plan["rubric_source_kind"],
-        "rubric_version_id": plan["rubric_version_id"],
-        "rubric_version_hash": plan["rubric_version_hash"],
-        "rubric_hash_scheme": plan["rubric_hash_scheme"],
-        "rubric_snapshot_hash": plan["rubric_snapshot_hash"],
-        "execution_plan_hash": plan["plan_hash"],
-        "policy_hash": plan["policy_hash"],
-        "business_profile_key": submission["profile_key"],
-        "business_profile_version": document["profile_version"],
-        "runtime_identity": value["runtime_identity"],
-        "rescore_generation": value["rescore_generation"],
-    }
+    return scoring_request_idempotency_projection(value)
 
 
 def _published_core_version(*, db, paper, rubric, compilations):
@@ -583,20 +398,16 @@ def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
     paper = _load_scoreable_paper(db, paper_id)
     rubric = paper.batch.rubric
     parsed = read_json(paper.parsed_text_path)
-    artifact_path = Path(paper.file_path)
+    artifact_path = materialize(paper.file_path)
     if not artifact_path.is_file():
         raise ValueError("paper source artifact is unavailable for Core replay")
     source_artifact_hash = hash_source_artifact(artifact_path.read_bytes())
-    profile = _LegacyThesisProfile()
-    paper_snapshots = LegacyPaperAdapter().adapt(
+    profile = ThesisProfile()
+    paper_snapshots = profile.adapt_paper(
         paper=paper,
         parsed=parsed,
         chunks=list(paper.chunks),
         source_artifact_hash=source_artifact_hash,
-        profile_key=profile.profile_key,
-        profile_version=profile.profile_version,
-        parser_version="legacy-document-parser@1",
-        normalizer_version="legacy-normalizer@1",
         submission_instance_key=paper.id,
     )
     compilations = list(
@@ -606,7 +417,7 @@ def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
             )
         ).all()
     )
-    registry = _legacy_checker_registry()
+    registry = profile.build_checker_registry()
     formal_version = _published_core_version(
         db=db,
         paper=paper,
@@ -643,9 +454,11 @@ def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
             "status": "published",
             "total_score": rubric.total_score,
         }
-        rubric_snapshot = LegacyRubricAdapter().adapt(
+        legacy_adapter = LegacyRubricAdapter()
+        raw_criteria = list(rubric.criteria)
+        rubric_snapshot = legacy_adapter.adapt(
             rubric=rubric_projection,
-            criteria=list(rubric.criteria),
+            criteria=raw_criteria,
             policy_snapshot=_plain_contract(policy),
             business_profile_key=profile.profile_key,
             compilation_rows=(),
@@ -654,6 +467,10 @@ def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
             rubric_snapshot=rubric_snapshot,
             profile=profile,
             registry=registry,
+            compatibility_nodes=legacy_adapter.adapt_compatibility_nodes(
+                criteria=raw_criteria,
+                rubric_source_kind="legacy_unversioned",
+            ),
         )
         workflow_profile = "template_driven"
     request = {
@@ -661,7 +478,7 @@ def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
         "submission": paper_snapshots.submission.to_mapping(),
         "document": paper_snapshots.document.to_mapping(),
         "plan": plan.to_mapping(),
-        "runtime_identity": _runtime_identity(scorer=scorer, profile=profile),
+        "runtime_identity": profile.build_runtime_identity(scorer),
         "rescore_generation": rescore_generation,
     }
     request["idempotency_key"] = canonical_sha256(
@@ -700,7 +517,7 @@ def _score_paper_core(
     outcome = score_submission(
         request=request,
         checker_registry=registry,
-        llm_runtime=_LegacyScorerRuntime(scorer),
+        llm_runtime=profile.build_llm_runtime(scorer),
         profile=profile,
     )
     snapshot_store = LocalDocumentSnapshotStore()
@@ -760,7 +577,7 @@ def _record_core_comparison(*, db, paper_id, scorer, legacy_run):
     outcome = score_submission(
         request=request,
         checker_registry=registry,
-        llm_runtime=_LegacyScorerRuntime(scorer),
+        llm_runtime=profile.build_llm_runtime(scorer),
         profile=profile,
     )
     outcome_mapping = outcome.to_mapping()
@@ -1471,11 +1288,7 @@ def update_score_item(db: Session, item_id: str, final_score: float, reason: str
     if final_score < 0 or final_score > float(item.max_score):
         raise ValueError("final_score out of range")
     _require_recalculable_run(item.scoring_run)
-    if item.auto_score_status in {"invalid", "blocked"}:
-        raise ValueError(
-            "ordinary override cannot resolve an invalid or blocked auto score; "
-            "use an authorized resolution or retry"
-        )
+    ThesisProfile().assert_ordinary_item_override_allowed(item=item)
 
     before = item.final_score if item.final_score is not None else item.ai_score
     item.final_score = final_score
@@ -1517,10 +1330,7 @@ def submit_review(db: Session, run_id: str, reason: str, reviewer_id: str):
         raise ValueError("scoring run not found")
     _require_recalculable_run(run)
     _recalculate_run(run, run.items, run.paper.parse_quality, run.rubric.total_score)
-    if run.final_total_score is None:
-        raise ValueError(
-            "review cannot be submitted while invalid or blocked score items remain"
-        )
+    ThesisProfile().assert_review_submission_allowed(run=run)
     run.status = "reviewed"
     run.need_manual_review = False
     run.paper.status = "reviewed"
@@ -2722,7 +2532,7 @@ def _compute_format_findings(paper, rubric):
     if not path.lower().endswith(".docx"):
         return []
     try:
-        actual = resolve_default_format(path)
+        actual = resolve_default_format(materialize(path))
     except Exception:
         return []
     return compare_format(actual, expected)

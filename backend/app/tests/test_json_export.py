@@ -3,11 +3,25 @@
 from backend.app.core.config import settings
 from backend.app.tests.conftest import make_sample_docx
 from backend.app.tests.conftest import publish_rubric_via_api
+from backend.app.services.scoring.profiles.thesis import ThesisProfile
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
-def test_run_json_export(client):
+def test_run_json_export(client, monkeypatch):
+    projections = []
+    original = ThesisProfile.build_artifact_projection
+
+    def record_projection(profile, **kwargs):
+        projection = original(profile, **kwargs)
+        projections.append(projection)
+        return projection
+
+    monkeypatch.setattr(
+        ThesisProfile,
+        "build_artifact_projection",
+        record_projection,
+    )
     rubric = {
         "name": "导出测试",
         "version": "v1.0",
@@ -58,5 +72,6 @@ def test_run_json_export(client):
     assert "review_logs" in data and "paper" in data
     # owner_id 自 batch→paper→run 贯通（单租户=dev 用户）
     assert data["run"]["owner_id"] == settings.DEFAULT_DEV_USER_ID
+    assert projections and projections[-1]["profile_key"] == "thesis"
 
     assert client.get("/api/scoring-runs/does-not-exist/export.json").status_code == 404

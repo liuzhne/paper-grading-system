@@ -21,7 +21,7 @@ from backend.app.services.scoring.core.contracts import (
 from backend.app.services.scoring.core.results import RuleExecutionResult
 
 
-PROMPT_VERSION = "2026-07-20-7"
+PROMPT_VERSION = "2026-08-02-9"
 OCCURRENCE_SCHEME = "occurrence-id-v1"
 
 
@@ -89,10 +89,16 @@ def _prompt_envelope(*, request, node, profile):
     submission = request["submission"]
     document = request["document"]
     plan = request["plan"]
+    runtime_prompt_version = request["runtime_identity"]["prompt_version"]
+    prompt_version = getattr(profile, "prompt_version", runtime_prompt_version)
+    if not isinstance(prompt_version, str) or not prompt_version.strip():
+        raise TypeError("profile.prompt_version must be a non-empty string")
+    if runtime_prompt_version != prompt_version:
+        raise ValueError("profile prompt version does not match runtime identity")
     return PromptEnvelopeV3.from_mapping(
         {
             "schema_version": "prompt-envelope@3",
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": prompt_version,
             "runtime_identity": _plain(request["runtime_identity"]),
             "rubric_identity": {
                 "rubric_source_kind": plan["rubric_source_kind"],
@@ -256,6 +262,8 @@ def _semantic_occurrences(*, response, request, rule, occurrence_payloads):
     if not isinstance(raw_occurrences, (list, tuple)):
         return [], [], "REQUIRED_EVIDENCE_INVALID", "occurrences must be an array"
     allowed_codes = set(rule["evidence_policy"].get("allowed_finding_codes", ()))
+    if rule["schema_version"] == "atomic-rule-snapshot@1" and not allowed_codes:
+        allowed_codes = {"legacy.atomic.%s" % rule["rule_code"]}
     units = {
         item["evidence_unit_id"]: item for item in request["document"]["evidence_units"]
     }
@@ -336,6 +344,8 @@ def _adapt_legacy_semantic_response(*, response, request, rule):
         allowed_codes = list(
             rule["evidence_policy"].get("allowed_finding_codes", ())
         )
+        if rule["schema_version"] == "atomic-rule-snapshot@1" and not allowed_codes:
+            allowed_codes = ["legacy.atomic.%s" % rule["rule_code"]]
         if len(allowed_codes) != 1 or not raw_evidence:
             return None
         locator = {}
@@ -821,10 +831,17 @@ def execute_rule_plan(*, request, checker_registry, llm_runtime, profile):
     dto = ScoringRequest.from_mapping(_plain(request))
     value = dto.to_mapping()
     _validate_profile(profile, value)
-    nodes_by_code = {node["rule_code"]: node for node in value["plan"]["nodes"]}
+    # plan@3 may add legacy-only compatibility nodes.  This state machine
+    # remains authoritative only for AtomicRule nodes; the compatibility
+    # executor merges both result streams before policy aggregation.
+    nodes_by_code = {
+        node["rule_code"]: node
+        for node in value["plan"]["nodes"]
+        if node["node_kind"] == "atomic_rule"
+    }
     schema_versions = {
         node["atomic_rule_snapshot"]["schema_version"]
-        for node in value["plan"]["nodes"]
+        for node in nodes_by_code.values()
     }
     # Mixed @1/@2 plans are a compatibility bridge and retain their already
     # frozen plan order.  Native M4 plans derive a stable topology themselves.

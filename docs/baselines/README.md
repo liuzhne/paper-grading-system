@@ -15,3 +15,7 @@ PGS-8 的正式流程见 [`pgs-8-release-gate-runbook.md`](pgs-8-release-gate-ru
 2. 负责人完成隐私/锚点排除复核，并用 candidate 的精确 hash 批准基线、验收阈值和未来回退容差；对原 candidate 离线 finalize 后才可能得到 `gate_passed=true`。
 
 普通 `pgs eval` / `run_qwk_eval` 首跑生成的聚合 `baseline.json` 会明确标记 `reproducible=false`、`gating_eligible=false`，只用于本地实验对比，不能替代上述发布门禁。
+
+GATE-02 等仓库内 Mock/parity 记录属于 `test-only`，必须保持 `production_default_switch_authorized=false`。[`gate-03-test-only-rehearsal.json`](gate-03-test-only-rehearsal.json) 同样只证明 GATE-03 的数据库关系、完整归档合同和不可审批边界可执行；它使用合成真值与 test fixture 模型，不能替代真实门禁。
+
+真实 GATE-03 还必须确认 anchors/holdout 排除，使用不可变真实模型与唯一 published RubricVersion，携带通过的 PGS-6 观测快照、获批基线与 M5 parity 比较，以及私有逐样本报告 hash。在所有门禁阈值和回退容差通过后取得维护者批准；最终记录必须同时为 `gating_eligible=true`、`gate_passed=true`、`production_default_switch_authorized=true` 才有资格进入 PGS-36 的默认切换决策。

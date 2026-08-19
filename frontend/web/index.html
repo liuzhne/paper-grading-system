@@ -3,242 +3,324 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>毕业论文智能评分系统</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260522-llm-runtime-status" />
+    <meta name="description" content="模板驱动的智能评审与评分工作台" />
+    <title>衡鉴 · 智能评审工作台</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=20260805-workflow-redesign" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">PG</div>
+          <div class="brand-mark">衡</div>
           <div>
-            <div class="brand-title">论文评分系统</div>
-            <div class="brand-subtitle">AI Assisted Review</div>
+            <div class="brand-title">衡鉴</div>
+            <div class="brand-subtitle">智能评审工作台</div>
           </div>
         </div>
-        <nav class="nav">
-          <button class="nav-item active" data-page="dashboard">总览</button>
-          <button class="nav-item" data-page="rubrics">评分标准</button>
-          <button class="nav-item" data-page="batches">批次与论文</button>
-          <button class="nav-item" data-page="review">评分复核</button>
-          <button class="nav-item" data-page="exports">导出写表</button>
+
+        <nav class="nav" aria-label="主导航">
+          <div class="nav-group-label">工作流</div>
+          <button class="nav-item active" data-page="dashboard"><span class="nav-symbol">⌂</span><span>工作台</span></button>
+          <button class="nav-item" data-page="batches"><span class="nav-symbol">▤</span><span>评分任务</span></button>
+          <button class="nav-item" data-page="review"><span class="nav-symbol">✓</span><span>结果复核</span></button>
+          <div class="nav-group-label">配置与输出</div>
+          <button class="nav-item" data-page="rubrics"><span class="nav-symbol">◇</span><span>模板中心</span></button>
+          <button class="nav-item" data-page="exports"><span class="nav-symbol">⇩</span><span>输出中心</span></button>
         </nav>
-        <div class="sidebar-note">
-          <span>本地单用户模式</span>
-          <strong>dev-user</strong>
+
+        <div class="sidebar-footer">
+          <details class="connection-settings">
+            <summary><span class="status-dot"></span>连接与账户</summary>
+            <div class="connection-body">
+              <label for="api-base">API 地址<input id="api-base" type="text" value="/api" /></label>
+              <button id="logout-btn" class="ghost hidden" title="登出">退出登录</button>
+            </div>
+          </details>
+          <div class="sidebar-user"><span class="avatar">D</span><span><strong>dev-user</strong><small>本地工作区</small></span></div>
         </div>
       </aside>
 
       <main class="workspace">
         <header class="topbar">
           <div>
-            <h1 id="page-title">总览</h1>
-            <p id="page-subtitle">查看评分批次、论文状态和待复核工作量。</p>
+            <div class="eyebrow">评审中心</div>
+            <h1 id="page-title">工作台</h1>
+            <p id="page-subtitle">从模板开始，继续最近的评分工作。</p>
           </div>
-          <div class="api-box">
-            <label for="api-base">API</label>
-            <input id="api-base" type="text" value="/api" />
-            <button id="refresh-btn" class="icon-button" title="刷新数据">刷新</button>
-            <button id="logout-btn" class="icon-button hidden" title="登出">登出</button>
+          <div class="topbar-actions">
+            <button id="refresh-btn" class="icon-button secondary" title="刷新数据">刷新</button>
+            <button class="primary" data-navigate="batches" data-scroll-to="batch-form">新建评分任务</button>
           </div>
         </header>
 
-        <div id="toast" class="toast hidden"></div>
+        <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
         <section id="page-dashboard" class="page active">
-          <div class="metric-grid">
-            <div class="metric"><span>批次数</span><strong id="metric-batches">0</strong></div>
-            <div class="metric"><span>论文数</span><strong id="metric-papers">0</strong></div>
-            <div class="metric"><span>待复核</span><strong id="metric-review">0</strong></div>
-            <div class="metric"><span>失败解析</span><strong id="metric-failed">0</strong></div>
+          <section class="welcome-panel">
+            <div>
+              <span class="welcome-kicker">模板驱动 · 证据可追溯</span>
+              <h2>从一套经过审核的模板开始评审</h2>
+              <p>选择评分模板，上传待评材料，系统会按规则完成解析、评分与证据定位。</p>
+            </div>
+            <div class="welcome-actions">
+              <button class="primary" data-navigate="batches" data-scroll-to="batch-form">创建评分任务</button>
+              <button class="secondary" data-navigate="rubrics" data-scroll-to="rubric-import-section">导入评分模板</button>
+            </div>
+          </section>
+
+          <div class="metric-grid dashboard-metrics">
+            <div class="metric"><span>评分任务</span><strong id="metric-batches">0</strong><small>全部批次</small></div>
+            <div class="metric"><span>当前材料</span><strong id="metric-papers">0</strong><small>所选任务</small></div>
+            <div class="metric attention"><span>等待复核</span><strong id="metric-review">0</strong><small>需要人工确认</small></div>
+            <div class="metric"><span>解析异常</span><strong id="metric-failed">0</strong><small>需要重新处理</small></div>
           </div>
-          <section class="panel">
-            <div class="panel-header">
-              <h2>P0 集成状态</h2>
-              <div class="toolbar">
-                <button id="llm-check-btn" class="secondary">测试 LLM 连接</button>
-                <button class="secondary" data-action="reload">刷新</button>
+
+          <div class="dashboard-grid">
+            <section class="panel continue-panel">
+              <div class="panel-header">
+                <div><span class="section-kicker">继续处理</span><h2>当前评分任务</h2></div>
+              </div>
+              <div id="active-batch-summary" class="stack"></div>
+            </section>
+            <section class="panel recent-panel">
+              <div class="panel-header">
+                <div><span class="section-kicker">最近更新</span><h2>评分任务</h2></div>
+                <button class="text-button" data-navigate="batches">查看全部</button>
+              </div>
+              <div id="dashboard-batches" class="table-wrap"></div>
+            </section>
+          </div>
+
+          <details class="panel disclosure-panel">
+            <summary><span><strong>系统状态与批量分析</strong><small>连接状态、相对排名和评分漂移</small></span><span class="disclosure-action">展开</span></summary>
+            <div class="disclosure-content">
+              <div class="panel-header compact-header">
+                <h2>运行环境</h2>
+                <div class="action-row"><button id="llm-check-btn" class="secondary">测试模型连接</button><button class="secondary" data-action="reload">刷新</button></div>
+              </div>
+              <div id="integration-status" class="integration-grid"></div>
+              <div id="llm-check-result" class="result-box"></div>
+              <div class="analysis-grid">
+                <div><h3 class="section-title">当前任务相对排名</h3><div id="batch-ranking" class="table-wrap"></div></div>
+                <div><h3 class="section-title">AI 分与人工终分漂移</h3><div id="batch-drift" class="table-wrap"></div></div>
               </div>
             </div>
-            <div id="integration-status" class="integration-grid"></div>
-            <div id="llm-check-result" class="result-box"></div>
-          </section>
-          <section class="panel">
-            <div class="panel-header">
-              <h2>批次概览</h2>
-              <button class="secondary" data-action="reload">刷新</button>
-            </div>
-            <div id="dashboard-batches" class="table-wrap"></div>
-          </section>
-          <section class="panel">
-            <div class="panel-header">
-              <h2>批量分析（当前批次）</h2>
-              <button class="secondary" data-action="reload">刷新</button>
-            </div>
-            <h3 class="section-title">相对排名</h3>
-            <div id="batch-ranking" class="table-wrap"></div>
-            <h3 class="section-title">评分漂移（AI 分 vs 人工终分）</h3>
-            <div id="batch-drift" class="table-wrap"></div>
-          </section>
+          </details>
         </section>
 
         <section id="page-rubrics" class="page">
-          <div class="split">
-            <section class="panel">
-              <div class="panel-header"><h2>评分标准</h2></div>
-              <div id="rubric-list" class="stack"></div>
-            </section>
-            <section class="panel">
-              <div class="panel-header"><h2>新建标准</h2></div>
-              <form id="rubric-form" class="form">
-                <label>名称<input name="name" value="本科毕业论文通用评分标准" /></label>
-                <label>版本<input name="version" value="v1.1" /></label>
-                <label>说明<textarea name="description">正式前端创建的评分标准。</textarea></label>
-                <label>评分项 JSON<textarea name="criteria" class="code-input"></textarea></label>
-                <button type="submit">创建评分标准</button>
-              </form>
-              <div class="divider"></div>
-              <form id="rubric-import-form" class="form compact">
-                <label>导入标准名称<input name="name" value="导入的论文评分标准" /></label>
-                <label>导入版本<input name="version" value="v1.0-import" /></label>
-                <label>导入说明<textarea name="description">由 Word 论文模板和 Excel 评分规则解析生成。</textarea></label>
-                <label>Word 模板<input name="template_file" type="file" accept=".docx" /></label>
-                <label>Excel 评分规则<input name="rules_file" type="file" accept=".xlsx,.xlsm" /></label>
-                <button id="download-rubric-template-btn" type="button" class="secondary">下载 Excel 模板</button>
-                <button type="submit" class="secondary">解析文件并创建草稿</button>
-              </form>
-              <div class="divider"></div>
-              <form id="rubric-edit-form" class="form compact">
-                <label>编辑草稿<select id="rubric-edit-select"></select></label>
-                <div class="form-row">
-                  <label>名称<input name="name" /></label>
-                  <label>版本<input name="version" /></label>
-                </div>
-                <label>说明<textarea name="description"></textarea></label>
-                <label>评分项 JSON（含 dimension / deduction_rules_structured，配置 findings→自动扣分）<textarea name="criteria" class="code-input compact-code"></textarea></label>
-                <button type="submit" class="secondary">保存草稿评分标准</button>
-              </form>
-            </section>
+          <div class="workflow-header">
+            <div><span class="section-kicker">模板生命周期</span><h2>把评分要求变成可执行模板</h2><p>导入或新建后，依次完成调整、校验和发布；评分任务只能稳定复用已发布版本。</p></div>
+            <div class="stepper" aria-label="模板流程">
+              <span class="step active"><b>1</b>创建</span><span class="step"><b>2</b>调整</span><span class="step"><b>3</b>审核</span><span class="step"><b>4</b>发布</span>
+            </div>
           </div>
-          <section class="panel">
-            <div class="panel-header"><h2>校准锚点（脱敏范文 few-shot）</h2></div>
-            <form id="anchor-form" class="form compact">
-              <label>评分标准<select id="anchor-rubric-select" name="rubric_id"></select></label>
-              <div class="form-row">
-                <label>评分项 code<input name="criterion_code" placeholder="如 C01" /></label>
-                <label>分数<input name="score" type="number" step="0.5" /></label>
-                <label>满分<input name="max_score" type="number" step="0.5" /></label>
-              </div>
-              <label>档位标签<input name="label" placeholder="优/良/中… 可空" /></label>
-              <label>脱敏范文摘录<textarea name="excerpt"></textarea></label>
-              <label>评分理由<textarea name="rationale"></textarea></label>
-              <button type="submit" class="secondary">添加锚点</button>
-            </form>
-            <div id="anchor-list" class="table-wrap"></div>
-          </section>
+
+          <div class="template-layout">
+            <aside class="panel library-panel">
+              <div class="panel-header"><div><span class="section-kicker">模板库</span><h2>评分模板</h2></div><span class="badge" id="rubric-count-badge">0 个</span></div>
+              <div class="library-actions"><button class="primary" data-scroll-to="rubric-import-section">导入模板</button><button class="secondary" data-scroll-to="blank-rubric-details">空白新建</button></div>
+              <div id="rubric-list" class="stack template-list"></div>
+            </aside>
+
+            <div class="template-main">
+              <section id="rubric-import-section" class="panel focus-panel">
+                <div class="panel-header">
+                  <div><span class="step-label">第 1 步</span><h2>导入现有模板</h2><p class="muted">推荐使用 Excel 定义规则，并可附加 Word 模板识别结构与格式要求。</p></div>
+                  <button id="download-rubric-template-btn" type="button" class="secondary">下载 Excel 示例</button>
+                </div>
+                <form id="rubric-import-form" class="form compact">
+                  <div class="form-row three-columns">
+                    <label>模板名称<input name="name" value="导入的论文评分标准" /></label>
+                    <label>版本<input name="version" value="v1.0-import" /></label>
+                    <label>用途说明<input name="description" value="由 Word 模板和 Excel 评分规则解析生成。" /></label>
+                  </div>
+                  <div class="file-grid">
+                    <label class="file-drop"><span class="file-icon">XLS</span><strong>评分规则（必需）</strong><small>选择 .xlsx 或 .xlsm 文件</small><input name="rules_file" type="file" accept=".xlsx,.xlsm" /></label>
+                    <label class="file-drop optional"><span class="file-icon">DOC</span><strong>文档模板（可选）</strong><small>选择带结构或批注的 .docx 文件</small><input name="template_file" type="file" accept=".docx" /></label>
+                  </div>
+                  <div class="form-actions"><span class="muted">文件只用于解析模板，不会直接开始评分。</span><button type="submit" class="primary">解析并生成草稿</button></div>
+                </form>
+                <div id="rubric-import-preview" class="stack lifecycle-preview"></div>
+
+                <details id="blank-rubric-details" class="subpanel">
+                  <summary><span><strong>没有现成文件？从空白模板开始</strong><small>使用可视化评分项编辑器创建</small></span><span>展开</span></summary>
+                  <form id="rubric-form" class="form details-form">
+                    <div class="form-row three-columns">
+                      <label>名称<input name="name" value="本科毕业论文通用评分标准" /></label>
+                      <label>版本<input name="version" value="v1.1" /></label>
+                      <label>说明<input name="description" value="从空白创建的评分模板。" /></label>
+                    </div>
+                    <div class="builder-toolbar"><div><strong>评分项</strong><span id="new-criteria-total" class="muted"></span></div><button type="button" class="secondary" data-add-criterion="new">添加评分项</button></div>
+                    <div id="new-criteria-builder" class="criteria-builder"></div>
+                    <details class="advanced-json"><summary>高级：直接编辑 JSON</summary><textarea name="criteria" class="code-input"></textarea></details>
+                    <div class="form-actions"><span></span><button type="submit">创建模板草稿</button></div>
+                  </form>
+                </details>
+              </section>
+
+              <section id="template-editor" class="panel">
+                <div class="panel-header">
+                  <div><span class="step-label">第 2 步</span><h2>调整模板内容</h2><p class="muted">通过表单修改评分项，复杂扣分规则仍可在高级 JSON 中精确维护。</p></div>
+                  <label class="header-select">编辑草稿<select id="rubric-edit-select"></select></label>
+                </div>
+                <form id="rubric-edit-form" class="form compact">
+                  <div class="form-row three-columns">
+                    <label>名称<input name="name" /></label>
+                    <label>版本<input name="version" /></label>
+                    <label>说明<input name="description" /></label>
+                  </div>
+                  <div class="builder-toolbar"><div><strong>评分项结构</strong><span id="edit-criteria-total" class="muted"></span></div><button type="button" class="secondary" data-add-criterion="edit">添加评分项</button></div>
+                  <div id="edit-criteria-builder" class="criteria-builder"></div>
+                  <details class="advanced-json"><summary>高级：结构化扣分与完整 JSON</summary><textarea name="criteria" class="code-input compact-code"></textarea></details>
+                  <div class="form-actions"><span class="muted">保存会重新生成可审核的执行草稿。</span><button type="submit">保存模板草稿</button></div>
+                </form>
+              </section>
+
+              <section id="template-review" class="panel">
+                <div class="panel-header">
+                  <div><span class="step-label">第 3–4 步</span><h2>校验、审核与发布</h2><p class="muted">逐条确认规则和模板映射；所有阻断项清除后才能冻结发布。</p></div>
+                  <label class="header-select">评分模板<select id="rubric-lifecycle-select"></select></label>
+                </div>
+                <div id="rubric-lifecycle-summary" class="stack"></div>
+                <div class="review-grid">
+                  <div><h3 class="section-title">需要处理</h3><div id="rubric-lifecycle-blockers" class="stack"></div></div>
+                  <div><h3 class="section-title">原子规则审核</h3><div id="rubric-lifecycle-rules" class="table-wrap"></div></div>
+                </div>
+                <details class="subpanel mapping-panel" open>
+                  <summary><span><strong>模板映射确认</strong><small>核对文档位置与评分规则的对应关系</small></span><span>展开</span></summary>
+                  <div id="rubric-lifecycle-template-links" class="table-wrap details-content"></div>
+                </details>
+              </section>
+
+              <details class="panel disclosure-panel calibration-panel">
+                <summary><span><strong>高级配置：校准锚点</strong><small>维护脱敏范文，用于稳定档位判断</small></span><span class="disclosure-action">展开</span></summary>
+                <div class="disclosure-content">
+                  <form id="anchor-form" class="form compact">
+                    <label>评分模板<select id="anchor-rubric-select" name="rubric_id"></select></label>
+                    <div class="form-row three-columns"><label>评分项 code<input name="criterion_code" placeholder="如 C01" /></label><label>分数<input name="score" type="number" step="0.5" /></label><label>满分<input name="max_score" type="number" step="0.5" /></label></div>
+                    <label>档位标签<input name="label" placeholder="优 / 良 / 中，可空" /></label>
+                    <label>脱敏范文摘录<textarea name="excerpt"></textarea></label>
+                    <label>评分理由<textarea name="rationale"></textarea></label>
+                    <div class="form-actions"><span></span><button type="submit" class="secondary">添加锚点</button></div>
+                  </form>
+                  <div id="anchor-list" class="table-wrap"></div>
+                </div>
+              </details>
+            </div>
+          </div>
         </section>
 
         <section id="page-batches" class="page">
-          <div class="split">
-            <section class="panel">
-              <div class="panel-header"><h2>批次</h2></div>
-              <form id="batch-form" class="form compact">
-                <label>批次名称<input name="name" value="2026 届论文评分批次" /></label>
-                <label>评分标准<select name="rubric_id"></select></label>
-                <div class="form-row">
-                  <label>学院<input name="department" value="计算机学院" /></label>
-                  <label>专业<input name="major" value="软件工程" /></label>
+          <div class="workflow-header task-workflow-header">
+            <div><span class="section-kicker">评分任务</span><h2>一次完成模板绑定、材料上传与评分</h2><p>任务会锁定模板版本，后续重试与复核都沿用同一套规则。</p></div>
+            <div id="batch-workflow-steps" class="stepper" aria-label="评分流程"></div>
+          </div>
+
+          <div class="task-layout">
+            <aside class="panel task-sidebar">
+              <div class="panel-header"><div><span class="section-kicker">任务列表</span><h2>评分任务</h2></div><span class="badge" id="batch-count-badge">0 个</span></div>
+              <button class="primary full-width" data-scroll-to="batch-form">新建任务</button>
+              <div id="batch-list" class="stack task-list"></div>
+            </aside>
+
+            <div class="task-main">
+              <section class="panel workflow-step-panel">
+                <div class="step-panel-header"><span class="step-number">1</span><div><h2>选择模板并创建任务</h2><p>为一组同类材料锁定评分标准与归属信息。</p></div></div>
+                <form id="batch-form" class="form compact">
+                  <div class="form-row"><label>任务名称<input name="name" value="2026 届论文评分批次" /></label><label>评分模板<select name="rubric_id"></select></label></div>
+                  <div class="form-row"><label>归属单位<input name="department" value="计算机学院" /></label><label>类别 / 专业<input name="major" value="软件工程" /></label></div>
+                  <div class="form-actions"><span class="muted">建议使用已发布模板，保证评分版本可追溯。</span><button type="submit">创建并继续</button></div>
+                </form>
+              </section>
+
+              <section class="panel workflow-step-panel">
+                <div class="step-panel-header"><span class="step-number">2</span><div><h2>上传待评材料</h2><p>支持批量上传 Word 或 PDF；解析后可先核对基本信息。</p></div></div>
+                <div class="upload-surface">
+                  <label class="upload-picker"><span class="upload-icon">↑</span><span><strong>选择或拖入文件</strong><small>DOCX、PDF，可多选</small></span><input id="paper-files" type="file" accept=".docx,.pdf" multiple /></label>
+                  <button id="upload-btn">上传并解析</button>
                 </div>
-                <button type="submit">创建批次</button>
-              </form>
-              <div id="batch-list" class="stack"></div>
-            </section>
-            <section class="panel">
-              <div class="panel-header">
-                <h2>论文</h2>
-                <button id="score-batch-btn" class="secondary">批量评分</button>
-              </div>
-              <div class="upload-row">
-                <input id="paper-files" type="file" accept=".docx,.pdf" multiple />
-                <button id="upload-btn">上传并解析</button>
-              </div>
-              <div id="paper-list" class="table-wrap"></div>
-              <div class="divider"></div>
-              <form id="paper-edit-form" class="form compact">
-                <label>校正论文<select id="paper-edit-select"></select></label>
-                <label>论文题名<input name="title" /></label>
-                <div class="form-row">
-                  <label>学号<input name="student_id" /></label>
-                  <label>学生姓名<input name="student_name" /></label>
-                </div>
-                <div class="form-row">
-                  <label>学院<input name="department" /></label>
-                  <label>专业<input name="major" /></label>
-                </div>
-                <label>指导教师<input name="advisor" /></label>
-                <button type="submit" class="secondary">保存论文信息</button>
-              </form>
-            </section>
+                <div id="paper-list" class="table-wrap material-list"></div>
+                <details class="subpanel metadata-panel">
+                  <summary><span><strong>校正材料信息</strong><small>仅在自动识别不准确时修改</small></span><span>展开</span></summary>
+                  <form id="paper-edit-form" class="form compact details-content">
+                    <label>选择材料<select id="paper-edit-select"></select></label>
+                    <label>材料标题<input name="title" /></label>
+                    <div class="form-row"><label>编号 / 学号<input name="student_id" /></label><label>作者 / 学生姓名<input name="student_name" /></label></div>
+                    <div class="form-row"><label>归属单位<input name="department" /></label><label>类别 / 专业<input name="major" /></label></div>
+                    <label>负责人 / 指导教师<input name="advisor" /></label>
+                    <div class="form-actions"><span></span><button type="submit" class="secondary">保存信息</button></div>
+                  </form>
+                </details>
+              </section>
+
+              <section id="batch-score-job-panel" class="panel workflow-step-panel run-panel">
+                <div class="step-panel-header"><span class="step-number">3</span><div><h2>运行批量评分</h2><p>任务支持检查点恢复、取消和仅重试失败材料。</p></div><button id="score-batch-btn" class="secondary">检查运行条件</button></div>
+                <div id="batch-score-job-status" class="batch-job-status"></div>
+                <div class="policy-callout"><strong>运行策略需经过审批</strong><span>门禁阈值由获授权用户提供并随任务保存；本页面不会授权将 Core 切为生产默认。</span></div>
+                <details class="subpanel run-config" open>
+                  <summary><span><strong>运行配置与恢复操作</strong><small>填写策略后创建可恢复任务</small></span><span>展开</span></summary>
+                  <form id="batch-score-job-form" class="form compact details-content">
+                    <div class="form-row"><label>最大并发数<input name="max_workers" type="number" min="1" max="16" value="4" /></label><label class="checkbox-label"><input name="rescore" type="checkbox" /> 对已有结果重新评分</label></div>
+                    <label>经批准的观察策略 JSON<textarea name="observation_policy" rows="8" placeholder="粘贴 core-cutover-observation-policy@1；生产阈值不会由系统预填"></textarea></label>
+                    <div class="action-row batch-job-actions"><button id="create-batch-score-job-btn" type="submit">创建任务</button><button id="run-batch-score-job-btn" type="button" class="secondary">运行 / 恢复</button><button id="cancel-batch-score-job-btn" type="button" class="secondary">取消</button><button id="retry-batch-score-job-btn" type="button" class="secondary">重试失败项</button></div>
+                  </form>
+                </details>
+                <div class="analysis-grid batch-job-observation"><div><h3>错误与重试</h3><div id="batch-score-job-errors" class="table-wrap"></div></div><div><h3>门禁信号</h3><div id="batch-score-job-signals" class="table-wrap"></div></div></div>
+              </section>
+            </div>
           </div>
         </section>
 
         <section id="page-review" class="page">
-          <div class="split">
-            <section class="panel">
-              <div class="panel-header">
-                <h2>评分任务</h2>
-                <button id="score-paper-btn" class="secondary">评分选中论文</button>
-              </div>
-              <div class="form compact">
-                <label>批次<select id="review-batch-select"></select></label>
-                <label>论文<select id="review-paper-select"></select></label>
-                <label>评分任务<select id="run-select"></select></label>
-              </div>
-              <div id="llm-runtime-status" class="llm-status"></div>
-              <div id="run-summary" class="run-summary"></div>
-            </section>
-            <section class="panel">
-              <div class="panel-header"><h2>评分明细与证据</h2></div>
-              <div id="score-items" class="stack"></div>
-            </section>
+          <div class="workflow-header">
+            <div><span class="section-kicker">人工在环</span><h2>先看结论，再核对证据</h2><p>优先处理系统标记的异常项；所有人工改分都会记录原因。</p></div>
           </div>
-          <section class="panel">
-            <div class="panel-header"><h2>篇章一致性 / 格式问题</h2></div>
-            <div id="run-findings" class="table-wrap"></div>
-          </section>
+          <div class="review-layout">
+            <aside class="panel review-sidebar">
+              <div class="panel-header"><div><span class="section-kicker">定位结果</span><h2>选择评分记录</h2></div></div>
+              <div class="form compact"><label>评分任务<select id="review-batch-select"></select></label><label>待评材料<select id="review-paper-select"></select></label><label>评分记录<select id="run-select"></select></label></div>
+              <button id="score-paper-btn" class="secondary full-width">评分选中材料</button>
+              <div id="llm-runtime-status" class="llm-status"></div>
+            </aside>
+            <div class="review-main">
+              <section class="panel result-overview"><div class="panel-header"><div><span class="section-kicker">结果概览</span><h2>评分结论</h2></div></div><div id="run-summary" class="run-summary"></div></section>
+              <div class="review-content-grid">
+                <section class="panel"><div class="panel-header"><div><span class="section-kicker">逐项核对</span><h2>评分明细与证据</h2></div></div><div id="score-items" class="stack"></div></section>
+                <section class="panel findings-panel"><div class="panel-header"><div><span class="section-kicker">风险提示</span><h2>一致性与格式问题</h2></div></div><div id="run-findings" class="table-wrap"></div></section>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section id="page-exports" class="page">
-          <section class="panel">
-            <div class="panel-header">
-              <h2>导出与在线写表</h2>
-              <button id="refresh-export-logs-btn" class="secondary">刷新记录</button>
-            </div>
-            <div class="toolbar">
-              <label>批次<select id="export-batch-select"></select></label>
-              <label>评分任务<select id="export-run-select"></select></label>
-              <label>写表目标<input id="sheet-target" value="local-preview" /></label>
-              <button id="export-excel-btn">导出 Excel</button>
-              <button id="write-sheet-btn" class="secondary">写入在线表格</button>
-              <button id="report-btn" class="secondary">生成报告</button>
+          <div class="workflow-header"><div><span class="section-kicker">输出中心</span><h2>选择范围，再选择交付方式</h2><p>同一评分结果可导出成绩表、生成评审报告或写入在线表格。</p></div></div>
+          <section class="panel export-panel">
+            <div class="export-selector"><label>评分任务<select id="export-batch-select"></select></label><label>评分记录<select id="export-run-select"></select></label><label>在线表格目标<input id="sheet-target" value="local-preview" /></label></div>
+            <div class="export-options">
+              <button id="export-excel-btn" class="export-card"><span class="export-icon">XLS</span><span><strong>导出汇总表</strong><small>下载当前任务的 Excel 成绩表</small></span><b>下载</b></button>
+              <button id="report-btn" class="export-card"><span class="export-icon">RPT</span><span><strong>生成评审报告</strong><small>打开包含证据和扣分明细的报告</small></span><b>生成</b></button>
+              <button id="write-sheet-btn" class="export-card"><span class="export-icon">WEB</span><span><strong>写入在线表格</strong><small>写入上方配置的表格目标</small></span><b>写入</b></button>
             </div>
             <div id="export-result" class="result-box"></div>
-            <h3 class="section-title">写表记录</h3>
-            <div id="export-logs" class="table-wrap"></div>
           </section>
+          <details class="panel disclosure-panel">
+            <summary><span><strong>历史输出记录</strong><small>查看在线写表结果与失败信息</small></span><span class="disclosure-action">展开</span></summary>
+            <div class="disclosure-content"><div class="panel-header compact-header"><h2>写表记录</h2><button id="refresh-export-logs-btn" class="secondary">刷新记录</button></div><div id="export-logs" class="table-wrap"></div></div>
+          </details>
         </section>
       </main>
     </div>
+
     <div id="login-overlay" class="login-overlay hidden">
       <form id="login-form" class="login-card">
-        <h2>登录</h2>
-        <p class="muted">本系统已启用访问鉴权，请登录后使用。</p>
+        <div class="login-brand"><span class="brand-mark">衡</span><span><strong>登录衡鉴</strong><small>进入智能评审工作台</small></span></div>
         <label>用户名<input id="login-username" type="text" value="admin" autocomplete="username" /></label>
         <label>密码<input id="login-password" type="password" autocomplete="current-password" /></label>
         <button type="submit" class="primary">登录</button>
         <div id="login-error" class="login-error hidden"></div>
       </form>
     </div>
-    <script src="/assets/app.js?v=20260619-auth-login"></script>
+    <script src="/assets/app.js?v=20260805-workflow-redesign"></script>
   </body>
 </html>

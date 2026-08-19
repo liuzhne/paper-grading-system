@@ -97,7 +97,13 @@ def test_blocked_final_total_is_excluded_instead_of_becoming_zero(tmp_path, monk
     class BlockedRun:
         final_total_score = None
         need_manual_review = True
-        items = []
+        items = [
+            type(
+                "Item",
+                (),
+                {"evidence_sufficient": False},
+            )()
+        ]
 
     monkeypatch.setattr(run_eval, "score_paper", lambda *_args, **_kwargs: BlockedRun())
     monkeypatch.setattr(run_eval, "_write_report", lambda _report: tmp_path / "report.json")
@@ -108,4 +114,7 @@ def test_blocked_final_total_is_excluded_instead_of_becoming_zero(tmp_path, monk
     assert report["completed_runs"] == 1
     assert report["review_rate"] == 1.0
     assert report["blocked_rate"] == 1.0
+    assert report["invalid_evidence_rate"] == 1.0
+    assert report["invalid_evidence_item_count"] == 1
+    assert report["evaluated_item_count"] == 1
     assert report["errors"] and "未进入指标" in report["errors"][0]["error"]

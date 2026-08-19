@@ -58,6 +58,11 @@ def get_scoring_run(run_id: str, db: Session = Depends(get_db)):
     run = db.get(ScoringRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="scoring run not found")
+    if run.submission_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="submission scoring runs must be queried through /api/v2",
+        )
     payload = ScoringRunRead.model_validate(run).model_dump(mode="json")
     # 单条审计查询必须明确展示历史空身份；批量/旧导出仍可省略新增 null 字段，
     # 以维持 M0 的公开 JSON 兼容合同。
@@ -77,6 +82,11 @@ def retry_scoring_run(run_id: str, db: Session = Depends(get_db)):
     run = db.get(ScoringRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="scoring run not found")
+    if run.submission_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="submission scoring runs must be retried through /api/v2",
+        )
     try:
         return retry_score_paper(db, run.id)
     except ValueError as exc:

@@ -478,6 +478,263 @@ def test_score_no_db_is_stateless(tmp_path):
     assert not ghost_db.exists()  # 关键：无状态不建任何 sqlite
 
 
+def test_score_no_db_explicit_thesis_uses_core_profile_contract(tmp_path):
+    rules = tmp_path / "profile-rules.xlsx"
+    rules.write_bytes(make_rules_xlsx().getvalue())
+    docx = tmp_path / "profile-thesis.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+
+    result = runner.invoke(
+        app,
+        [
+            "score",
+            str(docx),
+            "--no-db",
+            "--rubric-file",
+            str(rules),
+            "--profile",
+            "thesis",
+            "--mock",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["stateless"] is True
+    assert data["contract"] == "scoring-core@1"
+    assert data["profile"]["key"] == "thesis"
+    assert data["profile"]["version"]
+    identity = data["results"][0]["identity"]
+    assert identity["profile_key"] == "thesis"
+    assert identity["policy_hash"]
+    assert identity["plan_hash"]
+    assert identity["document_snapshot_hash"]
+
+
+def test_score_explicit_profile_dispatches_v2_with_exact_cli_inputs(
+    tmp_path,
+    monkeypatch,
+):
+    docx = tmp_path / "proposal.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    calls = []
+
+    def fake_profile_score(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        cli_main,
+        "_score_profiled",
+        fake_profile_score,
+        raising=False,
+    )
+    result = runner.invoke(
+        app,
+        [
+            "score",
+            str(docx),
+            "--rubric",
+            "proposal-rubric",
+            "--profile",
+            "technical_proposal",
+            "--profile-version",
+            "technical-proposal-test-profile@1",
+            "--metadata-json",
+            '{"project_name":"CLI project"}',
+            "--mock",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["files"] == [docx]
+    assert calls[0]["profile_key"] == "technical_proposal"
+    assert calls[0]["profile_version"] == "technical-proposal-test-profile@1"
+    assert calls[0]["metadata"] == {"project_name": "CLI project"}
+
+
+def test_cli_runs_registered_technical_profile_through_v2_core(
+    tmp_path,
+    local,
+):
+    from types import SimpleNamespace
+    from pathlib import Path
+
+    from sqlalchemy import update
+
+    from backend.app.services.scoring.profiles.registry import (
+        temporary_profile_registration,
+    )
+    from backend.app.tests.m2_contract_fixtures import PROFILE_KEY
+    from backend.app.tests.m2_contract_fixtures import PROFILE_VERSION
+    from backend.app.tests.test_m6_v2_submissions_api import (
+        _ApiTechnicalProposalProfile,
+    )
+    from backend.app.tests.test_m6_v2_submissions_api import _proposal_docx
+    from backend.app.tests.test_m6_v2_submissions_api import (
+        _published_technical_version,
+    )
+
+    cli_main._bootstrap(Path(local[1]), Path(local[3]))
+    fake_client = SimpleNamespace(session_factory=cli_db.cli_session)
+    rubric_id, version_id = _published_technical_version(
+        fake_client,
+        "cli-profile",
+    )
+    proposal = tmp_path / "technical-proposal.docx"
+    proposal.write_bytes(_proposal_docx())
+
+    with temporary_profile_registration(_ApiTechnicalProposalProfile()):
+        result = runner.invoke(
+            app,
+            [
+                "score",
+                str(proposal),
+                "--rubric",
+                rubric_id,
+                "--profile",
+                PROFILE_KEY,
+                "--profile-version",
+                PROFILE_VERSION,
+                "--metadata-json",
+                '{"project_name":"CLI technical fixture"}',
+                "--mock",
+                "--json",
+                *local,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        run_id = payload["results"][0]["run_id"]
+        exported = runner.invoke(
+            app,
+            ["report", run_id, "--format", "json", *local],
+        )
+
+    assert exported.exit_code == 0, exported.output
+    assert json.loads(exported.output)["schema"] == "grading-core/run-export@2"
+    assert payload["rubric_version_id"] == version_id
+    assert payload["profile"] == {
+        "key": PROFILE_KEY,
+        "version": PROFILE_VERSION,
+    }
+    scored = payload["results"][0]
+    assert scored["status"] == "ok"
+    assert scored["submission_id"]
+    assert scored["identity"]["business_profile_key"] == PROFILE_KEY
+    assert scored["identity"]["policy_hash"]
+    assert scored["identity"]["execution_plan_hash"]
+    assert scored["identity"]["document_snapshot_hash"]
+    assert scored["identity"]["runtime_identity"]
+
+
+def test_cli_eval_pins_unique_version_and_reports_policy_identity(
+    tmp_path,
+    local,
+    monkeypatch,
+):
+    from datetime import timedelta
+    from pathlib import Path
+
+    from sqlalchemy import update
+
+    from backend.app.eval import labeled_dataset
+    from backend.app.services.rubrics import lifecycle as rubric_lifecycle
+    from backend.app.services.scoring.core.policy import (
+        build_corrected_thesis_policy,
+    )
+    from backend.app.tests.test_atomic_rule_models import _make_p1_graph
+
+    cli_main._bootstrap(Path(local[1]), Path(local[3]))
+    with cli_db.cli_session() as session:
+        graph = _make_p1_graph(session, "cli-eval")
+        now = graph.compilation.created_at + timedelta(hours=1)
+        session.execute(
+            update(models.RubricVersion)
+            .where(models.RubricVersion.id == graph.version.id)
+            .values(
+                business_profile_key="thesis",
+                global_policy=build_corrected_thesis_policy(
+                    100,
+                    "points",
+                ).to_mapping(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        session.commit()
+        rubric_lifecycle.submit_for_review(session, graph.rubric.id)
+        session.commit()
+        rubric_lifecycle.publish_rubric(
+            session,
+            graph.rubric.id,
+            graph.compilation.id,
+            graph.user.id,
+            now=now,
+        )
+        session.commit()
+        rubric_id = graph.rubric.id
+        version_id = graph.version.id
+
+    calls = []
+
+    def fake_build(_db, selected_rubric_id, _papers, _scores, **kwargs):
+        calls.append((selected_rubric_id, kwargs))
+        return {
+            "qwk": 1.0,
+            "mae": 0.0,
+            "rmse": 0.0,
+            "exact_grade_agreement": 1.0,
+            "adjacent_grade_agreement": 1.0,
+            "n": 1,
+            "dataset_size": 1,
+            "errors": [],
+            "per_criterion": {},
+            "evaluation_identity": {
+                "business_profile_key": "thesis",
+                "business_profile_version": "thesis-legacy-profile@1",
+                "policy_hash": "a" * 64,
+                "grade_scale_sha256": "b" * 64,
+                "rounding": {"mode": "half_up", "digits": 2},
+            },
+        }
+
+    monkeypatch.setattr(labeled_dataset, "build_labeled_eval", fake_build)
+    monkeypatch.setattr(
+        "backend.app.eval.run_eval._write_report",
+        lambda _report: tmp_path / "eval-report.json",
+    )
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    scores = tmp_path / "scores.xlsx"
+    scores.write_bytes(b"fixture")
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--rubric",
+            rubric_id,
+            "--papers-dir",
+            str(papers),
+            "--scores",
+            str(scores),
+            "--profile",
+            "thesis",
+            *local,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [(rubric_id, {"rubric_version_id": version_id})]
+    assert "thesis-legacy-profile@1" in result.output
+    unfolded = result.output.replace(" │\n│                 │ ", "")
+    assert "a" * 64 in unfolded
+    assert "b" * 64 in unfolded
+
+
 def test_score_no_db_requires_rubric_file(tmp_path):
     docx = tmp_path / "t.docx"
     docx.write_bytes(make_sample_docx().getvalue())

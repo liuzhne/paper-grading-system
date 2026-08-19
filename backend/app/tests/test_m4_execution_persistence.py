@@ -173,6 +173,11 @@ def test_core_persistence_round_trips_m4_rule_audit_and_retry_is_idempotent():
         duplicate = persistence.persist(**kwargs)
 
         assert duplicate.id == first.id
+        assert first.business_profile_version == request["runtime_identity"][
+            "profile_version"
+        ]
+        assert first.prompt_version == request["runtime_identity"]["prompt_version"]
+        assert first.runtime_identity == request["runtime_identity"]
         assert db.scalar(select(func.count()).select_from(models.ScoringRun)) == 1
         assert db.scalar(select(func.count()).select_from(models.ScoreItem)) == 1
         item = db.scalar(
@@ -234,4 +239,3 @@ def test_core_persistence_round_trips_m4_rule_audit_and_retry_is_idempotent():
     finally:
         db.close()
         engine.dispose()
-

@@ -64,6 +64,41 @@ def _text_list(value: object, path: str) -> list[str]:
     return sorted(result)
 
 
+def _observation_schema(value: object) -> str | dict[str, object]:
+    if isinstance(value, str):
+        return _text(value, "observation_schema")
+    if not isinstance(value, Mapping):
+        raise TypeError("observation_schema must be a string or object")
+    fields = {
+        "schema_version",
+        "allowed_observation_codes",
+        "allowed_finding_codes",
+    }
+    unknown = set(value) - fields
+    missing = fields - set(value)
+    if unknown:
+        raise ValueError(
+            "observation_schema contains unknown fields: %s" % sorted(unknown)
+        )
+    if missing:
+        raise ValueError(
+            "observation_schema is missing fields: %s" % sorted(missing)
+        )
+    if value["schema_version"] != "deterministic-observation-schema@1":
+        raise ValueError("unsupported deterministic observation schema")
+    return {
+        "schema_version": "deterministic-observation-schema@1",
+        "allowed_observation_codes": _text_list(
+            value["allowed_observation_codes"],
+            "observation_schema.allowed_observation_codes",
+        ),
+        "allowed_finding_codes": _text_list(
+            value["allowed_finding_codes"],
+            "observation_schema.allowed_finding_codes",
+        ),
+    }
+
+
 def _freeze(value):
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
@@ -147,9 +182,7 @@ def _normalize_registration(value: Mapping[str, object]) -> dict[str, object]:
         "supported_profiles": _text_list(
             value["supported_profiles"], "supported_profiles"
         ),
-        "observation_schema": _text(
-            value["observation_schema"], "observation_schema"
-        ),
+        "observation_schema": _observation_schema(value["observation_schema"]),
     }
     if normalized["scheme"] != "checker-package-sha256-v1":
         raise ValueError("unsupported checker package hash scheme")

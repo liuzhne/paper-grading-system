@@ -28,6 +28,9 @@ from sqlalchemy.orm import Session
 
 from backend.app.db import models
 from backend.app.services.rubric_import.docx_comments import parse_comments
+from backend.app.services.rubric_import.parser import _criterion_from_row
+from backend.app.services.rubric_import.parser import _find_header
+from backend.app.services.rubric_import.parser import _rows_with_merged_values
 from backend.app.services.rubric_import.parser import parse_word_template
 from backend.app.services.scoring.core.policy import build_corrected_thesis_policy
 from backend.app.services.scoring.core.policy import validate_weight_configuration
@@ -401,22 +404,32 @@ def _excel_rows(rules_bytes: bytes) -> tuple[str, list[dict], list[str]]:
     workbook = load_workbook(BytesIO(rules_bytes), data_only=True)
     warnings: list[str] = []
     for sheet in workbook.worksheets:
-        rows = list(sheet.iter_rows(values_only=True))
-        for header_index, raw_header in enumerate(rows[:15]):
-            headers = [_text(value) for value in raw_header]
-            if not any(value in headers for value in ("评分项", "评分指标")):
-                continue
-            if not any(value in headers for value in ("分值", "满分", "最高分")):
-                continue
+        rows = _rows_with_merged_values(sheet)
+        header_index, mapping = _find_header(rows)
+        if header_index is not None:
+            headers = [_text(value) for value in rows[header_index]]
             records = []
-            for row_number, values in enumerate(rows[header_index + 1 :], start=header_index + 2):
+            for row_number, values in enumerate(
+                rows[header_index + 1 :], start=header_index + 2
+            ):
+                criterion = _criterion_from_row(values, mapping, len(records) + 1)
+                if criterion is None:
+                    continue
+                # Keep every original cell for provenance, then add the
+                # canonical fields consumed by the auditable compiler.
                 record = {
                     header: values[index] if index < len(values) else None
                     for index, header in enumerate(headers)
                     if header
                 }
-                if not _text(record.get("评分项")):
-                    continue
+                record.update(
+                    {
+                        "编号": criterion.code,
+                        "评分项": criterion.name,
+                        "分值": criterion.max_score,
+                        "评分说明": criterion.description,
+                    }
+                )
                 record["__row_number__"] = row_number
                 records.append(record)
             if records:
@@ -688,7 +701,28 @@ def prepare_file_import(
 
         deduction_text = _text(record.get("扣分规则"))
         deduction_points = _parse_deduction_points(deduction_text)
-        scoring_mode = explicit_mode or ("banded" if levels else "deductive" if deduction_points else "review_only")
+        description_text = _text(record.get("评分说明"))
+        checker_key = _text(record.get("checker_key")) or None
+        if (
+            _decimal(max_score) > 0
+            and not description_text
+            and not deduction_text
+            and not levels
+            and checker_key is None
+        ):
+            blockers.append(
+                {
+                    "code": "MISSING_CRITERION_DESCRIPTION",
+                    "criterion_code": criterion_code,
+                    "message": (
+                        "positive-score criterion requires a scoring description, "
+                        "band, deduction rule, or deterministic checker"
+                    ),
+                }
+            )
+        scoring_mode = explicit_mode or (
+            "banded" if levels else "deductive" if deduction_points else "review_only"
+        )
         if scoring_mode in {"deduct", "deductive"}:
             scoring_mode = "deductive"
         elif scoring_mode in {"band", "banded"}:
@@ -702,7 +736,7 @@ def prepare_file_import(
             "name": name,
             "max_score": max_score,
             "weight": None if record.get("权重") in (None, "") else _number_text(record.get("权重")),
-            "description": _text(record.get("评分说明")) or None,
+            "description": description_text or None,
             "evidence_hints": evidence_hints,
             "deduction_rules": [deduction_text] if deduction_text else [],
             "display_order": order,
@@ -715,7 +749,6 @@ def prepare_file_import(
             "deduction_rules_structured": [],
         }
         criteria.append(criterion)
-        checker_key = _text(record.get("checker_key")) or None
         checker_params = _json_object(record.get("checker_params"))
         evidence_policy = _json_object(record.get("evidence_policy"))
         strictness = _text(record.get("strictness")) or "required"

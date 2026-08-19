@@ -7,11 +7,51 @@ from sqlalchemy import select
 from backend.app.core.config import settings
 from backend.app.db import models
 from backend.app.services.spreadsheet import writer as writer_module
+from backend.app.services.scoring.profiles.thesis import ThesisProfile
 from backend.app.tests.conftest import make_sample_docx
 from backend.app.tests.conftest import publish_rubric_via_api
 
 
 def test_core_api_flow(client, monkeypatch):
+    artifact_projections = []
+    spreadsheet_projections = []
+    item_review_guards = []
+    run_review_guards = []
+    original_artifact = ThesisProfile.build_artifact_projection
+    original_spreadsheet = ThesisProfile.build_spreadsheet_projection
+    original_item_guard = ThesisProfile.assert_ordinary_item_override_allowed
+    original_run_guard = ThesisProfile.assert_review_submission_allowed
+
+    def record_artifact(profile, **kwargs):
+        projection = original_artifact(profile, **kwargs)
+        artifact_projections.append(projection)
+        return projection
+
+    def record_spreadsheet(profile, **kwargs):
+        projection = original_spreadsheet(profile, **kwargs)
+        spreadsheet_projections.append(projection)
+        return projection
+
+    def record_item_guard(profile, **kwargs):
+        item_review_guards.append(kwargs["item"].id)
+        return original_item_guard(profile, **kwargs)
+
+    def record_run_guard(profile, **kwargs):
+        run_review_guards.append(kwargs["run"].id)
+        return original_run_guard(profile, **kwargs)
+
+    monkeypatch.setattr(ThesisProfile, "build_artifact_projection", record_artifact)
+    monkeypatch.setattr(ThesisProfile, "build_spreadsheet_projection", record_spreadsheet)
+    monkeypatch.setattr(
+        ThesisProfile,
+        "assert_ordinary_item_override_allowed",
+        record_item_guard,
+    )
+    monkeypatch.setattr(
+        ThesisProfile,
+        "assert_review_submission_allowed",
+        record_run_guard,
+    )
     rubric_payload = {
         "name": "测试评分标准",
         "version": "v1.0",
@@ -360,6 +400,15 @@ def test_core_api_flow(client, monkeypatch):
     summary_sheet = workbook["总分表"]
     summary_headers = [cell.value for cell in summary_sheet[1]]
     summary_rows = [[cell.value for cell in row] for row in summary_sheet.iter_rows(min_row=2)]
+    assert summary_sheet.freeze_panes == "A2"
+    assert summary_sheet.auto_filter.ref == summary_sheet.dimensions
+    assert summary_sheet.column_dimensions["F"].width >= 38
+    assert summary_sheet["K2"].alignment.wrap_text is True
+    assert summary_sheet["A1"].font.bold is True
+    detail_sheet = workbook["评分明细表"]
+    assert detail_sheet.freeze_panes == "A2"
+    assert detail_sheet.column_dimensions["I"].width >= 64
+    assert detail_sheet["I2"].alignment.wrap_text is True
     assert "复核意见" in summary_headers
     reviewed_row = next(row for row in summary_rows if "20260001" in row and "校正后的论文题目" in row)
     assert reviewed_row[summary_headers.index("复核意见")] == "复核完成"
@@ -381,6 +430,11 @@ def test_core_api_flow(client, monkeypatch):
     assert "人工复核记录" in report_response.text
     assert "教师复核后调整" in report_response.text
     assert "复核完成" in report_response.text
+    assert artifact_projections and artifact_projections[-1]["profile_key"] == "thesis"
+    assert spreadsheet_projections
+    assert all(item["profile_key"] == "thesis" for item in spreadsheet_projections)
+    assert item_review_guards == [items[0]["id"]]
+    assert run_review_guards == [run["id"]]
 
 
 class FakeGoogleSheetsClient:

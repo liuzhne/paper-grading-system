@@ -19,7 +19,7 @@ SENSITIVE_KEYS = {
 
 
 def log_llm_request(provider, url, headers, payload, attempt, attempts):
-    if not settings.LLM_DEBUG_LOG_ENABLED:
+    if not _debug_logging_allowed():
         return
     _log(
         "LLM request",
@@ -36,7 +36,7 @@ def log_llm_request(provider, url, headers, payload, attempt, attempts):
 
 
 def log_llm_response(provider, response, elapsed_ms, attempt, attempts):
-    if not settings.LLM_DEBUG_LOG_ENABLED:
+    if not _debug_logging_allowed():
         return
     _log(
         "LLM response",
@@ -53,7 +53,7 @@ def log_llm_response(provider, response, elapsed_ms, attempt, attempts):
 
 
 def log_llm_exception(provider, exc, attempt, attempts):
-    if not settings.LLM_DEBUG_LOG_ENABLED:
+    if not _debug_logging_allowed():
         return
     _log(
         "LLM exception",
@@ -69,7 +69,7 @@ def log_llm_exception(provider, exc, attempt, attempts):
 
 
 def log_llm_retry_sleep(provider, delay_seconds, attempt, attempts, reason):
-    if not settings.LLM_DEBUG_LOG_ENABLED:
+    if not _debug_logging_allowed():
         return
     _log(
         "LLM retry sleep",
@@ -84,7 +84,7 @@ def log_llm_retry_sleep(provider, delay_seconds, attempt, attempts, reason):
 
 
 def log_llm_throttle_sleep(provider, delay_seconds):
-    if not settings.LLM_DEBUG_LOG_ENABLED:
+    if not _debug_logging_allowed():
         return
     _log(
         "LLM throttle sleep",
@@ -102,11 +102,33 @@ def _log(label, payload, level=logging.INFO):
 
 def _to_log_text(payload):
     text = json.dumps(payload, ensure_ascii=False, default=str, indent=2)
+    text = _redact_configured_secrets(text)
     max_chars = max(1000, settings.LLM_DEBUG_LOG_MAX_CHARS)
     if len(text) <= max_chars:
         return text
     omitted = len(text) - max_chars
     return "%s\n...<truncated %d chars>" % (text[:max_chars], omitted)
+
+
+def _debug_logging_allowed():
+    # Settings construction already rejects this combination.  Retain the
+    # runtime guard for tests, hot configuration and defense in depth.
+    return bool(settings.LLM_DEBUG_LOG_ENABLED and not settings.AUTH_ENABLED)
+
+
+def _redact_configured_secrets(text):
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "LOCAL_LLM_API_KEY",
+        "GOOGLE_SHEETS_WEBAPP_SECRET",
+        "AUTH_PASSWORD",
+        "AUTH_SECRET",
+    ):
+        value = getattr(settings, name, None)
+        if value and len(str(value)) >= 4:
+            text = text.replace(str(value), "***REDACTED***")
+    return text
 
 
 def _sanitize(value):

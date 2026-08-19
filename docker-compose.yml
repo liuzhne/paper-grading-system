@@ -31,6 +31,7 @@ services:
       LLM_DEBUG_LOG_ENABLED: ${LLM_DEBUG_LOG_ENABLED:-false}
     volumes:
       - app_storage:/app/storage
+      - ops_backups:/app/ops_backups
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -69,5 +70,6 @@ services:
 volumes:
   postgres_data:
   app_storage:
+  ops_backups:
   caddy_data:
   caddy_config:

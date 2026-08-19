@@ -237,7 +237,18 @@ def test_score_submission_runs_one_deterministic_deduction_and_one_semantic_band
     assert result["unrounded_total"] == "90"
     assert result["final_total"] == "90"
     assert result["grade"] == "A"
-    assert result["review_issues"] == []
+    assert result["review_issues"] == [
+        {
+            "code": "POLICY_REVIEW_REQUIRED",
+            "severity": "review",
+            "criterion_code": None,
+            "rule_code": None,
+            "message": (
+                "frozen scoring policy requires manual review for this "
+                "aggregate total"
+            ),
+        }
+    ]
     assert {
         item["criterion_code"]: (
             item["status"], item["auto_score"], item["final_score"]
@@ -289,7 +300,8 @@ def test_semantic_provider_receives_complete_v3_audit_envelope_and_exact_cache_h
         if node["rule_code"] == SEMANTIC_RULE_CODE
     )
     assert provider_input["schema_version"] == "prompt-envelope@3"
-    assert provider_input["prompt_version"] == llm_cache.PROMPT_VERSION
+    assert provider_input["prompt_version"] == _TechnicalProposalProfile().prompt_version
+    assert provider_input["prompt_version"] == request["runtime_identity"]["prompt_version"]
     assert provider_input["runtime_identity"] == request["runtime_identity"]
     assert provider_input["rubric_identity"] == {
         "rubric_source_kind": request["plan"]["rubric_source_kind"],

@@ -1,0 +1,120 @@
+{
+  "schema": "paper-grading/gate-03-test-only-rehearsal@1",
+  "generated_on": "2026-08-02",
+  "test_contract": "backend/app/tests/test_gate03_test_only_rehearsal.py",
+  "test_contract_passed": true,
+  "database_relationship_exercised": true,
+  "gating_eligible": false,
+  "gate_passed": false,
+  "production_default_switch_authorized": false,
+  "profile": {
+    "gate_key": "GATE-03",
+    "dataset_id": "synthetic-teacher-holdout",
+    "dataset_version": "test-v1",
+    "sample_count": 2,
+    "model_provider": "test_immutable",
+    "model_revision": "rubric-gate-fixture@2026-08-02",
+    "anchors_exclude_holdout": true,
+    "unique_published_immutable_rubric_version": true,
+    "rubric_criteria": {
+      "T01": 20,
+      "T02": 20,
+      "T03": 20,
+      "T04": 10,
+      "T05": 10,
+      "T06": 20
+    }
+  },
+  "evaluation": {
+    "qwk": 0.8,
+    "mae": 2.0,
+    "rmse": 3.0,
+    "exact_grade_agreement": 0.6,
+    "adjacent_grade_agreement": 1.0,
+    "review_rate": 0.1,
+    "blocked_rate": 0.0,
+    "invalid_evidence_rate": 0.0,
+    "per_criterion_bias": {
+      "T01": 0.0,
+      "T02": 0.0,
+      "T03": 0.0,
+      "T04": 0.0,
+      "T05": 0.0,
+      "T06": 0.0
+    }
+  },
+  "observation_policy": {
+    "schema_version": "core-cutover-observation-policy@1",
+    "minimum_sample_size": 2,
+    "observation_window": {
+      "minimum_completed_items": 2
+    },
+    "thresholds": {
+      "max_abs_legacy_core_delta": "0.5",
+      "max_invalid_evidence_rate": "0.01",
+      "max_unauthorized_rule_rate": "0",
+      "max_manual_review_rate": "0.25",
+      "min_cache_hit_rate": "0.5",
+      "max_checker_failure_rate": "0",
+      "max_llm_failure_rate": "0",
+      "max_retry_rate": "0.1",
+      "max_p95_latency_ms": "5000"
+    },
+    "fallback_tolerance": {
+      "max_abs_score_delta": "0.5"
+    }
+  },
+  "observation_policy_sha256": "b29adf121a992c50c294aed5935bb62f995bd10771b05ecad5e4a76d595598f9",
+  "operational_metrics": {
+    "sample_size": 2,
+    "completed_items": 2,
+    "invalid_evidence_rate": "0",
+    "unauthorized_rule_rate": "0",
+    "manual_review_rate": "0",
+    "cache_hit_rate": "0.75",
+    "cache_by_profile_and_rubric_version": {
+      "thesis:test-version": {
+        "hits": 3,
+        "misses": 1,
+        "hit_rate": "0.75"
+      }
+    },
+    "checker_failure_rate": "0",
+    "llm_failure_rate": "0",
+    "retry_rate": "0",
+    "p50_latency_ms": "120",
+    "p95_latency_ms": "180",
+    "legacy_core_delta": {
+      "available": true,
+      "values": ["0", "0"]
+    },
+    "error_counts": {},
+    "attempt_error_counts": {}
+  },
+  "observation_source_sha256": "abdf9c78e47f2d88cd879c649223d6cec673cb46cffe13b905bf40bf816e8f38",
+  "observation_report": {
+    "ready_for_gate": true,
+    "rollback_required": false,
+    "production_default_switch_authorized": false
+  },
+  "approved_baseline_comparison": {
+    "reference_id": "approved-test-baseline",
+    "status": "passed",
+    "significant_differences": [],
+    "difference_explanations": []
+  },
+  "m5_parity_comparison": {
+    "reference_id": "m5-test-only-parity",
+    "status": "passed",
+    "significant_differences": [],
+    "difference_explanations": []
+  },
+  "private_per_sample_report_sha256": "dd97d7b7c919b185cdb14e3bf0cefadc98b78033ebd10aec09d42b521c7d0339",
+  "why_not_release_evidence": [
+    "synthetic-teacher-truth",
+    "test-immutable-provider-not-production-model",
+    "pgs-6-real-postgres-evidence-pending",
+    "pgs-8-real-holdout-evidence-pending",
+    "no-real-maintainer-approval"
+  ]
+}

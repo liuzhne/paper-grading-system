@@ -26,6 +26,7 @@ GATE_RECORD_SCHEMA = "paper-grading/evaluation-gate@1"
 APPROVAL_SCHEMA = "paper-grading/evaluation-gate-approval@1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_SUPPORTED_PAPER_SUFFIXES = frozenset({".docx", ".pdf"})
 _AGGREGATE_METRICS = (
     "qwk",
     "mae",
@@ -34,18 +35,25 @@ _AGGREGATE_METRICS = (
     "adjacent_grade_agreement",
     "review_rate",
     "blocked_rate",
+    "invalid_evidence_rate",
 )
 _RUN_IDENTITY_FIELDS = (
+    "schema_version",
     "rubric_version_id",
     "rubric_version_hash",
     "rubric_hash_scheme",
     "rubric_snapshot_hash",
     "policy_hash",
+    "policy_snapshot_sha256",
+    "grade_scale_sha256",
     "execution_plan_hash",
     "plan_schema_version",
     "checker_manifest_sha256",
     "business_profile_key",
+    "business_profile_version",
     "workflow_profile",
+    "prompt_version",
+    "runtime_identity_sha256",
     "model_provider",
     "model_name",
     "model_version",
@@ -127,6 +135,10 @@ def build_holdout_manifest_from_rows(
             source.relative_to(base_dir)
         except ValueError as exc:
             raise GateValidationError("score-table filename escapes papers_dir") from exc
+        if source.suffix.lower() not in _SUPPORTED_PAPER_SUFFIXES:
+            raise GateValidationError(
+                "score row %d references an unsupported paper format" % index
+            )
         if not source.is_file():
             raise GateValidationError("paper file is missing for score row %d" % index)
 
@@ -164,6 +176,22 @@ def build_holdout_manifest_from_rows(
 
     if not paper_records:
         raise GateValidationError("release holdout must contain at least one sample")
+    scored_paths = {
+        Path(filename).as_posix()
+        for filename in seen_filenames
+    }
+    unlisted_paper_count = sum(
+        1
+        for path in base_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in _SUPPORTED_PAPER_SUFFIXES
+        and path.relative_to(base_dir).as_posix() not in scored_paths
+    )
+    if unlisted_paper_count:
+        raise GateValidationError(
+            "%d supported paper file(s) are missing from teacher scores"
+            % unlisted_paper_count
+        )
     paper_records.sort(key=lambda item: item["sample_id"])
     truth_records.sort(key=lambda item: item["sample_id"])
     paper_manifest_sha256 = evaluation_sha256(paper_records)
@@ -233,6 +261,11 @@ def summarize_run_identities(report: dict) -> tuple[dict, list[str]]:
             summary[field] = None
         else:
             summary[field] = next(iter(values))
+
+    if summary.get("schema_version") != "paper-grading/thesis-eval-run-identity@1":
+        issues.append(
+            "formal evaluation requires paper-grading/thesis-eval-run-identity@1"
+        )
 
     document_records = []
     source_records = []
@@ -525,6 +558,9 @@ def build_gate_candidate(
             "grade_confusion": deepcopy(report.get("grade_confusion")),
             "grade_labels": deepcopy(report.get("grade_labels")),
         },
+        "difference_explanations": normalize_difference_explanations(
+            report.get("difference_explanations") or []
+        ),
         "dataset": deepcopy(dataset_identity),
         "documents": {
             "document_snapshot_manifest_sha256": run_identity.get(
@@ -647,6 +683,39 @@ def finalize_gate(candidate: dict, approval: dict) -> dict:
     return result
 
 
+def validate_gate_candidate_record(candidate: dict) -> None:
+    """Validate a public candidate before it is associated in the database."""
+
+    if candidate.get("schema") != GATE_RECORD_SCHEMA:
+        raise GateValidationError("unsupported gate record schema")
+    _validate_candidate_hash(candidate)
+    normalize_difference_explanations(
+        candidate.get("difference_explanations") or []
+    )
+    assert_public_record_safe(candidate)
+
+
+def validate_gate_policy(thresholds: dict, tolerances: dict) -> None:
+    """Validate a user-defined gate policy without inventing default values."""
+
+    metrics = {
+        "qwk": thresholds.get("minimum_qwk"),
+        "mae": 0,
+        "rmse": 0,
+        "exact_grade_agreement": thresholds.get(
+            "minimum_exact_grade_agreement"
+        ),
+        "adjacent_grade_agreement": thresholds.get(
+            "minimum_adjacent_grade_agreement"
+        ),
+        "review_rate": 0,
+        "blocked_rate": 0,
+        "invalid_evidence_rate": 0,
+    }
+    _threshold_issues(metrics, thresholds)
+    _validate_regression_tolerances(tolerances)
+
+
 def approved_regression_issues(report: dict, approved_record: dict) -> list[str]:
     if approved_record.get("gate_passed") is not True:
         return ["reference record is not an approved, passed release gate"]
@@ -665,6 +734,11 @@ def approved_regression_issues(report: dict, approved_record: dict) -> list[str]
         ("exact_grade_agreement", "drop", "exact_grade_agreement_drop"),
         ("adjacent_grade_agreement", "drop", "adjacent_grade_agreement_drop"),
         ("review_rate", "rise", "review_rate_rise"),
+        (
+            "invalid_evidence_rate",
+            "rise",
+            "invalid_evidence_rate_rise",
+        ),
     )
     for metric, direction, tolerance_key in comparisons:
         current = report.get(metric)
@@ -733,6 +807,47 @@ def build_regression_record(
     approved_record: dict,
 ) -> dict:
     issues = approved_candidate_regression_issues(candidate, approved_record)
+    baseline_metrics = deepcopy(
+        approved_record.get("approval", {})
+        .get("accepted_baseline", {})
+        .get("metrics", {})
+    )
+    candidate_metrics = deepcopy(
+        candidate.get("evaluation", {}).get("metrics") or {}
+    )
+    metric_deltas = {
+        key: candidate_metrics[key] - baseline_metrics[key]
+        for key in sorted(set(candidate_metrics) & set(baseline_metrics))
+        if isinstance(candidate_metrics[key], (int, float))
+        and not isinstance(candidate_metrics[key], bool)
+        and isinstance(baseline_metrics[key], (int, float))
+        and not isinstance(baseline_metrics[key], bool)
+    }
+    baseline_dimensions = (
+        approved_record.get("evaluation", {}).get("per_criterion") or {}
+    )
+    candidate_dimensions = (
+        candidate.get("evaluation", {}).get("per_criterion") or {}
+    )
+    per_criterion = {}
+    for code in sorted(set(baseline_dimensions) | set(candidate_dimensions)):
+        baseline = deepcopy(baseline_dimensions.get(code))
+        current = deepcopy(candidate_dimensions.get(code))
+        comparison = {"baseline": baseline, "candidate": current}
+        for metric in ("mae", "bias"):
+            before = baseline.get(metric) if isinstance(baseline, dict) else None
+            after = current.get(metric) if isinstance(current, dict) else None
+            if (
+                isinstance(before, (int, float))
+                and not isinstance(before, bool)
+                and isinstance(after, (int, float))
+                and not isinstance(after, bool)
+            ):
+                comparison[metric + "_delta"] = after - before
+        per_criterion[code] = comparison
+    explanations = normalize_difference_explanations(
+        candidate.get("difference_explanations") or []
+    )
     record = {
         "schema": "paper-grading/evaluation-gate-regression@1",
         "candidate_sha256": candidate.get("candidate_sha256"),
@@ -741,7 +856,11 @@ def build_regression_record(
         "status": "passed" if not issues else "failed",
         "regression_passed": not issues,
         "issues": issues,
-        "metrics": deepcopy(candidate.get("evaluation", {}).get("metrics") or {}),
+        "metrics": candidate_metrics,
+        "baseline_metrics": baseline_metrics,
+        "metric_deltas": metric_deltas,
+        "per_criterion": per_criterion,
+        "difference_explanations": explanations,
     }
     assert_public_record_safe(record)
     record["regression_record_sha256"] = evaluation_sha256(record)
@@ -790,6 +909,10 @@ def _threshold_issues(metrics: dict, thresholds: dict) -> list[str]:
         ),
         "maximum_review_rate": ("review_rate", "maximum"),
         "maximum_blocked_rate": ("blocked_rate", "maximum"),
+        "maximum_invalid_evidence_rate": (
+            "invalid_evidence_rate",
+            "maximum",
+        ),
     }
     unknown = set(thresholds) - set(supported)
     missing = set(supported) - set(thresholds)
@@ -822,6 +945,7 @@ def _validate_regression_tolerances(tolerances: dict) -> None:
         "exact_grade_agreement_drop",
         "adjacent_grade_agreement_drop",
         "review_rate_rise",
+        "invalid_evidence_rate_rise",
     }
     unknown = set(tolerances) - required
     missing = required - set(tolerances)
@@ -835,6 +959,29 @@ def _validate_regression_tolerances(tolerances: dict) -> None:
         )
     for key in required:
         _non_negative_number(tolerances[key], key)
+
+
+def normalize_difference_explanations(value):
+    if not isinstance(value, (list, tuple)):
+        raise GateValidationError("difference_explanations must be an array")
+    result = []
+    required = {"criterion_code", "reason_code", "summary"}
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or set(item) != required:
+            raise GateValidationError(
+                "difference_explanations[%d] must contain exactly %s"
+                % (index, sorted(required))
+            )
+        result.append(
+            {
+                key: _required_text(
+                    item.get(key),
+                    "difference_explanations[%d].%s" % (index, key),
+                )
+                for key in ("criterion_code", "reason_code", "summary")
+            }
+        )
+    return result
 
 
 def _git(root: Path, *args: str) -> str:
@@ -940,8 +1087,11 @@ __all__ = [
     "ensure_external_artifact_dir",
     "evaluation_sha256",
     "finalize_gate",
+    "normalize_difference_explanations",
     "sample_id_for_artifact_sha256",
     "sha256_file",
     "summarize_run_identities",
+    "validate_gate_candidate_record",
+    "validate_gate_policy",
     "write_json",
 ]

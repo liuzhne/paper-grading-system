@@ -14,12 +14,15 @@ from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3, ScoringRequest
 from backend.app.services.scoring.core.policy import aggregate_scores, compile_scoring_policy
 from backend.app.services.scoring.core.results import ScoringOutcome
+from backend.app.services.scoring.core.legacy_compatibility import (
+    execute_legacy_compatibility_plan,
+)
 from backend.app.services.scoring.core.rule_executor import execute_rule_plan
 
 
 # This value is deliberately mirrored by services.cache.llm_cache.  Importing
 # that adapter from Core would violate the M2 dependency boundary.
-PROMPT_VERSION = "2026-07-20-7"
+PROMPT_VERSION = "2026-08-02-9"
 
 
 def _plain(value):
@@ -155,10 +158,16 @@ def _prompt_envelope(
         submission_snapshot=_plain(submission),
         document_snapshot=_plain(document),
     )
+    runtime_prompt_version = request["runtime_identity"]["prompt_version"]
+    prompt_version = getattr(profile, "prompt_version", runtime_prompt_version)
+    if not isinstance(prompt_version, str) or not prompt_version.strip():
+        raise TypeError("profile.prompt_version must be a non-empty string")
+    if runtime_prompt_version != prompt_version:
+        raise ValueError("profile prompt version does not match runtime identity")
     return PromptEnvelopeV3.from_mapping(
         {
             "schema_version": "prompt-envelope@3",
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": prompt_version,
             "runtime_identity": _plain(request["runtime_identity"]),
             "rubric_identity": {
                 "rubric_source_kind": plan["rubric_source_kind"],
@@ -218,6 +227,13 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
     _validate_profile(profile, value)
 
     plan = value["plan"]
+    if plan["schema_version"] == "rule-execution-plan@3":
+        return execute_legacy_compatibility_plan(
+            request=dto,
+            checker_registry=checker_registry,
+            llm_runtime=llm_runtime,
+            profile=profile,
+        )
     if any(
         node["atomic_rule_snapshot"]["schema_version"]
         == "atomic-rule-snapshot@2"
@@ -259,6 +275,19 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
             unrounded_total = _decimal_text(aggregated.unrounded_total)
             final_total = _decimal_text(aggregated.rounded_total)
             grade = aggregated.grade
+            if aggregated.need_manual_review:
+                executed["review_issues"].append(
+                    {
+                        "code": "POLICY_REVIEW_REQUIRED",
+                        "severity": "review",
+                        "criterion_code": None,
+                        "rule_code": None,
+                        "message": (
+                            "frozen scoring policy requires manual review for "
+                            "this aggregate total"
+                        ),
+                    }
+                )
         return ScoringOutcome.from_mapping(
             {
                 "schema_version": "scoring-outcome@2",
@@ -436,6 +465,19 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
         total_score=plan["policy_snapshot"]["aggregation"]["total_score"],
     )
     aggregated = aggregate_scores(policy, aggregate_items)
+    if aggregated.need_manual_review:
+        issues.append(
+            {
+                "code": "POLICY_REVIEW_REQUIRED",
+                "severity": "review",
+                "criterion_code": None,
+                "rule_code": None,
+                "message": (
+                    "frozen scoring policy requires manual review for this "
+                    "aggregate total"
+                ),
+            }
+        )
     return ScoringOutcome.from_mapping(
         {
             "schema_version": "scoring-outcome@1",

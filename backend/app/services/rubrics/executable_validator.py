@@ -19,6 +19,14 @@ from sqlalchemy.orm import Session
 from backend.app.db import models
 from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.services.scoring.core.policy import validate_weight_configuration
+from backend.app.services.scoring.profiles.technical_proposal import (
+    TECHNICAL_PROPOSAL_CHECKER_KEYS,
+)
+from backend.app.services.scoring.profiles.technical_proposal import (
+    TechnicalProposalProfile,
+)
+from backend.app.services.scoring.profiles.thesis import THESIS_CHECKER_KEYS
+from backend.app.services.scoring.profiles.thesis import ThesisProfile
 
 
 _DOCUMENT_SCHEMA = "document-snapshot@1"
@@ -52,6 +60,20 @@ class DefaultPublicationCheckerRegistry:
             "checker_version": "1.0.0",
             "supported_profiles": {"thesis"},
         },
+        **{
+            key: {
+                "checker_version": "1.0.0",
+                "supported_profiles": {"technical_proposal"},
+            }
+            for key in TECHNICAL_PROPOSAL_CHECKER_KEYS.values()
+        },
+        **{
+            key: {
+                "checker_version": "1.0.0",
+                "supported_profiles": {"thesis"},
+            }
+            for key in THESIS_CHECKER_KEYS.values()
+        },
         # Pre-M4 provenance fixtures use this key.  It is accepted only by the
         # compatibility publication path in lifecycle, never put in a Core plan.
         "required_structure_presence": {
@@ -66,12 +88,14 @@ class DefaultPublicationCheckerRegistry:
     def validate_publication_params(self, checker_key: str, params) -> None:
         if not isinstance(params, Mapping):
             raise ValueError("checker params must be an object")
-        if checker_key == "technical_proposal.required_fields.v1":
-            values = params.get("required_fields")
-            if not isinstance(values, list) or not values or not all(
-                isinstance(item, str) and item.strip() for item in values
-            ):
-                raise ValueError("required_fields must be a non-empty string array")
+        if checker_key in TECHNICAL_PROPOSAL_CHECKER_KEYS.values():
+            TechnicalProposalProfile().build_checker_registry().resolve(
+                checker_key=checker_key,
+                checker_version="1.0.0",
+                checker_params=dict(params),
+                profile_key="technical_proposal",
+                document_schema_version=_DOCUMENT_SCHEMA,
+            )
         elif checker_key == "thesis.legacy_required_fields.v1":
             if set(params) != {"criterion_code", "applies_to"} or any(
                 not isinstance(value, str) or not value.strip()
@@ -80,6 +104,14 @@ class DefaultPublicationCheckerRegistry:
                 raise ValueError(
                     "criterion_code and applies_to must be non-empty strings"
                 )
+        elif checker_key in THESIS_CHECKER_KEYS.values():
+            ThesisProfile().build_checker_registry().resolve(
+                checker_key=checker_key,
+                checker_version="1.0.0",
+                checker_params=dict(params),
+                profile_key="thesis",
+                document_schema_version=_DOCUMENT_SCHEMA,
+            )
 
 
 DEFAULT_CHECKER_REGISTRY = DefaultPublicationCheckerRegistry()

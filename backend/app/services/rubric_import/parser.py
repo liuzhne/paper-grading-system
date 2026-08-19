@@ -13,10 +13,31 @@ from backend.app.services.rubric_import.docx_comments import parse_comments
 
 HEADER_ALIASES = {
     "code": ["编号", "指标编号", "评分项编号", "代码", "code", "criterion_code"],
-    "name": ["评分项", "评分指标", "指标", "评价项目", "项目", "name", "criterion"],
+    # 部分院校模板把稳定标识和满分合并在“打分项”文本中，例如
+    # “指导教师成绩项1（20分）”。它不是评分项名称，需单独识别。
+    "item_label": ["打分项", "成绩项"],
+    "name": [
+        "评分项",
+        "评分指标",
+        "评价内容",
+        "指标",
+        "评价项目",
+        "项目",
+        "name",
+        "criterion",
+    ],
     "max_score": ["分值", "满分", "分数", "最高分", "权重分", "max_score", "score", "points"],
     "weight": ["权重", "weight"],
-    "description": ["说明", "评分说明", "评价标准", "评分标准", "标准说明", "描述", "description"],
+    "description": [
+        "说明",
+        "评分说明",
+        "评价标准",
+        "评分标准",
+        "标准说明",
+        "具体要求",
+        "描述",
+        "description",
+    ],
     "evidence_hints": ["依据", "证据", "证据提示", "章节依据", "相关章节", "关键词", "evidence_hints"],
     "deduction_rules": ["扣分规则", "扣分点", "扣分说明", "扣分原因", "deduction_rules"],
     "display_order": ["顺序", "排序", "display_order"],
@@ -150,7 +171,7 @@ def parse_excel_rules(rules_bytes):
     criteria = []
 
     for sheet in workbook.worksheets:
-        rows = list(sheet.iter_rows(values_only=True))
+        rows = _rows_with_merged_values(sheet)
         header_index, mapping = _find_header(rows)
         if header_index is None:
             warnings.append("工作表 %s 未识别到评分规则表头，已跳过。" % sheet.title)
@@ -170,31 +191,44 @@ def parse_excel_rules(rules_bytes):
 
 def _find_header(rows):
     for index, row in enumerate(rows[:15]):
-        normalized = [_normalize(cell) for cell in row]
+        normalized = [_normalize_header(cell) for cell in row]
         mapping = {}
+        used_columns = set()
         for field, aliases in HEADER_ALIASES.items():
             for alias in aliases:
-                alias_norm = alias.lower()
+                alias_norm = _normalize_header(alias)
                 for col, value in enumerate(normalized):
-                    if value and alias_norm in value.lower():
+                    if col in used_columns:
+                        continue
+                    if value and (value == alias_norm or alias_norm in value):
                         mapping[field] = col
+                        used_columns.add(col)
                         break
                 if field in mapping:
                     break
-        if "name" in mapping and "max_score" in mapping:
+        if "name" in mapping and (
+            "max_score" in mapping or "item_label" in mapping
+        ):
             return index, mapping
     return None, {}
 
 
 def _criterion_from_row(row, mapping, order):
-    name = _value(row, mapping.get("name"))
+    item_label = _value(row, mapping.get("item_label"))
+    name = _value(row, mapping.get("name")) or item_label
     if not name or name in {"合计", "总分", "总计"}:
         return None
     max_score = _parse_score(_value(row, mapping.get("max_score")))
     if max_score is None:
+        max_score = _parse_embedded_max_score(item_label)
+    if max_score is None:
         return None
 
-    code = _value(row, mapping.get("code")) or "C%02d" % order
+    code = (
+        _value(row, mapping.get("code"))
+        or _code_from_item_label(item_label)
+        or "C%02d" % order
+    )
     description = _value(row, mapping.get("description"))
     evidence_hints = _split_items(_value(row, mapping.get("evidence_hints")))
     deduction_rules = _split_items(_value(row, mapping.get("deduction_rules")))
@@ -225,6 +259,43 @@ def _criterion_from_row(row, mapping, order):
         sub_checks=sub_checks,
         dimension=dimension,
     )
+
+
+def _rows_with_merged_values(sheet):
+    """Return worksheet rows while expanding merged-cell top-left values.
+
+    ``openpyxl`` exposes the non-anchor cells in a merged range as ``None``.
+    Evaluation templates commonly merge a category name across several score
+    items, so leaving those cells empty silently drops all but the first item.
+    """
+
+    merged_values = {}
+    for merged_range in sheet.merged_cells.ranges:
+        value = sheet.cell(merged_range.min_row, merged_range.min_col).value
+        for row in range(merged_range.min_row, merged_range.max_row + 1):
+            for column in range(merged_range.min_col, merged_range.max_col + 1):
+                merged_values[(row, column)] = value
+    return [
+        tuple(
+            merged_values.get((cell.row, cell.column), cell.value)
+            for cell in row
+        )
+        for row in sheet.iter_rows()
+    ]
+
+
+def _parse_embedded_max_score(value):
+    if not value:
+        return None
+    match = re.search(r"[（(]\s*(\d+(?:\.\d+)?)\s*分\s*[）)]", str(value))
+    return float(match.group(1)) if match else None
+
+
+def _code_from_item_label(value):
+    if not value:
+        return None
+    match = re.search(r"指导教师(?:成绩|评分)项\s*(\d+)", str(value))
+    return "T%02d" % int(match.group(1)) if match else None
 
 
 def _enrich_with_template(criterion, template_summary):
@@ -395,6 +466,16 @@ def _normalize(value):
     if value is None:
         return ""
     return " ".join(str(value).strip().split())
+
+
+def _normalize_header(value):
+    """Normalize headers more aggressively than cell content.
+
+    Internal spaces in headers such as ``具  体  要  求`` are layout-only and
+    must not prevent alias matching.
+    """
+
+    return re.sub(r"\s+", "", _normalize(value)).lower()
 
 
 def _dedupe(items):

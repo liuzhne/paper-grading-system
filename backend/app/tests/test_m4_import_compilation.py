@@ -29,7 +29,7 @@ import zipfile
 
 import pytest
 from docx import Document
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -540,6 +540,38 @@ def test_missing_band_or_deduct_contract_creates_blocked_review_only_draft():
         rule.get("direction") != "llm_direct"
         for rule in _rows(graph, "atomic_rules")
     )
+
+
+@requires_file_prepare
+def test_empty_criterion_description_is_an_independent_publish_blocker():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "评分规则"
+    sheet.append(["编号", "评分项", "分值", "评分说明", "评分模式"])
+    sheet.append(["T02", "分析与解决问题", 20, None, "review_only"])
+    rules = BytesIO()
+    workbook.save(rules)
+    command = file_import_command()
+    command["rubric"]["name"] = "M4 missing criterion description"
+    command["rubric"]["global_policy"] = technical_policy_snapshot_payload(
+        total_score="20", rounding_digits=2
+    )
+    command["files"]["template_file_name"] = None
+
+    _, graph = _prepare_file(
+        command=command,
+        rules=rules.getvalue(),
+        template=None,
+    )
+
+    assert "MISSING_CRITERION_DESCRIPTION" in _blocker_codes(graph)
+    blocker = next(
+        item
+        for item in graph["compilation"]["blockers"]
+        if item["code"] == "MISSING_CRITERION_DESCRIPTION"
+    )
+    assert blocker["criterion_code"] == "T02"
+    assert "scoring description" in blocker["message"]
 
 
 @requires_file_prepare

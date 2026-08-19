@@ -8,6 +8,8 @@ from backend.app.services.document_parser.types import StructureCheck
 from backend.app.services.coherence import analyze_coherence
 from backend.app.services.document_parser.track_changes import parse_track_changes
 from backend.app.services.document_parser.track_changes import track_changes_findings
+from backend.app.services.document_parser.extractor import ExtractedDocument
+from backend.app.services.document_parser.extractor import extract_document
 
 SECTION_RE = re.compile(
     r"^("
@@ -52,26 +54,39 @@ TITLE_SKIP_KEYWORDS = (
 
 def parse_document(file_path):
     path = Path(file_path)
-    suffix = path.suffix.lower()
-    if suffix == ".docx":
-        raw_paragraphs, heading_texts = _extract_docx(path)
-    elif suffix == ".pdf":
-        raw_paragraphs, heading_texts = _extract_pdf(path)
-    else:
-        raise ValueError("unsupported file type; only .docx and text PDF are supported")
+    return interpret_thesis_document(extract_document(path), source_path=path)
 
-    paragraphs = [(page, _normalize_text(text)) for page, text in raw_paragraphs if _normalize_text(text)]
+
+def interpret_thesis_document(extracted, *, source_path=None):
+    """Interpret profile-neutral extracted layout with thesis semantics."""
+
+    if not isinstance(extracted, ExtractedDocument):
+        raise TypeError("thesis interpreter requires an ExtractedDocument")
+    if extracted.schema_version != "extracted-document@1":
+        raise ValueError("unsupported extracted document schema")
+
+    paragraphs = [
+        (block.page, _normalize_text(block.text))
+        for block in extracted.blocks
+        if _normalize_text(block.text)
+    ]
     if not paragraphs:
         raise ValueError("no readable text found; scanned PDFs require OCR and are not supported in MVP")
-    heading_texts = {_normalize_text(text) for text in heading_texts if _normalize_text(text)}
+    heading_texts = {
+        _normalize_text(text)
+        for text in extracted.heading_candidates
+        if _normalize_text(text)
+    }
 
     sections = _build_sections(paragraphs, heading_texts)
     full_text = "\n".join(text for _, text in paragraphs)
     cover_metadata = _extract_cover_metadata(paragraphs)
     references = _extract_references(sections)
     coherence_findings = analyze_coherence(full_text, references)
-    if suffix == ".docx":
-        coherence_findings = coherence_findings + _track_changes_findings(path)
+    if extracted.source_suffix == ".docx" and source_path is not None:
+        coherence_findings = coherence_findings + _track_changes_findings(
+            Path(source_path)
+        )
     checks = _structure_checks(full_text, sections, references)
     structure_confidence = _estimate_structure_confidence(sections, heading_texts)
     checks.append(
@@ -104,113 +119,19 @@ def parse_document(file_path):
 
 
 def _extract_docx(path):
-    from docx import Document
-    from docx.oxml.table import CT_Tbl
-    from docx.oxml.text.paragraph import CT_P
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
-
-    document = Document(str(path))
-    result = []
-    heading_texts = set()
-    for child in document.element.body.iterchildren():
-        if isinstance(child, CT_P):
-            paragraph = Paragraph(child, document)
-            text = paragraph.text.strip()
-            if not text:
-                continue
-            result.append((1, text))
-            style_name = getattr(paragraph.style, "name", "") or ""
-            if "Heading" in style_name or "Title" in style_name or "标题" in style_name:
-                heading_texts.add(text)
-        elif isinstance(child, CT_Tbl):
-            table = Table(child, document)
-            for row in table.rows:
-                # python-docx 对横向合并单元格会在 row.cells 里重复返回同一 Cell，
-                # 按底层 _tc 去重，避免合并单元格文本被重复拼接。
-                seen_tc = set()
-                cells = []
-                for cell in row.cells:
-                    tc_id = id(cell._tc)
-                    if tc_id in seen_tc:
-                        continue
-                    seen_tc.add(tc_id)
-                    text = cell.text.strip()
-                    if text:
-                        cells.append(text)
-                if cells:
-                    result.append((1, " | ".join(cells)))
-    return result, heading_texts
+    extracted = extract_document(path)
+    return (
+        [(block.page, block.text) for block in extracted.blocks],
+        set(extracted.heading_candidates),
+    )
 
 
 def _extract_pdf(path):
-    """文本 PDF：用字号/加粗启发式识别标题（N3）——正文字号取全篇众数，显著偏大或整行加粗的短行视为标题。
-
-    无可用字号信息时退回纯规则启发式（返回空 heading_texts）。
-    """
-    import fitz
-
-    result = []
-    span_sizes = []
-    blocks_info = []  # (block_text, max_size, all_bold)
-    with fitz.open(str(path)) as document:
-        for page_index, page in enumerate(document, start=1):
-            for block in page.get_text("dict").get("blocks", []):
-                if block.get("type") != 0:  # 0 = 文本块（跳过图片块）
-                    continue
-                lines_text = []
-                block_max_size = 0.0
-                all_bold = True
-                has_span = False
-                for line in block.get("lines", []):
-                    parts = []
-                    for span in line.get("spans", []):
-                        span_text = span.get("text", "")
-                        if not span_text.strip():
-                            continue
-                        has_span = True
-                        parts.append(span_text)
-                        size = float(span.get("size", 0) or 0)
-                        span_sizes.append(size)
-                        block_max_size = max(block_max_size, size)
-                        if not (int(span.get("flags", 0) or 0) & 16):  # bit4(=16)=加粗
-                            all_bold = False
-                    if parts:
-                        lines_text.append("".join(parts))
-                if not has_span:
-                    continue
-                block_text = " ".join(lines_text).strip()
-                if block_text:
-                    result.append((page_index, block_text))
-                    blocks_info.append((block_text, block_max_size, all_bold))
-
-    return result, _pdf_heading_texts(blocks_info, span_sizes)
-
-
-def _pdf_heading_texts(blocks_info, span_sizes):
-    if not span_sizes:
-        return set()
-    body_size = _mode_size(span_sizes)
-    headings = set()
-    for block_text, max_size, all_bold in blocks_info:
-        norm = _normalize_text(block_text)
-        if not norm or len(norm) > 40:
-            continue
-        if norm[-1] in "。．.；;，,、":  # 以标点收尾更像正文，不当标题
-            continue
-        bigger = bool(body_size) and max_size >= body_size * 1.15
-        if bigger or all_bold:
-            headings.add(norm)
-    return headings
-
-
-def _mode_size(sizes):
-    from collections import Counter
-
-    rounded = [round(size * 2) / 2 for size in sizes if size > 0]
-    if not rounded:
-        return 0.0
-    return Counter(rounded).most_common(1)[0][0]
+    extracted = extract_document(path)
+    return (
+        [(block.page, block.text) for block in extracted.blocks],
+        set(extracted.heading_candidates),
+    )
 
 
 def _normalize_text(text):

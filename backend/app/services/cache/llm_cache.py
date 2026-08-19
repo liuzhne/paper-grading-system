@@ -27,7 +27,7 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV2
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-07-20-7"  # M4 versioned rule decisions and occurrence evidence
+PROMPT_VERSION = "2026-08-02-9"  # M5 bounded legacy direct/composite compatibility input
 
 
 @dataclass(frozen=True)

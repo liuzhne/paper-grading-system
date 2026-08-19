@@ -1,0 +1,93 @@
+{
+  "candidate_version": {
+    "all_hashes_are_sha256": true,
+    "engine_version": "thesis-core-adapter@1",
+    "hashes": {
+      "execution_plan_hash": "7c06d04261705c7eec8a47022159a0c99c2ee4b42b4c46cee3628076cc009d23",
+      "policy_hash": "961fe94278a5ad785f39fff960ce26f9a91b61abe3c5027a8e26fe5bb9861631",
+      "rubric_snapshot_hash": "6c549d0a27342aae5f0e708910a44a5b173250a6408e9e8a742394dbbf80c901",
+      "runtime_identity_sha256": "ad478d38da3c5256cd7be3a341d09662c544deeba790bda5acbe6581698c6e53"
+    },
+    "node_kinds": [
+      "atomic_rule",
+      "composite_criterion",
+      "legacy_direct_criterion",
+      "legacy_direct_criterion"
+    ],
+    "node_signatures": [
+      {
+        "criterion_code": "BAND-INNOVATION",
+        "node_kind": "atomic_rule",
+        "rule_code": "legacy.band-innovation.a4fa3a98d823a49f6864daa1"
+      },
+      {
+        "criterion_code": "HYB-COMPLIANCE",
+        "node_kind": "composite_criterion",
+        "rule_code": "legacy.composite.74f66b86f3e94405b544528f"
+      },
+      {
+        "criterion_code": "DET-REF",
+        "node_kind": "legacy_direct_criterion",
+        "rule_code": "legacy.direct.21e884dd380e27b6c33a8618"
+      },
+      {
+        "criterion_code": "DED-METHOD",
+        "node_kind": "legacy_direct_criterion",
+        "rule_code": "legacy.direct.622cf75753d6b9939ee76488"
+      }
+    ],
+    "plan_schema_version": "rule-execution-plan@3",
+    "profile_key": "thesis",
+    "profile_version": "thesis-legacy-profile@1",
+    "prompt_version": "2026-08-02-9"
+  },
+  "compatibility": {
+    "core_persisted_item_order": [
+      "BAND-INNOVATION",
+      "DED-METHOD",
+      "DET-REF",
+      "HYB-COMPLIANCE"
+    ],
+    "criterion_codes": [
+      "BAND-INNOVATION",
+      "DED-METHOD",
+      "DET-REF",
+      "HYB-COMPLIANCE"
+    ],
+    "history_generations": [
+      0,
+      1
+    ],
+    "public_export_schema": "paper-grading/run-export@1",
+    "report_heading_present": true,
+    "review_and_retry_supported": true
+  },
+  "parity": {
+    "core_grade": "良好",
+    "core_total": 62.7,
+    "criterion_differences": [
+      {
+        "core_final": 20.0,
+        "criterion_code": "BAND-INNOVATION",
+        "legacy_final": 15.0
+      },
+      {
+        "core_final": 10.9,
+        "criterion_code": "HYB-COMPLIANCE",
+        "legacy_final": 9.45
+      }
+    ],
+    "difference_explanations": [
+      "CORE_CORRECTED_POLICY_AND_GRADE_SCALE",
+      "CORE_AUTHORIZED_EVIDENCE_AND_EFFECTS",
+      "LEGACY_DIRECT_AND_COMPOSITE_COMPATIBILITY_NODES"
+    ],
+    "legacy_grade": "不及格",
+    "legacy_total": 56.25
+  },
+  "replay": {
+    "frozen_identity_equal_across_generations": true,
+    "generation_changes_idempotency_only": true
+  },
+  "schema_version": "thesis-core-parity-golden@1"
+}

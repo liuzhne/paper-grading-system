@@ -10,7 +10,6 @@ from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import Paper
 from backend.app.db.models import PaperChunk
@@ -23,7 +22,7 @@ from backend.app.services.papers.ingestion import parse_and_store
 from backend.app.services.storage.local import ensure_storage_dirs
 from backend.app.services.storage.local import read_json
 from backend.app.services.storage.local import safe_filename
-from backend.app.services.storage.local import save_binary
+from backend.app.services.storage.local import store_binary
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -118,7 +117,7 @@ def get_parsed_paper(paper_id: str, db: Session = Depends(get_db)):
     if not paper.parsed_text_path:
         raise HTTPException(status_code=404, detail="paper has no parsed text")
     try:
-        parsed = read_json(Path(paper.parsed_text_path))
+        parsed = read_json(paper.parsed_text_path)
     except (OSError, ValueError):  # 文件缺失/损坏(JSONDecodeError 属 ValueError)→ 明确 404 而非 500
         raise HTTPException(status_code=404, detail="parsed text file not found or unreadable")
     return {"paper_id": paper.id, "parsed": parsed}
@@ -164,8 +163,11 @@ def _save_and_parse_upload(db: Session, batch_id: str, file: UploadFile, strict_
     db.add(paper)
     db.flush()
 
-    destination = settings.uploads_dir / ("%s_%s" % (paper.id, filename))
-    save_binary(file.file, destination)
-    paper.file_path = str(destination)
+    paper.file_path = store_binary(
+        file.file,
+        "uploads",
+        "%s_%s" % (paper.id, filename),
+        content_type=file.content_type,
+    )
     parse_and_store(db, paper)
     return paper

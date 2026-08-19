@@ -189,6 +189,7 @@ class LegacyPaperAdapter:
         parser_version: str,
         normalizer_version: str,
         submission_instance_key: str | None = None,
+        profile_extensions: Mapping[str, object] | None = None,
     ) -> LegacyPaperSnapshots:
         # ``chunks`` are intentionally not an identity source.  Legacy chunk
         # row IDs and boundaries are mutable retrieval artifacts; normalized
@@ -311,7 +312,7 @@ class LegacyPaperAdapter:
                 _field(parsed, "parse_quality", _field(paper, "parse_quality", 0))
             ),
             "parser_diagnostics": _diagnostics(parsed),
-            "profile_extensions": {},
+            "profile_extensions": dict(profile_extensions or {}),
         }
         document = DocumentSnapshot.from_mapping(
             {

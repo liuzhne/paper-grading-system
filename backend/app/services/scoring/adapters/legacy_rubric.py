@@ -19,7 +19,9 @@ from types import MappingProxyType
 
 from backend.app.services.scoring.core.evidence import FrozenList
 from backend.app.services.scoring.core.canonical import canonical_sha256
+from backend.app.services.scoring.core.contracts import CompositeCriterionNode
 from backend.app.services.scoring.core.contracts import CompiledRubricSnapshot
+from backend.app.services.scoring.core.contracts import LegacyDirectCriterionNode
 
 
 HASH_SCHEME = "core-canonical-json-v1"
@@ -426,6 +428,46 @@ def _core_evidence_policy(raw_rule=None, *, deterministic=False):
     }
 
 
+def _explicit_legacy_checker_route(raw_criterion):
+    """Return one user-authored checker relationship or fail closed.
+
+    The M3 compatibility snapshot can collapse multiple deduction rows into a
+    single AtomicRule only when every row points at the same checker and the
+    same parameters.  Missing or conflicting relationships are intentionally
+    left to the bounded legacy compatibility node; choosing a checker here
+    would otherwise invent production scoring policy.
+    """
+
+    structured = list(
+        _field(raw_criterion, "deduction_rules_structured", ()) or ()
+    )
+    if not structured:
+        return None
+    route = None
+    route_identity = None
+    for row in structured:
+        checker_key = str(_field(row, "checker_key") or "").strip()
+        checker_params = _field(row, "checker_params")
+        if not checker_key or not isinstance(checker_params, Mapping):
+            return None
+        canonical_params = _canonical_value(checker_params)
+        identity = (
+            checker_key,
+            json.dumps(
+                canonical_params,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        if route_identity is None:
+            route_identity = identity
+            route = (checker_key, canonical_params)
+        elif identity != route_identity:
+            return None
+    return route
+
+
 def _core_criterion(raw_criterion):
     code = str(_field(raw_criterion, "code") or "").strip()
     if not code:
@@ -517,10 +559,21 @@ def _core_atomic_rules(raw_criterion, criterion_snapshot):
             # deduct more than the frozen criterion maximum.
             max_points = maximum_decimal
         first_rule = structured[0] if structured else None
+        explicit_route = _explicit_legacy_checker_route(raw_criterion)
+        checker_key, checker_params = explicit_route or (
+            "thesis.legacy_required_fields.v1",
+            {
+                "criterion_code": code,
+                "applies_to": str(
+                    _field(raw_criterion, "applies_to") or "global"
+                ),
+            },
+        )
         rule_identity = {
             "criterion_code": code,
             "judge_type": "deterministic",
-            "checker_key": "thesis.legacy_required_fields.v1",
+            "checker_key": checker_key,
+            "checker_params": checker_params,
             "max_points": _core_decimal(
                 max_points, label=f"criterion {code} max_points"
             ),
@@ -535,14 +588,9 @@ def _core_atomic_rules(raw_criterion, criterion_snapshot):
                 "direction": "deduct",
                 "effect_type": "score",
                 "judge_type": "deterministic",
-                "checker_key": "thesis.legacy_required_fields.v1",
+                "checker_key": checker_key,
                 "checker_version": None,
-                "checker_params": {
-                    "criterion_code": code,
-                    "applies_to": str(
-                        _field(raw_criterion, "applies_to") or "global"
-                    ),
-                },
+                "checker_params": checker_params,
                 "evidence_policy": _core_evidence_policy(
                     first_rule, deterministic=True
                 ),
@@ -680,6 +728,163 @@ class LegacyRubricAdapter:
             ),
         }
         return CompiledRubricSnapshot.from_mapping(payload)
+
+    def adapt_compatibility_nodes(
+        self,
+        *,
+        criteria,
+        rubric_source_kind: str,
+    ) -> tuple:
+        """Freeze only the two legacy scoring shapes Core cannot compile as AtomicRule.
+
+        These nodes are deliberately unavailable to formal RubricVersion inputs.
+        Their model-facing payload excludes parent weights and any authoritative
+        point/effect fields; Core remains the only component that calculates totals.
+        """
+
+        if rubric_source_kind != "legacy_unversioned":
+            raise LegacyRubricError(
+                "compatibility nodes require rubric_source_kind=legacy_unversioned"
+            )
+
+        nodes = []
+        for raw in criteria:
+            criterion_type = str(
+                _field(raw, "criterion_type") or "llm_judgment"
+            )
+            scoring_mode = str(_field(raw, "scoring_mode") or "llm_direct")
+            sub_checks = list(_field(raw, "sub_checks", ()) or ())
+            is_composite = criterion_type == "hybrid" or bool(sub_checks)
+            needs_legacy_scoring_compatibility = (
+                criterion_type == "deterministic" or scoring_mode == "deductive"
+            ) and _explicit_legacy_checker_route(raw) is None
+            is_direct = not is_composite and (
+                (
+                    scoring_mode == "llm_direct"
+                    and criterion_type != "deterministic"
+                )
+                or needs_legacy_scoring_compatibility
+            )
+            if not is_composite and not is_direct:
+                continue
+
+            parent = _core_criterion(raw)
+            parent["assessment_mode"] = (
+                "legacy_composite" if is_composite else "legacy_direct"
+            )
+            code = parent["criterion_code"]
+            evidence_requirement = "required"
+            if is_composite:
+                if not sub_checks:
+                    raise LegacyRubricError(
+                        f"hybrid criterion {code} requires non-empty sub_checks"
+                    )
+                children = [
+                    self._compatibility_child(raw, child, index=index)
+                    for index, child in enumerate(sub_checks)
+                ]
+                identity = {
+                    "node_kind": "composite_criterion",
+                    "criterion_code": code,
+                    "criterion_snapshot": parent,
+                    "children": children,
+                    "evidence_requirement": evidence_requirement,
+                }
+                rule_code = "legacy.composite.%s" % canonical_sha256(
+                    {"scheme": "legacy-composite-node-v1", **identity}
+                )[:24]
+                nodes.append(
+                    CompositeCriterionNode.from_mapping(
+                        {**identity, "rule_code": rule_code}
+                    )
+                )
+                continue
+
+            legacy_criterion = self._compatibility_criterion(raw)
+            identity = {
+                "node_kind": "legacy_direct_criterion",
+                "criterion_code": code,
+                "criterion_snapshot": parent,
+                "legacy_criterion": legacy_criterion,
+                "evidence_requirement": evidence_requirement,
+            }
+            rule_code = "legacy.direct.%s" % canonical_sha256(
+                {"scheme": "legacy-direct-node-v1", **identity}
+            )[:24]
+            nodes.append(
+                LegacyDirectCriterionNode.from_mapping(
+                    {**identity, "rule_code": rule_code}
+                )
+            )
+        return tuple(nodes)
+
+    @staticmethod
+    def _compatibility_criterion(raw, *, code=None, maximum=None, name=None):
+        criterion_code = str(code or _field(raw, "code") or "").strip()
+        if not criterion_code:
+            raise LegacyRubricError("legacy compatibility criterion code is required")
+        max_score = _core_decimal(
+            maximum if maximum is not None else _field(raw, "max_score"),
+            label=f"criterion {criterion_code} max_score",
+        )
+        raw_type = str(_field(raw, "criterion_type") or "llm_judgment")
+        criterion_type = (
+            "deterministic" if raw_type == "deterministic" else "llm_judgment"
+        )
+        raw_mode = str(_field(raw, "scoring_mode") or "llm_direct")
+        scoring_mode = "deductive" if criterion_type == "deterministic" else raw_mode
+        if scoring_mode not in {"deductive", "banded", "llm_direct"}:
+            scoring_mode = "llm_direct"
+        return {
+            "code": criterion_code,
+            "name": str(name or _field(raw, "name") or criterion_code).strip(),
+            "max_score": max_score,
+            "description": str(_field(raw, "description") or ""),
+            "evidence_hints": [
+                str(item) for item in (_field(raw, "evidence_hints", ()) or ())
+            ],
+            "criterion_type": criterion_type,
+            "scoring_mode": scoring_mode,
+            "applies_to": str(_field(raw, "applies_to") or "global"),
+        }
+
+    @classmethod
+    def _compatibility_child(cls, parent, child, *, index):
+        parent_code = str(_field(parent, "code") or "").strip()
+        child_code = f"{parent_code}:SUB:{index + 1}"
+        child_name = str(
+            _field(child, "name") or _field(child, "label") or child_code
+        ).strip()
+        child_kind = str(_field(child, "kind") or "llm_judgment")
+        maximum = _field(child, "max_points", _field(child, "max_score"))
+        child_payload = {
+            "code": child_code,
+            "name": child_name,
+            "max_score": maximum,
+            "description": str(
+                _field(child, "description") or _field(parent, "description") or ""
+            ),
+            "evidence_hints": list(
+                _field(child, "evidence_hints", ())
+                or _field(parent, "evidence_hints", ())
+                or ()
+            ),
+            "criterion_type": (
+                "deterministic" if child_kind == "deterministic" else "llm_judgment"
+            ),
+            "scoring_mode": (
+                "deductive" if child_kind == "deterministic" else "llm_direct"
+            ),
+            "applies_to": str(
+                _field(child, "applies_to") or _field(parent, "applies_to") or "global"
+            ),
+        }
+        return cls._compatibility_criterion(
+            child_payload,
+            code=child_code,
+            maximum=maximum,
+            name=child_name,
+        )
 
 
 def _criterion(snapshot, criterion_code):

@@ -8,7 +8,7 @@ from backend.app.core.config import settings
 from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
-from backend.app.services.scoring.rules import as_float
+from backend.app.services.scoring.profiles.thesis import ThesisProfile
 from backend.app.services.storage.local import read_json
 
 
@@ -25,9 +25,18 @@ def generate_report(db: Session, run_id: str):
     )
     if run is None:
         raise ValueError("scoring run not found")
+    if run.submission_id is not None:
+        raise ValueError("submission scoring runs require run-export@2")
 
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
-    html = _render_html(run, review_logs, _coherence_for(run), _section_summaries_for(run.paper))
+    artifact = ThesisProfile().build_artifact_projection(
+        run=run,
+        review_logs=review_logs,
+        section_summaries=_section_summaries_for(run.paper),
+        coherence_findings=_coherence_for(run),
+        format_findings=getattr(run, "format_findings", None) or [],
+    )
+    html = _render_html(artifact)
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
     path = settings.reports_dir / ("scoring_report_%s.html" % run.id)  # 用已校验的 DB 值，杜绝路径穿越
     path.write_text(html, encoding="utf-8")
@@ -55,14 +64,15 @@ def _render_section_summary(summaries):
     return "<table><tr><th>章节</th><th>段落数</th><th>字符数</th></tr>%s</table>" % rows
 
 
-def _render_html(run, review_logs, coherence_findings, section_summaries=None):
-    paper = run.paper
-    item_html = "\n".join(_render_item(item) for item in run.items)
-    item_names = {item.id: item.criterion.name for item in run.items}
-    review_html = _render_review_logs(review_logs, item_names)
-    coherence_html = _render_coherence(coherence_findings)
-    summary_html = _render_section_summary(section_summaries or [])
-    format_html = _render_format(getattr(run, "format_findings", None) or [])
+def _render_html(artifact):
+    paper = artifact["paper"]
+    rubric = artifact["rubric"]
+    scores = artifact["scores"]
+    item_html = "\n".join(_render_item(item) for item in artifact["items"])
+    review_html = _render_review_logs(artifact["review_logs"])
+    coherence_html = _render_coherence(artifact["coherence_findings"])
+    summary_html = _render_section_summary(artifact["section_summaries"])
+    format_html = _render_format(artifact["format_findings"])
     return """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -104,15 +114,15 @@ def _render_html(run, review_logs, coherence_findings, section_summaries=None):
 </body>
 </html>
 """.format(
-        title=escape(paper.title or ""),
-        student_name=escape(paper.student_name or ""),
-        student_id=escape(paper.student_id or ""),
-        rubric=escape(run.rubric.name),
-        version=escape(run.rubric.version),
-        final_total=as_float(run.final_total_score),
-        ai_total=as_float(run.ai_total_score),
-        grade=escape(run.grade or ""),
-        need_review="是" if run.need_manual_review else "否",
+        title=escape(paper["title"] or ""),
+        student_name=escape(paper["student_name"] or ""),
+        student_id=escape(paper["student_id"] or ""),
+        rubric=escape(rubric["name"]),
+        version=escape(rubric["version"]),
+        final_total=scores["final_total"],
+        ai_total=scores["ai_total"],
+        grade=escape(scores["grade"]),
+        need_review="是" if scores["need_manual_review"] else "否",
         items=item_html,
         summary=summary_html,
         coherence=coherence_html,
@@ -125,9 +135,9 @@ def _render_item(item):
     evidence = "".join(
         "<blockquote>%s<br><small>%s</small></blockquote>"
         % (escape(e.get("quote", "")), escape(e.get("location", "")))
-        for e in item.evidence or []
+        for e in item["evidence"]
     )
-    deductions = "；".join(item.deductions or [])
+    deductions = "；".join(item["deductions"])
     return """
 <section class="item">
   <h3>{name}: {final_score}/{max_score}</h3>
@@ -138,14 +148,14 @@ def _render_item(item):
   <div><strong>原文依据：</strong>{evidence}</div>
 </section>
 """.format(
-        name=escape(item.criterion.name),
-        final_score=as_float(item.final_score),
-        max_score=as_float(item.max_score),
-        ai_score=as_float(item.ai_score),
-        confidence=as_float(item.confidence),
-        reason=escape(item.reason or ""),
+        name=escape(item["criterion_name"]),
+        final_score=item["final_score"],
+        max_score=item["max_score"],
+        ai_score=item["ai_score"],
+        confidence=item["confidence"],
+        reason=escape(item["reason"]),
         deductions=escape(deductions),
-        suggestion=escape(item.suggestion or ""),
+        suggestion=escape(item["suggestion"]),
         evidence=evidence,
     )
 
@@ -213,14 +223,13 @@ def _render_format(findings):
     )
 
 
-def _render_review_logs(review_logs, item_names):
+def _render_review_logs(review_logs):
     if not review_logs:
         return "<p>暂无人工复核记录。</p>"
 
     rows = []
     for log in review_logs:
-        review_type = "整体验收复核" if log.score_item_id is None else "单项分数调整"
-        item_name = item_names.get(log.score_item_id, "") if log.score_item_id else ""
+        review_type = "整体验收复核" if log["score_item_id"] is None else "单项分数调整"
         rows.append(
             """
 <tr>
@@ -233,13 +242,13 @@ def _render_review_logs(review_logs, item_names):
   <td>{reason}</td>
 </tr>
 """.format(
-                created_at=escape(log.created_at.isoformat(sep=" ") if log.created_at else ""),
+                created_at=escape(log["created_at"]),
                 review_type=escape(review_type),
-                item_name=escape(item_name),
-                before_score=as_float(log.before_score) if log.before_score is not None else "",
-                after_score=as_float(log.after_score) if log.after_score is not None else "",
-                reviewer=escape(log.reviewer_id or ""),
-                reason=escape(log.reason or ""),
+                item_name=escape(log["item_name"]),
+                before_score=log["before_score"] if log["before_score"] is not None else "",
+                after_score=log["after_score"] if log["after_score"] is not None else "",
+                reviewer=escape(log["reviewer_id"]),
+                reason=escape(log["reason"]),
             )
         )
 

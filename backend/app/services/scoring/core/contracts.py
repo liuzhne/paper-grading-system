@@ -1494,6 +1494,148 @@ def _normalize_plan_node_v2(value, path):
     }
 
 
+def _normalize_legacy_criterion_payload(value, path):
+    fields = {
+        "code",
+        "name",
+        "max_score",
+        "description",
+        "evidence_hints",
+        "criterion_type",
+        "scoring_mode",
+        "applies_to",
+    }
+    _assert_closed_mapping(value, fields=fields, path=path)
+    hints = _assert_text_array_preserving_order(
+        value["evidence_hints"], path + ".evidence_hints"
+    )
+    criterion_type = _assert_text(
+        value["criterion_type"], path + ".criterion_type"
+    )
+    if criterion_type not in {"deterministic", "llm_judgment"}:
+        raise ValueError(path + ".criterion_type is unsupported")
+    scoring_mode = _assert_text(value["scoring_mode"], path + ".scoring_mode")
+    if scoring_mode not in {"deductive", "banded", "llm_direct"}:
+        raise ValueError(path + ".scoring_mode is unsupported")
+    return {
+        "code": _assert_text(value["code"], path + ".code"),
+        "name": _assert_text(value["name"], path + ".name"),
+        "max_score": _decimal_text(
+            value["max_score"], path + ".max_score", positive=True
+        ),
+        "description": _assert_text(
+            value["description"], path + ".description", allow_empty=True
+        ),
+        "evidence_hints": hints,
+        "criterion_type": criterion_type,
+        "scoring_mode": scoring_mode,
+        "applies_to": _assert_text(value["applies_to"], path + ".applies_to"),
+    }
+
+
+def _normalize_evidence_requirement(value, path):
+    requirement = _assert_text(value, path)
+    if requirement not in {"required", "optional"}:
+        raise ValueError(path + " must be required or optional")
+    return requirement
+
+
+def _normalize_legacy_direct_node(value, path="LegacyDirectCriterionNode"):
+    fields = {
+        "node_kind",
+        "criterion_code",
+        "rule_code",
+        "criterion_snapshot",
+        "legacy_criterion",
+        "evidence_requirement",
+    }
+    _assert_closed_mapping(value, fields=fields, path=path)
+    if value["node_kind"] != "legacy_direct_criterion":
+        raise ValueError(path + " node_kind is unsupported")
+    criterion = _normalize_criterion_snapshot(
+        value["criterion_snapshot"], path + ".criterion_snapshot"
+    )
+    legacy = _normalize_legacy_criterion_payload(
+        value["legacy_criterion"], path + ".legacy_criterion"
+    )
+    criterion_code = _assert_text(value["criterion_code"], path + ".criterion_code")
+    if criterion["assessment_mode"] != "legacy_direct":
+        raise ValueError(path + " criterion assessment_mode must be legacy_direct")
+    if (
+        criterion_code != criterion["criterion_code"]
+        or criterion_code != legacy["code"]
+        or criterion["max_score"] != legacy["max_score"]
+        or legacy["scoring_mode"] not in {"llm_direct", "deductive"}
+    ):
+        raise ValueError(path + " criterion identities do not match")
+    return {
+        "node_kind": "legacy_direct_criterion",
+        "criterion_code": criterion_code,
+        "rule_code": _assert_text(value["rule_code"], path + ".rule_code"),
+        "criterion_snapshot": criterion,
+        "legacy_criterion": legacy,
+        "evidence_requirement": _normalize_evidence_requirement(
+            value["evidence_requirement"], path + ".evidence_requirement"
+        ),
+    }
+
+
+def _normalize_composite_node(value, path="CompositeCriterionNode"):
+    fields = {
+        "node_kind",
+        "criterion_code",
+        "rule_code",
+        "criterion_snapshot",
+        "children",
+        "evidence_requirement",
+    }
+    _assert_closed_mapping(value, fields=fields, path=path)
+    if value["node_kind"] != "composite_criterion":
+        raise ValueError(path + " node_kind is unsupported")
+    criterion = _normalize_criterion_snapshot(
+        value["criterion_snapshot"], path + ".criterion_snapshot"
+    )
+    criterion_code = _assert_text(value["criterion_code"], path + ".criterion_code")
+    if (
+        criterion["assessment_mode"] != "legacy_composite"
+        or criterion["criterion_code"] != criterion_code
+    ):
+        raise ValueError(path + " parent criterion identity does not match")
+    children = _assert_mapping_array(
+        value["children"],
+        path + ".children",
+        _normalize_legacy_criterion_payload,
+    )
+    if not children:
+        raise ValueError(path + ".children must be non-empty")
+    child_codes = [item["code"] for item in children]
+    if len(child_codes) != len(set(child_codes)):
+        raise ValueError(path + ".children codes must be unique")
+    return {
+        "node_kind": "composite_criterion",
+        "criterion_code": criterion_code,
+        "rule_code": _assert_text(value["rule_code"], path + ".rule_code"),
+        "criterion_snapshot": criterion,
+        "children": children,
+        "evidence_requirement": _normalize_evidence_requirement(
+            value["evidence_requirement"], path + ".evidence_requirement"
+        ),
+    }
+
+
+def _normalize_plan_node_v3(value, path):
+    if not isinstance(value, Mapping):
+        raise TypeError("%s must be an object" % path)
+    kind = value.get("node_kind")
+    if kind == "atomic_rule":
+        return _normalize_plan_node_v2(value, path)
+    if kind == "legacy_direct_criterion":
+        return _normalize_legacy_direct_node(value, path)
+    if kind == "composite_criterion":
+        return _normalize_composite_node(value, path)
+    raise ValueError("%s node kind is unsupported by rule-execution-plan@3" % path)
+
+
 def _normalize_checker_manifest_entry(value, path):
     fields = {
         "checker_version",
@@ -1582,6 +1724,9 @@ def _normalize_rule_execution_plan(value):
     elif schema_version == "rule-execution-plan@2":
         fields = v1_fields | v2_identity_fields
         node_normalizer = _normalize_plan_node_v2
+    elif schema_version == "rule-execution-plan@3":
+        fields = v1_fields | v2_identity_fields
+        node_normalizer = _normalize_plan_node_v3
     else:
         # Preserve the closed-schema error for missing schema_version while
         # still making future versions fail with an explicit discriminator.
@@ -1625,10 +1770,14 @@ def _normalize_rule_execution_plan(value):
         "checker_manifest": checker_manifest,
         "plan_hash": _assert_sha256(value["plan_hash"], "RuleExecutionPlan.plan_hash"),
     }
-    if schema_version == "rule-execution-plan@2":
+    if schema_version in {"rule-execution-plan@2", "rule-execution-plan@3"}:
         source_kind = _assert_text(
             value["rubric_source_kind"], "RuleExecutionPlan.rubric_source_kind"
         )
+        if schema_version == "rule-execution-plan@3" and source_kind != "legacy_unversioned":
+            raise ValueError(
+                "compatibility RuleExecutionPlan requires legacy_unversioned"
+            )
         if source_kind == "published_version":
             rubric_version_id = _assert_text(
                 value["rubric_version_id"], "RuleExecutionPlan.rubric_version_id"
@@ -1674,7 +1823,8 @@ def _normalize_rule_execution_plan(value):
         used_checkers = {
             item["atomic_rule_snapshot"]["checker_key"]
             for item in normalized["nodes"]
-            if item["atomic_rule_snapshot"]["checker_key"] is not None
+            if item["node_kind"] == "atomic_rule"
+            and item["atomic_rule_snapshot"]["checker_key"] is not None
         }
         if used_checkers != set(normalized["checker_manifest"]):
             raise ValueError("RuleExecutionPlan checker manifest must exactly match used checkers")
@@ -1789,8 +1939,11 @@ def _normalize_scoring_request(value):
             raise ValueError("checker %s does not support DocumentSnapshot schema" % checker_key)
     if schema_version == "scoring-request@1" and plan["schema_version"] != "rule-execution-plan@1":
         raise ValueError("scoring-request@1 requires rule-execution-plan@1")
-    if schema_version == "scoring-request@2" and plan["schema_version"] != "rule-execution-plan@2":
-        raise ValueError("scoring-request@2 requires rule-execution-plan@2")
+    if schema_version == "scoring-request@2" and plan["schema_version"] not in {
+        "rule-execution-plan@2",
+        "rule-execution-plan@3",
+    }:
+        raise ValueError("scoring-request@2 requires rule-execution-plan@2 or @3")
     normalized = {
         "schema_version": schema_version,
         "submission": submission,
@@ -2062,6 +2215,20 @@ class CompiledRubricSnapshot(_ImmutableContract):
     _normalizer = staticmethod(_normalize_compiled_rubric_snapshot)
 
 
+class LegacyDirectCriterionNode(_ImmutableContract):
+    """Bounded direct-score compatibility node for legacy_unversioned only."""
+
+    __slots__ = ()
+    _normalizer = staticmethod(_normalize_legacy_direct_node)
+
+
+class CompositeCriterionNode(_ImmutableContract):
+    """Ordered child-sum compatibility node for legacy_unversioned only."""
+
+    __slots__ = ()
+    _normalizer = staticmethod(_normalize_composite_node)
+
+
 class RuleExecutionPlan(_ImmutableContract):
     __slots__ = ()
     _normalizer = staticmethod(_normalize_rule_execution_plan)
@@ -2081,9 +2248,11 @@ class PromptEnvelopeV3(_ImmutableContract):
 
 __all__ = [
     "AtomicRuleSnapshot",
+    "CompositeCriterionNode",
     "CompiledRubricSnapshot",
     "DocumentSnapshot",
     "DeterministicCheckerResultV1",
+    "LegacyDirectCriterionNode",
     "PromptEnvelopeV1",
     "PromptEnvelopeV2",
     "PromptEnvelopeV3",

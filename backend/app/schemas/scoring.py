@@ -68,7 +68,11 @@ class ScoringRunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    paper_id: str
+    paper_id: Optional[str] = None
+    submission_id: Optional[str] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     rubric_id: str
     owner_id: Optional[str] = None
     model_provider: str
@@ -87,6 +91,22 @@ class ScoringRunRead(BaseModel):
     policy_snapshot: Optional[dict] = Field(default=None, exclude_if=lambda value: value is None)
     policy_hash: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
     policy_schema_version: Optional[str] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    business_profile_key: Optional[str] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    business_profile_version: Optional[str] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    prompt_version: Optional[str] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    runtime_identity: Optional[dict] = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

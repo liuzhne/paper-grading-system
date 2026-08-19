@@ -9,6 +9,7 @@ from sqlalchemy import DateTime
 from sqlalchemy import ForeignKey
 from sqlalchemy import ForeignKeyConstraint
 from sqlalchemy import Integer
+from sqlalchemy import Index
 from sqlalchemy import JSON
 from sqlalchemy import Numeric
 from sqlalchemy import String
@@ -1352,6 +1353,194 @@ def _protect_published_rubric_graph(session, _flush_context, _instances):
             _p103_validate_publish_signoff(session, rubric, candidates)
 
 
+class EvaluationBatch(Base):
+    """Profile-neutral batch pinned to one immutable published rubric."""
+
+    __tablename__ = "evaluation_batches"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["rubric_version_id", "rubric_id"],
+            ["rubric_versions.id", "rubric_versions.rubric_id"],
+            name="fk_evaluation_batches_rubric_version_rubric",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'completed', 'archived')",
+            name="ck_evaluation_batches_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    rubric_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("rubrics.id"), nullable=False
+    )
+    rubric_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    business_profile_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    business_profile_version: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="draft"
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    rubric: Mapped["Rubric"] = relationship()
+    rubric_version: Mapped["RubricVersion"] = relationship(
+        primaryjoin=foreign(rubric_version_id) == RubricVersion.id,
+        foreign_keys=[rubric_version_id],
+    )
+    submissions: Mapped[list["Submission"]] = relationship(
+        back_populates="evaluation_batch",
+        passive_deletes=True,
+    )
+
+
+class Submission(Base):
+    """Generic source artifact owned by an EvaluationBatch."""
+
+    __tablename__ = "submissions"
+    __table_args__ = (
+        CheckConstraint(
+            _lower_hex_digest_check("source_artifact_hash"),
+            name="ck_submissions_source_artifact_hash",
+        ),
+        CheckConstraint(
+            "byte_length >= 0",
+            name="ck_submissions_nonnegative_byte_length",
+        ),
+        CheckConstraint(
+            "status IN ('uploaded', 'parsing', 'parsed', 'failed', "
+            "'scored', 'pending_review', 'reviewed')",
+            name="ck_submissions_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evaluation_batch_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("evaluation_batches.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    source_artifact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_artifact_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(200), nullable=False)
+    byte_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    submission_metadata: Mapped[dict] = mapped_column(
+        "metadata",
+        MutableDict.as_mutable(JSON),
+        nullable=False,
+        default=dict,
+        server_default=sql_text("'{}'"),
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="uploaded"
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    evaluation_batch: Mapped["EvaluationBatch"] = relationship(
+        back_populates="submissions"
+    )
+    document_snapshots: Mapped[list["DocumentSnapshot"]] = relationship(
+        back_populates="submission",
+        passive_deletes=True,
+    )
+    scoring_runs: Mapped[list["ScoringRun"]] = relationship(
+        back_populates="submission",
+        foreign_keys="ScoringRun.submission_id",
+    )
+
+
+class DocumentSnapshot(Base):
+    """Immutable, content-addressed generic document projection."""
+
+    __tablename__ = "document_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "id",
+            "submission_id",
+            name="uq_document_snapshots_id_submission",
+        ),
+        UniqueConstraint(
+            "submission_id",
+            "snapshot_hash",
+            name="uq_document_snapshots_submission_hash",
+        ),
+        CheckConstraint(
+            _lower_hex_digest_check("content_hash"),
+            name="ck_document_snapshots_content_hash",
+        ),
+        CheckConstraint(
+            _lower_hex_digest_check("snapshot_hash"),
+            name="ck_document_snapshots_snapshot_hash",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    submission_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("submissions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    schema_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    business_profile_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    business_profile_version: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )
+    parser_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    normalizer_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_payload: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+
+    submission: Mapped["Submission"] = relationship(
+        back_populates="document_snapshots",
+        foreign_keys=[submission_id],
+    )
+    scoring_runs: Mapped[list["ScoringRun"]] = relationship(
+        back_populates="document_snapshot",
+        foreign_keys="ScoringRun.document_snapshot_id",
+        overlaps="scoring_runs,submission",
+    )
+
+
+@event.listens_for(Session, "before_flush")
+def _protect_document_snapshot_immutability(session, _flush_context, _instances):
+    for candidate in tuple(session.dirty) + tuple(session.deleted):
+        if (
+            isinstance(candidate, DocumentSnapshot)
+            and sa_inspect(candidate).persistent
+        ):
+            raise ValueError("DocumentSnapshot is immutable after insertion")
+
+
 class GradingBatch(Base):
     __tablename__ = "grading_batches"
     __table_args__ = (
@@ -1384,6 +1573,11 @@ class GradingBatch(Base):
         foreign_keys=[rubric_version_id],
     )
     papers: Mapped[list["Paper"]] = relationship(back_populates="batch", cascade="all, delete-orphan")
+    scoring_jobs: Mapped[list["BatchScoringJob"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="BatchScoringJob.generation",
+    )
 
 
 class Paper(Base):
@@ -1428,9 +1622,185 @@ class PaperChunk(Base):
     paper: Mapped["Paper"] = relationship(back_populates="chunks")
 
 
+class BatchScoringJob(Base):
+    """Durable coordinator state for a recoverable batch-scoring execution."""
+
+    __tablename__ = "batch_scoring_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "grading_batch_id",
+            "generation",
+            name="uq_batch_scoring_jobs_batch_generation",
+        ),
+        CheckConstraint(
+            "generation > 0",
+            name="ck_batch_scoring_jobs_positive_generation",
+        ),
+        CheckConstraint(
+            "max_workers >= 1 AND max_workers <= 16",
+            name="ck_batch_scoring_jobs_worker_bound",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'cancel_requested', 'completed', "
+            "'completed_with_errors', 'canceled', 'failed')",
+            name="ck_batch_scoring_jobs_status",
+        ),
+        CheckConstraint(
+            "total_items >= 0 AND pending_count >= 0 AND running_count >= 0 "
+            "AND succeeded_count >= 0 AND skipped_count >= 0 "
+            "AND failed_count >= 0 AND canceled_count >= 0",
+            name="ck_batch_scoring_jobs_nonnegative_counts",
+        ),
+        CheckConstraint(
+            _lower_hex_digest_check("observation_policy_hash"),
+            name="ck_batch_scoring_jobs_policy_hash",
+        ),
+        Index(
+            "ix_batch_scoring_jobs_one_active_per_batch",
+            "grading_batch_id",
+            unique=True,
+            sqlite_where=sql_text(
+                "status IN ('queued', 'running', 'cancel_requested')"
+            ),
+            postgresql_where=sql_text(
+                "status IN ('queued', 'running', 'cancel_requested')"
+            ),
+        ),
+        Index(
+            "ix_batch_scoring_jobs_batch_created",
+            "grading_batch_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    grading_batch_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("grading_batches.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    rescore: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    max_workers: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="queued")
+    total_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    running_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    succeeded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    canceled_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    observation_policy: Mapped[dict] = mapped_column(JSON, nullable=False)
+    observation_policy_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    metrics_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    runner_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    batch: Mapped["GradingBatch"] = relationship(back_populates="scoring_jobs")
+    items: Mapped[list["BatchScoringItem"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="(BatchScoringItem.created_at, BatchScoringItem.id)",
+    )
+
+
+class BatchScoringItem(Base):
+    """One durable, retryable paper checkpoint within a batch-scoring job."""
+
+    __tablename__ = "batch_scoring_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id", "paper_id", name="uq_batch_scoring_items_job_paper"
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'skipped', "
+            "'failed', 'canceled')",
+            name="ck_batch_scoring_items_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_batch_scoring_items_nonnegative_attempts",
+        ),
+        Index("ix_batch_scoring_items_job_status", "job_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("batch_scoring_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    paper_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("papers.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scoring_run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("scoring_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    baseline_scoring_run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("scoring_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    telemetry: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    attempt_history: Mapped[list] = mapped_column(
+        MutableList.as_mutable(JSON), nullable=False, default=list
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    job: Mapped["BatchScoringJob"] = relationship(back_populates="items")
+    paper: Mapped["Paper"] = relationship()
+    scoring_run: Mapped["ScoringRun | None"] = relationship(
+        foreign_keys=[scoring_run_id]
+    )
+    baseline_scoring_run: Mapped["ScoringRun | None"] = relationship(
+        foreign_keys=[baseline_scoring_run_id]
+    )
+
+
 class ScoringRun(Base):
     __tablename__ = "scoring_runs"
     __table_args__ = (
+        CheckConstraint(
+            "(paper_id IS NOT NULL AND submission_id IS NULL) OR "
+            "(paper_id IS NULL AND submission_id IS NOT NULL)",
+            name="ck_scoring_runs_exactly_one_target",
+        ),
+        CheckConstraint(
+            "(submission_id IS NULL AND document_snapshot_id IS NULL) OR "
+            "(submission_id IS NOT NULL AND document_snapshot_id IS NOT NULL)",
+            name="ck_scoring_runs_submission_snapshot_target",
+        ),
         CheckConstraint(
             "(%s AND policy_hash IS NULL AND policy_schema_version IS NULL) "
             "OR (%s AND policy_hash IS NOT NULL "
@@ -1450,6 +1820,9 @@ class ScoringRun(Base):
             "AND rubric_version_hash IS NULL "
             "AND rubric_hash_scheme IS NULL "
             "AND business_profile_key IS NULL "
+            "AND business_profile_version IS NULL "
+            "AND prompt_version IS NULL "
+            "AND runtime_identity IS NULL "
             "AND workflow_profile IS NULL "
             "AND execution_plan_snapshot IS NULL "
             "AND execution_plan_hash IS NULL "
@@ -1467,6 +1840,10 @@ class ScoringRun(Base):
             "AND rubric_source_kind IN ('published_version', 'legacy_unversioned') "
             "AND rubric_snapshot_hash IS NOT NULL AND %s "
             "AND business_profile_key IS NOT NULL AND length(business_profile_key) > 0 "
+            "AND ((business_profile_version IS NULL AND prompt_version IS NULL "
+            "AND runtime_identity IS NULL) OR (business_profile_version IS NOT NULL "
+            "AND length(business_profile_version) > 0 AND prompt_version IS NOT NULL "
+            "AND length(prompt_version) > 0 AND runtime_identity IS NOT NULL)) "
             "AND workflow_profile IS NOT NULL AND length(workflow_profile) > 0 "
             "AND execution_plan_snapshot IS NOT NULL "
             "AND execution_plan_hash IS NOT NULL AND %s "
@@ -1506,6 +1883,12 @@ class ScoringRun(Base):
             name="ck_scoring_runs_core_replay_identity",
         ),
         ForeignKeyConstraint(
+            ["document_snapshot_id", "submission_id"],
+            ["document_snapshots.id", "document_snapshots.submission_id"],
+            name="fk_scoring_runs_document_snapshot_submission",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
             [
                 "rubric_version_id",
                 "rubric_id",
@@ -1526,7 +1909,17 @@ class ScoringRun(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
-    paper_id: Mapped[str] = mapped_column(String(36), ForeignKey("papers.id"), nullable=False)
+    paper_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("papers.id"), nullable=True
+    )
+    submission_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("submissions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    document_snapshot_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
     rubric_id: Mapped[str] = mapped_column(String(36), ForeignKey("rubrics.id"), nullable=False)
     model_provider: Mapped[str] = mapped_column(String(100), nullable=False, default="mock")
     model_name: Mapped[str] = mapped_column(String(100), nullable=False, default="mock-criterion-scorer")
@@ -1552,6 +1945,13 @@ class ScoringRun(Base):
     rubric_version_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     rubric_hash_scheme: Mapped[str | None] = mapped_column(String(100), nullable=True)
     business_profile_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    business_profile_version: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    prompt_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    runtime_identity: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     workflow_profile: Mapped[str | None] = mapped_column(String(100), nullable=True)
     execution_plan_snapshot: Mapped[dict | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
@@ -1573,7 +1973,16 @@ class ScoringRun(Base):
     finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
-    paper: Mapped["Paper"] = relationship(back_populates="scoring_runs")
+    paper: Mapped["Paper | None"] = relationship(back_populates="scoring_runs")
+    submission: Mapped["Submission | None"] = relationship(
+        back_populates="scoring_runs",
+        foreign_keys=[submission_id],
+    )
+    document_snapshot: Mapped["DocumentSnapshot | None"] = relationship(
+        back_populates="scoring_runs",
+        foreign_keys=[document_snapshot_id, submission_id],
+        overlaps="scoring_runs,submission",
+    )
     rubric: Mapped["Rubric"] = relationship()
     items: Mapped[list["ScoreItem"]] = relationship(
         back_populates="scoring_run",
@@ -1688,6 +2097,188 @@ class CalibrationAnchor(Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False, default="范文")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class ReleaseGateProfile(Base):
+    """用户建立的不可变发布门禁关系快照，不保存论文或教师明细。"""
+
+    __tablename__ = "release_gate_profiles"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["rubric_version_id", "rubric_id"],
+            ["rubric_versions.id", "rubric_versions.rubric_id"],
+            name="fk_release_gate_profiles_rubric_version",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "gate_key",
+            "name",
+            name="uq_release_gate_profiles_gate_name",
+        ),
+        UniqueConstraint("profile_hash", name="uq_release_gate_profiles_hash"),
+        CheckConstraint(
+            "gate_key IN ('GATE-01', 'GATE-02', 'GATE-03')",
+            name="ck_release_gate_profiles_gate_key",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'retired')",
+            name="ck_release_gate_profiles_status",
+        ),
+        CheckConstraint(
+            _lower_hex_digest_check("profile_hash"),
+            name="ck_release_gate_profiles_hash",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    gate_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    rubric_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    rubric_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    dataset_identity: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    model_identity: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    anchors_identity: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    acceptance_thresholds: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    regression_tolerances: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    profile_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="active"
+    )
+    created_by: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+
+    rubric_version: Mapped["RubricVersion"] = relationship(
+        primaryjoin=foreign(rubric_version_id) == RubricVersion.id,
+        foreign_keys=[rubric_version_id],
+    )
+    runs: Mapped[list["ReleaseGateRun"]] = relationship(
+        back_populates="profile",
+        order_by="ReleaseGateRun.created_at",
+        passive_deletes=True,
+    )
+
+
+class ReleaseGateRun(Base):
+    """与 profile 绑定的仓库安全 candidate/final 门禁记录。"""
+
+    __tablename__ = "release_gate_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "id", "candidate_sha256", name="uq_release_gate_runs_id_candidate"
+        ),
+        UniqueConstraint(
+            "evaluation_id", name="uq_release_gate_runs_evaluation_id"
+        ),
+        UniqueConstraint(
+            "candidate_sha256", name="uq_release_gate_runs_candidate"
+        ),
+        CheckConstraint(
+            _lower_hex_digest_check("candidate_sha256"),
+            name="ck_release_gate_runs_candidate_hash",
+        ),
+        CheckConstraint(
+            "final_record_sha256 IS NULL OR "
+            + _lower_hex_digest_check("final_record_sha256"),
+            name="ck_release_gate_runs_final_hash",
+        ),
+        CheckConstraint(
+            "status IN ('candidate_awaiting_approval', 'passed', "
+            "'failed_thresholds', 'ineligible')",
+            name="ck_release_gate_runs_status",
+        ),
+        CheckConstraint(
+            "(status = 'candidate_awaiting_approval' AND final_record IS NULL "
+            "AND final_record_sha256 IS NULL AND finalized_at IS NULL) OR "
+            "(status <> 'candidate_awaiting_approval' AND final_record IS NOT NULL "
+            "AND final_record_sha256 IS NOT NULL AND finalized_at IS NOT NULL)",
+            name="ck_release_gate_runs_final_state",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("release_gate_profiles.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    evaluation_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    candidate_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_record: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="candidate_awaiting_approval"
+    )
+    final_record: Mapped[dict | None] = mapped_column(
+        MutableDict.as_mutable(JSON(none_as_null=True)), nullable=True
+    )
+    final_record_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    profile: Mapped["ReleaseGateProfile"] = relationship(back_populates="runs")
+    approval: Mapped["ReleaseGateApproval | None"] = relationship(
+        back_populates="run",
+        passive_deletes=True,
+        uselist=False,
+    )
+
+
+class ReleaseGateApproval(Base):
+    """由生产用户作出的、绑定精确 candidate hash 的批准记录。"""
+
+    __tablename__ = "release_gate_approvals"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "candidate_sha256"],
+            ["release_gate_runs.id", "release_gate_runs.candidate_sha256"],
+            name="fk_release_gate_approvals_exact_candidate",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("run_id", name="uq_release_gate_approvals_run"),
+        CheckConstraint(
+            _lower_hex_digest_check("candidate_sha256"),
+            name="ck_release_gate_approvals_candidate_hash",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    privacy_review: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    accepted_baseline: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False
+    )
+    approved_by: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False
+    )
+    approved_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+
+    run: Mapped["ReleaseGateRun"] = relationship(back_populates="approval")
 
 
 class SpreadsheetWriteLog(Base):

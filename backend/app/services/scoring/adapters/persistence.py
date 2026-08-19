@@ -11,14 +11,23 @@ from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
-
+import json
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from backend.app.db.models import Paper, ScoreItem, ScoringRun
-from backend.app.core.config import settings
-from backend.app.services.storage.local import read_json, write_json
+from backend.app.db.models import (
+    DocumentSnapshot as StoredDocumentSnapshot,
+    Paper,
+    ScoreItem,
+    ScoringRun,
+    Submission,
+)
+from backend.app.services.storage.local import (
+    artifact_not_found,
+    artifact_ref,
+    read_json,
+    store_json,
+)
 from backend.app.services.scoring.core.contracts import (
     DocumentSnapshot,
     ScoringRequest,
@@ -70,7 +79,36 @@ def _finding_list(value, *, label: str) -> list:
         return []
     if not isinstance(value, (list, tuple)):
         raise TypeError(f"{label} must be an array")
-    return deepcopy(list(value))
+    findings = deepcopy(list(value))
+    if any(not isinstance(item, Mapping) for item in findings):
+        raise TypeError(f"{label} entries must be objects")
+    return sorted(
+        findings,
+        key=lambda item: (
+            str(item.get("severity") or ""),
+            str(item.get("kind") or item.get("field") or ""),
+            str(item.get("location") or ""),
+            str(item.get("message") or ""),
+            json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ),
+        ),
+    )
+
+
+def _contribution_sort_key(value: Mapping):
+    kind_order = {"base": 0, "band": 1, "deduction": 2, "bonus": 3}
+    return (
+        str(value.get("criterion_code") or ""),
+        kind_order.get(value.get("kind"), 99),
+        str(value.get("rule_code") or ""),
+        str(value.get("occurrence_id") or ""),
+        str(value.get("amount") or ""),
+    )
 
 
 def _validate_document_snapshot(*, store, ref, request_document: Mapping) -> None:
@@ -113,6 +151,9 @@ def _request_identity(request: Mapping) -> dict:
         "execution_plan_hash": plan["plan_hash"],
         "policy_hash": plan["policy_hash"],
         "business_profile_key": submission["profile_key"],
+        "business_profile_version": runtime["profile_version"],
+        "prompt_version": runtime["prompt_version"],
+        "runtime_identity": deepcopy(runtime),
         "engine_version": runtime["engine_version"],
         "model_provider": runtime["provider"]["name"],
         "model_name": runtime["provider"]["model"],
@@ -137,6 +178,9 @@ def _stored_identity(run: ScoringRun) -> dict:
             "execution_plan_hash",
             "policy_hash",
             "business_profile_key",
+            "business_profile_version",
+            "prompt_version",
+            "runtime_identity",
             "engine_version",
             "model_provider",
             "model_name",
@@ -171,6 +215,10 @@ def _group_rule_results(request: Mapping, outcome: Mapping) -> dict[str, list[di
         for node in request["plan"]["nodes"]
     }
     criterion_codes = set(criterion_by_rule.values())
+    rule_order = {
+        rule_code: index
+        for index, rule_code in enumerate(request["plan"]["dependency_order"])
+    }
     m4 = outcome["schema_version"] == "scoring-outcome@2"
     decisions_by_rule = {}
     expected_version_hash = (
@@ -218,6 +266,8 @@ def _group_rule_results(request: Mapping, outcome: Mapping) -> dict[str, list[di
         contributions_by_rule.setdefault(contribution.get("rule_code"), []).append(
             deepcopy(contribution)
         )
+    for values in contributions_by_rule.values():
+        values.sort(key=_contribution_sort_key)
     grouped: dict[str, list[dict]] = {}
     for decision in outcome["rule_decisions"]:
         rule_code = decision["rule_code"]
@@ -246,6 +296,8 @@ def _group_rule_results(request: Mapping, outcome: Mapping) -> dict[str, list[di
                 "score_contributions": contributions_by_rule.get(rule_code, []),
             }
         grouped.setdefault(criterion_code, []).append(result)
+    for values in grouped.values():
+        values.sort(key=lambda item: rule_order[item["rule_code"]])
     return grouped
 
 
@@ -261,12 +313,17 @@ def _score_items(
         contributions_by_criterion.setdefault(
             contribution["criterion_code"], []
         ).append(deepcopy(contribution))
+    for values in contributions_by_criterion.values():
+        values.sort(key=_contribution_sort_key)
 
     items = []
     m4 = outcome["schema_version"] == "scoring-outcome@2"
     rule_results_schema = "rule-results@2" if m4 else "rule-results@1"
     aggregation_schema = "criterion-aggregation@2" if m4 else "criterion-aggregation@1"
-    for criterion in outcome["criterion_outcomes"]:
+    for criterion in sorted(
+        outcome["criterion_outcomes"],
+        key=lambda item: item["criterion_code"],
+    ):
         code = criterion["criterion_code"]
         criterion_id = criterion_id_by_code.get(code)
         if criterion_id is None:
@@ -356,7 +413,9 @@ class CoreRunPersistence:
         *,
         request,
         outcome,
-        paper_id: str,
+        paper_id: str | None = None,
+        submission_id: str | None = None,
+        document_snapshot_id: str | None = None,
         rubric_id: str,
         criterion_id_by_code: Mapping[str, str],
         workflow_profile: str,
@@ -374,21 +433,118 @@ class CoreRunPersistence:
         )
         if not isinstance(workflow_profile, str) or not workflow_profile.strip():
             raise ValueError("workflow profile must be non-empty")
-        paper = self.db.get(Paper, paper_id)
-        if paper is None:
-            raise ValueError("paper identity does not exist")
-        if paper.batch.rubric_id != rubric_id:
-            raise ValueError("paper/rubric identity mismatch")
-        locked_version_id = getattr(paper.batch, "rubric_version_id", None)
+
+        if (paper_id is None) == (submission_id is None):
+            raise ValueError("exactly one paper or submission target is required")
+
         plan = request_mapping["plan"]
-        if plan["rubric_source_kind"] == "published_version":
+        request_submission = request_mapping["submission"]
+        request_document = request_mapping["document"]
+        runtime = request_mapping["runtime_identity"]
+        paper = None
+        stored_submission = None
+        stored_document = None
+        owner_id = None
+
+        if paper_id is not None:
+            if document_snapshot_id is not None:
+                raise ValueError("paper target cannot bind a generic document snapshot")
+            paper = self.db.get(Paper, paper_id)
+            if paper is None:
+                raise ValueError("paper identity does not exist")
+            if paper.batch.rubric_id != rubric_id:
+                raise ValueError("paper/rubric identity mismatch")
+            locked_version_id = getattr(paper.batch, "rubric_version_id", None)
+            if plan["rubric_source_kind"] == "published_version":
+                if (
+                    locked_version_id is not None
+                    and locked_version_id != plan["rubric_version_id"]
+                ):
+                    raise ValueError(
+                        "paper batch lock does not match scoring rubric version"
+                    )
+            elif locked_version_id is not None:
+                raise ValueError(
+                    "version-locked paper cannot persist a legacy scoring plan"
+                )
+            owner_id = getattr(paper, "owner_id", None)
+        else:
+            if document_snapshot_id is None:
+                raise ValueError("submission target requires a document snapshot")
+            stored_submission = self.db.get(Submission, submission_id)
+            if stored_submission is None:
+                raise ValueError("submission identity does not exist")
+            if request_submission["submission_id"] != stored_submission.id:
+                raise ValueError("request/submission identity mismatch")
             if (
-                locked_version_id is not None
-                and locked_version_id != plan["rubric_version_id"]
+                request_submission["source_artifact_hash"]
+                != stored_submission.source_artifact_hash
             ):
-                raise ValueError("paper batch lock does not match scoring rubric version")
-        elif locked_version_id is not None:
-            raise ValueError("version-locked paper cannot persist a legacy scoring plan")
+                raise ValueError("request/submission source artifact mismatch")
+            artifact_refs = {
+                item["ref"] for item in request_submission["artifact_refs"]
+            }
+            if stored_submission.source_artifact_ref not in artifact_refs:
+                raise ValueError("request/submission source artifact ref mismatch")
+            if request_submission["metadata"] != stored_submission.submission_metadata:
+                raise ValueError("request/submission metadata mismatch")
+
+            evaluation_batch = stored_submission.evaluation_batch
+            if evaluation_batch.rubric_id != rubric_id:
+                raise ValueError("submission batch/rubric identity mismatch")
+            if plan["rubric_source_kind"] != "published_version":
+                raise ValueError(
+                    "evaluation batch requires a published scoring plan"
+                )
+            if evaluation_batch.rubric_version_id != plan["rubric_version_id"]:
+                raise ValueError(
+                    "submission batch lock does not match scoring rubric version"
+                )
+            if (
+                evaluation_batch.business_profile_key
+                != request_submission["profile_key"]
+                or evaluation_batch.business_profile_key
+                != plan["business_profile_key"]
+                or evaluation_batch.business_profile_key
+                != request_document["profile_key"]
+            ):
+                raise ValueError("submission batch business profile key mismatch")
+            if (
+                evaluation_batch.business_profile_version
+                != runtime["profile_version"]
+                or evaluation_batch.business_profile_version
+                != plan["business_profile_version"]
+                or evaluation_batch.business_profile_version
+                != request_document["profile_version"]
+            ):
+                raise ValueError("submission batch business profile version mismatch")
+
+            stored_document = self.db.get(
+                StoredDocumentSnapshot,
+                document_snapshot_id,
+            )
+            if stored_document is None:
+                raise ValueError("document snapshot identity does not exist")
+            if stored_document.submission_id != stored_submission.id:
+                raise ValueError("document snapshot belongs to a different submission")
+            expected_document_identity = {
+                "schema_version": request_document["schema_version"],
+                "business_profile_key": request_document["profile_key"],
+                "business_profile_version": request_document["profile_version"],
+                "parser_version": request_document["parser_version"],
+                "normalizer_version": request_document["normalizer_version"],
+                "content_hash": request_document["content_hash"],
+                "snapshot_hash": request_document["document_snapshot_hash"],
+                "snapshot_ref": document_snapshot_ref,
+                "snapshot_payload": request_document,
+            }
+            actual_document_identity = {
+                field: getattr(stored_document, field)
+                for field in expected_document_identity
+            }
+            if actual_document_identity != expected_document_identity:
+                raise ValueError("stored document snapshot identity mismatch")
+            owner_id = evaluation_batch.owner_id
 
         existing = self.db.scalar(
             select(ScoringRun).where(
@@ -398,11 +554,16 @@ class CoreRunPersistence:
         if existing is not None:
             if not _same_identity(existing, request_mapping):
                 raise ValueError("idempotency key collision with different replay identity")
+            if (
+                existing.paper_id != paper_id
+                or existing.submission_id != submission_id
+                or existing.document_snapshot_id != document_snapshot_id
+            ):
+                raise ValueError("idempotency key collision with different target identity")
             return existing
 
         document = request_mapping["document"]
-        submission = request_mapping["submission"]
-        runtime = request_mapping["runtime_identity"]
+        submission = request_submission
         provider = runtime["provider"]
         stored_coherence_findings = _finding_list(
             coherence_findings, label="coherence findings"
@@ -413,7 +574,9 @@ class CoreRunPersistence:
         now = _utcnow()
         run = ScoringRun(
             paper_id=paper_id,
-            owner_id=getattr(paper, "owner_id", None),
+            submission_id=submission_id,
+            document_snapshot_id=document_snapshot_id,
+            owner_id=owner_id,
             rubric_id=rubric_id,
             model_provider=provider["name"],
             model_name=provider["model"],
@@ -450,6 +613,9 @@ class CoreRunPersistence:
             rubric_version_hash=plan.get("rubric_version_hash"),
             rubric_hash_scheme=plan.get("rubric_hash_scheme"),
             business_profile_key=submission["profile_key"],
+            business_profile_version=runtime["profile_version"],
+            prompt_version=runtime["prompt_version"],
+            runtime_identity=deepcopy(runtime),
             workflow_profile=workflow_profile,
             execution_plan_snapshot=deepcopy(plan),
             execution_plan_hash=plan["plan_hash"],
@@ -472,7 +638,8 @@ class CoreRunPersistence:
             )
         )
         self.db.add(run)
-        paper.status = "pending_review" if run.need_manual_review else "scored"
+        target = paper if paper is not None else stored_submission
+        target.status = "pending_review" if run.need_manual_review else "scored"
         try:
             self.db.commit()
         except IntegrityError as exc:
@@ -489,6 +656,14 @@ class CoreRunPersistence:
                 raise ValueError(
                     "idempotency key collision with different replay identity"
                 ) from exc
+            if (
+                winner.paper_id != paper_id
+                or winner.submission_id != submission_id
+                or winner.document_snapshot_id != document_snapshot_id
+            ):
+                raise ValueError(
+                    "idempotency key collision with different target identity"
+                ) from exc
             return winner
         self.db.refresh(run)
         return run
@@ -499,12 +674,9 @@ class LocalDocumentSnapshotStore:
 
     _PREFIX = "document-snapshot:sha256:"
 
-    def _path(self, snapshot_hash: str) -> Path:
-        return (
-            settings.STORAGE_ROOT
-            / "document_snapshots"
-            / "sha256"
-            / f"{snapshot_hash}.json"
+    def _ref(self, snapshot_hash: str):
+        return artifact_ref(
+            "document_snapshots/sha256", f"{snapshot_hash}.json"
         )
 
     def put(self, snapshot) -> str:
@@ -512,13 +684,19 @@ class LocalDocumentSnapshotStore:
             _mapping(snapshot, label="document snapshot")
         ).to_mapping()
         snapshot_hash = value["document_snapshot_hash"]
-        path = self._path(snapshot_hash)
-        if path.exists():
-            existing = DocumentSnapshot.from_mapping(read_json(path)).to_mapping()
+        artifact = self._ref(snapshot_hash)
+        try:
+            existing = DocumentSnapshot.from_mapping(read_json(artifact)).to_mapping()
             if existing != value:
                 raise ValueError("document snapshot hash collision in local store")
-        else:
-            write_json(path, value)
+        except Exception as exc:
+            if not artifact_not_found(exc):
+                raise
+            store_json(
+                "document_snapshots/sha256",
+                f"{snapshot_hash}.json",
+                value,
+            )
         return self._PREFIX + snapshot_hash
 
     def resolve(self, *, ref: str):
@@ -530,10 +708,13 @@ class LocalDocumentSnapshotStore:
             or any(character not in "0123456789abcdef" for character in snapshot_hash)
         ):
             raise ValueError("document snapshot ref contains an invalid hash")
-        path = self._path(snapshot_hash)
-        if not path.exists():
+        artifact = self._ref(snapshot_hash)
+        try:
+            value = DocumentSnapshot.from_mapping(read_json(artifact)).to_mapping()
+        except Exception as exc:
+            if not artifact_not_found(exc):
+                raise
             raise KeyError(f"document snapshot ref does not exist: {ref}")
-        value = DocumentSnapshot.from_mapping(read_json(path)).to_mapping()
         if value["document_snapshot_hash"] != snapshot_hash:
             raise ValueError("document snapshot ref/hash mismatch")
         return value

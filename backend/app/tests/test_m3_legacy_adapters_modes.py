@@ -821,6 +821,14 @@ def _mutate_collision_identity(request: dict, identity_part: str) -> None:
         )
     elif identity_part == "runtime":
         request["runtime_identity"]["provider"]["artifact_hash"] = "7" * 64
+    elif identity_part == "profile-version":
+        request["runtime_identity"]["profile_version"] = "technical-proposal@2"
+        request["document"]["profile_version"] = "technical-proposal@2"
+        request["document"]["document_snapshot_hash"] = canonical_sha256(
+            document_snapshot_projection(request["document"])
+        )
+    elif identity_part == "prompt-version":
+        request["runtime_identity"]["prompt_version"] = "prompt-envelope@4"
     else:
         request["rescore_generation"] = 1
 
@@ -837,6 +845,8 @@ def _mutate_collision_identity(request: dict, identity_part: str) -> None:
         "policy",
         "profile",
         "runtime",
+        "profile-version",
+        "prompt-version",
         "rescore-generation",
     ),
 )
@@ -967,6 +977,58 @@ def test_core_persistence_writes_complete_replay_identity_and_per_rule_results()
         serialized_rules = repr([item.rule_results for item in items])
         assert DETERMINISTIC_RULE_CODE in serialized_rules
         assert SEMANTIC_RULE_CODE in serialized_rules
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@requires_persistence
+def test_core_persistence_freezes_stable_item_rule_contribution_and_finding_order():
+    _require(_CORE_RUN_PERSISTENCE, f"{PERSISTENCE_MODULE}.CoreRunPersistence")
+    engine, db, rubric, criteria, paper = _persistence_db()
+    try:
+        request = scoring_request_payload()
+        outcome = _outcome_for(request).to_mapping()
+        for field in (
+            "criterion_outcomes",
+            "rule_decisions",
+            "score_contributions",
+        ):
+            outcome[field] = list(reversed(outcome[field]))
+        store = _InMemoryDocumentSnapshotStore()
+        ref = store.put(request["document"])
+        run = _CORE_RUN_PERSISTENCE(
+            db,
+            document_snapshot_store=store,
+        ).persist(
+            request=deepcopy(request),
+            outcome=ScoringOutcome.from_mapping(outcome),
+            paper_id=paper.id,
+            rubric_id=rubric.id,
+            criterion_id_by_code={item.code: item.id for item in criteria},
+            workflow_profile="template_driven",
+            document_snapshot_ref=ref,
+            coherence_findings=[
+                {"severity": "warning", "kind": "z", "message": "second"},
+                {"severity": "info", "kind": "a", "message": "first"},
+            ],
+            format_findings=[
+                {"severity": "warning", "field": "z", "message": "second"},
+                {"severity": "info", "field": "a", "message": "first"},
+            ],
+        )
+
+        assert [item.criterion.code for item in run.items] == [
+            "RISK_CONTROL",
+            "SOLUTION_FIT",
+        ]
+        assert [
+            result["rule_code"]
+            for item in run.items
+            for result in item.rule_results
+        ] == [DETERMINISTIC_RULE_CODE, SEMANTIC_RULE_CODE]
+        assert [item["kind"] for item in run.coherence_findings] == ["a", "z"]
+        assert [item["field"] for item in run.format_findings] == ["a", "z"]
     finally:
         db.close()
         engine.dispose()
@@ -1355,6 +1417,9 @@ def test_core_mode_route_persists_one_complete_authoritative_vertical_run(
         assert run.rubric_version_hash == plan["rubric_version_hash"]
         assert run.rubric_hash_scheme == "rubric-content-v2"
         assert run.business_profile_key == "thesis"
+        assert run.business_profile_version == runtime["profile_version"]
+        assert run.prompt_version == runtime["prompt_version"]
+        assert run.runtime_identity == runtime
         assert isinstance(run.workflow_profile, str) and run.workflow_profile
         assert run.policy_snapshot == plan["policy_snapshot"]
         assert run.policy_hash == plan["policy_hash"]
@@ -1592,3 +1657,66 @@ def test_compare_executes_core_once_but_keeps_legacy_as_the_only_official_artifa
     for forbidden in ("core_outcome", "candidate_outcome", "comparison_artifact"):
         assert forbidden not in official_surfaces
     assert review_logs.json() == []
+
+
+@requires_core_mode
+def test_legacy_unversioned_hybrid_executes_as_plan3_in_core_mode(
+    client, monkeypatch
+):
+    """The real route scores every M0 parent and persists the composite once."""
+
+    _require_core_mode_capabilities()
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
+    monkeypatch.setattr(settings, "SCORING_ENGINE_MODE", "core")
+
+    rubric_id = create_legacy_unversioned_rubric_fixture(client, M0_RUBRIC)
+    batch = client.post(
+        "/api/batches",
+        json={"name": "M5 legacy compatibility", "rubric_id": rubric_id},
+    )
+    assert batch.status_code == 200, batch.text
+    paper_id = _upload_paper(
+        client,
+        batch.json()["id"],
+        suffix="legacy-plan3",
+    )
+
+    response = client.post(f"/api/papers/{paper_id}/score")
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "scored"
+    assert run["final_total_score"] is not None, {
+        "run": {
+            key: run.get(key)
+            for key in ("ai_total_score", "final_total_score", "need_manual_review")
+        },
+        "items": [
+            (
+                item.get("criterion_code"),
+                item.get("ai_score"),
+                item.get("final_score"),
+                item.get("auto_score_status"),
+                item.get("need_manual_review"),
+            )
+            for item in client.get(
+                f"/api/scoring-runs/{run['id']}/items"
+            ).json()
+        ],
+    }
+
+    with client.session_factory() as db:
+        stored = db.get(models.ScoringRun, run["id"])
+        assert stored.plan_schema_version == "rule-execution-plan@3"
+        nodes = stored.execution_plan_snapshot["nodes"]
+        assert [
+            node["node_kind"]
+            for node in nodes
+            if node["criterion_code"] == "HYB-COMPLIANCE"
+        ] == ["composite_criterion"]
+        items = db.scalars(
+            select(models.ScoreItem).where(models.ScoreItem.scoring_run_id == stored.id)
+        ).all()
+        assert len(items) == len(M0_RUBRIC["criteria"])
+        hybrid = next(item for item in items if item.criterion_code == "HYB-COMPLIANCE")
+        assert Decimal("0") <= hybrid.ai_score <= Decimal("20")
