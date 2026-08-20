@@ -29,14 +29,20 @@
         </nav>
 
         <div class="sidebar-footer">
-          <details class="connection-settings">
-            <summary><span class="status-dot"></span>连接与账户</summary>
-            <div class="connection-body">
-              <label for="api-base">API 地址<input id="api-base" type="text" value="/api" /></label>
-              <button id="logout-btn" class="ghost hidden" title="登出">退出登录</button>
+          <div id="connection-status" class="connection-status" data-state="checking" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="connection-status-label">正在检查服务</span>
+          </div>
+          <details class="sidebar-account">
+            <summary>
+              <span id="sidebar-user-avatar" class="avatar" aria-hidden="true">?</span>
+              <span class="sidebar-user-copy"><strong id="sidebar-user-name">正在检查登录状态</strong><small id="sidebar-user-context">请稍候</small></span>
+              <span class="account-disclosure" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="account-actions">
+              <button id="logout-btn" class="ghost hidden" title="退出登录">退出登录</button>
             </div>
           </details>
-          <div class="sidebar-user"><span class="avatar">D</span><span><strong>dev-user</strong><small>本地工作区</small></span></div>
         </div>
       </aside>
 
@@ -321,6 +327,7 @@
         <div id="login-error" class="login-error hidden"></div>
       </form>
     </div>
-    <script src="/assets/app.js?v=20260805-workflow-redesign"></script>
+    <!-- PGS_CLIENT_CONFIG -->
+    <script src="/assets/app.js?v=20260820-sidebar-status"></script>
   </body>
 </html>

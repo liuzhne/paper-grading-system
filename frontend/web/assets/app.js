@@ -101,7 +101,8 @@ const pageMeta = {
 };
 
 function apiBase() {
-  return document.querySelector("#api-base").value.replace(/\/$/, "");
+  const configured = window.__PGS_CONFIG__?.apiBase;
+  return typeof configured === "string" ? configured.replace(/\/$/, "") : "/api";
 }
 
 function authToken() {
@@ -139,27 +140,61 @@ function setLogoutVisible(visible) {
   if (btn) btn.classList.toggle("hidden", !visible);
 }
 
+function setConnectionStatus(status) {
+  const panel = document.querySelector("#connection-status");
+  const label = document.querySelector("#connection-status-label");
+  const copy = {
+    checking: "正在检查服务",
+    healthy: "服务正常",
+    failed: "连接失败",
+  };
+  if (panel) panel.dataset.state = status;
+  if (label) label.textContent = copy[status] || copy.checking;
+}
+
+function setSidebarUser(user, { localMode = false } = {}) {
+  const username = typeof user === "string" ? user.trim() : "";
+  const name = document.querySelector("#sidebar-user-name");
+  const context = document.querySelector("#sidebar-user-context");
+  const avatar = document.querySelector("#sidebar-user-avatar");
+  const displayName = username || (localMode ? "本地模式" : "访客");
+
+  if (name) name.textContent = displayName;
+  if (context) context.textContent = username ? "已登录" : (localMode ? "未启用登录" : "请登录");
+  if (avatar) avatar.textContent = username ? Array.from(username)[0].toUpperCase() : "?";
+}
+
 async function refreshAuthState() {
   // 返回 true=可进入应用；false=需登录（已弹出登录框）。
   try {
-    const status = await (await fetch(`${apiBase()}/auth/status`)).json();
+    setConnectionStatus("checking");
+    const statusResponse = await fetch(`${apiBase()}/auth/status`);
+    if (!statusResponse.ok) throw new Error(`服务响应异常（${statusResponse.status}）`);
+    const status = await statusResponse.json();
+    setConnectionStatus("healthy");
     if (!status.auth_required) {
       setLogoutVisible(false);
+      setSidebarUser(null, { localMode: true });
       return true;
     }
     const token = authToken();
     if (token) {
       const me = await fetch(`${apiBase()}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
       if (me.ok) {
+        const identity = await me.json();
         setLogoutVisible(true);
+        setSidebarUser(identity.user);
         return true;
       }
       setAuthToken("");
     }
+    setSidebarUser(null);
     showLogin();
     return false;
   } catch (_) {
-    return true; // 自检失败不阻塞（如离线/旧后端）
+    setConnectionStatus("failed");
+    setSidebarUser(null);
+    return true; // 连接失败仍展示页面，并在后续请求中重试。
   }
 }
 
@@ -167,10 +202,18 @@ async function api(path, options = {}) {
   const headers = Object.assign({}, options.headers || {});
   const token = authToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  const response = await fetch(`${apiBase()}${path}`, Object.assign({}, options, { headers }));
+  let response;
+  try {
+    response = await fetch(`${apiBase()}${path}`, Object.assign({}, options, { headers }));
+    setConnectionStatus(response.status < 500 ? "healthy" : "failed");
+  } catch (_) {
+    setConnectionStatus("failed");
+    throw new Error("无法连接服务");
+  }
   if (response.status === 401) {
     setAuthToken("");
     setLogoutVisible(false);
+    setSidebarUser(null);
     showLogin("登录已失效，请重新登录");
     throw new Error("需要登录后重试");
   }
@@ -1813,15 +1856,17 @@ function bindAuth() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username, password }),
         });
+        setConnectionStatus("healthy");
         if (!res.ok) {
           showLogin("用户名或密码错误");
           return;
         }
         setAuthToken((await res.json()).token);
         hideLogin();
-        setLogoutVisible(true);
+        await refreshAuthState();
         await loadAll();
       } catch (error) {
+        setConnectionStatus("failed");
         showLogin(error.message);
       }
     });
@@ -1831,6 +1876,7 @@ function bindAuth() {
     logout.addEventListener("click", () => {
       setAuthToken("");
       setLogoutVisible(false);
+      setSidebarUser(null);
       showLogin("已登出");
     });
   }

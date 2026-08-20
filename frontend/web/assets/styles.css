@@ -271,38 +271,55 @@ h3 {
   gap: 12px;
 }
 
-.connection-settings {
-  border: 1px solid rgba(255, 255, 255, 0.09);
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 7px;
+  color: var(--sidebar-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.connection-status[data-state="healthy"] {
+  color: #b8e8ce;
+}
+
+.connection-status[data-state="failed"] {
+  color: #f5b8b8;
+}
+
+.sidebar-account {
   border-radius: 8px;
   color: #c6cfdb;
 }
 
-.connection-settings summary {
-  padding: 10px 11px;
+.sidebar-account summary {
+  padding: 7px 6px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   cursor: pointer;
   list-style: none;
-  font-size: 12px;
-  font-weight: 650;
 }
 
-.connection-settings summary::-webkit-details-marker {
+.sidebar-account summary::-webkit-details-marker {
   display: none;
 }
 
-.connection-body {
-  padding: 0 11px 11px;
-  display: grid;
-  gap: 9px;
+.sidebar-account summary:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.connection-body label {
-  color: var(--sidebar-muted);
+.sidebar-account[open] summary {
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.connection-body button {
+.account-actions {
+  padding: 3px 6px 7px 48px;
+}
+
+.account-actions button {
   width: 100%;
   background: transparent;
   border-color: rgba(255, 255, 255, 0.13);
@@ -317,11 +334,14 @@ h3 {
   box-shadow: 0 0 0 3px rgba(65, 184, 131, 0.12);
 }
 
-.sidebar-user {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 6px;
+.connection-status[data-state="checking"] .status-dot {
+  background: #98a2b3;
+  box-shadow: 0 0 0 3px rgba(152, 162, 179, 0.12);
+}
+
+.connection-status[data-state="failed"] .status-dot {
+  background: #e06c75;
+  box-shadow: 0 0 0 3px rgba(224, 108, 117, 0.12);
 }
 
 .avatar {
@@ -336,17 +356,33 @@ h3 {
   font-weight: 700;
 }
 
-.sidebar-user span:last-child {
+.sidebar-user-copy {
   display: grid;
+  min-width: 0;
+  flex: 1;
 }
 
-.sidebar-user strong {
+.sidebar-user-copy strong {
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.sidebar-user small {
+.sidebar-user-copy small {
   color: var(--sidebar-muted);
   font-size: 10px;
+}
+
+.account-disclosure {
+  color: #98a2b3;
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 160ms ease;
+}
+
+.sidebar-account[open] .account-disclosure {
+  transform: rotate(180deg);
 }
 
 .workspace {

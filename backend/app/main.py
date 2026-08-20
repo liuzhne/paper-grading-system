@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
@@ -86,7 +88,18 @@ def create_app():
 
         @app.get("/", include_in_schema=False)
         def web_app():
-            return FileResponse(web_dir / "index.html")
+            # API 路径由当前服务配置注入，前端不提供可编辑入口。
+            # JSON 编码可避免配置中的特殊字符破坏页面脚本上下文。
+            client_config = json.dumps(
+                {"apiBase": settings.API_PREFIX.rstrip("/")}, ensure_ascii=False
+            ).replace("</", "<\\/")
+            html = (web_dir / "index.html").read_text(encoding="utf-8")
+            html = html.replace(
+                "<!-- PGS_CLIENT_CONFIG -->",
+                f"<script>window.__PGS_CONFIG__ = {client_config};</script>",
+                1,
+            )
+            return HTMLResponse(html)
 
     return app
 
