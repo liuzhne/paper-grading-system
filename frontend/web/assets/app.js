@@ -137,7 +137,26 @@ function hideLogin() {
 
 function setLogoutVisible(visible) {
   const btn = document.querySelector("#logout-btn");
+  const trigger = document.querySelector("#account-menu-trigger");
   if (btn) btn.classList.toggle("hidden", !visible);
+  if (trigger) trigger.disabled = !visible;
+  if (!visible) closeAccountMenu();
+}
+
+function closeAccountMenu() {
+  const menu = document.querySelector("#account-menu");
+  const trigger = document.querySelector("#account-menu-trigger");
+  if (menu) menu.classList.add("hidden");
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+}
+
+function toggleAccountMenu() {
+  const menu = document.querySelector("#account-menu");
+  const trigger = document.querySelector("#account-menu-trigger");
+  if (!menu || !trigger || trigger.disabled) return;
+  const opening = menu.classList.contains("hidden");
+  menu.classList.toggle("hidden", !opening);
+  trigger.setAttribute("aria-expanded", String(opening));
 }
 
 function setConnectionStatus(status) {
@@ -1844,6 +1863,15 @@ function bindEvents() {
 }
 
 function bindAuth() {
+  const accountTrigger = document.querySelector("#account-menu-trigger");
+  if (accountTrigger) accountTrigger.addEventListener("click", toggleAccountMenu);
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest?.("#sidebar-account")) closeAccountMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAccountMenu();
+  });
+
   const form = document.querySelector("#login-form");
   if (form) {
     form.addEventListener("submit", async (event) => {
@@ -1874,6 +1902,7 @@ function bindAuth() {
   const logout = document.querySelector("#logout-btn");
   if (logout) {
     logout.addEventListener("click", () => {
+      closeAccountMenu();
       setAuthToken("");
       setLogoutVisible(false);
       setSidebarUser(null);

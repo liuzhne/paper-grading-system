@@ -33,16 +33,16 @@
             <span class="status-dot" aria-hidden="true"></span>
             <span id="connection-status-label">正在检查服务</span>
           </div>
-          <details class="sidebar-account">
-            <summary>
+          <div id="sidebar-account" class="sidebar-account">
+            <button id="account-menu-trigger" class="sidebar-account-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu" aria-label="打开账户菜单" disabled>
               <span id="sidebar-user-avatar" class="avatar" aria-hidden="true">?</span>
               <span class="sidebar-user-copy"><strong id="sidebar-user-name">正在检查登录状态</strong><small id="sidebar-user-context">请稍候</small></span>
               <span class="account-disclosure" aria-hidden="true">⌄</span>
-            </summary>
-            <div class="account-actions">
-              <button id="logout-btn" class="ghost hidden" title="退出登录">退出登录</button>
+            </button>
+            <div id="account-menu" class="account-menu hidden" role="menu" aria-label="账户菜单">
+              <button id="logout-btn" class="account-menu-item danger hidden" type="button" role="menuitem">退出登录</button>
             </div>
-          </details>
+          </div>
         </div>
       </aside>
 
@@ -328,6 +328,6 @@
       </form>
     </div>
     <!-- PGS_CLIENT_CONFIG -->
-    <script src="/assets/app.js?v=20260820-sidebar-status"></script>
+    <script src="/assets/app.js?v=20260820-account-menu"></script>
   </body>
 </html>

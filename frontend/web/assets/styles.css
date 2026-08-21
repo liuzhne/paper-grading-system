@@ -290,40 +290,67 @@ h3 {
 }
 
 .sidebar-account {
+  position: relative;
   border-radius: 8px;
   color: #c6cfdb;
 }
 
-.sidebar-account summary {
+.sidebar-account-trigger {
+  width: 100%;
+  min-height: 46px;
   padding: 7px 6px;
   display: flex;
   align-items: center;
   gap: 10px;
   cursor: pointer;
-  list-style: none;
-}
-
-.sidebar-account summary::-webkit-details-marker {
-  display: none;
-}
-
-.sidebar-account summary:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.sidebar-account[open] summary {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.account-actions {
-  padding: 3px 6px 7px 48px;
-}
-
-.account-actions button {
-  width: 100%;
+  border: 0;
   background: transparent;
-  border-color: rgba(255, 255, 255, 0.13);
-  color: #d0d5dd;
+  color: inherit;
+  text-align: left;
+}
+
+.sidebar-account-trigger:hover,
+.sidebar-account-trigger[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.sidebar-account-trigger:disabled {
+  opacity: 1;
+}
+
+.account-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 60;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #202938;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.account-menu-item {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: #e4e7ec;
+  text-align: left;
+}
+
+.account-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.account-menu-item.danger {
+  color: #f6b7b7;
+}
+
+.account-menu-item.danger:hover {
+  background: rgba(224, 108, 117, 0.16);
 }
 
 .status-dot {
@@ -381,7 +408,7 @@ h3 {
   transition: transform 160ms ease;
 }
 
-.sidebar-account[open] .account-disclosure {
+.sidebar-account-trigger[aria-expanded="true"] .account-disclosure {
   transform: rotate(180deg);
 }
 
