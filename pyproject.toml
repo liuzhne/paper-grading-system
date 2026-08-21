@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "paper-grading-system"
 version = "0.1.0"
 description = "MVP for AI-assisted graduate thesis grading."
-requires-python = ">=3.9"
+requires-python = ">=3.10,<3.13"
 dependencies = [
   "alembic>=1.13.0",
   "fastapi>=0.110.0",
@@ -22,10 +22,13 @@ dependencies = [
   "requests>=2.31.0",
   "rich>=15.0.0",
   "sqlalchemy>=2.0.27",
-  "streamlit>=1.33.0",
+  "supabase>=2.0.0,<3.0.0",
   "typer>=0.23.2",
   "uvicorn[standard]>=0.27.1",
 ]
+
+[project.optional-dependencies]
+streamlit = ["streamlit>=1.33.0"]
 
 [project.scripts]
 pgs = "backend.app.cli.main:run"
@@ -41,4 +44,4 @@ pythonpath = ["."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]
-
+exclude = ["backend/app/tests"]

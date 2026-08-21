@@ -1,0 +1,17 @@
+[
+  {
+    "criterion_code": "T01",
+    "reason_code": "EVIDENCE_CORRECTNESS_FIX",
+    "summary": "Core 只采用可定位且通过授权检查的证据。"
+  },
+  {
+    "criterion_code": "T02",
+    "reason_code": "POLICY_CORRECTNESS_FIX",
+    "summary": "Core 按已发布 global policy 执行聚合、舍入和等级映射。"
+  },
+  {
+    "criterion_code": "T03",
+    "reason_code": "DEDUCTIVE_CORRECTNESS_FIX",
+    "summary": "Core 仅采用已发布 AtomicRule 中授权的扣分分值。"
+  }
+]

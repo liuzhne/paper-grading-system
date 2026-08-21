@@ -1,5 +1,6 @@
 from backend.app.services.document_parser.parser import parse_document
 from backend.app.tests.conftest import make_dalian_neusoft_cover_docx
+from backend.app.tests.conftest import publish_rubric_via_api
 
 
 def test_dalian_neusoft_cover_metadata_parser(tmp_path):
@@ -31,12 +32,21 @@ def test_upload_applies_dalian_neusoft_cover_metadata(client):
                     "max_score": 100,
                     "evidence_hints": ["系统设计", "系统实现"],
                     "deduction_rules": ["设计说明不足扣分"],
+                    "scoring_mode": "deductive",
+                    "deduction_rules_structured": [
+                        {
+                            "match": "设计说明不足",
+                            "points": 100,
+                            "reason": "设计说明不足",
+                        }
+                    ],
                     "display_order": 1,
                 }
             ],
         },
     )
     assert rubric_response.status_code == 200, rubric_response.text
+    publish_rubric_via_api(client, rubric_response.json()["id"])
 
     batch_response = client.post(
         "/api/batches",

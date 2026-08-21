@@ -6,9 +6,10 @@
 
 import json
 import shutil
+from copy import deepcopy
 from datetime import datetime
-from datetime import timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List
 from typing import Optional
 
@@ -44,6 +45,100 @@ def _safe_scorer():
         return get_llm_scorer()
     except Exception:
         return None
+
+
+def _cli_file_import_command(*, name, version, description, rules, template, scorer):
+    """Build the versioned M4 command consumed by the shared import pipeline."""
+    from backend.app.services.rubric_import import pipeline as rubric_pipeline
+
+    provider = None
+    model_name = None
+    if scorer is not None:
+        provider = getattr(scorer, "provider_name", None) or getattr(
+            scorer, "provider", None
+        )
+        model_name = getattr(scorer, "model_name", None)
+    return {
+        "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
+        "source_kind": "file_import",
+        "rubric": {
+            "name": name,
+            "version": version,
+            "description": description,
+            "business_profile_key": "thesis",
+            "workflow_profile": "template_driven" if template else "manual_json",
+        },
+        "files": {
+            "rules_file_name": Path(rules).name,
+            "template_file_name": Path(template).name if template else None,
+        },
+        "compiler": {
+            "parser_version": "rubric-file-parser@2",
+            "compiler_version": "atomic-rule-compiler@1",
+            "prompt_version": "rubric-compilation-prompt@2",
+            "model_provider": provider,
+            "model_name": model_name,
+            "sampling_params": {},
+        },
+        "version": {"hash_scheme": "rubric-content-v2"},
+    }
+
+
+def _prepare_cli_file_import(*, rules, template, name, version, description, scorer):
+    """Parse/compile files without opening or depending on a database session."""
+    from backend.app.services.rubric_import import pipeline as rubric_pipeline
+
+    rules_bytes = Path(rules).read_bytes()
+    template_bytes = Path(template).read_bytes() if template else None
+    prepared = rubric_pipeline.prepare_file_import(
+        command=_cli_file_import_command(
+            name=name,
+            version=version,
+            description=description,
+            rules=rules,
+            template=template,
+            scorer=scorer,
+        ),
+        rules_bytes=rules_bytes,
+        template_bytes=template_bytes,
+        scorer=scorer,
+    )
+    return prepared
+
+
+def _resolve_cli_frozen_version(session, rubric):
+    """Resolve the one consistently frozen published version for CLI scoring."""
+
+    from sqlalchemy import select
+
+    from backend.app.db.models import RubricCompilation, RubricVersion
+
+    versions = session.scalars(
+        select(RubricVersion).where(RubricVersion.rubric_id == rubric.id)
+    ).all()
+    if not versions:
+        return None
+    eligible = []
+    for version in versions:
+        compilation = session.get(RubricCompilation, version.compilation_id)
+        if (
+            rubric.status == "published"
+            and rubric.published_at is not None
+            and compilation is not None
+            and compilation.rubric_id == rubric.id
+            and compilation.status == "validated"
+            and compilation.reviewed_by is not None
+            and compilation.reviewed_at is not None
+            and compilation.published_at == rubric.published_at
+            and compilation.reviewed_at == compilation.published_at
+            and compilation.final_version_hash == version.version_hash
+        ):
+            eligible.append(version)
+    if len(eligible) == 1:
+        return eligible[0]
+    if not eligible:
+        raise typer.BadParameter("正式评分标准没有一致冻结的已发布版本")
+    raise typer.BadParameter("评分标准存在多个冻结发布版本，无法唯一锁定")
 
 
 _PROVIDER_OPT = typer.Option(None, "--provider", help="覆盖 LLM provider：mock / local（本地私有模型）/ openai / openai_compatible")
@@ -95,16 +190,10 @@ def _resolve_rubric(session, rubric, rubric_file, template):
     from backend.app.db.models import Rubric
 
     if rubric_file:
-        from backend.app.services.rubric_import.parser import parse_rubric_files
-        from backend.app.services.rubric_import.persist import persist_imported_rubric
-
-        imported = parse_rubric_files(
-            rules_bytes=Path(rubric_file).read_bytes(),
-            template_bytes=Path(template).read_bytes() if template else None,
-            scorer=_safe_scorer(),
+        raise typer.BadParameter(
+            "数据库评分不再隐式导入未审核规则；请先用 `pgs import` 导入并完成审核发布，"
+            "或使用 `pgs score --no-db --rubric-file ...` 做无状态评分"
         )
-        version = "cli-%s" % datetime.now().strftime("%Y%m%d-%H%M%S")
-        return persist_imported_rubric(session, Path(rubric_file).stem, version, None, imported)
 
     if rubric:
         obj = session.get(Rubric, rubric)
@@ -117,9 +206,17 @@ def _resolve_rubric(session, rubric, rubric_file, template):
         )
         if loaded is None:
             raise typer.BadParameter("找不到评分标准：%s（用 `pgs rubrics` 查看，或 `pgs import`）" % rubric)
+        if loaded.status != "published":
+            raise typer.BadParameter(
+                "评分标准尚未发布：%s；请完成规则审核、标准送审与发布后再评分"
+                % loaded.name
+            )
         return loaded
 
-    raise typer.BadParameter("请用 --rubric <id|名称> 或 --rubric-file 指定评分标准（或先 `pgs init --seed`）")
+    raise typer.BadParameter(
+        "请用 --rubric <id|名称> 指定已发布评分标准（或先 `pgs init --seed`）；"
+        "一次性文件评分请加 --no-db --rubric-file"
+    )
 
 
 def _run_scoring(items, fn, workers, show_progress):
@@ -277,6 +374,369 @@ def _score_stateless(files, rubric_file, template, mock, workers, report_dir, as
     return 1 if any_failed else 0
 
 
+def _score_stateless_profiled(
+    files,
+    rubric_file,
+    template,
+    mock,
+    workers,
+    report_dir,
+    as_json,
+    *,
+    profile_key,
+    profile_version,
+):
+    """Run the legacy file rubric through an explicit Profile/Core request."""
+
+    if profile_key != "thesis":
+        raise typer.BadParameter(
+            "--no-db currently supports only the explicit thesis Profile; "
+            "other Profiles require a published RubricVersion in local SQLite"
+        )
+    if not rubric_file:
+        raise typer.BadParameter("--no-db 需要 --rubric-file 指定评分标准（无 DB 可查）")
+    if report_dir:
+        raise typer.BadParameter(
+            "--no-db 不支持 --report-dir（报告需 DB）；改用普通模式，或用 --json 取明细"
+        )
+
+    from backend.app.services.document_parser.parser import parse_document
+    from backend.app.services.rubric_import.parser import parse_rubric_files
+    from backend.app.services.scoring.adapters.legacy_rubric import (
+        LegacyRubricAdapter,
+    )
+    from backend.app.services.scoring.core.canonical import canonical_sha256
+    from backend.app.services.scoring.core.contracts import ScoringRequest
+    from backend.app.services.scoring.core.engine import score_submission
+    from backend.app.services.scoring.core.identity import hash_source_artifact
+    from backend.app.services.scoring.core.identity import (
+        scoring_request_idempotency_projection,
+    )
+    from backend.app.services.scoring.core.policy import (
+        build_corrected_thesis_policy,
+    )
+    from backend.app.services.scoring.core.policy import (
+        validate_weight_configuration,
+    )
+    from backend.app.services.scoring.engine import _build_legacy_execution_plan
+    from backend.app.services.scoring.profiles.registry import get_profile
+
+    if mock:
+        from backend.app.services.llm.mock import MockLLMScorer
+
+        scorer = MockLLMScorer()
+    else:
+        scorer = _safe_scorer()
+        if scorer is None:
+            render.error("未配置可用 LLM（加 --mock，或在 .env 配置真实 provider）")
+            return 2
+
+    profile = get_profile(
+        profile_key=profile_key,
+        profile_version=profile_version,
+    )
+    try:
+        imported = parse_rubric_files(
+            rules_bytes=Path(rubric_file).read_bytes(),
+            template_bytes=Path(template).read_bytes() if template else None,
+            scorer=scorer,
+        )
+    except ValueError as exc:
+        render.error("评分标准解析失败：%s" % exc)
+        return 2
+    weights = validate_weight_configuration(
+        imported.criteria,
+        total_score=imported.total_score,
+    )
+    policy = build_corrected_thesis_policy(
+        imported.total_score,
+        weights.mode,
+    )
+    adapter = LegacyRubricAdapter()
+    rubric_snapshot = adapter.adapt(
+        rubric={
+            "name": Path(rubric_file).stem,
+            "status": "published",
+            "total_score": imported.total_score,
+        },
+        criteria=imported.criteria,
+        policy_snapshot=policy.to_mapping(),
+        business_profile_key=profile.profile_key,
+        compilation_rows=(),
+    )
+    registry = profile.build_checker_registry()
+    plan = _build_legacy_execution_plan(
+        rubric_snapshot=rubric_snapshot,
+        profile=profile,
+        registry=registry,
+        compatibility_nodes=adapter.adapt_compatibility_nodes(
+            criteria=imported.criteria,
+            rubric_source_kind="legacy_unversioned",
+        ),
+    )
+
+    def _score_one(path):
+        try:
+            raw_bytes = Path(path).read_bytes()
+            artifact_hash = hash_source_artifact(raw_bytes)
+            parsed = parse_document(str(path)).to_dict()
+            paper = SimpleNamespace(
+                id="stateless:" + artifact_hash,
+                title=parsed.get("title") or path.stem,
+                parse_quality=parsed.get("parse_quality"),
+                student_id=None,
+                student_name=None,
+                department=None,
+                major=None,
+                advisor=None,
+            )
+            snapshots = profile.adapt_paper(
+                paper=paper,
+                parsed=parsed,
+                source_artifact_hash=artifact_hash,
+            )
+            request_mapping = {
+                "schema_version": "scoring-request@2",
+                "submission": snapshots.submission.to_mapping(),
+                "document": snapshots.document.to_mapping(),
+                "plan": plan.to_mapping(),
+                "runtime_identity": profile.build_runtime_identity(scorer),
+                "rescore_generation": 0,
+            }
+            request_mapping["idempotency_key"] = canonical_sha256(
+                scoring_request_idempotency_projection(request_mapping)
+            )
+            outcome = score_submission(
+                request=ScoringRequest.from_mapping(request_mapping),
+                checker_registry=registry,
+                llm_runtime=profile.build_llm_runtime(scorer),
+                profile=profile,
+            ).to_mapping()
+            identity = {
+                **deepcopy(outcome["request_identity"]),
+                "profile_version": profile.profile_version,
+                "runtime_identity": deepcopy(outcome["audit_identity"]),
+            }
+            return {
+                "file": path.name,
+                "status": "ok" if outcome["status"] == "completed" else outcome["status"],
+                "total": (
+                    None
+                    if outcome["final_total"] is None
+                    else float(outcome["final_total"])
+                ),
+                "grade": outcome["grade"],
+                "need_review": bool(outcome["review_issues"]),
+                "tokens": 0,
+                "items": deepcopy(outcome["criterion_outcomes"]),
+                "identity": identity,
+            }
+        except Exception as exc:
+            return {"file": path.name, "status": "失败", "error": str(exc)}
+
+    results = _run_scoring(list(files), _score_one, workers, show_progress=not as_json)
+    results.sort(key=lambda item: item["file"])
+    any_failed = any(item["status"] != "ok" for item in results)
+    payload = {
+        "contract": "scoring-core@1",
+        "rubric": "%s（%d 项，无状态）"
+        % (Path(rubric_file).stem, len(imported.criteria)),
+        "stateless": True,
+        "profile": {
+            "key": profile.profile_key,
+            "version": profile.profile_version,
+        },
+        "results": results,
+    }
+    if as_json:
+        render.dump_json(payload)
+    else:
+        render.info(
+            "Profile：%s / %s（无状态 Core）"
+            % (profile.profile_key, profile.profile_version)
+        )
+        render.render_table(
+            "评分结果（无状态 Core）",
+            ["文件", "总分", "等级", "需复核", "状态"],
+            [
+                (
+                    item["file"],
+                    item.get("total", "-"),
+                    item.get("grade", "-"),
+                    "是" if item.get("need_review") else "否",
+                    item["status"],
+                )
+                for item in results
+            ],
+        )
+    return 1 if any_failed else 0
+
+
+def _score_profiled(
+    *,
+    files,
+    rubric,
+    rubric_file,
+    template,
+    mock,
+    workers,
+    report_dir,
+    as_json,
+    db,
+    storage,
+    profile_key,
+    profile_version,
+    metadata,
+):
+    """Local SQLite v2 Submission → Profile → Core scoring flow."""
+
+    _bootstrap(db, storage)
+    from backend.app.schemas.submission import EvaluationBatchCreate
+    from backend.app.services.dev_user import ensure_dev_user
+    from backend.app.services.report.generic_export import build_run_export_v2
+    from backend.app.services.report.generic_generator import generate_report_v2
+    from backend.app.services.scoring.profiles.registry import get_profile
+    from backend.app.services.scoring.profiles.registry import get_profile_by_key
+    from backend.app.services.submissions.lifecycle import create_evaluation_batch
+    from backend.app.services.submissions.lifecycle import ingest_submission
+    from backend.app.services.submissions.lifecycle import score_generic_submission
+
+    selected = (
+        get_profile(
+            profile_key=profile_key,
+            profile_version=profile_version,
+        )
+        if profile_version
+        else get_profile_by_key(profile_key)
+    )
+    exact_version = selected.profile_version
+    scorer = None
+    if mock:
+        from backend.app.services.llm.mock import MockLLMScorer
+
+        scorer = MockLLMScorer()
+    else:
+        scorer = _safe_scorer()
+        if scorer is None:
+            render.error("未配置可用 LLM（加 --mock，或在 .env 配置真实 provider）")
+            return 2
+
+    submissions = []
+    with clidb.cli_session() as session:
+        user = ensure_dev_user(session)
+        rub = _resolve_rubric(session, rubric, rubric_file, template)
+        version = _resolve_cli_frozen_version(session, rub)
+        if version is None:
+            raise typer.BadParameter(
+                "显式 Profile 评分需要唯一、持续一致发布的 RubricVersion"
+            )
+        if version.business_profile_key != profile_key:
+            raise typer.BadParameter(
+                "评分标准 RubricVersion 与 --profile 不匹配"
+            )
+        batch = create_evaluation_batch(
+            session,
+            EvaluationBatchCreate(
+                name="CLI-v2-%s" % datetime.now().strftime("%Y%m%d-%H%M%S"),
+                rubric_version_id=version.id,
+                business_profile_key=profile_key,
+                business_profile_version=exact_version,
+            ),
+            creator_id=user.id,
+        )
+        rubric_label = "%s / %s" % (rub.name, rub.version)
+        for path in files:
+            try:
+                submission, _snapshot = ingest_submission(
+                    session,
+                    evaluation_batch_id=batch.id,
+                    file_name=path.name,
+                    uploaded_media_type=None,
+                    raw_bytes=path.read_bytes(),
+                    metadata=deepcopy(metadata),
+                    creator_id=user.id,
+                )
+                submissions.append((path.name, path.stem, submission.id))
+            except Exception as exc:
+                session.rollback()
+                submissions.append((path.name, path.stem, None, str(exc)))
+        batch_id = batch.id
+        rubric_version_id = version.id
+
+    def _score_one(item):
+        if len(item) == 4:
+            return {"file": item[0], "status": "失败", "error": item[3]}
+        name, stem, submission_id = item
+        with clidb.cli_session() as session:
+            try:
+                run = score_generic_submission(
+                    session,
+                    submission_id,
+                    rescore_generation=0,
+                    scorer=scorer,
+                )
+                exported = build_run_export_v2(session, run.id)
+                if report_dir:
+                    Path(report_dir).mkdir(parents=True, exist_ok=True)
+                    html = generate_report_v2(session, run.id)
+                    shutil.copyfile(html, Path(report_dir) / (stem + ".html"))
+                return {
+                    "file": name,
+                    "status": "ok",
+                    "total": exported["run"]["final_total_score"],
+                    "grade": exported["run"]["grade"],
+                    "need_review": exported["run"]["need_manual_review"],
+                    "run_id": run.id,
+                    "submission_id": submission_id,
+                    "document_snapshot_id": exported["submission"][
+                        "document_snapshot_id"
+                    ],
+                    "identity": exported["identity"],
+                }
+            except Exception as exc:
+                session.rollback()
+                return {"file": name, "status": "失败", "error": str(exc)}
+
+    results = _run_scoring(
+        submissions,
+        _score_one,
+        workers,
+        show_progress=not as_json,
+    )
+    results.sort(key=lambda item: item["file"])
+    any_failed = any(item["status"] != "ok" for item in results)
+    payload = {
+        "contract": "grading-core/cli-profile-score@1",
+        "rubric": rubric_label,
+        "rubric_version_id": rubric_version_id,
+        "batch_id": batch_id,
+        "profile": {"key": profile_key, "version": exact_version},
+        "results": results,
+    }
+    if as_json:
+        render.dump_json(payload)
+    else:
+        render.info(
+            "Profile：%s / %s    RubricVersion：%s"
+            % (profile_key, exact_version, rubric_version_id)
+        )
+        render.render_table(
+            "v2 Profile/Core 评分结果",
+            ["文件", "总分", "等级", "需复核", "状态"],
+            [
+                (
+                    item["file"],
+                    item.get("total", "-"),
+                    item.get("grade", "-"),
+                    "是" if item.get("need_review") else "否",
+                    item["status"],
+                )
+                for item in results
+            ],
+        )
+    return 1 if any_failed else 0
+
+
 # ---- 命令 ----
 @app.command()
 def init(
@@ -359,6 +819,50 @@ def doctor(
     raise typer.Exit(0)
 
 
+@app.command("core-cutover-audit")
+def core_cutover_audit(
+    as_json: bool = typer.Option(False, "--json", help="输出稳定 JSON 报告"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """只读盘点活跃 Rubric 的 Core 可执行性；有 blocker 时退出 1。"""
+
+    _bootstrap(db, storage)
+    from backend.app.services.deployment.cutover_inventory import (
+        build_core_cutover_inventory,
+    )
+
+    with clidb.cli_session() as session:
+        report = build_core_cutover_inventory(session)
+    if as_json:
+        render.dump_json(report)
+    else:
+        rows = [
+            (
+                item["rubric_id"],
+                item["rubric_source_kind"],
+                item["rubric_version_id"] or "-",
+                item["status"],
+                ",".join(item["blocker_codes"]) or "-",
+                len(item["affected_batches"]),
+            )
+            for item in report["targets"]
+        ]
+        render.render_table(
+            "Core 默认切换 Rubric 盘点",
+            ["Rubric", "来源", "Version", "状态", "Blocker", "批次数"],
+            rows,
+        )
+        message = (
+            "Rubric 盘点通过（仅代表 inventory scope，不代表生产发布批准）"
+            if report["inventory_clear"]
+            else "Rubric 盘点存在 %s 个 blocker"
+            % report["summary"]["blockers"]
+        )
+        (render.info if report["inventory_clear"] else render.error)(message)
+    raise typer.Exit(0 if report["inventory_clear"] else 1)
+
+
 @app.command()
 def rubrics(
     as_json: bool = typer.Option(False, "--json", help="输出 JSON"),
@@ -405,28 +909,62 @@ def import_rubric(
 ):
     """从 Excel 规则（+可选 Word 模板）导入评分标准到本地库。"""
     _bootstrap(db, storage)
-    from backend.app.services.dev_user import ensure_dev_user
-    from backend.app.services.rubric_import.parser import parse_rubric_files
-    from backend.app.services.rubric_import.persist import persist_imported_rubric
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.orm import selectinload
 
-    rules_bytes = Path(rules).read_bytes()
-    template_bytes = Path(template).read_bytes() if template else None
+    from backend.app.db.models import Rubric
+    from backend.app.services.dev_user import ensure_dev_user
+    from backend.app.services.rubric_import import pipeline as rubric_pipeline
+
+    scorer = _safe_scorer()
+    try:
+        # Parsing and optional LLM compilation deliberately happen before a
+        # database session is opened.  The returned DTO is immutable.
+        prepared = _prepare_cli_file_import(
+            rules=rules,
+            template=template,
+            name=name,
+            version=version,
+            description=description,
+            scorer=scorer,
+        )
+    except (OSError, ValueError) as exc:
+        render.error("解析失败：%s" % exc)
+        raise typer.Exit(2)
+
+    prepared_graph = prepared.to_mapping()
     with clidb.cli_session() as session:
         ensure_dev_user(session)
         session.commit()
         try:
-            imported = parse_rubric_files(rules_bytes=rules_bytes, template_bytes=template_bytes, scorer=_safe_scorer())
-        except ValueError as exc:
-            render.error("解析失败：%s" % exc)
+            identity = rubric_pipeline.persist_prepared_import(
+                session=session,
+                prepared=prepared,
+                actor_id=settings.DEFAULT_DEV_USER_ID,
+            )
+        except (IntegrityError, ValueError) as exc:
+            session.rollback()
+            message = (
+                "rubric name and version already exist"
+                if isinstance(exc, IntegrityError)
+                else str(exc)
+            )
+            render.error(message)
             raise typer.Exit(2)
-        try:
-            rubric = persist_imported_rubric(session, name, version, description, imported)
-        except ValueError as exc:
+        rubric = session.scalar(
+            select(Rubric)
+            .where(Rubric.id == identity.rubric_id)
+            .options(selectinload(Rubric.criteria))
+        )
+        if rubric is None:  # defensive: persistence returned an invalid identity
+            session.rollback()
+            exc = ValueError("导入完成后找不到评分标准")
             render.error(str(exc))
             raise typer.Exit(2)
         rows = [(c.code, c.name, c.max_score) for c in rubric.criteria]
         rid, rname, rver = rubric.id, rubric.name, rubric.version
-        warnings = list(imported.warnings or [])
+        warnings = list(prepared_graph["compilation"].get("warnings") or [])
     render.info("✓ 已导入：%s（%s）  id=%s" % (rname, rver, rid))
     render.render_table("评分项", ["code", "名称", "满分"], rows)
     for warning in warnings:
@@ -437,7 +975,11 @@ def import_rubric(
 def score(
     paths: List[Path] = typer.Argument(..., help="docx/pdf 文件或目录（目录递归 .docx/.pdf）"),
     rubric: Optional[str] = typer.Option(None, "--rubric", help="评分标准 id 或名称"),
-    rubric_file: Optional[Path] = typer.Option(None, "--rubric-file", help="临时导入的 Excel 规则"),
+    rubric_file: Optional[Path] = typer.Option(
+        None,
+        "--rubric-file",
+        help="--no-db 无状态评分使用的 Excel 规则",
+    ),
     template: Optional[Path] = typer.Option(None, "--template", help="--rubric-file 配套 Word 模板"),
     mock: bool = typer.Option(False, "--mock", help="强制用 Mock 评分器（不调真实 LLM）"),
     provider: Optional[str] = _PROVIDER_OPT,
@@ -446,6 +988,21 @@ def score(
     report_dir: Optional[Path] = typer.Option(None, "--report-dir", help="为每篇生成 HTML 报告到该目录"),
     workers: int = typer.Option(1, "--workers", min=1, help="并发评分线程数（>1 适合真实 LLM 批量；6.1 解耦后可真正并行）"),
     no_db: bool = typer.Option(False, "--no-db", help="无状态：从文件直接评分，不建 sqlite/不落库（需 --rubric-file）"),
+    profile_key: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help="显式业务 Profile；不传保持默认 thesis 兼容路径",
+    ),
+    profile_version: Optional[str] = typer.Option(
+        None,
+        "--profile-version",
+        help="显式 Profile 版本；省略时解析该 key 唯一注册版本",
+    ),
+    metadata_json: str = typer.Option(
+        "{}",
+        "--metadata-json",
+        help="显式 Profile 的业务元数据 JSON 对象",
+    ),
     as_json: bool = typer.Option(False, "--json"),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
@@ -456,9 +1013,68 @@ def score(
     if not files:
         render.error("没有可评分的文件")
         raise typer.Exit(2)
+    try:
+        metadata = json.loads(metadata_json)
+    except (TypeError, ValueError) as exc:
+        raise typer.BadParameter("--metadata-json 必须是 JSON 对象") from exc
+    if not isinstance(metadata, dict):
+        raise typer.BadParameter("--metadata-json 必须是 JSON 对象")
+    if profile_key:
+        if no_db:
+            from backend.app.services.scoring.profiles.registry import (
+                get_profile,
+            )
+            from backend.app.services.scoring.profiles.registry import (
+                get_profile_by_key,
+            )
+
+            selected = (
+                get_profile(
+                    profile_key=profile_key,
+                    profile_version=profile_version,
+                )
+                if profile_version
+                else get_profile_by_key(profile_key)
+            )
+            raise typer.Exit(
+                _score_stateless_profiled(
+                    files,
+                    rubric_file,
+                    template,
+                    mock,
+                    workers,
+                    report_dir,
+                    as_json,
+                    profile_key=profile_key,
+                    profile_version=selected.profile_version,
+                )
+            )
+        raise typer.Exit(
+            _score_profiled(
+                files=files,
+                rubric=rubric,
+                rubric_file=rubric_file,
+                template=template,
+                mock=mock,
+                workers=workers,
+                report_dir=report_dir,
+                as_json=as_json,
+                db=db,
+                storage=storage,
+                profile_key=profile_key,
+                profile_version=profile_version,
+                metadata=metadata,
+            )
+        )
+    if profile_version:
+        raise typer.BadParameter("--profile-version 需要同时指定 --profile")
+    if metadata:
+        raise typer.BadParameter("--metadata-json 仅用于显式 --profile 路径")
     if no_db:
         raise typer.Exit(_score_stateless(files, rubric_file, template, mock, workers, report_dir, as_json))
     db_url = _bootstrap(db, storage)
+
+    from sqlalchemy import select
 
     from backend.app.db.models import GradingBatch
     from backend.app.services.dev_user import ensure_dev_user
@@ -481,9 +1097,12 @@ def score(
         ensure_dev_user(session)
         rub = _resolve_rubric(session, rubric, rubric_file, template)
         rubric_label = "%s / %s" % (rub.name, rub.version)
+        formal_version = _resolve_cli_frozen_version(session, rub)
+        rubric_version_id = formal_version.id if formal_version else None
         batch = GradingBatch(
             name="CLI-%s" % datetime.now().strftime("%Y%m%d-%H%M%S"),
             rubric_id=rub.id,
+            rubric_version_id=rubric_version_id,
             status="draft",
             created_by=settings.DEFAULT_DEV_USER_ID,
         )
@@ -505,7 +1124,7 @@ def score(
                 results.append({"file": path.name, "status": "失败", "error": str(exc)})
 
     if workers > 1 and db_url.startswith("sqlite") and not as_json:
-        render.hint("提示：本地 sqlite 下评分事务跨 LLM 调用持写锁，多 worker 实际趋于串行；要真正并行可指向并发数据库。")
+        render.hint("提示：本地 SQLite 已启用 WAL + busy_timeout；worker 可并行计算，持久化采用短事务并由幂等键防止重复权威 run。")
 
     # 阶段 2：评分（每 worker 独立会话，互不串扰）
     def _score_one(item):
@@ -577,8 +1196,20 @@ def report(
     _bootstrap(db, storage)
 
     with clidb.cli_session() as session:
+        from backend.app.db.models import ScoringRun
+
+        run = session.get(ScoringRun, run_id)
+        if run is None:
+            render.error("评分任务不存在")
+            raise typer.Exit(2)
+        is_submission_run = run.submission_id is not None
         if fmt == "json":
-            from backend.app.services.report.json_export import build_run_export
+            if is_submission_run:
+                from backend.app.services.report.generic_export import (
+                    build_run_export_v2 as build_run_export,
+                )
+            else:
+                from backend.app.services.report.json_export import build_run_export
 
             try:
                 data = build_run_export(session, run_id)
@@ -591,7 +1222,12 @@ def report(
             else:
                 render.dump_json(data)
             return
-        from backend.app.services.report.generator import generate_report
+        if is_submission_run:
+            from backend.app.services.report.generic_generator import (
+                generate_report_v2 as generate_report,
+            )
+        else:
+            from backend.app.services.report.generator import generate_report
 
         try:
             path = Path(generate_report(session, run_id))
@@ -733,6 +1369,16 @@ def eval_cmd(
     papers_dir: Path = typer.Option(..., "--papers-dir", help="真实论文文件夹（仓库外）"),
     scores: Path = typer.Option(..., "--scores", help="教师成绩表 .xlsx/.csv"),
     baseline: Optional[Path] = typer.Option(None, "--baseline", help="基线 JSON（默认 storage/eval/baseline.json）"),
+    profile_key: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help="评估使用的业务 Profile；默认保持 thesis 兼容",
+    ),
+    profile_version: Optional[str] = typer.Option(
+        None,
+        "--profile-version",
+        help="显式 Profile 版本；省略时锁定该 key 的注册版本",
+    ),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
 ):
@@ -742,9 +1388,46 @@ def eval_cmd(
     from backend.app.eval.run_eval import _write_report
     from backend.app.eval.runner import assert_no_regression
     from backend.app.eval.runner import baseline_from_report
+    from backend.app.services.scoring.profiles.registry import get_profile
+    from backend.app.services.scoring.profiles.registry import get_profile_by_key
+
+    if profile_version and not profile_key:
+        raise typer.BadParameter("--profile-version 需要同时指定 --profile")
 
     with clidb.cli_session() as session:
-        data = build_labeled_eval(session, rubric_id, str(papers_dir), str(scores))
+        rubric = _resolve_rubric(session, rubric_id, None, None)
+        version = _resolve_cli_frozen_version(session, rubric)
+        selected_key = profile_key or (
+            version.business_profile_key if version is not None else "thesis"
+        )
+        if version is not None and version.business_profile_key != selected_key:
+            raise typer.BadParameter(
+                "评分标准 RubricVersion 与 --profile 不匹配"
+            )
+        try:
+            profile = (
+                get_profile(
+                    profile_key=selected_key,
+                    profile_version=profile_version,
+                )
+                if profile_version
+                else get_profile_by_key(selected_key)
+            )
+        except (LookupError, ValueError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if profile.profile_key != "thesis":
+            raise typer.BadParameter(
+                "当前教师留出集导入仅支持 thesis Profile；"
+                "其他 Profile 需提供对应的标注数据适配器"
+            )
+        kwargs = {"rubric_version_id": version.id} if version is not None else {}
+        data = build_labeled_eval(
+            session,
+            rubric.id,
+            str(papers_dir),
+            str(scores),
+            **kwargs,
+        )
     report_path = _write_report(data)
     render.render_table(
         "QWK 评估",
@@ -766,6 +1449,26 @@ def eval_cmd(
             "逐维度 bias（>0 偏宽 / <0 偏严）",
             ["code", "bias", "mae", "n"],
             [(code, s["bias"], s["mae"], s["n"]) for code, s in per.items()],
+        )
+    identity = data.get("evaluation_identity") or {}
+    if identity:
+        rounding = identity.get("rounding") or {}
+        render.render_table(
+            "评估身份（可复现）",
+            ["字段", "值"],
+            [
+                ("Profile", "%s / %s" % (
+                    identity.get("business_profile_key") or profile.profile_key,
+                    identity.get("business_profile_version") or profile.profile_version,
+                )),
+                ("RubricVersion", identity.get("rubric_version_id") or (version.id if version else "legacy")),
+                ("Policy hash", identity.get("policy_hash") or "-"),
+                ("GradeScale hash", identity.get("grade_scale_sha256") or "-"),
+                ("Rounding", "%s / %s" % (
+                    rounding.get("mode", "-"),
+                    rounding.get("digits", "-"),
+                )),
+            ],
         )
     render.hint("报告：%s" % report_path)
 
@@ -792,16 +1495,24 @@ def eval_cmd(
 @app.command()
 def publish(
     rubric_id: str = typer.Argument(..., help="评分标准 id 或名称"),
+    compilation_id: Optional[str] = typer.Option(
+        None,
+        "--compilation-id",
+        help="显式选择待发布 compilation；存在多个活动候选时必填",
+    ),
     db: Optional[Path] = _DB_OPT,
     storage: Optional[Path] = _STORAGE_OPT,
 ):
-    """发布草稿评分标准（draft → published）。"""
+    """发布已经完成规则审核与可执行性校验的评分标准。"""
     _bootstrap(db, storage)
     from sqlalchemy import select
 
-    from backend.app.db.models import Rubric
+    from backend.app.db.models import Rubric, RubricCompilation
+    from backend.app.services.dev_user import ensure_dev_user
+    from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 
     with clidb.cli_session() as session:
+        ensure_dev_user(session)
         rubric = session.get(Rubric, rubric_id)
         if rubric is None:
             rubric = session.scalar(
@@ -810,11 +1521,369 @@ def publish(
         if rubric is None:
             render.error("找不到评分标准：%s（用 `pgs rubrics` 查看）" % rubric_id)
             raise typer.Exit(2)
-        rubric.status = "published"
-        rubric.published_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        session.commit()
+        compilations = session.scalars(
+            select(RubricCompilation)
+            .where(RubricCompilation.rubric_id == rubric.id)
+            .order_by(RubricCompilation.created_at.desc())
+        ).all()
+        if not compilations:
+            render.error("旧草稿缺少来源图；请先执行显式升级")
+            raise typer.Exit(2)
+        if compilation_id is not None:
+            compilation = session.get(RubricCompilation, compilation_id)
+            if compilation is None or compilation.rubric_id != rubric.id:
+                render.error("指定 compilation 不存在或不属于该评分标准")
+                raise typer.Exit(2)
+        else:
+            active = [
+                item
+                for item in compilations
+                if item.status != "superseded" and item.published_at is None
+            ]
+            validated = [item for item in active if item.status == "validated"]
+            if len(active) != 1 or len(validated) != 1:
+                render.error(
+                    "无法唯一选择活动 validated compilation；"
+                    "请使用 --compilation-id 显式指定"
+                )
+                raise typer.Exit(2)
+            compilation = validated[0]
+        try:
+            rubric_lifecycle.publish_rubric(
+                session,
+                rubric.id,
+                compilation.id,
+                settings.DEFAULT_DEV_USER_ID,
+            )
+            session.commit()
+        except rubric_lifecycle.RubricLifecycleError as exc:
+            session.rollback()
+            render.error(str(exc))
+            raise typer.Exit(2)
         name, version = rubric.name, rubric.version
     render.info("✓ 已发布：%s（%s）" % (name, version))
+
+
+def _cli_resolve_rubric(session, rubric_id: str):
+    from sqlalchemy import select
+
+    from backend.app.db.models import Rubric
+
+    rubric = session.get(Rubric, rubric_id)
+    if rubric is None:
+        rubric = session.scalar(
+            select(Rubric)
+            .where(Rubric.name == rubric_id)
+            .order_by(Rubric.created_at.desc())
+        )
+    if rubric is None:
+        raise typer.BadParameter("找不到评分标准：%s" % rubric_id)
+    return rubric
+
+
+@app.command("rubric-graph")
+def rubric_graph(
+    rubric_id: str = typer.Argument(..., help="评分标准 id 或名称"),
+    as_json: bool = typer.Option(False, "--json"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """显示可供审核/恢复调用的安全执行图标识与状态。"""
+
+    _bootstrap(db, storage)
+    from backend.app.services.rubrics.draft_graph import read_execution_draft
+
+    with clidb.cli_session() as session:
+        rubric = _cli_resolve_rubric(session, rubric_id)
+        data = read_execution_draft(session=session, rubric_id=rubric.id)
+    if as_json:
+        render.dump_json(data)
+        return
+    active = data.get("active_compilation")
+    if active is None:
+        render.warn(data.get("ambiguity") or "没有活动 compilation")
+    else:
+        version = active.get("version") or {}
+        render.info(
+            "active compilation=%s  version=%s  status=%s"
+            % (active["id"], version.get("id", "-"), active["status"])
+        )
+        render.render_table(
+            "原子规则",
+            ["rule_code", "方向", "effect", "状态", "reviewer"],
+            [
+                (
+                    item["rule_code"],
+                    item["direction"],
+                    item["effect_type"],
+                    item["status"],
+                    item.get("reviewed_by"),
+                )
+                for item in active.get("rules", [])
+            ],
+        )
+        if active.get("template_links"):
+            render.render_table(
+                "模板映射",
+                ["link_id", "rule_code", "状态"],
+                [
+                    (item["id"], item["rule_code"], item["review_status"])
+                    for item in active["template_links"]
+                ],
+            )
+
+
+@app.command("rubric-submit-review")
+def rubric_submit_review(
+    rubric_id: str = typer.Argument(...),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """显式提交评分标准进入发布审核。"""
+
+    _bootstrap(db, storage)
+    from backend.app.services.rubrics import lifecycle
+
+    with clidb.cli_session() as session:
+        rubric = _cli_resolve_rubric(session, rubric_id)
+        try:
+            lifecycle.submit_for_review(session, rubric.id)
+            session.commit()
+        except lifecycle.RubricLifecycleError as exc:
+            session.rollback()
+            render.error(str(exc))
+            raise typer.Exit(2)
+    render.info("✓ 评分标准已提交审核")
+
+
+@app.command("rubric-return-draft")
+def rubric_return_draft(
+    rubric_id: str = typer.Argument(...),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """显式把审核中的评分标准退回草稿。"""
+
+    _bootstrap(db, storage)
+    from backend.app.services.rubrics import lifecycle
+
+    with clidb.cli_session() as session:
+        rubric = _cli_resolve_rubric(session, rubric_id)
+        try:
+            lifecycle.return_to_draft(session, rubric.id)
+            session.commit()
+        except lifecycle.RubricLifecycleError as exc:
+            session.rollback()
+            render.error(str(exc))
+            raise typer.Exit(2)
+    render.info("✓ 评分标准已退回 draft")
+
+
+@app.command("rubric-upgrade")
+def rubric_upgrade(
+    rubric_id: str = typer.Argument(...),
+    reason: str = typer.Option(..., "--reason"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """显式把无 provenance 的旧草稿升级为可审核 M4 图。"""
+
+    _bootstrap(db, storage)
+    from backend.app.services.dev_user import ensure_dev_user
+    from backend.app.services.rubrics import lifecycle
+
+    with clidb.cli_session() as session:
+        ensure_dev_user(session)
+        rubric = _cli_resolve_rubric(session, rubric_id)
+        try:
+            lifecycle.upgrade_legacy_draft(
+                session,
+                rubric.id,
+                settings.DEFAULT_DEV_USER_ID,
+                reason=reason,
+            )
+            session.commit()
+        except lifecycle.RubricLifecycleError as exc:
+            session.rollback()
+            render.error(str(exc))
+            raise typer.Exit(2)
+    render.info("✓ 旧草稿已升级为 M4 provenance 图")
+
+
+def _run_rule_lifecycle_cli(
+    *,
+    rubric_id: str,
+    target_id: str,
+    service_name: str,
+    reason: str,
+    db: Optional[Path],
+    storage: Optional[Path],
+    changes: dict | None = None,
+    decision: str | None = None,
+):
+    _bootstrap(db, storage)
+    from backend.app.services.dev_user import ensure_dev_user
+    from backend.app.services.rubrics import lifecycle as rubric_lifecycle
+
+    with clidb.cli_session() as session:
+        ensure_dev_user(session)
+        service = getattr(rubric_lifecycle, service_name)
+        try:
+            if service_name == "edit_atomic_rule":
+                service(
+                    session,
+                    rubric_id,
+                    target_id,
+                    changes,
+                    settings.DEFAULT_DEV_USER_ID,
+                    reason,
+                )
+            elif service_name == "review_template_link":
+                service(
+                    session,
+                    rubric_id,
+                    target_id,
+                    settings.DEFAULT_DEV_USER_ID,
+                    decision,
+                    reason,
+                )
+            else:
+                service(
+                    session,
+                    rubric_id,
+                    target_id,
+                    settings.DEFAULT_DEV_USER_ID,
+                    reason,
+                )
+            session.commit()
+        except rubric_lifecycle.RubricLifecycleError as exc:
+            session.rollback()
+            render.error(str(exc))
+            raise typer.Exit(2)
+
+
+@app.command("rule-submit")
+def rule_submit(
+    rubric_id: str = typer.Argument(...),
+    rule_code: str = typer.Argument(...),
+    reason: str = typer.Option(..., "--reason"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """提交一个 draft 原子规则进入人工审核。"""
+    _run_rule_lifecycle_cli(
+        rubric_id=rubric_id,
+        target_id=rule_code,
+        service_name="submit_atomic_rule_for_review",
+        reason=reason,
+        db=db,
+        storage=storage,
+    )
+
+
+@app.command("rule-edit")
+def rule_edit(
+    rubric_id: str = typer.Argument(...),
+    rule_code: str = typer.Argument(...),
+    changes_json: str = typer.Option(..., "--changes-json"),
+    reason: str = typer.Option(..., "--reason"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """按 allowlist 编辑一个 draft 原子规则。"""
+    try:
+        changes = json.loads(changes_json)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter("--changes-json 必须是 JSON 对象") from exc
+    if not isinstance(changes, dict):
+        raise typer.BadParameter("--changes-json 必须是 JSON 对象")
+    _run_rule_lifecycle_cli(
+        rubric_id=rubric_id,
+        target_id=rule_code,
+        service_name="edit_atomic_rule",
+        reason=reason,
+        changes=changes,
+        db=db,
+        storage=storage,
+    )
+
+
+@app.command("rule-approve")
+def rule_approve(
+    rubric_id: str = typer.Argument(...),
+    rule_code: str = typer.Argument(...),
+    reason: str = typer.Option(..., "--reason"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """批准一个 review 原子规则。"""
+    _run_rule_lifecycle_cli(
+        rubric_id=rubric_id,
+        target_id=rule_code,
+        service_name="approve_atomic_rule",
+        reason=reason,
+        db=db,
+        storage=storage,
+    )
+
+
+@app.command("rule-reject")
+def rule_reject(
+    rubric_id: str = typer.Argument(...),
+    rule_code: str = typer.Argument(...),
+    reason: str = typer.Option(..., "--reason"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """驳回一个 review 原子规则。"""
+    _run_rule_lifecycle_cli(
+        rubric_id=rubric_id,
+        target_id=rule_code,
+        service_name="reject_atomic_rule",
+        reason=reason,
+        db=db,
+        storage=storage,
+    )
+
+
+@app.command("rule-reopen")
+def rule_reopen(
+    rubric_id: str = typer.Argument(...),
+    rule_code: str = typer.Argument(...),
+    reason: str = typer.Option(..., "--reason"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """保留驳回审计并把 rejected 原子规则重新打开为 draft。"""
+    _run_rule_lifecycle_cli(
+        rubric_id=rubric_id,
+        target_id=rule_code,
+        service_name="reopen_atomic_rule",
+        reason=reason,
+        db=db,
+        storage=storage,
+    )
+
+
+@app.command("template-link-review")
+def template_link_review(
+    rubric_id: str = typer.Argument(...),
+    link_id: str = typer.Argument(...),
+    decision: str = typer.Option(..., "--decision"),
+    reason: str = typer.Option(..., "--reason"),
+    db: Optional[Path] = _DB_OPT,
+    storage: Optional[Path] = _STORAGE_OPT,
+):
+    """确认或驳回一个规则到模板条目的映射。"""
+    _run_rule_lifecycle_cli(
+        rubric_id=rubric_id,
+        target_id=link_id,
+        service_name="review_template_link",
+        reason=reason,
+        decision=decision,
+        db=db,
+        storage=storage,
+    )
 
 
 @app.command()

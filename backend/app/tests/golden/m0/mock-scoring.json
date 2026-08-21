@@ -1,0 +1,370 @@
+{
+  "items": [
+    {
+      "ai_score": 15.0,
+      "band_selection": null,
+      "confidence": 1.0,
+      "created_at": "<TIMESTAMP>",
+      "criterion_code": "DET-REF",
+      "criterion_id": "<UUID>",
+      "criterion_name": "参考文献规范",
+      "deduction_items": [],
+      "deductions": [],
+      "evidence": [
+        {
+          "chunk_id": null,
+          "location": "参考文献",
+          "quote": "文中编号引用 1 处，参考文献 1 条"
+        }
+      ],
+      "evidence_sufficient": true,
+      "final_score": 15.0,
+      "id": "<UUID>",
+      "max_score": 15.0,
+      "need_manual_review": false,
+      "reason": "参考文献规范：编号制引文-参考文献双向核对，发现 0 处问题。",
+      "scoring_run_id": "<UUID>",
+      "sub_results": null,
+      "suggestion": ""
+    },
+    {
+      "ai_score": 16.8,
+      "band_selection": null,
+      "confidence": 0.79,
+      "created_at": "<TIMESTAMP>",
+      "criterion_code": "DED-METHOD",
+      "criterion_id": "<UUID>",
+      "criterion_name": "研究方法",
+      "deduction_items": [
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": 3.2,
+          "reason": "相关论述篇幅较短，支撑材料有限。",
+          "rule_ref": "DED-METHOD"
+        }
+      ],
+      "deductions": [
+        "相关论述篇幅较短，支撑材料有限。（-3.2分）"
+      ],
+      "evidence": [
+        {
+          "chunk_id": "<UUID>",
+          "location": "第三章 研究方法，第1页",
+          "quote": "本文采用问卷调查、数据清洗、回归分析和分类模型对教学质量进行建模。"
+        },
+        {
+          "chunk_id": "<UUID>",
+          "location": "中文摘要，第1页",
+          "quote": "本文围绕教学质量评价问题展开研究，说明研究背景、研究意义和应用价值。 关键词：教学质量；机器学习；评价模型"
+        },
+        {
+          "chunk_id": "<UUID>",
+          "location": "未命名开头，第1页",
+          "quote": "基于机器学习的教学质量评价研究 姓名：张三 学号：20260001"
+        }
+      ],
+      "evidence_sufficient": true,
+      "final_score": 16.8,
+      "id": "<UUID>",
+      "max_score": 20.0,
+      "need_manual_review": false,
+      "reason": "研究方法 按扣分制核算：满分 20.00，扣分合计 3.20，得 16.80/20.00。",
+      "scoring_run_id": "<UUID>",
+      "sub_results": null,
+      "suggestion": "建议围绕研究方法补充更明确的论证、数据或引用依据。"
+    },
+    {
+      "ai_score": 15.0,
+      "band_selection": {
+        "awarded": 15.0,
+        "evidence_location": "第五章 创新点，第1页",
+        "evidence_quote": "本文提出改进的指标加权方法，并增强评价结果解释能力。",
+        "level": "良好",
+        "rationale": "创新性评分基于召回证据完成，得分 16.80/20.00。",
+        "rule_ref": "BAND-INNOVATION"
+      },
+      "confidence": 0.79,
+      "created_at": "<TIMESTAMP>",
+      "criterion_code": "BAND-INNOVATION",
+      "criterion_id": "<UUID>",
+      "criterion_name": "创新性",
+      "deduction_items": [
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "相关论述篇幅较短，支撑材料有限。",
+          "rule_ref": null
+        }
+      ],
+      "deductions": [
+        "相关论述篇幅较短，支撑材料有限。"
+      ],
+      "evidence": [
+        {
+          "chunk_id": "<UUID>",
+          "location": "第五章 创新点，第1页",
+          "quote": "本文提出改进的指标加权方法，并增强评价结果解释能力。"
+        },
+        {
+          "chunk_id": "<UUID>",
+          "location": "中文摘要，第1页",
+          "quote": "本文围绕教学质量评价问题展开研究，说明研究背景、研究意义和应用价值。 关键词：教学质量；机器学习；评价模型"
+        },
+        {
+          "chunk_id": "<UUID>",
+          "location": "未命名开头，第1页",
+          "quote": "基于机器学习的教学质量评价研究 姓名：张三 学号：20260001"
+        }
+      ],
+      "evidence_sufficient": true,
+      "final_score": 15.0,
+      "id": "<UUID>",
+      "max_score": 20.0,
+      "need_manual_review": false,
+      "reason": "创新性 按分档制核算：选档「良好」=15.00/20.00。",
+      "scoring_run_id": "<UUID>",
+      "sub_results": null,
+      "suggestion": "建议围绕创新性补充更明确的论证、数据或引用依据。"
+    },
+    {
+      "ai_score": 9.45,
+      "band_selection": null,
+      "confidence": 0.553,
+      "created_at": "<TIMESTAMP>",
+      "criterion_code": "HYB-COMPLIANCE",
+      "criterion_id": "<UUID>",
+      "criterion_name": "研究规范综合检查",
+      "deduction_items": [
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": 7.02,
+          "reason": "正文约 367 字，低于下限 3000",
+          "rule_ref": "WORD_COUNT_MIN"
+        },
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "当前评分项可用原文证据不足。",
+          "rule_ref": null
+        },
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "相关论述篇幅较短，支撑材料有限。",
+          "rule_ref": null
+        },
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "证据中对研究方法、数据来源或实验设计的描述不充分。",
+          "rule_ref": null
+        }
+      ],
+      "deductions": [
+        "正文约 367 字，低于下限 3000（-7.02分）",
+        "当前评分项可用原文证据不足。",
+        "相关论述篇幅较短，支撑材料有限。",
+        "证据中对研究方法、数据来源或实验设计的描述不充分。"
+      ],
+      "evidence": [
+        {
+          "chunk_id": null,
+          "location": "全文",
+          "quote": "正文约 367 字"
+        },
+        {
+          "chunk_id": "<UUID>",
+          "location": "第三章 研究方法，第1页",
+          "quote": "本文采用问卷调查、数据清洗、回归分析和分类模型对教学质量进行建模。"
+        },
+        {
+          "chunk_id": "<UUID>",
+          "location": "中文摘要，第1页",
+          "quote": "本文围绕教学质量评价问题展开研究，说明研究背景、研究意义和应用价值。 关键词：教学质量；机器学习；评价模型"
+        },
+        {
+          "chunk_id": "<UUID>",
+          "location": "未命名开头，第1页",
+          "quote": "基于机器学习的教学质量评价研究 姓名：张三 学号：20260001"
+        }
+      ],
+      "evidence_sufficient": true,
+      "final_score": 9.45,
+      "id": "<UUID>",
+      "max_score": 20.0,
+      "need_manual_review": true,
+      "reason": "研究规范综合检查 按混合制核算：2 个子检查合计 9.45/20.00。",
+      "scoring_run_id": "<UUID>",
+      "sub_results": [
+        {
+          "checker_kind": "word_count",
+          "confidence": 1.0,
+          "criterion_id": "<UUID>::sub1",
+          "criterion_name": "正文字数",
+          "deduction_items": [
+            {
+              "evidence_location": "",
+              "evidence_quote": "",
+              "points": 7.02,
+              "reason": "正文约 367 字，低于下限 3000",
+              "rule_ref": "WORD_COUNT_MIN"
+            }
+          ],
+          "deductions": [
+            "正文约 367 字，低于下限 3000（-7.02分）"
+          ],
+          "evidence": [
+            {
+              "chunk_id": null,
+              "location": "全文",
+              "quote": "正文约 367 字"
+            }
+          ],
+          "evidence_sufficient": true,
+          "max_score": 8.0,
+          "need_manual_review": false,
+          "reason": "正文字数：正文约 367 字，低于下限 3000，按比例扣分。",
+          "score": 0.98,
+          "scoring_mode": "deterministic",
+          "suggestion": "",
+          "usage": {
+            "completion_tokens": 0,
+            "prompt_tokens": 0,
+            "total_tokens": 0
+          }
+        },
+        {
+          "cache_hits": 0,
+          "cache_keys": [],
+          "chunk_evaluation_mode": "per-evidence-chunk",
+          "chunk_scores": [
+            {
+              "chunk_id": "<UUID>",
+              "confidence": 0.45,
+              "evidence_sufficient": false,
+              "location": "第三章 研究方法，第1页",
+              "max_score": 12.0,
+              "score": 6.84
+            },
+            {
+              "chunk_id": "<UUID>",
+              "confidence": 0.79,
+              "evidence_sufficient": true,
+              "location": "中文摘要，第1页",
+              "max_score": 12.0,
+              "score": 10.08
+            },
+            {
+              "chunk_id": "<UUID>",
+              "confidence": 0.42,
+              "evidence_sufficient": false,
+              "location": "未命名开头，第1页",
+              "max_score": 12.0,
+              "score": 5.16
+            }
+          ],
+          "confidence": 0.553,
+          "criterion_id": "<UUID>::sub2",
+          "criterion_name": "研究方法论证",
+          "deduction_items": [
+            {
+              "evidence_location": "",
+              "evidence_quote": "",
+              "points": null,
+              "reason": "当前评分项可用原文证据不足。",
+              "rule_ref": null
+            },
+            {
+              "evidence_location": "",
+              "evidence_quote": "",
+              "points": null,
+              "reason": "相关论述篇幅较短，支撑材料有限。",
+              "rule_ref": null
+            },
+            {
+              "evidence_location": "",
+              "evidence_quote": "",
+              "points": null,
+              "reason": "证据中对研究方法、数据来源或实验设计的描述不充分。",
+              "rule_ref": null
+            }
+          ],
+          "deductions": [
+            "当前评分项可用原文证据不足。",
+            "相关论述篇幅较短，支撑材料有限。",
+            "证据中对研究方法、数据来源或实验设计的描述不充分。"
+          ],
+          "evidence": [
+            {
+              "chunk_id": "<UUID>",
+              "location": "第三章 研究方法，第1页",
+              "quote": "本文采用问卷调查、数据清洗、回归分析和分类模型对教学质量进行建模。"
+            },
+            {
+              "chunk_id": "<UUID>",
+              "location": "中文摘要，第1页",
+              "quote": "本文围绕教学质量评价问题展开研究，说明研究背景、研究意义和应用价值。 关键词：教学质量；机器学习；评价模型"
+            },
+            {
+              "chunk_id": "<UUID>",
+              "location": "未命名开头，第1页",
+              "quote": "基于机器学习的教学质量评价研究 姓名：张三 学号：20260001"
+            }
+          ],
+          "evidence_gate_applied": true,
+          "evidence_sufficient": true,
+          "max_score": 12.0,
+          "need_manual_review": true,
+          "reason": "研究方法论证采用分块证据评分并加权汇总，汇总得分 8.47/12.00。分块结果：第三章 研究方法，第1页 6.84/12.00；中文摘要，第1页 10.08/12.00；未命名开头，第1页 5.16/12.00。",
+          "score": 8.47,
+          "score_before_gate": 8.47,
+          "suggestion": "已按分块证据评分汇总；建议人工重点查看低分块、证据不足块和被封顶的评分项。",
+          "usage": {
+            "completion_tokens": 0,
+            "prompt_tokens": 0,
+            "total_tokens": 0
+          }
+        }
+      ],
+      "suggestion": "混合制：确定性子项由规则核验，语义子项由模型评分。"
+    }
+  ],
+  "run": {
+    "ai_total_score": 56.25,
+    "coherence_findings": [
+      {
+        "kind": "reference_uncited",
+        "location": null,
+        "message": "参考文献[1]未被正文引用",
+        "refs": [
+          1
+        ],
+        "severity": "info"
+      }
+    ],
+    "completion_tokens": 0,
+    "created_at": "<TIMESTAMP>",
+    "final_total_score": 56.25,
+    "finished_at": "<TIMESTAMP>",
+    "format_findings": [],
+    "grade": "不及格",
+    "id": "<UUID>",
+    "model_name": "mock-criterion-scorer",
+    "model_provider": "mock",
+    "model_version": "v1",
+    "need_manual_review": true,
+    "owner_id": "00000000-0000-0000-0000-000000000001",
+    "paper_id": "<UUID>",
+    "prompt_tokens": 0,
+    "rubric_id": "<UUID>",
+    "started_at": "<TIMESTAMP>",
+    "status": "scored",
+    "total_tokens": 0
+  }
+}

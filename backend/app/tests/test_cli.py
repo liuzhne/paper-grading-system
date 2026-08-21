@@ -5,14 +5,22 @@
 """
 
 import json
+from contextlib import contextmanager
 
 import pytest
+from openpyxl import Workbook
+from sqlalchemy import select
 from typer.testing import CliRunner
 
+from backend.app.cli import db as cli_db
+from backend.app.cli import main as cli_main
 from backend.app.cli.main import app
 from backend.app.core.config import settings
+from backend.app.db import models
 from backend.app.tests.conftest import make_rules_xlsx
 from backend.app.tests.conftest import make_sample_docx
+from backend.app.tests.m4_import_contract_fixtures import real_rules_xlsx_bytes
+from backend.app.tests.m4_import_contract_fixtures import real_template_docx_bytes
 
 runner = CliRunner()
 
@@ -86,6 +94,100 @@ def test_import_rubric_from_excel(tmp_path, local):
     assert "CLI导入标准" in listing.output
 
 
+def test_import_uses_m4_two_phase_pipeline_and_keeps_review_state_empty(
+    tmp_path, local, monkeypatch
+):
+    from backend.app.services.rubric_import import pipeline as rubric_pipeline
+    from backend.app.services.rubrics import lifecycle
+
+    rules = tmp_path / "m4-rules.xlsx"
+    template = tmp_path / "m4-template.docx"
+    rules.write_bytes(real_rules_xlsx_bytes())
+    template.write_bytes(real_template_docx_bytes())
+
+    open_sessions = 0
+    prepare_calls = []
+    original_session = cli_db.cli_session
+    original_prepare = rubric_pipeline.prepare_file_import
+
+    @contextmanager
+    def tracked_session(*args, **kwargs):
+        nonlocal open_sessions
+        open_sessions += 1
+        try:
+            with original_session(*args, **kwargs) as session:
+                yield session
+        finally:
+            open_sessions -= 1
+
+    def tracked_prepare(*args, **kwargs):
+        # The expensive parser/compiler phase must not hold a DB transaction.
+        assert open_sessions == 0
+        prepare_calls.append(kwargs["command"])
+        return original_prepare(*args, **kwargs)
+
+    def forbidden_signoff(*_args, **_kwargs):
+        raise AssertionError("CLI import must not forge review or publication")
+
+    monkeypatch.setattr(cli_main.clidb, "cli_session", tracked_session)
+    monkeypatch.setattr(rubric_pipeline, "prepare_file_import", tracked_prepare)
+    monkeypatch.setattr(lifecycle, "approve_atomic_rule", forbidden_signoff)
+    monkeypatch.setattr(lifecycle, "publish_rubric", forbidden_signoff)
+
+    result = runner.invoke(
+        app,
+        [
+            "import",
+            str(rules),
+            "--template",
+            str(template),
+            "--name",
+            "M4 CLI provenance",
+            "--version",
+            "v1.0",
+            *local,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0]["schema_version"] == rubric_pipeline.IMPORT_SCHEMA_VERSION
+
+    with original_session() as session:
+        rubric = session.scalar(
+            select(models.Rubric).where(models.Rubric.name == "M4 CLI provenance")
+        )
+        compilation = session.scalar(
+            select(models.RubricCompilation).where(
+                models.RubricCompilation.rubric_id == rubric.id
+            )
+        )
+        version = session.scalar(
+            select(models.RubricVersion).where(
+                models.RubricVersion.rubric_id == rubric.id
+            )
+        )
+        atomic_rules = session.scalars(
+            select(models.AtomicRule).where(
+                models.AtomicRule.rubric_version_id == version.id
+            )
+        ).all()
+        artifacts = session.scalars(
+            select(models.SourceArtifact).where(
+                models.SourceArtifact.compilation_id == compilation.id
+            )
+        ).all()
+
+        assert rubric.status == "draft"
+        assert compilation.human_changes == []
+        assert compilation.reviewed_by is None
+        assert compilation.reviewed_at is None
+        assert compilation.published_at is None
+        assert atomic_rules
+        assert all(rule.status == "draft" for rule in atomic_rules)
+        assert all(rule.reviewed_by is None for rule in atomic_rules)
+        assert {artifact.artifact_type for artifact in artifacts} == {"excel", "word"}
+
+
 def test_runs_and_show_after_score(tmp_path, local):
     runner.invoke(app, ["init", "--seed", *local])
     docx = tmp_path / "t.docx"
@@ -115,14 +217,230 @@ def test_batches_lists_after_score(tmp_path, local):
     assert json.loads(result.output)  # 非空
 
 
-def test_publish_draft_rubric(tmp_path, local):
+def test_publish_rejects_unreviewed_import(tmp_path, local):
     rules = tmp_path / "rules.xlsx"
     rules.write_bytes(make_rules_xlsx().getvalue())
     assert runner.invoke(app, ["import", str(rules), "--name", "待发布标准", *local]).exit_code == 0
     rid = next(r["id"] for r in json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output) if r["name"] == "待发布标准")
-    assert runner.invoke(app, ["publish", rid, *local]).exit_code == 0
+    assert runner.invoke(app, ["publish", rid, *local]).exit_code == 2
     after = json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output)
-    assert next(r["status"] for r in after if r["id"] == rid) == "published"
+    assert next(r["status"] for r in after if r["id"] == rid) == "draft"
+
+
+def test_cli_graph_discovery_and_explicit_m4_publish_chain(tmp_path, local):
+    rules = tmp_path / "strict-rules.xlsx"
+    template = tmp_path / "strict-template.docx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        [
+            "原子规则编号",
+            "评分项编号",
+            "评分项",
+            "分值",
+            "类型",
+            "评分模式",
+            "评分说明",
+            "适用范围",
+            "分档",
+            "evidence_policy",
+            "effect_type",
+            "strictness",
+        ]
+    )
+    sheet.append(
+        [
+            "thesis.risk_fit.v1",
+            "RISK_FIT",
+            "风险方案质量",
+            10,
+            "semantic",
+            "banded",
+            "风险控制方案应与论文需求一致。",
+            "风险控制",
+            "HIGH:10;LOW:5",
+            json.dumps(
+                {
+                    "mode": "source_quote",
+                    "requirement": "required",
+                    "minimum_coverage": "1",
+                }
+            ),
+            "score",
+            "required",
+        ]
+    )
+    workbook.save(rules)
+    template.write_bytes(real_template_docx_bytes())
+    imported = runner.invoke(
+        app,
+        [
+            "import",
+            str(rules),
+            "--template",
+            str(template),
+            "--name",
+            "CLI strict lifecycle",
+            *local,
+        ],
+    )
+    assert imported.exit_code == 0, imported.output
+    rubrics = json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output)
+    rubric_id = next(item["id"] for item in rubrics if item["name"] == "CLI strict lifecycle")
+
+    graph_result = runner.invoke(app, ["rubric-graph", rubric_id, "--json", *local])
+    assert graph_result.exit_code == 0, graph_result.output
+    graph = json.loads(graph_result.output)
+    active = graph["active_compilation"]
+    assert active["id"]
+    assert active["rules"]
+    assert "raw_model_output" not in graph_result.output
+    assert "rule_text" not in graph_result.output
+
+    for rule in active["rules"]:
+        submitted = runner.invoke(
+            app,
+            [
+                "rule-submit",
+                rubric_id,
+                rule["rule_code"],
+                "--reason",
+                "CLI 提交",
+                *local,
+            ],
+        )
+        assert submitted.exit_code == 0, submitted.output
+        approved = runner.invoke(
+            app,
+            [
+                "rule-approve",
+                rubric_id,
+                rule["rule_code"],
+                "--reason",
+                "CLI 批准",
+                *local,
+            ],
+        )
+        assert approved.exit_code == 0, approved.output
+    for link in active["template_links"]:
+        reviewed = runner.invoke(
+            app,
+            [
+                "template-link-review",
+                rubric_id,
+                link["id"],
+                "--decision",
+                "confirmed",
+                "--reason",
+                "CLI 确认映射",
+                *local,
+            ],
+        )
+        assert reviewed.exit_code == 0, reviewed.output
+
+    submitted_rubric = runner.invoke(
+        app, ["rubric-submit-review", rubric_id, *local]
+    )
+    assert submitted_rubric.exit_code == 0, submitted_rubric.output
+    published = runner.invoke(
+        app,
+        [
+            "publish",
+            rubric_id,
+            "--compilation-id",
+            active["id"],
+            *local,
+        ],
+    )
+    assert published.exit_code == 0, published.output
+    after = json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output)
+    assert next(item["status"] for item in after if item["id"] == rubric_id) == "published"
+
+
+def test_cli_rubric_return_draft_and_explicit_legacy_upgrade(tmp_path, local):
+    rules = tmp_path / "return-rules.xlsx"
+    rules.write_bytes(make_rules_xlsx().getvalue())
+    imported = runner.invoke(
+        app,
+        ["import", str(rules), "--name", "CLI return lifecycle", *local],
+    )
+    assert imported.exit_code == 0, imported.output
+    rubrics = json.loads(runner.invoke(app, ["rubrics", "--json", *local]).output)
+    rubric_id = next(item["id"] for item in rubrics if item["name"] == "CLI return lifecycle")
+    assert runner.invoke(app, ["rubric-submit-review", rubric_id, *local]).exit_code == 0
+    returned = runner.invoke(app, ["rubric-return-draft", rubric_id, *local])
+    assert returned.exit_code == 0, returned.output
+
+    with cli_db.cli_session() as session:
+        from backend.app.services.dev_user import ensure_dev_user
+
+        actor = ensure_dev_user(session)
+        legacy = models.Rubric(
+            name="CLI legacy upgrade",
+            version="legacy-v1",
+            total_score=10,
+            status="draft",
+            created_by=actor.id,
+            owner_id=actor.id,
+        )
+        legacy.criteria.append(
+            models.RubricCriterion(
+                code="LEGACY",
+                name="Legacy direct",
+                max_score=10,
+                criterion_type="llm_judgment",
+                scoring_mode="llm_direct",
+                applies_to="global",
+                display_order=0,
+            )
+        )
+        session.add(legacy)
+        session.commit()
+        legacy_id = legacy.id
+
+    upgraded = runner.invoke(
+        app,
+        [
+            "rubric-upgrade",
+            legacy_id,
+            "--reason",
+            "CLI 显式升级",
+            *local,
+        ],
+    )
+    assert upgraded.exit_code == 0, upgraded.output
+    graph = runner.invoke(app, ["rubric-graph", legacy_id, "--json", *local])
+    assert graph.exit_code == 0, graph.output
+    data = json.loads(graph.output)
+    assert data["active_compilation"]["id"]
+    assert data["active_compilation"]["blockers"]
+
+
+def test_database_score_refuses_implicit_unreviewed_file_import(tmp_path, local):
+    rules = tmp_path / "rules.xlsx"
+    rules.write_bytes(make_rules_xlsx().getvalue())
+    docx = tmp_path / "thesis.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+
+    result = runner.invoke(
+        app,
+        ["score", str(docx), "--rubric-file", str(rules), "--mock", *local],
+    )
+
+    assert result.exit_code != 0
+    assert "不再隐式导入未审核规则" in result.output
+
+    imported = runner.invoke(
+        app,
+        ["import", str(rules), "--name", "未审核 CLI 标准", *local],
+    )
+    assert imported.exit_code == 0, imported.output
+    selected_draft = runner.invoke(
+        app,
+        ["score", str(docx), "--rubric", "未审核 CLI 标准", "--mock", *local],
+    )
+    assert selected_draft.exit_code != 0
+    assert "尚未发布" in selected_draft.output
 
 
 def test_score_multiple_with_workers(tmp_path, local):
@@ -158,6 +476,263 @@ def test_score_no_db_is_stateless(tmp_path):
     assert data["results"][0]["status"] == "ok"
     assert data["results"][0]["items"]  # 含逐项明细
     assert not ghost_db.exists()  # 关键：无状态不建任何 sqlite
+
+
+def test_score_no_db_explicit_thesis_uses_core_profile_contract(tmp_path):
+    rules = tmp_path / "profile-rules.xlsx"
+    rules.write_bytes(make_rules_xlsx().getvalue())
+    docx = tmp_path / "profile-thesis.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+
+    result = runner.invoke(
+        app,
+        [
+            "score",
+            str(docx),
+            "--no-db",
+            "--rubric-file",
+            str(rules),
+            "--profile",
+            "thesis",
+            "--mock",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["stateless"] is True
+    assert data["contract"] == "scoring-core@1"
+    assert data["profile"]["key"] == "thesis"
+    assert data["profile"]["version"]
+    identity = data["results"][0]["identity"]
+    assert identity["profile_key"] == "thesis"
+    assert identity["policy_hash"]
+    assert identity["plan_hash"]
+    assert identity["document_snapshot_hash"]
+
+
+def test_score_explicit_profile_dispatches_v2_with_exact_cli_inputs(
+    tmp_path,
+    monkeypatch,
+):
+    docx = tmp_path / "proposal.docx"
+    docx.write_bytes(make_sample_docx().getvalue())
+    calls = []
+
+    def fake_profile_score(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        cli_main,
+        "_score_profiled",
+        fake_profile_score,
+        raising=False,
+    )
+    result = runner.invoke(
+        app,
+        [
+            "score",
+            str(docx),
+            "--rubric",
+            "proposal-rubric",
+            "--profile",
+            "technical_proposal",
+            "--profile-version",
+            "technical-proposal-test-profile@1",
+            "--metadata-json",
+            '{"project_name":"CLI project"}',
+            "--mock",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["files"] == [docx]
+    assert calls[0]["profile_key"] == "technical_proposal"
+    assert calls[0]["profile_version"] == "technical-proposal-test-profile@1"
+    assert calls[0]["metadata"] == {"project_name": "CLI project"}
+
+
+def test_cli_runs_registered_technical_profile_through_v2_core(
+    tmp_path,
+    local,
+):
+    from types import SimpleNamespace
+    from pathlib import Path
+
+    from sqlalchemy import update
+
+    from backend.app.services.scoring.profiles.registry import (
+        temporary_profile_registration,
+    )
+    from backend.app.tests.m2_contract_fixtures import PROFILE_KEY
+    from backend.app.tests.m2_contract_fixtures import PROFILE_VERSION
+    from backend.app.tests.test_m6_v2_submissions_api import (
+        _ApiTechnicalProposalProfile,
+    )
+    from backend.app.tests.test_m6_v2_submissions_api import _proposal_docx
+    from backend.app.tests.test_m6_v2_submissions_api import (
+        _published_technical_version,
+    )
+
+    cli_main._bootstrap(Path(local[1]), Path(local[3]))
+    fake_client = SimpleNamespace(session_factory=cli_db.cli_session)
+    rubric_id, version_id = _published_technical_version(
+        fake_client,
+        "cli-profile",
+    )
+    proposal = tmp_path / "technical-proposal.docx"
+    proposal.write_bytes(_proposal_docx())
+
+    with temporary_profile_registration(_ApiTechnicalProposalProfile()):
+        result = runner.invoke(
+            app,
+            [
+                "score",
+                str(proposal),
+                "--rubric",
+                rubric_id,
+                "--profile",
+                PROFILE_KEY,
+                "--profile-version",
+                PROFILE_VERSION,
+                "--metadata-json",
+                '{"project_name":"CLI technical fixture"}',
+                "--mock",
+                "--json",
+                *local,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        run_id = payload["results"][0]["run_id"]
+        exported = runner.invoke(
+            app,
+            ["report", run_id, "--format", "json", *local],
+        )
+
+    assert exported.exit_code == 0, exported.output
+    assert json.loads(exported.output)["schema"] == "grading-core/run-export@2"
+    assert payload["rubric_version_id"] == version_id
+    assert payload["profile"] == {
+        "key": PROFILE_KEY,
+        "version": PROFILE_VERSION,
+    }
+    scored = payload["results"][0]
+    assert scored["status"] == "ok"
+    assert scored["submission_id"]
+    assert scored["identity"]["business_profile_key"] == PROFILE_KEY
+    assert scored["identity"]["policy_hash"]
+    assert scored["identity"]["execution_plan_hash"]
+    assert scored["identity"]["document_snapshot_hash"]
+    assert scored["identity"]["runtime_identity"]
+
+
+def test_cli_eval_pins_unique_version_and_reports_policy_identity(
+    tmp_path,
+    local,
+    monkeypatch,
+):
+    from datetime import timedelta
+    from pathlib import Path
+
+    from sqlalchemy import update
+
+    from backend.app.eval import labeled_dataset
+    from backend.app.services.rubrics import lifecycle as rubric_lifecycle
+    from backend.app.services.scoring.core.policy import (
+        build_corrected_thesis_policy,
+    )
+    from backend.app.tests.test_atomic_rule_models import _make_p1_graph
+
+    cli_main._bootstrap(Path(local[1]), Path(local[3]))
+    with cli_db.cli_session() as session:
+        graph = _make_p1_graph(session, "cli-eval")
+        now = graph.compilation.created_at + timedelta(hours=1)
+        session.execute(
+            update(models.RubricVersion)
+            .where(models.RubricVersion.id == graph.version.id)
+            .values(
+                business_profile_key="thesis",
+                global_policy=build_corrected_thesis_policy(
+                    100,
+                    "points",
+                ).to_mapping(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        session.commit()
+        rubric_lifecycle.submit_for_review(session, graph.rubric.id)
+        session.commit()
+        rubric_lifecycle.publish_rubric(
+            session,
+            graph.rubric.id,
+            graph.compilation.id,
+            graph.user.id,
+            now=now,
+        )
+        session.commit()
+        rubric_id = graph.rubric.id
+        version_id = graph.version.id
+
+    calls = []
+
+    def fake_build(_db, selected_rubric_id, _papers, _scores, **kwargs):
+        calls.append((selected_rubric_id, kwargs))
+        return {
+            "qwk": 1.0,
+            "mae": 0.0,
+            "rmse": 0.0,
+            "exact_grade_agreement": 1.0,
+            "adjacent_grade_agreement": 1.0,
+            "n": 1,
+            "dataset_size": 1,
+            "errors": [],
+            "per_criterion": {},
+            "evaluation_identity": {
+                "business_profile_key": "thesis",
+                "business_profile_version": "thesis-legacy-profile@1",
+                "policy_hash": "a" * 64,
+                "grade_scale_sha256": "b" * 64,
+                "rounding": {"mode": "half_up", "digits": 2},
+            },
+        }
+
+    monkeypatch.setattr(labeled_dataset, "build_labeled_eval", fake_build)
+    monkeypatch.setattr(
+        "backend.app.eval.run_eval._write_report",
+        lambda _report: tmp_path / "eval-report.json",
+    )
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    scores = tmp_path / "scores.xlsx"
+    scores.write_bytes(b"fixture")
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--rubric",
+            rubric_id,
+            "--papers-dir",
+            str(papers),
+            "--scores",
+            str(scores),
+            "--profile",
+            "thesis",
+            *local,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [(rubric_id, {"rubric_version_id": version_id})]
+    assert "thesis-legacy-profile@1" in result.output
+    unfolded = result.output.replace(" │\n│                 │ ", "")
+    assert "a" * 64 in unfolded
+    assert "b" * 64 in unfolded
 
 
 def test_score_no_db_requires_rubric_file(tmp_path):

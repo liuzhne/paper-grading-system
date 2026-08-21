@@ -1,0 +1,255 @@
+{
+  "items": [
+    {
+      "ai_score": 15.0,
+      "band_selection": null,
+      "criterion_code": "DET-REF",
+      "criterion_name": "参考文献规范",
+      "deduction_items": [],
+      "evidence_count": 1,
+      "evidence_sufficient": true,
+      "final_score": 15.0,
+      "max_score": 15.0,
+      "need_manual_review": false,
+      "sub_results": []
+    },
+    {
+      "ai_score": 16.8,
+      "band_selection": null,
+      "criterion_code": "DED-METHOD",
+      "criterion_name": "研究方法",
+      "deduction_items": [
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": 3.2,
+          "reason": "相关论述篇幅较短，支撑材料有限。",
+          "rule_ref": "DED-METHOD"
+        }
+      ],
+      "evidence_count": 3,
+      "evidence_sufficient": true,
+      "final_score": 16.8,
+      "max_score": 20.0,
+      "need_manual_review": false,
+      "sub_results": []
+    },
+    {
+      "ai_score": 15.0,
+      "band_selection": {
+        "awarded": 15.0,
+        "evidence_location": "第五章 创新点，第1页",
+        "evidence_quote": "本文提出改进的指标加权方法，并增强评价结果解释能力。",
+        "level": "良好",
+        "rationale": "创新性评分基于召回证据完成，得分 16.80/20.00。",
+        "rule_ref": "BAND-INNOVATION"
+      },
+      "criterion_code": "BAND-INNOVATION",
+      "criterion_name": "创新性",
+      "deduction_items": [
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "相关论述篇幅较短，支撑材料有限。",
+          "rule_ref": null
+        }
+      ],
+      "evidence_count": 3,
+      "evidence_sufficient": true,
+      "final_score": 15.0,
+      "max_score": 20.0,
+      "need_manual_review": false,
+      "sub_results": []
+    },
+    {
+      "ai_score": 9.45,
+      "band_selection": null,
+      "criterion_code": "HYB-COMPLIANCE",
+      "criterion_name": "研究规范综合检查",
+      "deduction_items": [
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": 7.02,
+          "reason": "正文约 367 字，低于下限 3000",
+          "rule_ref": "WORD_COUNT_MIN"
+        },
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "当前评分项可用原文证据不足。",
+          "rule_ref": null
+        },
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "相关论述篇幅较短，支撑材料有限。",
+          "rule_ref": null
+        },
+        {
+          "evidence_location": "",
+          "evidence_quote": "",
+          "points": null,
+          "reason": "证据中对研究方法、数据来源或实验设计的描述不充分。",
+          "rule_ref": null
+        }
+      ],
+      "evidence_count": 4,
+      "evidence_sufficient": true,
+      "final_score": 16.0,
+      "max_score": 20.0,
+      "need_manual_review": false,
+      "sub_results": [
+        {
+          "checker_kind": "word_count",
+          "criterion_name": "正文字数",
+          "evidence_sufficient": true,
+          "max_score": 8.0,
+          "need_manual_review": false,
+          "score": 0.98,
+          "scoring_mode": "deterministic"
+        },
+        {
+          "criterion_name": "研究方法论证",
+          "evidence_sufficient": true,
+          "max_score": 12.0,
+          "need_manual_review": true,
+          "score": 8.47
+        }
+      ]
+    }
+  ],
+  "normalized_sha256": "4b78d02a582e26e2e2e0f6a882b699e1377831fdef5dc3a3a0bebf4d31d55d48",
+  "paper": {
+    "id": "<UUID>",
+    "student_id": "M0001",
+    "student_name": "M0 测试学生",
+    "title": "M0 代表性毕业论文"
+  },
+  "review_logs": [
+    {
+      "after_score": 16.0,
+      "before_score": 9.45,
+      "created_at": "<TIMESTAMP>",
+      "id": "<UUID>",
+      "reason": "M0 golden：教师核对原文后调整混合项。",
+      "reviewer_id": "00000000-0000-0000-0000-000000000001",
+      "score_item_id": "<UUID>",
+      "scoring_run_id": "<UUID>"
+    },
+    {
+      "after_score": 62.8,
+      "before_score": 56.25,
+      "created_at": "<TIMESTAMP>",
+      "id": "<UUID>",
+      "reason": "M0 golden：人工复核完成。",
+      "reviewer_id": "00000000-0000-0000-0000-000000000001",
+      "score_item_id": null,
+      "scoring_run_id": "<UUID>"
+    }
+  ],
+  "rubric": {
+    "id": "<UUID>",
+    "name": "M0 论文评分兼容基线",
+    "version": "legacy-v1"
+  },
+  "run": {
+    "ai_total_score": 56.25,
+    "coherence_findings": [
+      {
+        "kind": "reference_uncited",
+        "location": null,
+        "message": "参考文献[1]未被正文引用",
+        "refs": [
+          1
+        ],
+        "severity": "info"
+      }
+    ],
+    "completion_tokens": 0,
+    "created_at": "<TIMESTAMP>",
+    "final_total_score": 62.8,
+    "finished_at": "<TIMESTAMP>",
+    "format_findings": [],
+    "grade": "及格",
+    "id": "<UUID>",
+    "model_name": "mock-criterion-scorer",
+    "model_provider": "mock",
+    "model_version": "v1",
+    "need_manual_review": false,
+    "owner_id": "00000000-0000-0000-0000-000000000001",
+    "paper_id": "<UUID>",
+    "prompt_tokens": 0,
+    "rubric_id": "<UUID>",
+    "started_at": "<TIMESTAMP>",
+    "status": "reviewed",
+    "total_tokens": 0
+  },
+  "schema": "paper-grading/run-export@1",
+  "schema_keys": {
+    "item": [
+      "ai_score",
+      "band_selection",
+      "confidence",
+      "created_at",
+      "criterion_code",
+      "criterion_id",
+      "criterion_name",
+      "deduction_items",
+      "deductions",
+      "evidence",
+      "evidence_sufficient",
+      "final_score",
+      "id",
+      "max_score",
+      "need_manual_review",
+      "reason",
+      "scoring_run_id",
+      "sub_results",
+      "suggestion"
+    ],
+    "review_log": [
+      "after_score",
+      "before_score",
+      "created_at",
+      "id",
+      "reason",
+      "reviewer_id",
+      "score_item_id",
+      "scoring_run_id"
+    ],
+    "run": [
+      "ai_total_score",
+      "coherence_findings",
+      "completion_tokens",
+      "created_at",
+      "final_total_score",
+      "finished_at",
+      "format_findings",
+      "grade",
+      "id",
+      "model_name",
+      "model_provider",
+      "model_version",
+      "need_manual_review",
+      "owner_id",
+      "paper_id",
+      "prompt_tokens",
+      "rubric_id",
+      "started_at",
+      "status",
+      "total_tokens"
+    ],
+    "top_level": [
+      "items",
+      "paper",
+      "review_logs",
+      "rubric",
+      "run",
+      "schema"
+    ]
+  }
+}

@@ -31,13 +31,14 @@ OPENAI_COMPATIBLE_MAX_RETRIES=2
 OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON=true
 OPENAI_COMPATIBLE_THINKING_TYPE=disabled
 SCORING_CHUNK_EVAL_TOP_K=3
+# 以下两项仅供 legacy_unversioned compatibility；正式 Core 不读取它们授权分值
 SCORING_STANDARD_CAP_RATIO=0.8
 SCORING_EXCEPTIONAL_RATIO=0.92
 ```
 
 `glm-4.7-flash` 支持思考模式。论文评分接口只需要稳定返回结构化 JSON，所以默认开启 JSON 模式并关闭思考模式，避免模型把输出预算消耗在 `reasoning_content` 上而最终 `message.content` 为空。
 
-评分引擎按评分项逐块评测证据：每次只给 LLM 一个证据块，后端再加权汇总。普通情况会按 `SCORING_STANDARD_CAP_RATIO=0.8` 封顶；只有多个证据块都证据充分、置信度高、无实质扣分且达到 `SCORING_EXCEPTIONAL_RATIO=0.92` 时，才允许突破 80%。
+评分引擎按评分项逐块评测证据：每次只给 LLM 一个证据块，后端再汇总已验证证据。正式 published RubricVersion 的分值、档位、舍入与复核边界全部来自冻结 ScoringPolicy、AtomicRule 和 RuleLevel，不存在代码级固定 80% 封顶。`SCORING_STANDARD_CAP_RATIO` 与 `SCORING_EXCEPTIONAL_RATIO` 只保留给 `legacy_unversioned compatibility`，不能授权或覆盖 Core 规则。
 
 真实 LLM 调用默认会在后端日志输出 `[LLM request]`、`[LLM response]` 和 `[LLM exception]`，包含请求 URL、模型 payload、响应状态码和响应体，`Authorization` 与 API Key 会自动打码。若论文内容不希望进入日志，可设置 `LLM_DEBUG_LOG_ENABLED=false`；如响应体较长，可调大 `LLM_DEBUG_LOG_MAX_CHARS`。
 
@@ -134,6 +135,6 @@ http://localhost:8501
 
 - 总览与 P0 集成状态
 - 评分标准创建、Word/Excel 导入、草稿编辑、发布、复制版本
-- 批次创建、论文上传、论文信息校正、批量评分
+- 批次创建、论文上传、论文信息校正、持久化批量评分（用户提交观察策略、进度/错误/门禁信号、取消与定向重试）
 - 评分证据查看、单项分数调整、人工复核
 - Excel 导出、HTML 报告、在线写表和写表记录

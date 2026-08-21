@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.core.config import settings
+from backend.app.db.sqlite import enable_sqlite_foreign_keys
 from backend.app.services.storage.local import ensure_storage_dirs
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -54,6 +55,7 @@ def make_engine(db_url=None):
         pool_pre_ping=True,
         connect_args={"timeout": 60} if is_sqlite else {},
     )
+    enable_sqlite_foreign_keys(engine)
     if is_sqlite:
 
         @event.listens_for(engine, "connect")

@@ -10,15 +10,15 @@ from pathlib import Path
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from backend.app.core.config import settings
 from backend.app.db.models import Paper
 from backend.app.db.models import PaperChunk
 from backend.app.services.document_parser.chunking import build_chunks
 from backend.app.services.document_parser.parser import parse_document
 from backend.app.services.storage.local import ensure_storage_dirs
-from backend.app.services.storage.local import save_binary
+from backend.app.services.storage.local import materialize
 from backend.app.services.storage.local import safe_filename
-from backend.app.services.storage.local import write_json
+from backend.app.services.storage.local import store_binary
+from backend.app.services.storage.local import store_json
 
 
 def parse_and_store(db: Session, paper: Paper):
@@ -32,9 +32,8 @@ def parse_and_store(db: Session, paper: Paper):
     paper.error_message = None
     paper.status = "parsing"
     try:
-        parsed = parse_document(paper.file_path)
-        parsed_path = settings.parsed_dir / ("%s.json" % paper.id)
-        write_json(parsed_path, parsed.to_dict())
+        parsed = parse_document(materialize(paper.file_path))
+        parsed_path = store_json("parsed", "%s.json" % paper.id, parsed.to_dict())
         # 解析成功后才删旧 chunks / 更新元数据，避免重解析失败时永久丢失既有数据
         db.execute(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
         paper.title = existing_title or parsed.title
@@ -43,7 +42,7 @@ def parse_and_store(db: Session, paper: Paper):
         paper.department = existing_department or parsed.department
         paper.major = existing_major or parsed.major
         paper.advisor = existing_advisor or parsed.advisor
-        paper.parsed_text_path = str(parsed_path)
+        paper.parsed_text_path = parsed_path
         paper.parse_quality = parsed.parse_quality
         paper.status = "parsed"
         for chunk in build_chunks(parsed, paper.id):
@@ -66,14 +65,17 @@ def ingest_file(db: Session, batch_id: str, file_path, file_name: str = None):
     db.add(paper)
     db.flush()
 
-    destination = settings.uploads_dir / ("%s_%s" % (paper.id, name))
     try:
         with open(source, "rb") as handle:
-            save_binary(handle, destination)
+            destination = store_binary(
+                handle,
+                "uploads",
+                "%s_%s" % (paper.id, name),
+            )
     except Exception:
         db.delete(paper)  # 拷贝失败则清理孤儿 Paper（无有效文件），再抛给调用方
         db.flush()
         raise
-    paper.file_path = str(destination)
+    paper.file_path = destination
     parse_and_store(db, paper)
     return paper
