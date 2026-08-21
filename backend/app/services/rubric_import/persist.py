@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from backend.app.core.config import settings
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCriterion
+from backend.app.services.scoring.core.policy import validate_weight_configuration
 
 
 def persist_imported_rubric(db: Session, name, version, description, imported, created_by=None):
@@ -20,6 +21,8 @@ def persist_imported_rubric(db: Session, name, version, description, imported, c
 
     created_by 默认 DEFAULT_DEV_USER_ID（CLI/单租户），Web 路由传登录用户。
     """
+    validate_weight_configuration(imported.criteria, total_score=imported.total_score)
+
     exists = db.scalar(select(Rubric).where(Rubric.name == name, Rubric.version == version))
     if exists is not None:
         raise ValueError("rubric name and version already exist")

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from dataclasses import field
 
 from backend.app.eval import metrics
+from backend.app.services.scoring.core.canonical import canonical_sha256
 
 
 @dataclass
@@ -27,6 +28,21 @@ class EvalPrediction:
     key: str
     system_total: float
     system_items: dict = field(default_factory=dict)  # {criterion_code: score}
+
+
+def evidence_quality_counts(run):
+    """Return evidence-insufficient item count and the evaluated item count.
+
+    Release evaluation uses the persisted, profile-neutral
+    ``evidence_sufficient`` decision.  Counting items (rather than runs) keeps
+    the metric comparable when rubrics contain different numbers of criteria.
+    """
+
+    items = list(getattr(run, "items", ()) or ())
+    invalid = sum(
+        1 for item in items if getattr(item, "evidence_sufficient", None) is False
+    )
+    return invalid, len(items)
 
 
 def load_dataset(path):
@@ -50,27 +66,65 @@ def load_dataset(path):
     return samples
 
 
-def evaluate(predictions, truths):
+def evaluate(
+    predictions,
+    truths,
+    *,
+    grade_scale=None,
+    scoring_policy=None,
+):
     """配对后计算指标，返回可序列化报告。"""
+    if grade_scale is not None and scoring_policy is not None:
+        raise ValueError("provide either grade_scale or scoring_policy, not both")
+    if scoring_policy is not None:
+        grade_scale = metrics.EvaluationGradeScale.from_policy(scoring_policy)
+    grade_scale = grade_scale or metrics.DEFAULT_GRADE_SCALE
     truth_by_key = {sample.key: sample for sample in truths}
     paired = [(pred, truth_by_key[pred.key]) for pred in predictions if pred.key in truth_by_key]
 
-    true_totals = [truth.human_total for _, truth in paired]
-    pred_totals = [pred.system_total for pred, _ in paired]
+    true_totals = [float(grade_scale.normalize(truth.human_total)) for _, truth in paired]
+    pred_totals = [float(grade_scale.normalize(pred.system_total)) for pred, _ in paired]
 
-    true_grades = [metrics.grade_ordinal(t) for t in true_totals]
-    pred_grades = [metrics.grade_ordinal(t) for t in pred_totals]
+    true_grades = [metrics.grade_ordinal(t, grade_scale) for t in true_totals]
+    pred_grades = [metrics.grade_ordinal(t, grade_scale) for t in pred_totals]
+    grade_scale_mapping = grade_scale.to_mapping()
+    grade_scale_sha256 = canonical_sha256(grade_scale_mapping)
+    policy_hash = getattr(scoring_policy, "policy_hash", None)
+    if policy_hash is None and isinstance(scoring_policy, dict):
+        policy_hash = scoring_policy.get("policy_hash")
 
     return {
         "n": len(paired),
         "unmatched_predictions": [pred.key for pred in predictions if pred.key not in truth_by_key],
-        "qwk": metrics.quadratic_weighted_kappa(true_grades, pred_grades, 0, metrics.NUM_GRADES - 1),
+        "qwk": metrics.quadratic_weighted_kappa(
+            true_grades,
+            pred_grades,
+            0,
+            len(grade_scale.labels) - 1,
+        ),
         "mae": metrics.mae(true_totals, pred_totals),
         "rmse": metrics.rmse(true_totals, pred_totals),
-        "exact_grade_agreement": metrics.exact_agreement(true_totals, pred_totals),
-        "adjacent_grade_agreement": metrics.adjacent_agreement(true_totals, pred_totals),
-        "grade_confusion": metrics.grade_confusion(true_totals, pred_totals),
-        "grade_labels": metrics.GRADE_LABELS,
+        "exact_grade_agreement": metrics.exact_agreement(
+            true_totals, pred_totals, grade_scale
+        ),
+        "adjacent_grade_agreement": metrics.adjacent_agreement(
+            true_totals, pred_totals, grade_scale
+        ),
+        "grade_confusion": metrics.grade_confusion(
+            true_totals, pred_totals, grade_scale
+        ),
+        "grade_labels": list(grade_scale.labels),
+        "grade_scale": grade_scale_mapping,
+        "grade_scale_sha256": grade_scale_sha256,
+        "evaluation_policy_identity": {
+            "policy_hash": policy_hash,
+            "grade_scale_sha256": grade_scale_sha256,
+            "rounding": {
+                "mode": grade_scale.rounding_mode,
+                "digits": grade_scale.rounding_digits,
+            },
+            "total_score": grade_scale.total_score,
+        },
         "per_criterion": _per_criterion_errors(paired),
     }
 
@@ -96,9 +150,15 @@ def _per_criterion_errors(paired):
 
 
 def baseline_from_report(report):
-    """从报告抽取可固化为回归基线的**聚合指标**（无任何学生内容，可安全提交仓库）。"""
+    """抽取普通实验的聚合基线；它明确不具备发布门禁资格。"""
     keys = ("qwk", "mae", "rmse", "exact_grade_agreement", "adjacent_grade_agreement")
-    return {key: report.get(key) for key in keys}
+    return {
+        "schema": "paper-grading/evaluation-aggregate-baseline@1",
+        "provenance": "aggregate_only_non_release",
+        "reproducible": False,
+        "gating_eligible": False,
+        **{key: report.get(key) for key in keys},
+    }
 
 
 def assert_no_regression(report, baseline, qwk_drop_tol=0.02, mae_rise_tol=1.0):

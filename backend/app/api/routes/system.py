@@ -1,8 +1,13 @@
 from pathlib import Path
 
 from fastapi import APIRouter
+from fastapi import Depends
+from sqlalchemy.orm import Session
 
+from backend.app.api.deps import enforce_auth
 from backend.app.core.config import settings
+from backend.app.db.session import get_db
+from backend.app.services.deployment.readiness import build_ops_readiness
 from backend.app.services.llm.diagnostics import check_connectivity
 from backend.app.services.llm.factory import LOCAL_PROVIDERS
 from backend.app.services.llm.factory import provider_network_scope
@@ -10,6 +15,11 @@ from backend.app.services.offline import network_touchpoints
 from backend.app.services.offline import offline_ready
 
 router = APIRouter(prefix="/system", tags=["system"])
+
+
+@router.get("/ops-readiness", dependencies=[Depends(enforce_auth)])
+def ops_readiness(db: Session = Depends(get_db)):
+    return build_ops_readiness(db)
 
 
 @router.get("/llm-check")
@@ -46,6 +56,18 @@ def integration_status():
             "static_web_ready": static_web_ready,
             "streamlit_backup": True,
             "entrypoint": "/",
+        },
+        "storage": {
+            "provider": settings.STORAGE_PROVIDER,
+            "configured": (
+                settings.STORAGE_PROVIDER == "local"
+                or bool(settings.SUPABASE_URL and settings.SUPABASE_SECRET_KEY)
+            ),
+            "bucket": (
+                settings.SUPABASE_STORAGE_BUCKET
+                if settings.STORAGE_PROVIDER == "supabase"
+                else None
+            ),
         },
     }
 

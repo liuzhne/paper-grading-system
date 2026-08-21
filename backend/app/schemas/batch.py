@@ -9,6 +9,7 @@ from pydantic import Field
 class BatchCreate(BaseModel):
     name: str = Field(min_length=1)
     rubric_id: str
+    rubric_version_id: Optional[str] = None
     department: Optional[str] = None
     major: Optional[str] = None
     academic_year: Optional[str] = None
@@ -19,6 +20,7 @@ class BatchCreate(BaseModel):
 class BatchUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1)
     rubric_id: Optional[str] = None
+    rubric_version_id: Optional[str] = None
     department: Optional[str] = None
     major: Optional[str] = None
     academic_year: Optional[str] = None
@@ -36,6 +38,7 @@ class BatchRead(BaseModel):
     academic_year: Optional[str] = None
     paper_type: Optional[str] = None
     rubric_id: str
+    rubric_version_id: Optional[str] = None
     status: str
     owner_id: Optional[str] = None
     created_at: datetime

@@ -4,6 +4,7 @@ from backend.app.eval.runner import EvalSample
 from backend.app.eval.runner import assert_no_regression
 from backend.app.eval.runner import baseline_from_report
 from backend.app.eval.runner import evaluate
+from backend.app.eval import run_eval
 
 
 def test_qwk_perfect_agreement_is_one():
@@ -63,6 +64,10 @@ def test_baseline_from_report_extracts_aggregate_only():
         "per_criterion": {"C01": {"bias": -1}}, "errors": [], "n": 5,
     }
     assert baseline_from_report(report) == {
+        "schema": "paper-grading/evaluation-aggregate-baseline@1",
+        "provenance": "aggregate_only_non_release",
+        "reproducible": False,
+        "gating_eligible": False,
         "qwk": 0.8, "mae": 2.0, "rmse": 3.0, "exact_grade_agreement": 0.7, "adjacent_grade_agreement": 0.9,
     }
 
@@ -80,3 +85,36 @@ def test_regression_gate_passes_and_fails():
     assert issues and "QWK 回退" in issues[0]
     mae_issues = assert_no_regression({"qwk": 0.96, "mae": 3.5}, baseline, mae_rise_tol=1.0)
     assert mae_issues and "MAE 上升" in mae_issues[0]
+
+
+def test_blocked_final_total_is_excluded_instead_of_becoming_zero(tmp_path, monkeypatch):
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(
+        '[{"key":"paper-1","human_total":88,"human_items":{}}]',
+        encoding="utf-8",
+    )
+
+    class BlockedRun:
+        final_total_score = None
+        need_manual_review = True
+        items = [
+            type(
+                "Item",
+                (),
+                {"evidence_sufficient": False},
+            )()
+        ]
+
+    monkeypatch.setattr(run_eval, "score_paper", lambda *_args, **_kwargs: BlockedRun())
+    monkeypatch.setattr(run_eval, "_write_report", lambda _report: tmp_path / "report.json")
+
+    report = run_eval.run_evaluation(object(), dataset)
+
+    assert report["n"] == 0
+    assert report["completed_runs"] == 1
+    assert report["review_rate"] == 1.0
+    assert report["blocked_rate"] == 1.0
+    assert report["invalid_evidence_rate"] == 1.0
+    assert report["invalid_evidence_item_count"] == 1
+    assert report["evaluated_item_count"] == 1
+    assert report["errors"] and "未进入指标" in report["errors"][0]["error"]

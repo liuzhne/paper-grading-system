@@ -5,13 +5,18 @@ from docx import Document
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 from sqlalchemy import create_engine
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core.config import settings
+from backend.app.db import models
 from backend.app.db.models import Base
 from backend.app.db.session import get_db
 from backend.app.main import app
+from backend.app.schemas.rubric import RubricCriterionCreate
+from backend.app.services.dev_user import ensure_dev_user
+from backend.app.services.rubric_import.persist import build_criterion
 from backend.app.services.storage.local import ensure_storage_dirs
 
 
@@ -48,12 +53,158 @@ def client(tmp_path):
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
+        # Lifecycle-aware integration helpers need a read-only way to discover
+        # the immutable version/compilation and AtomicRule identifiers created
+        # by the public import endpoint.  State transitions still go through
+        # the real API below; exposing the test session factory avoids forging
+        # review metadata in fixtures.
+        test_client.session_factory = TestingSessionLocal
         yield test_client
     app.dependency_overrides.clear()
     engine.dispose()  # 释放该用例的引擎连接，避免跨用例连接堆积
     settings.STORAGE_ROOT = original_storage_root
     for key, value in original_runtime_settings.items():
         setattr(settings, key, value)
+
+
+def review_rubric_via_api(client, rubric_id, *, session_factory=None):
+    """Complete the real M4 rule/link/rubric review chain for a test rubric.
+
+    The helper only reads identifiers from the fixture database.  Every audit
+    event, reviewer identity and timestamp is produced by the public lifecycle
+    endpoints, keeping older integration tests on the same strict path as
+    production callers.
+    """
+
+    session_factory = session_factory or getattr(client, "session_factory", None)
+    assert session_factory is not None, "client fixture must expose session_factory"
+    with session_factory() as session:
+        versions = session.scalars(
+            select(models.RubricVersion).where(
+                models.RubricVersion.rubric_id == rubric_id
+            )
+        ).all()
+        assert len(versions) == 1, "draft rubric must have exactly one version"
+        version = versions[0]
+        rules = session.scalars(
+            select(models.AtomicRule)
+            .where(models.AtomicRule.rubric_version_id == version.id)
+            .order_by(models.AtomicRule.rule_code)
+        ).all()
+        rule_states = [(rule.rule_code, rule.status) for rule in rules]
+        rule_ids = [rule.id for rule in rules]
+        links = (
+            session.scalars(
+                select(models.RuleTemplateLink)
+                .where(models.RuleTemplateLink.rule_id.in_(rule_ids))
+                .order_by(models.RuleTemplateLink.id)
+            ).all()
+            if rule_ids
+            else []
+        )
+        link_states = [(link.id, link.review_status) for link in links]
+        compilation_id = version.compilation_id
+        version_id = version.id
+
+    for rule_code, status in rule_states:
+        if status == "draft":
+            response = client.post(
+                f"/api/rubrics/{rubric_id}/rules/{rule_code}/submit-review",
+                json={"reason": "测试按 M4 生命周期提交规则审核"},
+            )
+            assert response.status_code == 200, response.text
+            status = "review"
+        if status == "review":
+            response = client.post(
+                f"/api/rubrics/{rubric_id}/rules/{rule_code}/approve",
+                json={"reason": "测试按 M4 生命周期确认规则可执行"},
+            )
+            assert response.status_code == 200, response.text
+        else:
+            assert status == "approved", f"unsupported AtomicRule status: {status}"
+
+    for link_id, status in link_states:
+        if status == "pending":
+            response = client.post(
+                f"/api/rubrics/{rubric_id}/template-links/{link_id}/review",
+                json={
+                    "decision": "confirmed",
+                    "reason": "测试按 M4 生命周期核对模板映射",
+                },
+            )
+            assert response.status_code == 200, response.text
+        else:
+            assert status == "confirmed", f"unsupported template-link status: {status}"
+
+    rubric = client.get(f"/api/rubrics/{rubric_id}")
+    assert rubric.status_code == 200, rubric.text
+    if rubric.json()["status"] == "draft":
+        submitted = client.post(f"/api/rubrics/{rubric_id}/submit-review")
+        assert submitted.status_code == 200, submitted.text
+        assert submitted.json()["status"] == "review"
+    else:
+        assert rubric.json()["status"] == "review"
+
+    return {
+        "compilation_id": compilation_id,
+        "rubric_version_id": version_id,
+    }
+
+
+def publish_rubric_via_api(client, rubric_id, *, session_factory=None):
+    """Review and publish one imported rubric through the strict M4 API."""
+
+    identity = review_rubric_via_api(
+        client,
+        rubric_id,
+        session_factory=session_factory,
+    )
+    response = client.post(
+        f"/api/rubrics/{rubric_id}/publish",
+        json={
+            "compilation_id": identity["compilation_id"],
+            "reason": "测试按 M4 生命周期发布冻结版本",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "published"
+    return response.json(), identity
+
+
+def create_legacy_unversioned_rubric_fixture(
+    client,
+    payload,
+    *,
+    session_factory=None,
+):
+    """Seed an explicitly historical, unversioned draft rubric.
+
+    Only M0 characterization and M3 legacy/compare tests should use this
+    fixture.  It deliberately creates no compilation/version/review metadata,
+    so it cannot be mistaken for a formally published M4 rubric or bypass the
+    strict lifecycle.  Current API-facing tests must use
+    :func:`publish_rubric_via_api` instead.
+    """
+
+    session_factory = session_factory or getattr(client, "session_factory", None)
+    assert session_factory is not None, "client fixture must expose session_factory"
+    with session_factory() as session:
+        user = ensure_dev_user(session)
+        rubric = models.Rubric(
+            name=payload["name"],
+            version=payload.get("version") or "legacy-v1",
+            description=payload.get("description"),
+            total_score=payload["total_score"],
+            status="draft",
+            created_by=user.id,
+            owner_id=user.id,
+        )
+        for index, raw in enumerate(payload.get("criteria") or []):
+            criterion = RubricCriterionCreate.model_validate(raw)
+            rubric.criteria.append(build_criterion(criterion, index))
+        session.add(rubric)
+        session.commit()
+        return rubric.id
 
 
 def make_sample_docx():
@@ -79,6 +230,17 @@ def make_sample_docx():
     document.add_paragraph("研究结论表明，该方法具有一定应用价值，后续可扩展到更多专业。")
     document.add_paragraph("参考文献")
     document.add_paragraph("[1] 张某某. 教学评价研究综述[J]. 教育研究, 2024.")
+    buffer = BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def make_sample_docx_with_required_owner():
+    """Return the sample thesis with the deterministic owner field present."""
+
+    document = Document(make_sample_docx())
+    document.add_paragraph("负责人：张三")
     buffer = BytesIO()
     document.save(buffer)
     buffer.seek(0)

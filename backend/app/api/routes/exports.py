@@ -22,6 +22,18 @@ from backend.app.services.spreadsheet.writer import write_run_to_sheet
 router = APIRouter(tags=["exports"])
 
 
+def _legacy_thesis_run(db: Session, run_id: str):
+    run = db.get(ScoringRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="scoring run not found")
+    if run.submission_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="submission scoring runs must use /api/v2 export endpoints",
+        )
+    return run
+
+
 @router.get("/export-logs", response_model=list[ExportLogRead])
 def list_export_logs(
     batch_id: Optional[str] = None,
@@ -51,6 +63,7 @@ def export_batch(batch_id: str, db: Session = Depends(get_db)):
 
 @router.post("/scoring-runs/{run_id}/write-sheet", response_model=ExportLogRead)
 def write_sheet(run_id: str, payload: WriteSheetRequest | None = None, db: Session = Depends(get_db)):
+    _legacy_thesis_run(db, run_id)
     try:
         target_id = payload.target_id if payload else None
         return write_run_to_sheet(db, run_id, target_id=target_id)
@@ -62,6 +75,7 @@ def write_sheet(run_id: str, payload: WriteSheetRequest | None = None, db: Sessi
 
 @router.get("/scoring-runs/{run_id}/report")
 def report(run_id: str, db: Session = Depends(get_db)):
+    _legacy_thesis_run(db, run_id)
     try:
         path = generate_report(db, run_id)
     except ValueError as exc:
@@ -72,6 +86,7 @@ def report(run_id: str, db: Session = Depends(get_db)):
 @router.get("/scoring-runs/{run_id}/export.json")
 def export_run_json(run_id: str, db: Session = Depends(get_db)):
     """结构化 JSON 导出（运行/论文/逐项/扣分/证据/篇章·格式发现/复核），供下游二次处理。"""
+    _legacy_thesis_run(db, run_id)
     try:
         return build_run_export(db, run_id)
     except ValueError as exc:

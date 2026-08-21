@@ -58,11 +58,14 @@ class MockLLMScorer(LLMScorer):
             deductions.append("未发现明显扣分点，评分基于召回证据保守给出。")
 
         evidence = []
-        for candidate in evidence_candidates[:3]:
+        for evidence_index, candidate in enumerate(evidence_candidates[:3], start=1):
             quote = _quote(candidate.get("text", ""))
             if quote:
                 evidence.append(
                     {
+                        "evidence_ref": "evidence-%s" % evidence_index,
+                        "type": "source_quote",
+                        "evidence_unit_id": candidate.get("evidence_unit_id"),
                         "quote": quote,
                         "location": candidate.get("location") or candidate.get("section_title") or "未知位置",
                         "chunk_id": candidate.get("chunk_id"),
@@ -85,15 +88,42 @@ class MockLLMScorer(LLMScorer):
         # 模式感知（与真实模型行为对齐，便于端到端测试）：
         mode = getattr(criterion, "scoring_mode", "llm_direct")
         if mode == "deductive":
-            result["deduction_items"] = [
-                {
-                    "points": round(max_score - score, 2),
-                    "reason": "；".join(deductions)[:120] or "综合扣分",
-                    "rule_ref": getattr(criterion, "code", None),
-                    "evidence_location": "",
-                    "evidence_quote": "",
-                }
-            ]
+            secure_execution = bool(
+                getattr(criterion, "secure_execution", False)
+            )
+            authorized_rules = list(
+                getattr(criterion, "authorized_rules", None) or []
+            )
+            source_rule = next(
+                (
+                    rule
+                    for rule in authorized_rules
+                    if (
+                        rule.get("evidence_mode")
+                        if isinstance(rule, dict)
+                        else getattr(rule, "evidence_mode", None)
+                    )
+                    == "source_quote"
+                ),
+                None,
+            )
+            rule_ref = (
+                source_rule.get("code")
+                if isinstance(source_rule, dict)
+                else getattr(source_rule, "code", None)
+            ) if source_rule is not None else getattr(criterion, "code", None)
+            item = {
+                "points": round(max_score - score, 2),
+                "reason": "；".join(deductions)[:120] or "综合扣分",
+                "rule_ref": rule_ref,
+                "evidence_location": "",
+                "evidence_quote": "",
+            }
+            if secure_execution:
+                item["evidence_refs"] = (
+                    [evidence[0]["evidence_ref"]] if evidence else []
+                )
+            result["deduction_items"] = [item]
         elif mode == "banded":
             bands = [b for b in (getattr(criterion, "rubric_levels", None) or []) if isinstance(b, dict) and _numeric(b.get("points")) is not None]
             if bands:
@@ -102,8 +132,12 @@ class MockLLMScorer(LLMScorer):
                     "level": chosen.get("label"),
                     "rationale": result["reason"],
                     "rule_ref": getattr(criterion, "code", None),
-                    "evidence_location": "",
-                    "evidence_quote": "",
+                    "evidence_location": (
+                        evidence[0].get("location", "") if evidence else ""
+                    ),
+                    "evidence_quote": (
+                        evidence[0].get("quote", "") if evidence else ""
+                    ),
                 }
         return result
 

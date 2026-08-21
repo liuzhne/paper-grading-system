@@ -1,14 +1,61 @@
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def deployment_security_issues(config):
+    """Return stable, non-secret issue codes for protected deployments."""
+
+    if not config.AUTH_ENABLED:
+        return ["AUTH_DISABLED"]
+    issues = []
+    username = (config.AUTH_USERNAME or "").strip().casefold()
+    password = (config.AUTH_PASSWORD or "").strip()
+    password_folded = password.casefold()
+    weak_passwords = {
+        "change-me",
+        "change-me-in-prod",
+        "password",
+        "admin",
+        "replace-with-strong-login-password",
+    }
+    if (
+        len(password) < 12
+        or len(set(password)) < 4
+        or password_folded == username
+        or password_folded in weak_passwords
+        or password_folded.startswith("replace-with-")
+    ):
+        issues.append("AUTH_PASSWORD_WEAK")
+    secret = (config.AUTH_SECRET or "").strip()
+    secret_folded = secret.casefold()
+    if (
+        len(secret) < 32
+        or len(set(secret)) < 8
+        or secret_folded == "change-me-in-prod"
+        or secret_folded.startswith("replace-with-")
+    ):
+        issues.append("AUTH_SECRET_WEAK")
+    if config.LLM_DEBUG_LOG_ENABLED:
+        issues.append("LLM_RAW_DEBUG_LOGGING_ENABLED")
+    return issues
 
 
 class Settings(BaseSettings):
     APP_NAME: str = "Paper Grading System"
     API_PREFIX: str = "/api"
-    DATABASE_URL: str = "postgresql+psycopg://paper:paper@localhost:5432/paper_grading"
+    DATABASE_URL: str = Field(
+        default="postgresql+psycopg://paper:paper@localhost:5432/paper_grading",
+        validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL"),
+    )
     STORAGE_ROOT: Path = Path("storage")
+    STORAGE_PROVIDER: Literal["local", "supabase"] = "local"
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_SECRET_KEY: Optional[str] = None
+    SUPABASE_STORAGE_BUCKET: str = "paper-grading-private"
     MAX_UPLOAD_SIZE_MB: int = 50
     OFFLINE_MODE: bool = False  # True=硬禁止一切外呼（网络型导出报错提示改用 Excel）；CLI 可经 --offline 开启
     DEFAULT_DEV_USER_ID: str = "00000000-0000-0000-0000-000000000001"
@@ -21,6 +68,10 @@ class Settings(BaseSettings):
     AUTH_SECRET: str = "change-me-in-prod"  # 签发会话 token 的 HMAC 密钥，生产务必改
     AUTH_TOKEN_TTL_SECONDS: int = 86400
     LLM_PROVIDER: str = "mock"
+    # M3 rollout switch.  ``legacy`` remains the production-safe default;
+    # ``compare`` executes a non-authoritative Core candidate and ``core`` is
+    # reserved for explicitly isolated vertical validation until M8.
+    SCORING_ENGINE_MODE: Literal["legacy", "compare", "core"] = "legacy"
     LLM_FALLBACK_TO_MOCK: bool = True
     LLM_CACHE_ENABLED: bool = True  # L0 缓存/账本（设计§7）：按输入哈希复用 LLM 评分结果
     COHERENCE_SEMANTIC_ENABLED: bool = False  # §8 语义一致性核验（研究问题↔结论等）：每篇额外一次 LLM 调用，故默认 opt-in（设计「LLM 按需」）
@@ -71,8 +122,51 @@ class Settings(BaseSettings):
     GOOGLE_SHEETS_WEBAPP_URL: Optional[str] = None
     GOOGLE_SHEETS_WEBAPP_SECRET: Optional[str] = None
     GOOGLE_SHEETS_TIMEOUT_SECONDS: float = 30
+    # PGS-12 operations policy.  These are safe development defaults only;
+    # every production deployment must explicitly review/override them in its
+    # environment and record the accepted values in the launch checklist.
+    OPS_DISK_FREE_GB_MIN: float = 10.0
+    OPS_DATABASE_SIZE_GB_MAX: float = 50.0
+    OPS_BATCH_STALE_MINUTES: int = 30
+    OPS_LLM_FAILURE_RATE_MAX: float = 0.05
+    OPS_RTO_MINUTES: int = 120
+    OPS_RPO_MINUTES: int = 1440
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def _use_psycopg_driver(cls, value):
+        raw = str(value or "")
+        if raw.startswith("postgres://"):
+            raw = "postgresql+psycopg://" + raw[len("postgres://") :]
+        elif raw.startswith("postgresql://"):
+            raw = "postgresql+psycopg://" + raw[len("postgresql://") :]
+        if raw.startswith("postgresql+psycopg://"):
+            parts = urlsplit(raw)
+            query = [
+                (key, item)
+                for key, item in parse_qsl(parts.query, keep_blank_values=True)
+                if key.casefold() not in {"supa", "pgbouncer"}
+            ]
+            raw = urlunsplit(
+                (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+            )
+        return raw
+
+    @model_validator(mode="after")
+    def _validate_protected_deployment(self):
+        """Fail closed when auth marks this process as a protected deployment."""
+
+        if not self.AUTH_ENABLED:
+            return self
+        issues = deployment_security_issues(self)
+        if issues:
+            raise ValueError(
+                "protected deployment security validation failed: %s"
+                % ", ".join(issues)
+            )
+        return self
 
     @property
     def uploads_dir(self):

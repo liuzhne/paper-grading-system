@@ -4,6 +4,8 @@
 编写日期：2026-05-18  
 适用对象：产品经理、教务管理人员、学院管理员、论文评阅教师、研发团队
 
+> **M0 语义说明（2026-07-18）**：本文保留 v1.0 论文业务需求背景；其中模型直接给分、教师直接提交改分、固定百分制/复核边界和“证据必为原文引用”等旧表述，不是通用 Core 合同。计分授权、Evidence 类型、human resolution、ScoringPolicy、运行身份与 Profile 术语以 [`docs/adr/0001-general-scoring-core-foundations.md`](docs/adr/0001-general-scoring-core-foundations.md) 为准。
+
 ## 1. 项目背景
 
 毕业论文评阅通常存在以下问题：

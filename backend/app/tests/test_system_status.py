@@ -28,6 +28,19 @@ def test_integration_status_masks_secrets_and_reports_real_adapters(client, monk
     assert payload["frontend"]["primary"] == "static_web"
 
 
+def test_web_page_injects_api_path_from_service_configuration(client, monkeypatch):
+    monkeypatch.setattr(settings, "API_PREFIX", "/review-api")
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'window.__PGS_CONFIG__ = {"apiBase": "/review-api"};' in response.text
+    assert 'id="api-base"' not in response.text
+    assert 'id="account-menu-trigger"' in response.text
+    assert 'id="account-menu"' in response.text
+    assert '<details class="sidebar-account">' not in response.text
+
+
 def test_llm_check_reports_mock_without_real_call(client):
     response = client.get("/api/system/llm-check")
     assert response.status_code == 200

@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
@@ -12,12 +14,15 @@ from sqlalchemy.exc import ProgrammingError
 from backend.app.api.deps import enforce_auth
 from backend.app.api.routes import auth
 from backend.app.api.routes import batches
+from backend.app.api.routes import batch_jobs
 from backend.app.api.routes import calibration
 from backend.app.api.routes import exports
 from backend.app.api.routes import papers
+from backend.app.api.routes import release_gates
 from backend.app.api.routes import rubrics
 from backend.app.api.routes import scoring
 from backend.app.api.routes import system
+from backend.app.api.routes import submissions_v2
 from backend.app.core.config import settings
 from backend.app.services.storage.local import ensure_storage_dirs
 
@@ -58,9 +63,20 @@ def create_app():
     guarded = [Depends(enforce_auth)]
     app.include_router(auth.router, prefix=settings.API_PREFIX)
     app.include_router(batches.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(batch_jobs.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(rubrics.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(papers.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(
+        release_gates.router,
+        prefix=settings.API_PREFIX,
+        dependencies=guarded,
+    )
     app.include_router(scoring.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(
+        submissions_v2.router,
+        prefix=settings.API_PREFIX,
+        dependencies=guarded,
+    )
     app.include_router(exports.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(system.router, prefix=settings.API_PREFIX)
     app.include_router(calibration.router, prefix=settings.API_PREFIX, dependencies=guarded)
@@ -72,7 +88,18 @@ def create_app():
 
         @app.get("/", include_in_schema=False)
         def web_app():
-            return FileResponse(web_dir / "index.html")
+            # API 路径由当前服务配置注入，前端不提供可编辑入口。
+            # JSON 编码可避免配置中的特殊字符破坏页面脚本上下文。
+            client_config = json.dumps(
+                {"apiBase": settings.API_PREFIX.rstrip("/")}, ensure_ascii=False
+            ).replace("</", "<\\/")
+            html = (web_dir / "index.html").read_text(encoding="utf-8")
+            html = html.replace(
+                "<!-- PGS_CLIENT_CONFIG -->",
+                f"<script>window.__PGS_CONFIG__ = {client_config};</script>",
+                1,
+            )
+            return HTMLResponse(html)
 
     return app
 

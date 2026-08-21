@@ -1,0 +1,226 @@
+name: pgs-production-gates
+
+on:
+  push:
+    branches: [main, Convert2RubricScalePlatform]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SCORING_ENGINE_MODE: legacy
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  unit-and-sqlite-migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Sync the locked environment
+        run: uv sync --locked
+      - name: Run the complete self-contained suite
+        run: |
+          mkdir -p pgs_ops_artifacts
+          uv run python -m pytest -q --junitxml=pgs_ops_artifacts/pytest.xml
+      - name: Upload unit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgs-unit-and-sqlite-evidence
+          path: pgs_ops_artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  postgres-migrations-constraints-and-restore:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: paper_grading
+          POSTGRES_USER: paper
+          POSTGRES_PASSWORD: ci-only-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U paper -d paper_grading"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://paper:ci-only-postgres-password@127.0.0.1:5432/paper_grading
+      PGPASSWORD: ci-only-postgres-password
+      OPS_RTO_MINUTES: "120"
+      OPS_RPO_MINUTES: "1440"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install PostgreSQL client and locked dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          uv sync --locked
+      - name: Exercise every production migration boundary
+        run: |
+          set -euo pipefail
+          mkdir -p pgs_ops_artifacts
+          for revision in \
+            0011_version_hash_on_update \
+            0012_frozen_scoring_policy \
+            0013_core_replay_identity \
+            0014_release_gate_profiles \
+            0015_scoring_run_runtime_identity \
+            0016_general_submissions \
+            0017_batch_scoring_jobs
+          do
+            uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
+          done
+      - name: Verify Postgres constraints and stable ordering
+        run: |
+          uv run python -m backend.app.scripts.verify_postgres_ops --exercise-ci-fixture \
+            | tee pgs_ops_artifacts/postgres-verification.json
+      - name: Prove lossy 0017 downgrade is rejected without DDL damage
+        run: |
+          set -euo pipefail
+          if uv run alembic downgrade 0016_general_submissions >> pgs_ops_artifacts/postgres-migrations.log 2>&1
+          then
+            echo "ERROR: lossy downgrade unexpectedly succeeded" | tee -a pgs_ops_artifacts/postgres-migrations.log
+            exit 1
+          fi
+          echo "expected lossy downgrade refusal observed" | tee -a pgs_ops_artifacts/postgres-migrations.log
+          uv run python -m backend.app.scripts.verify_postgres_ops \
+            | tee pgs_ops_artifacts/postgres-post-downgrade-refusal.json
+      - name: Execute isolated database and storage backup restore drill
+        run: |
+          set -euo pipefail
+          mkdir -p pgs_ops_storage/uploads pgs_ops_storage/parsed pgs_ops_backups pgs_ops_restored
+          printf 'ci-private-fixture' > pgs_ops_storage/uploads/fixture.docx
+          printf '{"snapshot":true}' > pgs_ops_storage/parsed/snapshot.json
+          printf 'cache-ledger' > pgs_ops_storage/llm_cache.sqlite
+          uv run python -m backend.app.scripts.ops_backup create \
+            --storage-root pgs_ops_storage \
+            --destination pgs_ops_backups \
+            --migration-head 0017_batch_scoring_jobs \
+            --revision "$GITHUB_SHA" \
+            | tee pgs_ops_artifacts/backup-create.json
+          package="$(find pgs_ops_backups -mindepth 1 -maxdepth 1 -type d | head -1)"
+          uv run python -m backend.app.scripts.ops_backup verify "$package" \
+            | tee pgs_ops_artifacts/backup-verify.json
+          createdb --host 127.0.0.1 --username paper recovery_db
+          rmdir pgs_ops_restored
+          uv run python -m backend.app.scripts.ops_backup restore "$package" \
+            --database-url postgresql+psycopg://paper:ci-only-postgres-password@127.0.0.1:5432/recovery_db \
+            --storage-target pgs_ops_restored \
+            --confirm-database recovery_db \
+            | tee pgs_ops_artifacts/restore-report.json
+          DATABASE_URL=postgresql+psycopg://paper:ci-only-postgres-password@127.0.0.1:5432/recovery_db \
+            uv run python -m backend.app.scripts.verify_postgres_ops \
+            | tee pgs_ops_artifacts/restored-postgres-verification.json
+          diff pgs_ops_storage/uploads/fixture.docx pgs_ops_restored/uploads/fixture.docx
+          cp "$package/manifest.json" pgs_ops_artifacts/backup-manifest.json
+      - name: Reject secret leakage in persisted CI evidence
+        run: |
+          if grep -R -E 'ci-only-postgres-password|PGPASSWORD|AUTH_SECRET|OPENAI(_COMPATIBLE)?_API_KEY' pgs_ops_artifacts
+          then
+            echo "secret-like material detected in OPS evidence"
+            exit 1
+          fi
+      - name: Upload Postgres and recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgs-postgres-migration-restore-evidence
+          path: pgs_ops_artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  docker-compose-smoke:
+    needs:
+      - unit-and-sqlite-migrations
+      - postgres-migrations-constraints-and-restore
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV_FILE: .env.intranet.example
+      POSTGRES_DB: paper_grading
+      POSTGRES_USER: paper
+      POSTGRES_PASSWORD: CI-compose-postgres-password-2026
+      AUTH_ENABLED: "true"
+      AUTH_USERNAME: ops-admin
+      AUTH_PASSWORD: CI-compose-login-password-2026
+      AUTH_SECRET: ci-compose-auth-secret-0123456789abcdef
+      LLM_DEBUG_LOG_ENABLED: "false"
+      PAPER_GRADING_SITE: https://localhost
+      SCORING_ENGINE_MODE: legacy
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build the production application image
+        run: |
+          mkdir -p pgs_docker_artifacts
+          docker compose --env-file .env.intranet.example build --pull app
+      - name: Start the complete production stack
+        run: |
+          docker compose --env-file .env.intranet.example up -d --wait --wait-timeout 180
+          docker compose --env-file .env.intranet.example ps \
+            | tee pgs_docker_artifacts/compose-ps.txt
+      - name: Verify the PostgreSQL 16 client and HTTPS proxy
+        run: |
+          docker compose --env-file .env.intranet.example exec -T app pg_dump --version \
+            | tee pgs_docker_artifacts/pg-dump-version.txt \
+            | grep -E ' 16\.'
+          curl --fail --silent --show-error --insecure \
+            https://localhost/api/system/integrations \
+            | tee pgs_docker_artifacts/https-integrations.json
+      - name: Exercise login upload score report and export
+        run: |
+          docker compose --env-file .env.intranet.example exec -T app \
+            python -m backend.app.scripts.seed_dev
+          docker compose --env-file .env.intranet.example exec -T app \
+            python -m backend.app.scripts.smoke_deployment \
+            | tee pgs_docker_artifacts/deployment-smoke.json
+      - name: Exercise backup creation and independent verification in the image
+        run: |
+          docker compose --env-file .env.intranet.example exec -T app \
+            python -m backend.app.scripts.ops_backup create \
+            --storage-root /app/storage \
+            --destination /app/ops_backups \
+            --migration-head 0017_batch_scoring_jobs \
+            --revision "$GITHUB_SHA" \
+            | tee pgs_docker_artifacts/container-backup-create.json
+          docker compose --env-file .env.intranet.example exec -T app sh -ec '
+            package="$(find /app/ops_backups -mindepth 1 -maxdepth 1 -type d | head -1)"
+            test -n "$package"
+            python -m backend.app.scripts.ops_backup verify "$package"
+          ' | tee pgs_docker_artifacts/container-backup-verify.json
+      - name: Capture container logs
+        if: always()
+        run: |
+          docker compose --env-file .env.intranet.example logs --no-color \
+            > pgs_docker_artifacts/compose.log 2>&1 || true
+      - name: Stop the disposable stack
+        if: always()
+        run: docker compose --env-file .env.intranet.example down --volumes --remove-orphans
+      - name: Upload Docker deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgs-docker-compose-smoke-evidence
+          path: pgs_docker_artifacts/
+          if-no-files-found: error
+          retention-days: 30

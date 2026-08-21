@@ -1,0 +1,110 @@
+{
+  "schema": "paper-grading/evaluation-baseline@1",
+  "baseline_id": "m0-a4-full98-2026-06-16",
+  "archive_record_version": "m0-a4-full98-metadata-v1",
+  "profile_key": "thesis",
+  "provenance": "historical_transcription",
+  "status": "historical_summary_only",
+  "reproducible": false,
+  "gating_eligible": false,
+  "recorded_at": "2026-06-17T01:05:39+08:00",
+  "evaluation": {
+    "reported_sample_count": 98,
+    "reported_errors": 0,
+    "reported_unmatched": 0,
+    "metrics": {
+      "qwk": {
+        "value": -0.002,
+        "reported_decimals": 3,
+        "approximate": true
+      },
+      "mae": {
+        "value": 6.83,
+        "reported_decimals": 2
+      },
+      "rmse": {
+        "value": 8.78,
+        "reported_decimals": 2
+      },
+      "exact_grade_agreement": {
+        "value": 0.449,
+        "reported_decimals": 3
+      },
+      "adjacent_grade_agreement": {
+        "value": 0.898,
+        "reported_decimals": 3
+      },
+      "criterion_bias": {
+        "R01": 0.45,
+        "R02": 1.5,
+        "R03": 1.51,
+        "R04": 1.3,
+        "R05": 0.84
+      }
+    }
+  },
+  "dataset": {
+    "recorded_version": null,
+    "archival_label": "A4-full98-2026-06-16",
+    "identity_status": "not_recorded",
+    "visibility": "external_private_not_in_repository",
+    "reported_truth_source": "teacher_scores",
+    "raw_artifacts_retained": false,
+    "dataset_manifest_sha256": null,
+    "paper_manifest_sha256": null,
+    "truth_sha256": null,
+    "unavailable_reason": "The progress log names a fixed 98-paper run but does not record a dataset version or fingerprints; private papers and teacher scores must not be reconstructed or committed."
+  },
+  "rubric": {
+    "reported_legacy_rubric_id": "9262a246-3dd0-44da-9994-919af579b206",
+    "reported_version_label": "v1.3",
+    "reported_configuration": "R03 banded with anti-top-band prompt nudge; anchor-free",
+    "rubric_version_hash": null,
+    "rubric_snapshot_sha256": null,
+    "identity_status": "database_snapshot_not_retained"
+  },
+  "runtime": {
+    "provider_family": "local_llama_cpp",
+    "model_id": null,
+    "model_artifact_sha256": null,
+    "model_identity_status": "not_recorded",
+    "request_mode": "single_call",
+    "retrieval_top_k": 8,
+    "request_timeout_seconds": 180,
+    "max_retries": 2,
+    "parallel_slots": 4,
+    "context_tokens": 16384,
+    "prompt_version": "2026-06-16-1"
+  },
+  "anchors": {
+    "reported_mode": "none",
+    "reported_count": 0,
+    "canonical_empty_array_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "run_snapshot_retained": false
+  },
+  "code": {
+    "best_known_scoring_revision": "6139ed59c557b3b9914fe093e2b1f0ad98d2505a",
+    "historical_record_revision": "3fc3f6dbed8ca4616262e138847e470cae075996",
+    "exact_dirty_tree_state_recorded": false
+  },
+  "source_evidence": [
+    {
+      "path": "执行进展.md",
+      "lines": "91-105",
+      "commit": "3fc3f6dbed8ca4616262e138847e470cae075996"
+    }
+  ],
+  "missing_original_artifacts": [
+    "/tmp/a4_full98.json",
+    "eval_report_20260616T170331Z.json",
+    "private paper corpus",
+    "teacher score workbook",
+    "cli.db"
+  ],
+  "limitations": [
+    "Metric values are rounded transcriptions, not values recomputed from retained samples.",
+    "Dataset, rubric graph, model artifact, policy, execution plan and per-document fingerprints are unavailable.",
+    "The later scripts/start-llm.sh model path is operational documentation, not cryptographic evidence of the model used by this run.",
+    "This record is for historical comparison only and must never pass or fail CI."
+  ]
+}

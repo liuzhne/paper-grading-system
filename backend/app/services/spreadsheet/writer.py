@@ -9,11 +9,9 @@ from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import SpreadsheetWriteLog
-from backend.app.services.scoring.rules import as_float
+from backend.app.services.scoring.profiles.thesis import ThesisProfile
 from backend.app.services.spreadsheet.excel import DETAIL_HEADERS
 from backend.app.services.spreadsheet.excel import SUMMARY_HEADERS
-from backend.app.services.spreadsheet.excel import _main_deductions
-from backend.app.services.spreadsheet.excel import _review_notes
 
 
 class SpreadsheetWriteError(RuntimeError):
@@ -124,54 +122,56 @@ def _load_run(db, run_id):
 
 def _sheet_payload(db, run):
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
+    projection = ThesisProfile().build_spreadsheet_projection(
+        batch=run.paper.batch,
+        run=run,
+        review_logs=review_logs,
+    )
     return {
         "summary_headers": SUMMARY_HEADERS,
-        "summary_row": _summary_row(run, review_logs),
+        "summary_row": _summary_row(projection["summary"]),
         "detail_headers": DETAIL_HEADERS,
-        "detail_rows": [_detail_row(run, item) for item in run.items],
+        "detail_rows": [_detail_row(item) for item in projection["details"]],
     }
 
 
-def _summary_row(run, review_logs):
-    paper = run.paper
-    batch = paper.batch
-    changed = any(as_float(item.final_score) != as_float(item.ai_score) for item in run.items)
+def _summary_row(row):
+    finished = row["finished_at"]
     values = [
-        batch.name,
-        paper.student_id,
-        paper.student_name,
-        paper.department or batch.department,
-        paper.major or batch.major,
-        paper.title,
-        run.rubric.version,
-        as_float(run.ai_total_score),
-        as_float(run.final_total_score),
-        run.grade,
-        _main_deductions(run),
-        "是" if changed else "否",
-        "是" if run.need_manual_review else "否",
-        run.finished_at.isoformat(sep=" ") if run.finished_at else "",
-        "dev-user" if run.status == "reviewed" else "",
-        _review_notes(review_logs),
-        "/api/scoring-runs/%s/report" % run.id,
+        row["batch_name"],
+        row["student_id"],
+        row["student_name"],
+        row["department"],
+        row["major"],
+        row["title"],
+        row["rubric_version"],
+        row["ai_total"],
+        row["final_total"],
+        row["grade"],
+        row["main_deductions"],
+        row["changed"],
+        row["need_manual_review"],
+        finished.isoformat(sep=" ") if finished else "",
+        row["reviewer"],
+        row["review_notes"],
+        row["report_link"],
     ]
     return dict(zip(SUMMARY_HEADERS, values))
 
 
-def _detail_row(run, item):
-    paper = run.paper
+def _detail_row(item):
     values = [
-        paper.student_id,
-        paper.student_name,
-        paper.title,
-        item.criterion.name,
-        as_float(item.max_score),
-        as_float(item.ai_score),
-        as_float(item.final_score),
-        "；".join(item.deductions or []),
-        "；".join(evidence.get("quote", "") for evidence in item.evidence or []),
-        "；".join(evidence.get("location", "") for evidence in item.evidence or []),
-        item.suggestion,
-        as_float(item.confidence),
+        item["student_id"],
+        item["student_name"],
+        item["title"],
+        item["criterion_name"],
+        item["max_score"],
+        item["ai_score"],
+        item["final_score"],
+        item["deductions"],
+        item["evidence_quotes"],
+        item["evidence_locations"],
+        item["suggestion"],
+        item["confidence"],
     ]
     return dict(zip(DETAIL_HEADERS, values))

@@ -1,0 +1,71 @@
+{
+  "schema": "paper-grading/gate-02-test-only-parity@1",
+  "generated_on": "2026-08-02",
+  "test_contract": "backend/app/tests/test_gate02_thesis_core_parity.py",
+  "test_contract_passed": true,
+  "gating_eligible": false,
+  "gate_passed": false,
+  "production_default_switch_authorized": false,
+  "profile": {
+    "gate_key": "GATE-02",
+    "dataset_id": "gate-02-test-only-t01-t06",
+    "dataset_version": "2026-08-02-v1",
+    "sample_count": 6,
+    "model_provider": "test_immutable",
+    "model_revision": "thesis-core-parity-fixture@2026-08-02",
+    "anchor_count": 0,
+    "anchor_holdout_exclusion_confirmed": true,
+    "rubric_criteria": {
+      "T01": 20,
+      "T02": 20,
+      "T03": 20,
+      "T04": 10,
+      "T05": 10,
+      "T06": 20
+    }
+  },
+  "approved_test_thresholds": {
+    "minimum_qwk": 0.9,
+    "maximum_mae": 3.0,
+    "maximum_rmse": 4.0,
+    "minimum_exact_grade_agreement": 0.9,
+    "minimum_adjacent_grade_agreement": 1.0,
+    "maximum_review_rate": 0.2,
+    "maximum_blocked_rate": 0.0,
+    "maximum_invalid_evidence_rate": 0.0
+  },
+  "approved_test_baseline": {
+    "qwk": 1.0,
+    "mae": 1.6666666666666667,
+    "rmse": 1.7320508075688772,
+    "exact_grade_agreement": 1.0,
+    "adjacent_grade_agreement": 1.0,
+    "review_rate": 0.0,
+    "blocked_rate": 0.0,
+    "invalid_evidence_rate": 0.0
+  },
+  "core_test_candidate": {
+    "qwk": 1.0,
+    "mae": 1.1666666666666667,
+    "rmse": 1.224744871391589,
+    "exact_grade_agreement": 1.0,
+    "adjacent_grade_agreement": 1.0,
+    "review_rate": 0.0,
+    "blocked_rate": 0.0,
+    "invalid_evidence_rate": 0.0,
+    "per_criterion_bias": {
+      "T01": 0.25,
+      "T02": -0.25,
+      "T03": 0.5,
+      "T04": -0.5,
+      "T05": 0.25,
+      "T06": -0.25
+    }
+  },
+  "why_not_release_evidence": [
+    "synthetic_teacher_truth",
+    "test_immutable_provider_not_production_model",
+    "no_external_private_holdout_artifacts",
+    "no_clean-production-revision run"
+  ]
+}

@@ -1,4 +1,5 @@
-from backend.app.tests.conftest import make_sample_docx
+from backend.app.tests.conftest import make_sample_docx_with_required_owner
+from backend.app.tests.conftest import publish_rubric_via_api
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -7,7 +8,13 @@ def _upload(client, batch_id, name):
     response = client.post(
         "/api/papers/upload",
         data={"batch_id": batch_id},
-        files={"file": (name, make_sample_docx().getvalue(), DOCX_MIME)},
+        files={
+            "file": (
+                name,
+                make_sample_docx_with_required_owner().getvalue(),
+                DOCX_MIME,
+            )
+        },
     )
     assert response.status_code == 200, response.text
     return response.json()["id"]
@@ -18,9 +25,31 @@ def test_batch_ranking_and_drift(client):
         "name": "L2批量",
         "version": "v1.0",
         "total_score": 10,
-        "criteria": [{"code": "C1", "name": "研究方法", "max_score": 10, "display_order": 1}],
+        "criteria": [
+            {
+                "code": "C1",
+                "name": "研究方法",
+                "max_score": 10,
+                "criterion_type": "deterministic",
+                "scoring_mode": "deductive",
+                "deduction_rules_structured": [
+                    {
+                        "match": "研究方法论述不足",
+                        "points": 10,
+                        "reason": "研究方法论述不足",
+                        "checker_key": "thesis.legacy_required_fields.v1",
+                        "checker_params": {
+                            "criterion_code": "C1",
+                            "applies_to": "global",
+                        },
+                    }
+                ],
+                "display_order": 1,
+            }
+        ],
     }
     rubric_id = client.post("/api/rubrics", json=rubric).json()["id"]
+    publish_rubric_via_api(client, rubric_id)
     batch_id = client.post("/api/batches", json={"name": "批次", "rubric_id": rubric_id}).json()["id"]
     paper_ids = [_upload(client, batch_id, "s0.docx"), _upload(client, batch_id, "s1.docx")]
 

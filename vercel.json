@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["iad1"],
+  "functions": {
+    "api/**/*.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{.env,.env.*,storage/**,backend/app/tests/**,docs/**,.github/**,test/**,frontend/streamlit_app.py,**/*.docx,**/*.pdf,**/*.png,**/*.svg,**/*.mmd}"
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {"key": "X-Content-Type-Options", "value": "nosniff"},
+        {"key": "X-Frame-Options", "value": "DENY"},
+        {"key": "Referrer-Policy", "value": "same-origin"},
+        {"key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains"}
+      ]
+    }
+  ]
+}
