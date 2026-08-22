@@ -351,6 +351,8 @@ def _normalized_graph_content(db, rubric_id):
             "created_by",
             "created_at",
             "published_at",
+            "published_by",
+            "archived_by",
         },
     )
     compilation_content = tuple(

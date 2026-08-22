@@ -20,6 +20,11 @@ MIGRATION_SEQUENCE = (
     "0015_scoring_run_runtime_identity",
     "0016_general_submissions",
     "0017_batch_scoring_jobs",
+    "0018_identity_organizations",
+    "0019_resource_organization_scope",
+    "0020_rubric_visibility_scope",
+    "0021_private_ai_connections",
+    "0022_legacy_tenant_backfill",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -47,6 +52,10 @@ def verify_postgres(session):
         "document_snapshots",
         "batch_scoring_jobs",
         "batch_scoring_items",
+        "organizations",
+        "organization_members",
+        "ai_connections",
+        "ai_usage_ledger",
     }
     missing = sorted(required_tables - tables)
     if missing:
@@ -64,6 +73,29 @@ def verify_postgres(session):
     predicate = "" if predicate_value is None else str(predicate_value)
     if "queued" not in predicate or "running" not in predicate:
         raise RuntimeError("active batch job index predicate is incomplete")
+    rubric_indexes = {
+        value["name"]: value for value in inspector.get_indexes("rubrics")
+    }
+    for index_name, visibility in (
+        ("uq_rubrics_system_name_version", "system"),
+        ("uq_rubrics_organization_name_version", "organization"),
+        ("uq_rubrics_private_name_version", "private"),
+    ):
+        index = rubric_indexes.get(index_name)
+        predicate = str(
+            ((index or {}).get("dialect_options") or {}).get("postgresql_where") or ""
+        )
+        if index is None or not index.get("unique") or visibility not in predicate:
+            raise RuntimeError("rubric visibility partial unique index is incomplete: %s" % index_name)
+    connection_checks = {
+        value["name"] for value in inspector.get_check_constraints("ai_connections")
+    }
+    if not {
+        "ck_ai_connections_private_scope",
+        "ck_ai_connections_provider_type",
+        "ck_ai_connections_status",
+    }.issubset(connection_checks):
+        raise RuntimeError("AI connection security constraints are incomplete")
     ordered_rows = session.execute(
         text(
             "SELECT id, created_at FROM batch_scoring_items "
@@ -79,6 +111,9 @@ def verify_postgres(session):
         "migration_head": head,
         "migration_sequence": list(MIGRATION_SEQUENCE),
         "active_job_index": ACTIVE_JOB_INDEX,
+        "rubric_visibility_indexes": sorted(
+            name for name in rubric_indexes if name.startswith("uq_rubrics_")
+        ),
         "stable_ordering": list(stable_ordering_clause()),
         "sampled_item_count": len(ordered_rows),
         "production_default_switch_authorized": False,
@@ -91,6 +126,11 @@ def exercise_postgres_constraints(session):
     if session.get_bind().dialect.name != "postgresql":
         raise RuntimeError("constraint exercise requires postgresql")
     user = ensure_dev_user(session)
+    organization_id = session.scalar(
+        text("SELECT id FROM organizations WHERE name = 'Default Organization'")
+    )
+    if organization_id is None:
+        raise RuntimeError("default organization migration backfill is missing")
     rubric = models.Rubric(
         name="PGS-12 Postgres CI rubric",
         version=models.new_id(),
@@ -98,6 +138,7 @@ def exercise_postgres_constraints(session):
         status="published",
         created_by=user.id,
         owner_id=user.id,
+        organization_id=organization_id,
     )
     batch = models.GradingBatch(
         name="PGS-12 Postgres CI batch",
@@ -105,6 +146,7 @@ def exercise_postgres_constraints(session):
         status="draft",
         created_by=user.id,
         owner_id=user.id,
+        organization_id=organization_id,
     )
     session.add_all([rubric, batch])
     session.flush()
@@ -116,6 +158,8 @@ def exercise_postgres_constraints(session):
                 file_path="/ci/ops-%s.docx" % ordinal,
                 parsed_text_path="/ci/ops-%s.json" % ordinal,
                 status="parsed",
+                owner_id=user.id,
+                organization_id=organization_id,
             )
         )
     session.commit()

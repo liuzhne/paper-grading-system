@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any
+from typing import Literal
 from typing import Optional
 
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ class RubricCreate(BaseModel):
     version: str = Field(default="v1.0", min_length=1)
     total_score: float = Field(default=100, gt=0)
     description: Optional[str] = None
+    visibility: Literal["system", "organization", "private"] = "private"
     criteria: list[RubricCriterionCreate]
 
     @model_validator(mode="after")
@@ -174,6 +176,7 @@ class RubricRead(BaseModel):
     version: str
     total_score: float
     status: str
+    visibility: str = "private"
     description: Optional[str] = None
     format_spec: dict = Field(default_factory=dict)
     created_at: datetime

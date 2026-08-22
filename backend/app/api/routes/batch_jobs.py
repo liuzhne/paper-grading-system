@@ -5,7 +5,11 @@ from fastapi import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
+from backend.app.api.deps import CurrentPrincipal
+from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
+from backend.app.api.deps import require_organization_role
+from backend.app.db.models import GradingBatch
 from backend.app.db.session import get_db
 from backend.app.schemas.batch_job import BatchScoringJobCreate
 from backend.app.schemas.batch_job import BatchScoringJobRead
@@ -21,9 +25,26 @@ from backend.app.services.dev_user import ensure_dev_user
 router = APIRouter(tags=["batch-scoring-jobs"])
 
 
-def _job_or_404(db, job_id):
+def _batch_or_404(
+    db: Session,
+    batch_id: str,
+    principal: CurrentPrincipal,
+) -> GradingBatch:
+    batch = db.get(GradingBatch, batch_id)
+    if batch is None or (
+        principal.organization_id is not None
+        and batch.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="batch not found")
+    return batch
+
+
+def _job_or_404(db, job_id, principal: CurrentPrincipal):
     job = get_batch_scoring_job(db, job_id)
-    if job is None:
+    if job is None or (
+        principal.organization_id is not None
+        and job.batch.organization_id != principal.organization_id
+    ):
         raise HTTPException(status_code=404, detail="batch scoring job not found")
     return job
 
@@ -39,9 +60,12 @@ def create_job(
     response: Response,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _batch_or_404(db, batch_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         job, created = create_batch_scoring_job(
             db,
             batch_id=batch_id,
@@ -62,7 +86,12 @@ def create_job(
     "/batches/{batch_id}/score-jobs/latest",
     response_model=BatchScoringJobRead,
 )
-def latest_job(batch_id: str, db: Session = Depends(get_db)):
+def latest_job(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _batch_or_404(db, batch_id, principal)
     job = get_latest_batch_scoring_job(db, batch_id)
     if job is None:
         raise HTTPException(status_code=404, detail="batch scoring job not found")
@@ -73,16 +102,26 @@ def latest_job(batch_id: str, db: Session = Depends(get_db)):
     "/batch-scoring-jobs/{job_id}",
     response_model=BatchScoringJobRead,
 )
-def read_job(job_id: str, db: Session = Depends(get_db)):
-    return _job_or_404(db, job_id)
+def read_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    return _job_or_404(db, job_id, principal)
 
 
 @router.post(
     "/batch-scoring-jobs/{job_id}/cancel",
     response_model=BatchScoringJobRead,
 )
-def cancel_job(job_id: str, db: Session = Depends(get_db)):
+def cancel_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     try:
+        _job_or_404(db, job_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         return cancel_batch_scoring_job(db, job_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -92,8 +131,14 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     "/batch-scoring-jobs/{job_id}/retry",
     response_model=BatchScoringJobRead,
 )
-def retry_job(job_id: str, db: Session = Depends(get_db)):
+def retry_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     try:
+        _job_or_404(db, job_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         return retry_batch_scoring_job(db, job_id)
     except ValueError as exc:
         status = 404 if "not found" in str(exc) else 409
@@ -104,8 +149,13 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
     "/batch-scoring-jobs/{job_id}/run",
     response_model=BatchScoringJobRead,
 )
-def run_job(job_id: str, db: Session = Depends(get_db)):
-    _job_or_404(db, job_id)
+def run_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _job_or_404(db, job_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
     bind = db.get_bind()
     db.rollback()
     factory = sessionmaker(bind=bind, autocommit=False, autoflush=False)
@@ -113,4 +163,3 @@ def run_job(job_id: str, db: Session = Depends(get_db)):
         return run_batch_scoring_job(factory, job_id=job_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-

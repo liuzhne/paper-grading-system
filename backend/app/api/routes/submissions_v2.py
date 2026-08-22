@@ -9,7 +9,11 @@ from fastapi import UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from backend.app.core.config import settings
+from backend.app.api.deps import CurrentPrincipal
+from backend.app.api.deps import current_principal
+from backend.app.api.deps import current_user_id
+from backend.app.api.deps import require_organization_role
+from backend.app.db import models
 from backend.app.db.session import get_db
 from backend.app.schemas.submission import DocumentSnapshotSummary
 from backend.app.schemas.submission import EvaluationBatchCreate
@@ -67,6 +71,66 @@ def _raise_http(exc):
     raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _visible_evaluation_batch(
+    db: Session,
+    batch_id: str,
+    principal: CurrentPrincipal,
+) -> models.EvaluationBatch:
+    batch = db.get(models.EvaluationBatch, batch_id)
+    if batch is None or (
+        principal.organization_id is not None
+        and batch.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="evaluation batch not found")
+    return batch
+
+
+def _visible_submission(
+    db: Session,
+    submission_id: str,
+    principal: CurrentPrincipal,
+):
+    try:
+        submission = get_submission(db, submission_id)
+    except (LookupError, ValueError) as exc:
+        _raise_http(exc)
+    if (
+        principal.organization_id is not None
+        and submission.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="submission not found")
+    return submission
+
+
+def _visible_scoring_run(
+    db: Session,
+    run_id: str,
+    principal: CurrentPrincipal,
+):
+    try:
+        run = get_scoring_run(db, run_id)
+    except (LookupError, ValueError) as exc:
+        _raise_http(exc)
+    if (
+        principal.organization_id is not None
+        and run.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="v2 scoring run not found")
+    return run
+
+
+def _visible_score_item(
+    db: Session,
+    item_id: str,
+    principal: CurrentPrincipal,
+):
+    item = db.get(models.ScoreItem, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="score item not found")
+    _visible_scoring_run(db, item.scoring_run_id, principal)
+    return item
+
+
 @router.post(
     "/evaluation-batches",
     response_model=EvaluationBatchRead,
@@ -75,10 +139,24 @@ def _raise_http(exc):
 def post_evaluation_batch(
     payload: EvaluationBatchCreate,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
-    user = ensure_dev_user(db)
+    ensure_dev_user(db)
+    version = db.get(models.RubricVersion, payload.rubric_version_id)
+    rubric = None if version is None else db.get(models.Rubric, version.rubric_id)
+    if rubric is None or (
+        principal.organization_id is not None
+        and rubric.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="rubric version not found")
+    require_organization_role(principal, "org_admin", "teacher")
     try:
-        batch = create_evaluation_batch(db, payload, creator_id=user.id)
+        batch = create_evaluation_batch(
+            db,
+            payload,
+            creator_id=principal.user_id,
+            organization_id=principal.organization_id,
+        )
     except (LookupError, ValueError) as exc:
         _raise_http(exc)
     return evaluation_batch_projection(batch)
@@ -90,8 +168,9 @@ async def post_submission(
     metadata_json: str = Form("{}"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
-    user = ensure_dev_user(db)
+    ensure_dev_user(db)
     try:
         metadata = json.loads(metadata_json)
     except (TypeError, ValueError) as exc:
@@ -105,6 +184,8 @@ async def post_submission(
             detail="metadata_json must be a JSON object",
         )
     try:
+        _visible_evaluation_batch(db, evaluation_batch_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         submission, _snapshot = ingest_submission(
             db,
             evaluation_batch_id=evaluation_batch_id,
@@ -112,7 +193,7 @@ async def post_submission(
             uploaded_media_type=file.content_type,
             raw_bytes=await file.read(),
             metadata=metadata,
-            creator_id=user.id,
+            creator_id=principal.user_id,
         )
     except (LookupError, ValueError) as exc:
         _raise_http(exc)
@@ -120,11 +201,12 @@ async def post_submission(
 
 
 @router.get("/submissions/{submission_id}", response_model=SubmissionRead)
-def read_submission(submission_id: str, db: Session = Depends(get_db)):
-    try:
-        return submission_projection(get_submission(db, submission_id))
-    except (LookupError, ValueError) as exc:
-        _raise_http(exc)
+def read_submission(
+    submission_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    return submission_projection(_visible_submission(db, submission_id, principal))
 
 
 @router.get(
@@ -135,8 +217,10 @@ def read_document_snapshot(
     submission_id: str,
     document_snapshot_id: str | None = None,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     try:
+        _visible_submission(db, submission_id, principal)
         snapshot = get_document_snapshot(
             db,
             submission_id,
@@ -155,9 +239,12 @@ def post_submission_score(
     submission_id: str,
     payload: ScoreSubmissionRequest,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _visible_submission(db, submission_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         run = score_generic_submission(
             db,
             submission_id,
@@ -174,11 +261,12 @@ def post_submission_score(
     "/scoring-runs/{run_id}",
     response_model=V2ScoringRunRead,
 )
-def read_scoring_run(run_id: str, db: Session = Depends(get_db)):
-    try:
-        return scoring_run_projection(get_scoring_run(db, run_id))
-    except (LookupError, ValueError) as exc:
-        _raise_http(exc)
+def read_scoring_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    return scoring_run_projection(_visible_scoring_run(db, run_id, principal))
 
 
 @router.patch(
@@ -189,16 +277,20 @@ def patch_score_item(
     item_id: str,
     payload: GenericScoreItemReview,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
 ):
     ensure_dev_user(db)
     try:
+        _visible_score_item(db, item_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         item = update_generic_score_item(
             db,
             item_id=item_id,
             final_score=payload.final_score,
             reason=payload.reason,
             resolution_type=payload.resolution_type,
-            reviewer_id=settings.DEFAULT_DEV_USER_ID,
+            reviewer_id=user_id,
         )
     except (LookupError, ValueError) as exc:
         _raise_http(exc)
@@ -213,14 +305,18 @@ def post_scoring_review(
     run_id: str,
     payload: GenericReviewSubmit,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
 ):
     ensure_dev_user(db)
     try:
+        _visible_scoring_run(db, run_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         run = submit_generic_review(
             db,
             run_id=run_id,
             reason=payload.reason,
-            reviewer_id=settings.DEFAULT_DEV_USER_ID,
+            reviewer_id=user_id,
         )
         run = get_scoring_run(db, run.id)
     except (LookupError, ValueError) as exc:
@@ -232,8 +328,13 @@ def post_scoring_review(
     "/scoring-runs/{run_id}/review-logs",
     response_model=list[V2ReviewLogRead],
 )
-def read_review_logs(run_id: str, db: Session = Depends(get_db)):
+def read_review_logs(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     try:
+        _visible_scoring_run(db, run_id, principal)
         return [
             review_log_projection(log) for log in review_logs(db, run_id)
         ]
@@ -242,16 +343,26 @@ def read_review_logs(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/scoring-runs/{run_id}/export.json")
-def export_scoring_run_json(run_id: str, db: Session = Depends(get_db)):
+def export_scoring_run_json(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     try:
+        _visible_scoring_run(db, run_id, principal)
         return build_run_export_v2(db, run_id)
     except (LookupError, TypeError, ValueError) as exc:
         _raise_http(exc)
 
 
 @router.get("/scoring-runs/{run_id}/report")
-def export_scoring_run_report(run_id: str, db: Session = Depends(get_db)):
+def export_scoring_run_report(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     try:
+        _visible_scoring_run(db, run_id, principal)
         path = generate_report_v2(db, run_id)
     except (LookupError, TypeError, ValueError) as exc:
         _raise_http(exc)
@@ -263,8 +374,13 @@ def export_scoring_run_report(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/scoring-runs/{run_id}/export.xlsx")
-def export_scoring_run_excel(run_id: str, db: Session = Depends(get_db)):
+def export_scoring_run_excel(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     try:
+        _visible_scoring_run(db, run_id, principal)
         path = export_run_excel_v2(db, run_id)
     except (LookupError, TypeError, ValueError) as exc:
         _raise_http(exc)

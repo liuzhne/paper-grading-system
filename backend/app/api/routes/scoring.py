@@ -7,7 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
-from backend.app.core.config import settings
+from backend.app.api.deps import CurrentPrincipal
+from backend.app.api.deps import current_principal
+from backend.app.api.deps import current_user_id
+from backend.app.api.deps import require_organization_role
 from backend.app.db.models import Paper
 from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
@@ -28,13 +31,52 @@ from backend.app.services.scoring.engine import update_score_item
 router = APIRouter(tags=["scoring"])
 
 
+def _visible_paper(db: Session, paper_id: str, principal: CurrentPrincipal) -> Paper:
+    paper = db.get(Paper, paper_id)
+    if paper is None or (
+        principal.organization_id is not None
+        and paper.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="paper not found")
+    return paper
+
+
+def _visible_run(
+    db: Session,
+    run_id: str,
+    principal: CurrentPrincipal,
+) -> ScoringRun:
+    run = db.get(ScoringRun, run_id)
+    if run is None or (
+        principal.organization_id is not None
+        and run.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="scoring run not found")
+    return run
+
+
+def _visible_score_item(
+    db: Session,
+    item_id: str,
+    principal: CurrentPrincipal,
+) -> ScoreItem:
+    item = db.get(ScoreItem, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="score item not found")
+    _visible_run(db, item.scoring_run_id, principal)
+    return item
+
+
 @router.get("/scoring-runs", response_model=list[ScoringRunRead])
 def list_scoring_runs(
     paper_id: Optional[str] = None,
     batch_id: Optional[str] = None,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     query = select(ScoringRun).order_by(ScoringRun.created_at.desc())
+    if principal.organization_id is not None:
+        query = query.where(ScoringRun.organization_id == principal.organization_id)
     if paper_id:
         query = query.where(ScoringRun.paper_id == paper_id)
     if batch_id:
@@ -43,9 +85,15 @@ def list_scoring_runs(
 
 
 @router.post("/papers/{paper_id}/score", response_model=ScoringRunRead)
-def create_scoring_run(paper_id: str, db: Session = Depends(get_db)):
+def create_scoring_run(
+    paper_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     ensure_dev_user(db)
     try:
+        _visible_paper(db, paper_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
         return score_paper(db, paper_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -54,10 +102,12 @@ def create_scoring_run(paper_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/scoring-runs/{run_id}")
-def get_scoring_run(run_id: str, db: Session = Depends(get_db)):
-    run = db.get(ScoringRun, run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="scoring run not found")
+def get_scoring_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    run = _visible_run(db, run_id, principal)
     if run.submission_id is not None:
         raise HTTPException(
             status_code=400,
@@ -77,11 +127,14 @@ def get_scoring_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/scoring-runs/{run_id}/retry", response_model=ScoringRunRead)
-def retry_scoring_run(run_id: str, db: Session = Depends(get_db)):
+def retry_scoring_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     ensure_dev_user(db)
-    run = db.get(ScoringRun, run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="scoring run not found")
+    run = _visible_run(db, run_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
     if run.submission_id is not None:
         raise HTTPException(
             status_code=400,
@@ -96,10 +149,12 @@ def retry_scoring_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/scoring-runs/{run_id}/items", response_model=list[ScoreItemRead])
-def list_score_items(run_id: str, db: Session = Depends(get_db)):
-    run = db.get(ScoringRun, run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="scoring run not found")
+def list_score_items(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _visible_run(db, run_id, principal)
     return db.scalars(
         select(ScoreItem)
         .where(ScoreItem.scoring_run_id == run_id)
@@ -109,26 +164,44 @@ def list_score_items(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.patch("/score-items/{item_id}", response_model=ScoreItemRead)
-def patch_score_item(item_id: str, payload: ScoreItemUpdate, db: Session = Depends(get_db)):
+def patch_score_item(
+    item_id: str,
+    payload: ScoreItemUpdate,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
+):
     ensure_dev_user(db)
     try:
-        return update_score_item(db, item_id, payload.final_score, payload.reason, settings.DEFAULT_DEV_USER_ID)
+        _visible_score_item(db, item_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
+        return update_score_item(db, item_id, payload.final_score, payload.reason, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/scoring-runs/{run_id}/review", response_model=ScoringRunRead)
-def review_scoring_run(run_id: str, payload: ReviewSubmit, db: Session = Depends(get_db)):
+def review_scoring_run(
+    run_id: str,
+    payload: ReviewSubmit,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
+):
     ensure_dev_user(db)
     try:
-        return submit_review(db, run_id, payload.reason, settings.DEFAULT_DEV_USER_ID)
+        _visible_run(db, run_id, principal)
+        require_organization_role(principal, "org_admin", "teacher")
+        return submit_review(db, run_id, payload.reason, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/scoring-runs/{run_id}/review-logs", response_model=list[ReviewLogRead])
-def list_review_logs(run_id: str, db: Session = Depends(get_db)):
-    run = db.get(ScoringRun, run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="scoring run not found")
+def list_review_logs(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _visible_run(db, run_id, principal)
     return db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run_id).order_by(ReviewLog.created_at)).all()

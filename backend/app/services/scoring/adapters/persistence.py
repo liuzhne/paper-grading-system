@@ -33,6 +33,7 @@ from backend.app.services.scoring.core.contracts import (
     ScoringRequest,
 )
 from backend.app.services.scoring.core.results import ScoringOutcome
+from backend.app.services.ai_connections import record_usage_ledger
 
 
 def _mapping(value, *, label: str) -> dict:
@@ -422,6 +423,7 @@ class CoreRunPersistence:
         document_snapshot_ref: str,
         coherence_findings=None,
         format_findings=None,
+        ai_connection_snapshot=None,
     ) -> ScoringRun:
         request_mapping = _request_mapping(request)
         outcome_mapping = _outcome_mapping(outcome)
@@ -468,6 +470,7 @@ class CoreRunPersistence:
                     "version-locked paper cannot persist a legacy scoring plan"
                 )
             owner_id = getattr(paper, "owner_id", None)
+            organization_id = getattr(paper, "organization_id", None)
         else:
             if document_snapshot_id is None:
                 raise ValueError("submission target requires a document snapshot")
@@ -545,6 +548,7 @@ class CoreRunPersistence:
             if actual_document_identity != expected_document_identity:
                 raise ValueError("stored document snapshot identity mismatch")
             owner_id = evaluation_batch.owner_id
+            organization_id = getattr(evaluation_batch, "organization_id", None)
 
         existing = self.db.scalar(
             select(ScoringRun).where(
@@ -577,10 +581,14 @@ class CoreRunPersistence:
             submission_id=submission_id,
             document_snapshot_id=document_snapshot_id,
             owner_id=owner_id,
+            organization_id=organization_id,
             rubric_id=rubric_id,
             model_provider=provider["name"],
             model_name=provider["model"],
             model_version=provider["model_version"],
+            ai_connection_id=(ai_connection_snapshot or {}).get("ai_connection_id"),
+            ai_connection_key_version=(ai_connection_snapshot or {}).get("key_version"),
+            ai_connection_snapshot=deepcopy(ai_connection_snapshot),
             status="scored",
             started_at=now,
             finished_at=now,
@@ -638,6 +646,8 @@ class CoreRunPersistence:
             )
         )
         self.db.add(run)
+        self.db.flush()
+        record_usage_ledger(self.db, run)
         target = paper if paper is not None else stored_submission
         target.status = "pending_review" if run.need_manual_review else "scored"
         try:

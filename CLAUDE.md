@@ -14,7 +14,7 @@
 - CI：`.github/workflows/ci.yml` 包含锁文件全量测试与 Postgres 16 的逐版本迁移、约束/排序、拒绝 lossy downgrade、备份恢复演练；本机 SQLite 通过不能替代真实 CI artifact。
 
 ## 当前发布边界
-- Alembic head：`0017_batch_scoring_jobs`。
+- Alembic head：`0022_legacy_tenant_backfill`（将旧单租户资源安全回填至默认组织；有真实归属数据时降级 fail-closed）。
 - v1 `score_paper()` 与 v2 `score_generic_submission()` 并存；正式 RubricVersion 走 AtomicRule Core，未版本化标准只能走显式 compatibility。
 - `SCORING_ENGINE_MODE` 当前默认 `legacy`；它只控制未版本化兼容路径。真实 `GATE-03` 达到 `gating_eligible=true` 且取得维护者发布批准前，禁止改为默认 Core。
 
@@ -48,7 +48,7 @@
 确定性优先(代码做判定题、LLM 做判断题)、原子评分项、每个扣分/选档强制带证据(抗幻觉)、结构化优先、无状态可缓存可复现、人在回路。**扣哪项/扣几分来自用户授权的模板/Excel 编译，不写死。**
 
 ## 约定
-- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0017_batch_scoring_jobs`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
+- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0022_legacy_tenant_backfill`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
 - 改 prompt/输入构造要 bump `cache/llm_cache.PROMPT_VERSION`。
 - 改评分逻辑后用 §15 QWK 留出集重新锚定基线。
 - 生产变更需完成 `docs/上线清单.md`；备份恢复必须先 verify，restore 只允许显式确认的数据库与空 storage 目标。

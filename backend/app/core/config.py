@@ -67,7 +67,24 @@ class Settings(BaseSettings):
     AUTH_PASSWORD: Optional[str] = None
     AUTH_SECRET: str = "change-me-in-prod"  # 签发会话 token 的 HMAC 密钥，生产务必改
     AUTH_TOKEN_TTL_SECONDS: int = 86400
+    AUTH_COOKIE_NAME: str = "pgs_session"
+    AUTH_COOKIE_SECURE: bool = True
+    AUTH_COOKIE_SAMESITE: Literal["lax", "strict"] = "lax"
+    REGISTRATION_MODE: Literal["invite_only", "public"] = "invite_only"
+    EMAIL_VERIFICATION_TOKEN_TTL_SECONDS: int = 86400
+    PASSWORD_RESET_TOKEN_TTL_SECONDS: int = 3600
+    DEFAULT_ORGANIZATION_NAME: str = "Default Organization"
+    # Deployment-owned key-encryption material.  It is deliberately separate
+    # from AUTH_SECRET: rotating cookie signing keys must not make BYOK records
+    # unreadable.  Protected deployments must set a managed/KMS-derived value.
+    BYOK_MASTER_KEY: Optional[str] = None
+    BYOK_KEY_VERSION: int = 1
+    AI_CONNECTION_RATE_LIMIT_PER_MINUTE: int = 20
     LLM_PROVIDER: str = "mock"
+    # A protected multi-user deployment must not accidentally bill/expose work
+    # through the deployment-wide key.  Set this only for a reviewed migration,
+    # demo, or explicitly authorized platform-managed model policy.
+    PLATFORM_MANAGED_LLM_ENABLED: bool = False
     # M3 rollout switch.  ``legacy`` remains the production-safe default;
     # ``compare`` executes a non-authoritative Core candidate and ``core`` is
     # reserved for explicitly isolated vertical validation until M8.
@@ -79,7 +96,10 @@ class Settings(BaseSettings):
     MONITORING_REVIEW_SAMPLE_RATIO: float = 0.2  # 上线抽样复核（§15.2）：每批抽取此比例的论文做人工抽检
     MONITORING_MIN_REVIEW_COVERAGE: float = 0.1  # 漂移监控可信门槛：人工复核覆盖率低于此值则漂移信号暂不可信
     # 警告：调试日志会落入论文原文/评分内容/学生 PII，生产或处理真实学生数据时务必关闭。
-    LLM_DEBUG_LOG_ENABLED: bool = True
+    # Raw model payloads can contain student work and vendor data.  Local
+    # diagnostics must be explicitly opted into; protected deployments reject
+    # the setting altogether.
+    LLM_DEBUG_LOG_ENABLED: bool = False
     LLM_DEBUG_LOG_MAX_CHARS: int = 12000
     LLM_RATE_LIMIT_SLEEP_SECONDS: float = 1.0
     LLM_RETRY_BASE_DELAY_SECONDS: float = 1.0
@@ -132,7 +152,10 @@ class Settings(BaseSettings):
     OPS_RTO_MINUTES: int = 120
     OPS_RPO_MINUTES: int = 1440
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # `.env.local` is an ignored developer override.  Process environment
+    # variables still take precedence, so container/platform deployments keep
+    # using their injected configuration rather than any checked-out files.
+    model_config = SettingsConfigDict(env_file=(".env", ".env.local"), extra="ignore")
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

@@ -7,6 +7,8 @@ from fastapi import Form
 from fastapi import HTTPException
 from fastapi import Response
 from fastapi import UploadFile
+from sqlalchemy import and_
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
@@ -26,8 +28,12 @@ from backend.app.schemas.rubric import RubricDraftRecompileRequest
 from backend.app.schemas.rubric import RubricExecutionDraftRead
 from backend.app.schemas.rubric import TemplateLinkReviewRequest
 from backend.app.schemas.rubric import RubricUpdate
+from backend.app.api.deps import CurrentPrincipal
+from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
+from backend.app.api.deps import require_organization_role
 from backend.app.services.dev_user import ensure_dev_user
+from backend.app.services.auth import auth_active
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.eval.scores_template import build_scores_table_template
 from backend.app.services.rubric_import.parser import parse_rubric_files
@@ -42,11 +48,74 @@ from backend.app.services.rubrics.draft_graph import read_execution_draft
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
 
+def _scoped_duplicate(
+    db: Session,
+    *,
+    name: str,
+    version: str,
+    visibility: str,
+    principal: CurrentPrincipal,
+    exclude_id: str | None = None,
+) -> Rubric | None:
+    query = select(Rubric).where(
+        Rubric.name == name,
+        Rubric.version == version,
+        Rubric.visibility == visibility,
+    )
+    if visibility == "system":
+        pass
+    elif visibility == "organization":
+        query = query.where(Rubric.organization_id == principal.organization_id)
+    else:
+        query = query.where(Rubric.owner_id == principal.user_id)
+    if exclude_id is not None:
+        query = query.where(Rubric.id != exclude_id)
+    return db.scalar(query)
+
+
+def _visible_rubric(
+    db: Session,
+    rubric_id: str,
+    principal: CurrentPrincipal,
+) -> Rubric:
+    rubric = _load_rubric(db, rubric_id)
+    if rubric is None:
+        raise HTTPException(status_code=404, detail="rubric not found")
+    allowed = (
+        not auth_active()
+        or principal.platform_role == "platform_admin"
+        or (
+            rubric.visibility == "system"
+            or rubric.visibility == "organization" and rubric.organization_id == principal.organization_id
+            or rubric.visibility == "private" and rubric.owner_id == principal.user_id
+        )
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="rubric not found")
+    return rubric
+
+
 @router.post("", response_model=RubricRead)
-def create_rubric(payload: RubricCreate, db: Session = Depends(get_db), user_id: str = Depends(current_user_id)):
+def create_rubric(
+    payload: RubricCreate,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     ensure_dev_user(db)
+    if payload.visibility == "system":
+        if principal.platform_role != "platform_admin":
+            raise HTTPException(status_code=403, detail="only platform admins can create system rubrics")
+    elif payload.visibility == "organization":
+        require_organization_role(principal, "org_admin")
     _validate_criteria_total(payload.total_score, payload.criteria)
-    exists = db.scalar(select(Rubric).where(Rubric.name == payload.name, Rubric.version == payload.version))
+    exists = _scoped_duplicate(
+        db,
+        name=payload.name,
+        version=payload.version,
+        visibility=payload.visibility,
+        principal=principal,
+    )
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
 
@@ -59,6 +128,8 @@ def create_rubric(payload: RubricCreate, db: Session = Depends(get_db), user_id:
             session=db,
             prepared=prepared,
             actor_id=user_id,
+            organization_id=(None if payload.visibility == "system" else principal.organization_id),
+            visibility=payload.visibility,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -66,8 +137,26 @@ def create_rubric(payload: RubricCreate, db: Session = Depends(get_db), user_id:
 
 
 @router.get("", response_model=list[RubricRead])
-def list_rubrics(db: Session = Depends(get_db)):
-    return db.scalars(select(Rubric).options(selectinload(Rubric.criteria)).order_by(Rubric.created_at.desc())).all()
+def list_rubrics(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    query = select(Rubric).options(selectinload(Rubric.criteria))
+    if auth_active() and principal.platform_role != "platform_admin":
+        query = query.where(
+            or_(
+                Rubric.visibility == "system",
+                and_(
+                    Rubric.visibility == "organization",
+                    Rubric.organization_id == principal.organization_id,
+                ),
+                and_(
+                    Rubric.visibility == "private",
+                    Rubric.owner_id == principal.user_id,
+                ),
+            )
+        )
+    return db.scalars(query.order_by(Rubric.created_at.desc())).all()
 
 
 @router.get("/import-template.xlsx")
@@ -80,11 +169,13 @@ def download_rubric_import_template():
 
 
 @router.get("/{rubric_id}/scores-template.xlsx")
-def download_scores_template(rubric_id: str, db: Session = Depends(get_db)):
+def download_scores_template(
+    rubric_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     """按该 rubric 的评分项 code 生成"教师成绩表"模板，供 QWK 评估填写（见 scripts/run_qwk_eval）。"""
-    rubric = _load_rubric(db, rubric_id)
-    if rubric is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
+    rubric = _visible_rubric(db, rubric_id, principal)
     return Response(
         build_scores_table_template(rubric.criteria),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -97,18 +188,27 @@ def import_rubric_from_files(
     name: str = Form(...),
     version: str = Form("v1.0"),
     description: Optional[str] = Form(None),
+    visibility: str = Form("private"),
     rules_file: UploadFile = File(...),
     template_file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
+    if visibility not in {"private", "organization", "system"}:
+        raise HTTPException(status_code=422, detail="invalid rubric visibility")
+    if visibility == "system":
+        if principal.platform_role != "platform_admin":
+            raise HTTPException(status_code=403, detail="only platform admins can create system rubrics")
+    elif visibility == "organization":
+        require_organization_role(principal, "org_admin")
     if not _is_excel_file(rules_file.filename or ""):
         raise HTTPException(status_code=400, detail="rules_file must be an .xlsx or .xlsm file")
     if template_file and not _is_docx_file(template_file.filename or ""):
         raise HTTPException(status_code=400, detail="template_file must be a .docx file")
 
-    exists = db.scalar(select(Rubric).where(Rubric.name == name, Rubric.version == version))
+    exists = _scoped_duplicate(db, name=name, version=version, visibility=visibility, principal=principal)
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
 
@@ -143,6 +243,8 @@ def import_rubric_from_files(
             session=db,
             prepared=prepared,
             actor_id=user_id,
+            organization_id=(None if visibility == "system" else principal.organization_id),
+            visibility=visibility,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -159,14 +261,19 @@ def clone_rubric(
     payload: RubricCloneRequest,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
-    original = _load_rubric(db, rubric_id)
-    if original is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
+    original = _visible_rubric(db, rubric_id, principal)
 
     new_name = payload.name or original.name
-    exists = db.scalar(select(Rubric).where(Rubric.name == new_name, Rubric.version == payload.new_version))
+    exists = _scoped_duplicate(
+        db,
+        name=new_name,
+        version=payload.new_version,
+        visibility=original.visibility,
+        principal=principal,
+    )
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
 
@@ -187,11 +294,12 @@ def clone_rubric(
 
 
 @router.get("/{rubric_id}", response_model=RubricRead)
-def get_rubric(rubric_id: str, db: Session = Depends(get_db)):
-    rubric = _load_rubric(db, rubric_id)
-    if rubric is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
-    return rubric
+def get_rubric(
+    rubric_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    return _visible_rubric(db, rubric_id, principal)
 
 
 @router.get(
@@ -201,17 +309,24 @@ def get_rubric(rubric_id: str, db: Session = Depends(get_db)):
 def get_rubric_execution_draft(
     rubric_id: str,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     try:
+        _visible_rubric(db, rubric_id, principal)
         return read_execution_draft(session=db, rubric_id=rubric_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{rubric_id}/submit-review", response_model=RubricRead)
-def submit_rubric_review(rubric_id: str, db: Session = Depends(get_db)):
+def submit_rubric_review(
+    rubric_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         rubric_lifecycle.submit_for_review(db, rubric_id)
         db.commit()
     except rubric_lifecycle.RubricLifecycleError as exc:
@@ -221,9 +336,14 @@ def submit_rubric_review(rubric_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{rubric_id}/return-to-draft", response_model=RubricRead)
-def return_rubric_to_draft(rubric_id: str, db: Session = Depends(get_db)):
+def return_rubric_to_draft(
+    rubric_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         rubric_lifecycle.return_to_draft(db, rubric_id)
         db.commit()
     except rubric_lifecycle.RubricLifecycleError as exc:
@@ -238,13 +358,12 @@ def recompile_rubric_draft(
     payload: RubricDraftRecompileRequest,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     """Create a complete successor graph for a blocked/unpublished draft."""
 
     ensure_dev_user(db)
-    rubric = _load_rubric(db, rubric_id)
-    if rubric is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
+    rubric = _visible_rubric(db, rubric_id, principal)
     if rubric.status != "draft":
         raise HTTPException(
             status_code=400,
@@ -277,9 +396,11 @@ def submit_atomic_rule_review(
     payload: RubricLifecycleReason,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         rule = rubric_lifecycle.submit_atomic_rule_for_review(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -297,9 +418,11 @@ def patch_atomic_rule(
     payload: AtomicRuleEditRequest,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         rule = rubric_lifecycle.edit_atomic_rule(
             db,
             rubric_id,
@@ -322,9 +445,11 @@ def approve_atomic_rule_review(
     payload: RubricLifecycleReason,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         rule = rubric_lifecycle.approve_atomic_rule(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -342,9 +467,11 @@ def reject_atomic_rule_review(
     payload: RubricLifecycleReason,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         rule = rubric_lifecycle.reject_atomic_rule(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -362,9 +489,11 @@ def reopen_atomic_rule_review(
     payload: RubricLifecycleReason,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         rule = rubric_lifecycle.reopen_atomic_rule(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -382,9 +511,11 @@ def review_atomic_rule_template_link(
     payload: TemplateLinkReviewRequest,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
     try:
+        _visible_rubric(db, rubric_id, principal)
         link = rubric_lifecycle.review_template_link(
             db,
             rubric_id,
@@ -407,11 +538,14 @@ def review_atomic_rule_template_link(
 
 
 @router.patch("/{rubric_id}", response_model=RubricRead)
-def update_rubric(rubric_id: str, payload: RubricUpdate, db: Session = Depends(get_db)):
+def update_rubric(
+    rubric_id: str,
+    payload: RubricUpdate,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     ensure_dev_user(db)
-    rubric = _load_rubric(db, rubric_id)
-    if rubric is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
+    rubric = _visible_rubric(db, rubric_id, principal)
     if rubric.status != "draft":
         raise HTTPException(status_code=400, detail="only draft rubrics can be edited; clone published rubrics first")
 
@@ -435,7 +569,14 @@ def update_rubric(rubric_id: str, payload: RubricUpdate, db: Session = Depends(g
 
     next_name = updates.get("name", rubric.name)
     next_version = updates.get("version", rubric.version)
-    exists = db.scalar(select(Rubric).where(Rubric.name == next_name, Rubric.version == next_version, Rubric.id != rubric.id))
+    exists = _scoped_duplicate(
+        db,
+        name=next_name,
+        version=next_version,
+        visibility=rubric.visibility,
+        principal=principal,
+        exclude_id=rubric.id,
+    )
     if exists is not None:
         raise HTTPException(status_code=400, detail="rubric name and version already exist")
 
@@ -475,8 +616,10 @@ def publish_rubric(
     payload: RubricPublishRequest | None = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
+    _visible_rubric(db, rubric_id, principal)
     compilation_id = payload.compilation_id if payload else None
     if not compilation_id:
         has_provenance = db.scalar(

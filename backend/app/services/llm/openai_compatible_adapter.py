@@ -21,7 +21,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
     provider = "openai_compatible"
     model_version = "chat-completions"
 
-    def __init__(self, api_key=None, base_url=None, model_name=None, provider_name=None, client=None):
+    def __init__(self, api_key=None, base_url=None, model_name=None, provider_name=None, client=None, timeout_seconds=None, max_tokens=None, temperature=None, response_format_json=None, thinking_type=None):
         self.api_key = api_key or settings.OPENAI_COMPATIBLE_API_KEY
         if not self.api_key:
             raise ValueError("OPENAI_COMPATIBLE_API_KEY is required when LLM_PROVIDER=openai_compatible")
@@ -31,8 +31,13 @@ class OpenAICompatibleChatScorer(LLMScorer):
         self.base_url = self.base_url.rstrip("/")
         self.model_name = model_name or settings.OPENAI_COMPATIBLE_MODEL
         self.provider_name = provider_name or settings.OPENAI_COMPATIBLE_PROVIDER_NAME
+        self.timeout_seconds = float(timeout_seconds or settings.OPENAI_COMPATIBLE_TIMEOUT_SECONDS)
+        self.max_tokens = int(max_tokens or settings.OPENAI_COMPATIBLE_MAX_TOKENS)
+        self.temperature = float(temperature if temperature is not None else settings.OPENAI_COMPATIBLE_TEMPERATURE)
+        self.response_format_json = settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON if response_format_json is None else bool(response_format_json)
+        self.thinking_type = settings.OPENAI_COMPATIBLE_THINKING_TYPE if thinking_type is None else thinking_type
         self._owns_client = client is None
-        self.client = client or httpx.Client(timeout=settings.OPENAI_COMPATIBLE_TIMEOUT_SECONDS)
+        self.client = client or httpx.Client(timeout=self.timeout_seconds)
 
     def close(self):
         if self._owns_client and self.client is not None:
@@ -51,13 +56,13 @@ class OpenAICompatibleChatScorer(LLMScorer):
                 {"role": "system", "content": _instructions(criterion)},
                 {"role": "user", "content": _input_payload(paper, criterion, evidence_candidates, structure_checks, anchors)},
             ],
-            "temperature": settings.OPENAI_COMPATIBLE_TEMPERATURE,
-            "max_tokens": settings.OPENAI_COMPATIBLE_MAX_TOKENS,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
-        thinking_type = (settings.OPENAI_COMPATIBLE_THINKING_TYPE or "").strip()
+        thinking_type = (self.thinking_type or "").strip()
         if thinking_type:
             payload["thinking"] = {"type": thinking_type}
-        if settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON:
+        if self.response_format_json:
             payload["response_format"] = {"type": "json_object"}
 
         response = self._post_with_retry(payload)

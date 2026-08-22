@@ -26,6 +26,7 @@
           <div class="nav-group-label">配置与输出</div>
           <button class="nav-item" data-page="rubrics"><span class="nav-symbol">◇</span><span>模板中心</span></button>
           <button class="nav-item" data-page="exports"><span class="nav-symbol">⇩</span><span>输出中心</span></button>
+          <button class="nav-item" data-page="settings"><span class="nav-symbol">⚙</span><span>账户设置</span></button>
         </nav>
 
         <div class="sidebar-footer">
@@ -125,6 +126,7 @@
           <div class="template-layout">
             <aside class="panel library-panel">
               <div class="panel-header"><div><span class="section-kicker">模板库</span><h2>评分模板</h2></div><span class="badge" id="rubric-count-badge">0 个</span></div>
+              <label>显示范围<select id="rubric-visibility-filter"><option value="all">全部可读取模板</option><option value="private">仅自己</option><option value="organization">当前组织</option><option value="system">系统模板</option></select></label>
               <div class="library-actions"><button class="primary" data-scroll-to="rubric-import-section">导入模板</button><button class="secondary" data-scroll-to="blank-rubric-details">空白新建</button></div>
               <div id="rubric-list" class="stack template-list"></div>
             </aside>
@@ -141,6 +143,7 @@
                     <label>版本<input name="version" value="v1.0-import" /></label>
                     <label>用途说明<input name="description" value="由 Word 模板和 Excel 评分规则解析生成。" /></label>
                   </div>
+                  <label>模板范围<select name="visibility"><option value="private">仅自己可见</option><option value="organization">当前组织可见（仅组织管理员）</option><option value="system">全平台可见（仅平台管理员）</option></select></label>
                   <div class="file-grid">
                     <label class="file-drop"><span class="file-icon">XLS</span><strong>评分规则（必需）</strong><small>选择 .xlsx 或 .xlsm 文件</small><input name="rules_file" type="file" accept=".xlsx,.xlsm" /></label>
                     <label class="file-drop optional"><span class="file-icon">DOC</span><strong>文档模板（可选）</strong><small>选择带结构或批注的 .docx 文件</small><input name="template_file" type="file" accept=".docx" /></label>
@@ -157,6 +160,7 @@
                       <label>版本<input name="version" value="v1.1" /></label>
                       <label>说明<input name="description" value="从空白创建的评分模板。" /></label>
                     </div>
+                    <label>模板范围<select name="visibility"><option value="private">仅自己可见</option><option value="organization">当前组织可见（仅组织管理员）</option><option value="system">全平台可见（仅平台管理员）</option></select></label>
                     <div class="builder-toolbar"><div><strong>评分项</strong><span id="new-criteria-total" class="muted"></span></div><button type="button" class="secondary" data-add-criterion="new">添加评分项</button></div>
                     <div id="new-criteria-builder" class="criteria-builder"></div>
                     <details class="advanced-json"><summary>高级：直接编辑 JSON</summary><textarea name="criteria" class="code-input"></textarea></details>
@@ -236,6 +240,7 @@
                 <form id="batch-form" class="form compact">
                   <div class="form-row"><label>任务名称<input name="name" value="2026 届论文评分批次" /></label><label>评分模板<select name="rubric_id"></select></label></div>
                   <div class="form-row"><label>归属单位<input name="department" value="计算机学院" /></label><label>类别 / 专业<input name="major" value="软件工程" /></label></div>
+                  <label>评分 AI 连接<select id="batch-ai-connection" name="ai_connection_id"></select><small>仅显示当前组织内你有权使用的启用连接。论文内容将发送至所选厂商，费用由连接所有者按厂商规则承担。</small></label>
                   <div class="form-actions"><span class="muted">建议使用已发布模板，保证评分版本可追溯。</span><button type="submit">创建并继续</button></div>
                 </form>
               </section>
@@ -315,19 +320,37 @@
             <div class="disclosure-content"><div class="panel-header compact-header"><h2>写表记录</h2><button id="refresh-export-logs-btn" class="secondary">刷新记录</button></div><div id="export-logs" class="table-wrap"></div></div>
           </details>
         </section>
+
+        <section id="page-settings" class="page">
+          <div class="workflow-header"><div><span class="section-kicker">账户与组织</span><h2>账户设置</h2><p>在当前组织内管理成员、模板范围与私有 AI 连接。密钥仅通过 HTTPS 发往本系统后端，浏览器不会直接请求模型厂商。</p></div></div>
+          <div class="dashboard-grid settings-grid">
+            <section class="panel"><div class="panel-header"><div><span class="section-kicker">当前身份</span><h2 id="settings-identity">未登录</h2></div></div><label>当前组织<select id="organization-switcher"></select></label><p id="organization-role-hint" class="muted"></p></section>
+            <section class="panel"><div class="panel-header"><div><span class="section-kicker">成员与邀请</span><h2>组织成员</h2></div></div><div id="organization-members" class="table-wrap"></div><form id="organization-invite-form" class="form compact hidden"><label>邀请邮箱<input name="email" type="email" autocomplete="email" /></label><label>组织角色<select name="role"><option value="member">成员</option><option value="teacher">教师</option><option value="org_admin">组织管理员</option></select></label><button type="submit" class="secondary">发送邀请</button></form></section>
+          </div>
+          <section class="panel">
+            <div class="panel-header"><div><span class="section-kicker">私有 BYOK</span><h2>我的 AI 连接</h2><p class="muted">保存、测试、换 Key、停用和删除都在服务端完成；页面只展示掩码和状态。</p></div></div>
+            <form id="ai-connection-form" class="form compact">
+              <div class="form-row three-columns"><label>名称<input name="name" value="我的 AI 连接" /></label><label>厂商协议<select name="provider_type"><option value="openai_responses">OpenAI Responses</option><option value="openai_compatible">OpenAI 兼容</option></select></label><label>模型<input name="model_name" value="gpt-4.1-mini" /></label></div>
+              <div class="form-row"><label>HTTPS 接口地址<input name="base_url" type="url" value="https://api.openai.com/v1" /></label><label>API Key<input name="api_key" type="password" autocomplete="off" /></label></div>
+              <div class="form-actions"><span class="muted">测试不会在浏览器直接调用厂商。</span><span class="action-row"><button id="ai-connection-test-draft" type="button" class="secondary">测试配置</button><button type="submit">加密保存连接</button></span></div>
+            </form>
+            <div id="ai-connection-list" class="stack"></div>
+          </section>
+        </section>
       </main>
     </div>
 
     <div id="login-overlay" class="login-overlay hidden">
-      <form id="login-form" class="login-card">
+      <div class="login-card">
         <div class="login-brand"><span class="brand-mark">衡</span><span><strong>登录衡鉴</strong><small>进入智能评审工作台</small></span></div>
-        <label>用户名<input id="login-username" type="text" value="admin" autocomplete="username" /></label>
-        <label>密码<input id="login-password" type="password" autocomplete="current-password" /></label>
-        <button type="submit" class="primary">登录</button>
-        <div id="login-error" class="login-error hidden"></div>
-      </form>
+        <form id="login-form" class="form compact"><label>用户名<input id="login-username" type="text" value="admin" autocomplete="username" /></label><label>密码<input id="login-password" type="password" autocomplete="current-password" /></label><button type="submit" class="primary">登录</button><div id="login-error" class="login-error hidden"></div></form>
+        <details id="login-register-details"><summary>首次使用？注册账户</summary><form id="register-form" class="form compact"><label>用户名<input name="username" autocomplete="username" required /></label><label>邮箱<input name="email" type="email" autocomplete="email" required /></label><label>显示名称<input name="display_name" required /></label><label>密码（至少 12 位）<input name="password" type="password" autocomplete="new-password" required /></label><label>邀请令牌（如有）<input name="invitation_token" /></label><button type="submit" class="secondary">注册</button></form></details>
+        <details><summary>已收到邮箱验证令牌？</summary><form id="email-verification-form" class="form compact"><label>验证令牌<input name="token" autocomplete="one-time-code" required /></label><button type="submit" class="secondary">验证邮箱</button></form></details>
+        <details id="password-reset-details"><summary>忘记密码？</summary><form id="password-reset-form" class="form compact"><label>注册邮箱<input name="email" type="email" autocomplete="email" required /></label><button type="submit" class="secondary">发送重置说明</button></form></details>
+        <details><summary>已有重置令牌？</summary><form id="password-reset-confirm-form" class="form compact"><label>重置令牌<input name="token" autocomplete="one-time-code" required /></label><label>新密码（至少 12 位）<input name="password" type="password" autocomplete="new-password" required /></label><button type="submit" class="secondary">设置新密码</button></form></details>
+      </div>
     </div>
     <!-- PGS_CLIENT_CONFIG -->
-    <script src="/assets/app.js?v=20260820-account-menu"></script>
+    <script src="/assets/app.js?v=20260822-pgs47-settings"></script>
   </body>
 </html>

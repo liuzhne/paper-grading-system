@@ -10,6 +10,7 @@ class EvaluationBatchCreate(BaseModel):
     rubric_version_id: str = Field(min_length=1)
     business_profile_key: str = Field(min_length=1, max_length=100)
     business_profile_version: str = Field(min_length=1, max_length=100)
+    ai_connection_id: str | None = None
 
 
 class EvaluationBatchRead(BaseModel):
@@ -19,6 +20,9 @@ class EvaluationBatchRead(BaseModel):
     rubric_version_id: str
     business_profile_key: str
     business_profile_version: str
+    ai_connection_id: str | None = None
+    ai_connection_key_version: int | None = None
+    ai_connection_snapshot: dict | None = None
     status: str
     created_at: datetime
     updated_at: datetime
@@ -109,6 +113,9 @@ class V2ScoringRunRead(BaseModel):
     model_provider: str
     model_name: str
     model_version: str | None = None
+    ai_connection_id: str | None = None
+    ai_connection_key_version: int | None = None
+    ai_connection_snapshot: dict | None = None
     rescore_generation: int
     idempotency_key: str
     status: str

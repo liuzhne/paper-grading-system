@@ -64,7 +64,16 @@ def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
             "document_snapshots",
             "batch_scoring_jobs",
             "batch_scoring_items",
+            "organizations",
+            "organization_members",
+            "organization_invitations",
+            "auth_sessions",
+            "email_verification_tokens",
+            "password_reset_tokens",
+            "audit_logs",
         }.issubset(tables)
+        user_cols = {col["name"] for col in inspector.get_columns("users")}
+        assert {"email", "email_verified_at", "platform_role"}.issubset(user_cols)
         # 0002 原子项语义
         criterion_cols = {col["name"] for col in inspector.get_columns("rubric_criteria")}
         assert {"criterion_type", "scoring_mode", "applies_to", "rubric_levels", "sub_checks"}.issubset(criterion_cols)
@@ -116,7 +125,6 @@ def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
             assert "owner_id" in {col["name"] for col in inspector.get_columns(table)}
     finally:
         engine.dispose()
-
 
 def test_0017_batch_scoring_job_migration_downgrades_empty_and_replays(
     monkeypatch,
@@ -293,6 +301,98 @@ def test_0016_upgrade_preserves_legacy_paper_run_without_synthetic_submission(
             assert connection.execute(
                 text("SELECT count(*) FROM document_snapshots")
             ).scalar_one() == 0
+    finally:
+        engine.dispose()
+
+
+def test_0022_backfills_legacy_resources_into_the_default_organization(
+    monkeypatch,
+    tmp_path,
+):
+    """PGS-49: upgrading an existing 0017 database preserves and scopes history."""
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "pgs49-legacy-backfill.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0017_batch_scoring_jobs")
+
+    engine = create_engine(url)
+    now = datetime(2026, 8, 22)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, username, display_name, role, created_at, updated_at) "
+                    "VALUES (:id, 'dev-user', 'Legacy developer', 'developer', :now, :now)"
+                ),
+                {"id": settings.DEFAULT_DEV_USER_ID, "now": now},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO rubrics (id, name, version, total_score, status, owner_id, created_at) "
+                    "VALUES ('legacy-rubric', 'Legacy', '1', 100, 'published', :owner, :now)"
+                ),
+                {"owner": settings.DEFAULT_DEV_USER_ID, "now": now},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO grading_batches (id, name, rubric_id, status, owner_id, created_at, updated_at) "
+                    "VALUES ('legacy-batch', 'Legacy batch', 'legacy-rubric', 'completed', :owner, :now, :now)"
+                ),
+                {"owner": settings.DEFAULT_DEV_USER_ID, "now": now},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO papers (id, batch_id, file_name, file_path, status, owner_id, created_at, updated_at) "
+                    "VALUES ('legacy-paper', 'legacy-batch', 'legacy.docx', '/tmp/legacy.docx', 'scored', :owner, :now, :now)"
+                ),
+                {"owner": settings.DEFAULT_DEV_USER_ID, "now": now},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO scoring_runs "
+                    "(id, paper_id, rubric_id, model_provider, model_name, status, need_manual_review, owner_id, created_at) "
+                    "VALUES ('legacy-run', 'legacy-paper', 'legacy-rubric', 'openai', 'legacy-model', 'scored', 0, :owner, :now)"
+                ),
+                {"owner": settings.DEFAULT_DEV_USER_ID, "now": now},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            organization_id = connection.execute(
+                text("SELECT id FROM organizations WHERE id = '00000000-0000-0000-0000-000000000002'")
+            ).scalar_one()
+            assert connection.execute(
+                text("SELECT platform_role, email_verified_at IS NOT NULL FROM users WHERE id = :id"),
+                {"id": settings.DEFAULT_DEV_USER_ID},
+            ).one() == ("platform_admin", 1)
+            assert connection.execute(
+                text("SELECT role FROM organization_members WHERE organization_id = :organization_id AND user_id = :user_id"),
+                {"organization_id": organization_id, "user_id": settings.DEFAULT_DEV_USER_ID},
+            ).scalar_one() == "org_admin"
+            for table in ("rubrics", "grading_batches", "papers", "scoring_runs", "evaluation_batches", "submissions"):
+                assert connection.execute(
+                    text("SELECT count(*) FROM %s WHERE organization_id IS NULL" % table)
+                ).scalar_one() == 0
+            assert connection.execute(
+                text("SELECT model_provider, model_name FROM scoring_runs WHERE id = 'legacy-run'")
+            ).one() == ("openai", "legacy-model")
+            assert connection.execute(
+                text("SELECT ai_connection_id FROM scoring_runs WHERE id = 'legacy-run'")
+            ).scalar_one() is None
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="would lose tenant ownership"):
+        command.downgrade(config, "0021_private_ai_connections")
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0022_legacy_tenant_backfill"
     finally:
         engine.dispose()
 

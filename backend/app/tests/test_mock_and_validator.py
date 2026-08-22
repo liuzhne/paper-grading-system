@@ -121,6 +121,8 @@ def test_openai_compatible_debug_logs_request_and_response_with_redacted_key(mon
 
 
 def test_openai_compatible_429_uses_long_retry_delay(monkeypatch, caplog):
+    # Raw diagnostic logging is opt-in after the BYOK privacy hardening.
+    monkeypatch.setattr(settings, "LLM_DEBUG_LOG_ENABLED", True)
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MAX_RETRIES", 1)
     monkeypatch.setattr(settings, "LLM_429_RETRY_DELAY_SECONDS", 12)
     monkeypatch.setattr(settings, "LLM_RETRY_MAX_DELAY_SECONDS", 30)

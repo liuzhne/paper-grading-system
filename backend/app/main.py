@@ -13,10 +13,12 @@ from sqlalchemy.exc import ProgrammingError
 
 from backend.app.api.deps import enforce_auth
 from backend.app.api.routes import auth
+from backend.app.api.routes import ai_connections
 from backend.app.api.routes import batches
 from backend.app.api.routes import batch_jobs
 from backend.app.api.routes import calibration
 from backend.app.api.routes import exports
+from backend.app.api.routes import organizations
 from backend.app.api.routes import papers
 from backend.app.api.routes import release_gates
 from backend.app.api.routes import rubrics
@@ -62,6 +64,8 @@ def create_app():
     # auth / system 保持开放（登录页与状态自检需在登录前可达）。
     guarded = [Depends(enforce_auth)]
     app.include_router(auth.router, prefix=settings.API_PREFIX)
+    app.include_router(ai_connections.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(organizations.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(batches.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(batch_jobs.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(rubrics.router, prefix=settings.API_PREFIX, dependencies=guarded)

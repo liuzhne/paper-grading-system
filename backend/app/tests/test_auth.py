@@ -12,14 +12,15 @@ def test_auth_on_gates_data_routes(client, monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENABLED", True)
     monkeypatch.setattr(settings, "AUTH_PASSWORD", "s3cret")
     monkeypatch.setattr(settings, "AUTH_USERNAME", "admin")
+    monkeypatch.setattr(settings, "AUTH_COOKIE_SECURE", False)
 
     assert client.get("/api/auth/status").json()["auth_required"] is True
     assert client.get("/api/batches").status_code == 401  # 无 token
     assert client.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).status_code == 401
 
-    token = client.post("/api/auth/login", json={"username": "admin", "password": "s3cret"}).json()["token"]
-    assert token
-    ok = client.get("/api/batches", headers={"Authorization": "Bearer %s" % token})
+    login = client.post("/api/auth/login", json={"username": "admin", "password": "s3cret"})
+    assert login.status_code == 204
+    ok = client.get("/api/batches")
     assert ok.status_code == 200
     # /system 与 /auth 始终开放（登录页/状态自检需在登录前可达）
     assert client.get("/api/system/integrations").status_code == 200

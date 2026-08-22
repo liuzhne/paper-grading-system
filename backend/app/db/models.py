@@ -74,16 +74,203 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="developer")
     department: Mapped[str] = mapped_column(String(100), nullable=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=True, unique=True)
+    email_verified_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    platform_role: Mapped[str] = mapped_column(String(50), nullable=False, default="user")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
 
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    created_by: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class OrganizationMember(Base):
+    __tablename__ = "organization_members"
+    __table_args__ = (UniqueConstraint("organization_id", "user_id", name="uq_organization_membership"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class OrganizationInvitation(Base):
+    __tablename__ = "organization_invitations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="member")
+    token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    accepted_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    organization_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class EmailVerificationToken(Base):
+    __tablename__ = "email_verification_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    organization_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=True, index=True, deferred=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    event_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class AIConnection(Base):
+    """A private, server-side BYOK connection. Never expose cipher material."""
+
+    __tablename__ = "ai_connections"
+    __table_args__ = (
+        CheckConstraint("scope = 'private'", name="ck_ai_connections_private_scope"),
+        CheckConstraint(
+            "provider_type IN ('openai_responses', 'openai_compatible')",
+            name="ck_ai_connections_provider_type",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'disabled', 'deleted')",
+            name="ck_ai_connections_status",
+        ),
+        UniqueConstraint("owner_id", "name", name="uq_ai_connections_owner_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False, default="private")
+    provider_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider_options: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+    api_key_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_nonce: Mapped[str] = mapped_column(String(128), nullable=False)
+    api_key_tag: Mapped[str] = mapped_column(String(128), nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    key_last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    last_verified_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    last_error_code: Mapped[str] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+    disabled_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
+class AIUsageLedger(Base):
+    __tablename__ = "ai_usage_ledger"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    ai_connection_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ai_connections.id"), nullable=False, index=True
+    )
+    scoring_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("scoring_runs.id"), nullable=True, index=True
+    )
+    provider_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    estimated_cost: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
 class Rubric(Base):
     __tablename__ = "rubrics"
-    __table_args__ = (UniqueConstraint("name", "version", name="uq_rubrics_name_version"),)
+    __table_args__ = (
+        Index(
+            "uq_rubrics_system_name_version",
+            "name",
+            "version",
+            unique=True,
+            sqlite_where=sql_text("visibility = 'system'"),
+            postgresql_where=sql_text("visibility = 'system'"),
+        ),
+        Index(
+            "uq_rubrics_organization_name_version",
+            "organization_id",
+            "name",
+            "version",
+            unique=True,
+            sqlite_where=sql_text("visibility = 'organization'"),
+            postgresql_where=sql_text("visibility = 'organization'"),
+        ),
+        Index(
+            "uq_rubrics_private_name_version",
+            "owner_id",
+            "name",
+            "version",
+            unique=True,
+            sqlite_where=sql_text("visibility = 'private'"),
+            postgresql_where=sql_text("visibility = 'private'"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
+    organization_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=True, index=True, deferred=True)
+    # Kept deferred so the current model can still load historical schemas in
+    # migration replay tests that intentionally stop before 0020.
+    visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="private", deferred=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     version: Mapped[str] = mapped_column(String(50), nullable=False)
     total_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=100)
@@ -98,6 +285,12 @@ class Rubric(Base):
     created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     published_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    published_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True, deferred=True
+    )
+    archived_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True, deferred=True
+    )
 
     criteria: Mapped[list["RubricCriterion"]] = relationship(
         back_populates="rubric",
@@ -324,6 +517,9 @@ class RubricVersion(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     rubric_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=True, index=True, deferred=True
+    )
     compilation_id: Mapped[str] = mapped_column(String(36), nullable=False)
     version: Mapped[str] = mapped_column(String(50), nullable=False)
     workflow_profile: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -910,7 +1106,7 @@ _P103_OPERATION_COLUMNS = {
     "submit_for_review": {Rubric: frozenset({"status"})},
     "return_to_draft": {Rubric: frozenset({"status"})},
     "publish": {
-        Rubric: frozenset({"status", "published_at"}),
+        Rubric: frozenset({"status", "published_at", "published_by"}),
         RubricCompilation: frozenset(
             {"reviewed_by", "reviewed_at", "published_at", "final_version_hash"}
         ),
@@ -1372,11 +1568,25 @@ class EvaluationBatch(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("organizations.id"),
+        nullable=True,
+        index=True,
+        deferred=True,
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     rubric_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("rubrics.id"), nullable=False
     )
     rubric_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    ai_connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ai_connections.id"), nullable=True, deferred=True
+    )
+    ai_connection_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True, deferred=True)
+    ai_connection_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True, deferred=True
+    )
     business_profile_key: Mapped[str] = mapped_column(String(100), nullable=False)
     business_profile_version: Mapped[str] = mapped_column(
         String(100), nullable=False
@@ -1426,6 +1636,13 @@ class Submission(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("organizations.id"),
+        nullable=True,
+        index=True,
+        deferred=True,
+    )
     evaluation_batch_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("evaluation_batches.id", ondelete="RESTRICT"),
@@ -1554,6 +1771,7 @@ class GradingBatch(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
+    organization_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=True, index=True, deferred=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     department: Mapped[str] = mapped_column(String(100), nullable=True)
     major: Mapped[str] = mapped_column(String(100), nullable=True)
@@ -1561,6 +1779,11 @@ class GradingBatch(Base):
     paper_type: Mapped[str] = mapped_column(String(50), nullable=True)
     rubric_id: Mapped[str] = mapped_column(String(36), ForeignKey("rubrics.id"), nullable=False)
     rubric_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    ai_connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ai_connections.id"), nullable=True, deferred=True
+    )
+    ai_connection_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True, deferred=True)
+    ai_connection_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True, deferred=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="draft")
     created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
@@ -1585,6 +1808,7 @@ class Paper(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
+    organization_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=True, index=True)
     batch_id: Mapped[str] = mapped_column(String(36), ForeignKey("grading_batches.id"), nullable=False)
     student_id: Mapped[str] = mapped_column(String(100), nullable=True)
     student_name: Mapped[str] = mapped_column(String(100), nullable=True)
@@ -1909,6 +2133,15 @@ class ScoringRun(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
+    # Kept deferred while the additive tenant migration is rolled out so the
+    # ORM can still read historical schemas during migration verification.
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("organizations.id"),
+        nullable=True,
+        index=True,
+        deferred=True,
+    )
     paper_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("papers.id"), nullable=True
     )
@@ -1924,6 +2157,13 @@ class ScoringRun(Base):
     model_provider: Mapped[str] = mapped_column(String(100), nullable=False, default="mock")
     model_name: Mapped[str] = mapped_column(String(100), nullable=False, default="mock-criterion-scorer")
     model_version: Mapped[str] = mapped_column(String(100), nullable=True, default="v1")
+    ai_connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ai_connections.id"), nullable=True, deferred=True
+    )
+    ai_connection_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True, deferred=True)
+    ai_connection_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True, deferred=True
+    )
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="created")
     ai_total_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=True)
     final_total_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=True)

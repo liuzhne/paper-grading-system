@@ -21,7 +21,7 @@ class OpenAIResponsesScorer(LLMScorer):
     provider = "openai"
     model_version = "responses-api"
 
-    def __init__(self, api_key=None, base_url=None, model_name=None, client=None):
+    def __init__(self, api_key=None, base_url=None, model_name=None, client=None, timeout_seconds=None, max_output_tokens=None, temperature=None):
         self.api_key = api_key or settings.OPENAI_API_KEY
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
@@ -30,8 +30,11 @@ class OpenAIResponsesScorer(LLMScorer):
             raise ValueError("OPENAI_BASE_URL is required when LLM_PROVIDER=openai")
         self.base_url = self.base_url.rstrip("/")
         self.model_name = model_name or settings.OPENAI_MODEL
+        self.timeout_seconds = float(timeout_seconds or settings.OPENAI_TIMEOUT_SECONDS)
+        self.max_output_tokens = int(max_output_tokens or settings.OPENAI_MAX_OUTPUT_TOKENS)
+        self.temperature = float(temperature if temperature is not None else settings.OPENAI_TEMPERATURE)
         self._owns_client = client is None
-        self.client = client or httpx.Client(timeout=settings.OPENAI_TIMEOUT_SECONDS)
+        self.client = client or httpx.Client(timeout=self.timeout_seconds)
 
     def close(self):
         if self._owns_client and self.client is not None:
@@ -46,10 +49,10 @@ class OpenAIResponsesScorer(LLMScorer):
     def score_criterion(self, paper, criterion, evidence_candidates, structure_checks, anchors=None):
         payload = {
             "model": self.model_name,
-            "temperature": settings.OPENAI_TEMPERATURE,
+            "temperature": self.temperature,
             "instructions": _instructions(),
             "input": _input_payload(paper, criterion, evidence_candidates, structure_checks, anchors),
-            "max_output_tokens": settings.OPENAI_MAX_OUTPUT_TOKENS,
+            "max_output_tokens": self.max_output_tokens,
             "text": {
                 "format": {
                     "type": "json_schema",

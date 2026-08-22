@@ -10,6 +10,7 @@ class BatchCreate(BaseModel):
     name: str = Field(min_length=1)
     rubric_id: str
     rubric_version_id: Optional[str] = None
+    ai_connection_id: Optional[str] = None
     department: Optional[str] = None
     major: Optional[str] = None
     academic_year: Optional[str] = None
@@ -21,6 +22,7 @@ class BatchUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1)
     rubric_id: Optional[str] = None
     rubric_version_id: Optional[str] = None
+    ai_connection_id: Optional[str] = None
     department: Optional[str] = None
     major: Optional[str] = None
     academic_year: Optional[str] = None
@@ -39,6 +41,9 @@ class BatchRead(BaseModel):
     paper_type: Optional[str] = None
     rubric_id: str
     rubric_version_id: Optional[str] = None
+    ai_connection_id: Optional[str] = None
+    ai_connection_key_version: Optional[int] = None
+    ai_connection_snapshot: Optional[dict] = None
     status: str
     owner_id: Optional[str] = None
     created_at: datetime

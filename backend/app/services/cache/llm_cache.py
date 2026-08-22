@@ -27,7 +27,7 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV2
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-08-02-9"  # M5 bounded legacy direct/composite compatibility input
+PROMPT_VERSION = "2026-08-22-1"  # BYOK tenant/connection cache partition identity
 
 
 @dataclass(frozen=True)
@@ -69,11 +69,20 @@ class CacheEnvelopeEntry:
 def build_request(scorer, criterion, candidates, structure_checks, rubric_version, anchors=None):
     """构造进入哈希且作为审计留存的"完整输入"。
     校准锚点并入哈希 → 锚点变化即缓存失效（保可复现，设计§7）。"""
+    connection_snapshot = getattr(scorer, "_ai_connection_snapshot", None) or {}
     return {
         "prompt_version": PROMPT_VERSION,
         "provider": getattr(scorer, "provider", ""),
         "model": getattr(scorer, "model_name", ""),
         "model_version": getattr(scorer, "model_version", ""),
+        # BYOK credentials never enter the key.  The tenant, connection and
+        # rotation version do, so even byte-identical submissions cannot reuse
+        # another user's/provider account cache entry.
+        "connection_scope": {
+            "organization_id": getattr(scorer, "_ai_connection_organization_id", None),
+            "ai_connection_id": connection_snapshot.get("ai_connection_id"),
+            "key_version": connection_snapshot.get("key_version"),
+        },
         "sampling": {
             "openai_temperature": settings.OPENAI_TEMPERATURE,
             "openai_compatible_temperature": settings.OPENAI_COMPATIBLE_TEMPERATURE,

@@ -272,12 +272,16 @@ def _canonical_version_hash(
             {
                 "id",
                 "owner_id",
+                "organization_id",
+                "visibility",
                 "name",
                 "version",
                 "status",
                 "created_by",
                 "created_at",
                 "published_at",
+                "published_by",
+                "archived_by",
             },
         ),
         "criteria": _stable_rows(
@@ -305,6 +309,7 @@ def _canonical_version_hash(
             {
                 "id",
                 "rubric_id",
+                "organization_id",
                 "compilation_id",
                 "version",
                 "version_hash",
@@ -1053,6 +1058,7 @@ def upgrade_legacy_draft(
         version = models.RubricVersion(
             id=models.new_id(),
             rubric_id=rubric.id,
+            organization_id=rubric.organization_id,
             compilation_id=compilation.id,
             version=rubric.version,
             workflow_profile="manual_json",
@@ -1230,6 +1236,7 @@ def publish_rubric(
         )
     rubric.status = "published"
     rubric.published_at = published_at
+    rubric.published_by = reviewer_id
     compilation.reviewed_by = reviewer_id
     compilation.reviewed_at = published_at
     compilation.published_at = published_at
@@ -1278,12 +1285,18 @@ def clone_published_rubric(
         raise RubricLifecycleError("评分标准名称不能为空")
     clone_description = source.description if description is None else description
 
-    collision = session.scalar(
-        select(models.Rubric.id).where(
-            models.Rubric.name == clone_name,
-            models.Rubric.version == new_version,
-        )
+    collision_query = select(models.Rubric.id).where(
+        models.Rubric.name == clone_name,
+        models.Rubric.version == new_version,
+        models.Rubric.visibility == source.visibility,
     )
+    if source.visibility == "organization":
+        collision_query = collision_query.where(
+            models.Rubric.organization_id == source.organization_id
+        )
+    elif source.visibility == "private":
+        collision_query = collision_query.where(models.Rubric.owner_id == actor_id)
+    collision = session.scalar(collision_query)
     pending_collision = any(
         isinstance(item, models.Rubric)
         and item.name == clone_name
@@ -1352,6 +1365,8 @@ def clone_published_rubric(
     cloned = models.Rubric(
         id=models.new_id(),
         owner_id=actor_id,
+        organization_id=source.organization_id,
+        visibility=source.visibility,
         name=clone_name,
         version=new_version,
         total_score=source.total_score,
@@ -1461,6 +1476,7 @@ def clone_published_rubric(
         copied = models.RubricVersion(
             id=models.new_id(),
             rubric_id=cloned.id,
+            organization_id=cloned.organization_id,
             compilation_id=compilation_map[original.compilation_id].id,
             version=new_version,
             workflow_profile=original.workflow_profile,

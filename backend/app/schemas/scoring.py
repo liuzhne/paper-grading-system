@@ -78,6 +78,9 @@ class ScoringRunRead(BaseModel):
     model_provider: str
     model_name: str
     model_version: Optional[str] = None
+    ai_connection_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
+    ai_connection_key_version: Optional[int] = Field(default=None, exclude_if=lambda value: value is None)
+    ai_connection_snapshot: Optional[dict] = Field(default=None, exclude_if=lambda value: value is None)
     status: str
     ai_total_score: Optional[float] = None
     final_total_score: Optional[float] = None

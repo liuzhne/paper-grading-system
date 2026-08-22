@@ -85,6 +85,13 @@ const state = {
   drift: null,
   anchors: [],
   anchorRubricId: "",
+  authRequired: false,
+  identity: null,
+  organizations: [],
+  currentOrganizationId: "",
+  organizationMembers: [],
+  aiConnections: [],
+  rubricVisibilityFilter: "all",
   llmStatus: { phase: "idle" },
   llmTimer: null,
   newCriteriaDraft: JSON.parse(JSON.stringify(defaultCriteria)),
@@ -98,19 +105,12 @@ const pageMeta = {
   batches: ["评分任务", "绑定模板、上传待评材料并运行批量评分。"],
   review: ["结果复核", "查看结论与证据，处理需要人工确认的评分项。"],
   exports: ["输出中心", "将评分结果导出为汇总表、评审报告或在线表格。"],
+  settings: ["账户设置", "管理组织、成员和私有 AI 连接。"],
 };
 
 function apiBase() {
   const configured = window.__PGS_CONFIG__?.apiBase;
   return typeof configured === "string" ? configured.replace(/\/$/, "") : "/api";
-}
-
-function authToken() {
-  return window.localStorage.getItem("pgs_token") || "";
-}
-function setAuthToken(token) {
-  if (token) window.localStorage.setItem("pgs_token", token);
-  else window.localStorage.removeItem("pgs_token");
 }
 
 function showLogin(message) {
@@ -171,15 +171,15 @@ function setConnectionStatus(status) {
   if (label) label.textContent = copy[status] || copy.checking;
 }
 
-function setSidebarUser(user, { localMode = false } = {}) {
-  const username = typeof user === "string" ? user.trim() : "";
+function setSidebarUser(user, { localMode = false, organizationName = "" } = {}) {
+  const username = typeof user === "string" ? user.trim() : (user?.display_name || user?.username || "").trim();
   const name = document.querySelector("#sidebar-user-name");
   const context = document.querySelector("#sidebar-user-context");
   const avatar = document.querySelector("#sidebar-user-avatar");
   const displayName = username || (localMode ? "本地模式" : "访客");
 
   if (name) name.textContent = displayName;
-  if (context) context.textContent = username ? "已登录" : (localMode ? "未启用登录" : "请登录");
+  if (context) context.textContent = username ? (organizationName || "已登录") : (localMode ? "未启用登录" : "请登录");
   if (avatar) avatar.textContent = username ? Array.from(username)[0].toUpperCase() : "?";
 }
 
@@ -187,26 +187,33 @@ async function refreshAuthState() {
   // 返回 true=可进入应用；false=需登录（已弹出登录框）。
   try {
     setConnectionStatus("checking");
-    const statusResponse = await fetch(`${apiBase()}/auth/status`);
+    const statusResponse = await fetch(`${apiBase()}/auth/status`, { credentials: "same-origin" });
     if (!statusResponse.ok) throw new Error(`服务响应异常（${statusResponse.status}）`);
     const status = await statusResponse.json();
     setConnectionStatus("healthy");
     if (!status.auth_required) {
+      state.authRequired = false;
+      state.identity = null;
+      state.organizations = [];
+      state.currentOrganizationId = "";
       setLogoutVisible(false);
       setSidebarUser(null, { localMode: true });
       return true;
     }
-    const token = authToken();
-    if (token) {
-      const me = await fetch(`${apiBase()}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
-      if (me.ok) {
-        const identity = await me.json();
-        setLogoutVisible(true);
-        setSidebarUser(identity.user);
-        return true;
-      }
-      setAuthToken("");
+    state.authRequired = true;
+    const me = await fetch(`${apiBase()}/auth/me`, { credentials: "same-origin" });
+    if (me.ok) {
+      const identity = await me.json();
+      state.identity = identity;
+      state.currentOrganizationId = identity.organization?.id || "";
+      state.organizations = await api("/organizations");
+      setLogoutVisible(true);
+      setSidebarUser(identity.user, { organizationName: state.organizations.find((item) => item.id === state.currentOrganizationId)?.name || "" });
+      return true;
     }
+    state.identity = null;
+    state.organizations = [];
+    state.currentOrganizationId = "";
     setSidebarUser(null);
     showLogin();
     return false;
@@ -219,18 +226,15 @@ async function refreshAuthState() {
 
 async function api(path, options = {}) {
   const headers = Object.assign({}, options.headers || {});
-  const token = authToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   let response;
   try {
-    response = await fetch(`${apiBase()}${path}`, Object.assign({}, options, { headers }));
+    response = await fetch(`${apiBase()}${path}`, Object.assign({}, options, { headers, credentials: "same-origin" }));
     setConnectionStatus(response.status < 500 ? "healthy" : "failed");
   } catch (_) {
     setConnectionStatus("failed");
     throw new Error("无法连接服务");
   }
   if (response.status === 401) {
-    setAuthToken("");
     setLogoutVisible(false);
     setSidebarUser(null);
     showLogin("登录已失效，请重新登录");
@@ -314,6 +318,16 @@ function renderTable(headers, rows) {
 }
 
 async function loadAll() {
+  if (state.authRequired) {
+    state.organizations = await api("/organizations");
+    state.aiConnections = await api("/ai-connections");
+    state.organizationMembers = state.identity?.organization?.role === "org_admin" || state.identity?.user?.platform_role === "platform_admin"
+      ? await api(`/organizations/${state.currentOrganizationId}/members`)
+      : [];
+  } else {
+    state.aiConnections = [];
+    state.organizationMembers = [];
+  }
   state.integrations = await api("/system/integrations");
   state.rubrics = await api("/rubrics");
   if (!state.rubrics.some((rubric) => rubric.id === state.selectedLifecycleRubricId)) {
@@ -393,6 +407,7 @@ function render() {
   renderBatches();
   renderReview();
   renderExports();
+  renderSettings();
 }
 
 function renderSharedSelects() {
@@ -401,6 +416,16 @@ function renderSharedSelects() {
     ? optionHtml(state.rubrics, "id", (item) => `${item.name} · ${item.version} · ${statusLabel(item.status)}`)
     : '<option value="">请先创建评分模板</option>';
   rubricSelect.disabled = !state.rubrics.length;
+
+  const aiConnectionSelect = document.querySelector("#batch-ai-connection");
+  if (aiConnectionSelect) {
+    const activeConnections = state.aiConnections.filter((connection) => connection.status === "active");
+    aiConnectionSelect.innerHTML = '<option value="">使用 Mock（不外发论文或私有 Key）</option>' + optionHtml(
+      activeConnections,
+      "id",
+      (connection) => `${connection.name} · ${connection.provider_type} · ${connection.model_name} · ${connection.key_masked}`,
+    );
+  }
 
   for (const selector of ["#review-batch-select", "#export-batch-select"]) {
     document.querySelector(selector).innerHTML = optionHtml(state.batches, "id", (item) => item.name, state.selectedBatchId);
@@ -590,13 +615,16 @@ function sheetFallbackNote(sheets) {
 
 function renderRubrics() {
   const count = document.querySelector("#rubric-count-badge");
-  if (count) count.textContent = `${state.rubrics.length} 个`;
+  const visibleRubrics = state.rubricVisibilityFilter === "all"
+    ? state.rubrics
+    : state.rubrics.filter((rubric) => rubric.visibility === state.rubricVisibilityFilter);
+  if (count) count.textContent = `${visibleRubrics.length} 个`;
   document.querySelector("#rubric-list").innerHTML =
-    state.rubrics
+    visibleRubrics
       .map(
         (rubric) => `<article class="item-card template-card ${rubric.id === state.selectedLifecycleRubricId ? "selected" : ""}">
           <div class="item-title"><span>${escapeHtml(rubric.name)}</span><span class="badge ${statusTone(rubric.status)}">${escapeHtml(statusLabel(rubric.status))}</span></div>
-          <div class="muted">${escapeHtml(rubric.version)} · ${rubric.total_score} 分 · ${rubric.criteria.length} 项</div>
+          <div class="muted">${escapeHtml(rubric.version)} · ${rubric.total_score} 分 · ${rubric.criteria.length} 项 · ${escapeHtml({ private: "仅自己", organization: "当前组织", system: "系统模板" }[rubric.visibility] || rubric.visibility)}</div>
           <div class="template-description">${escapeHtml(rubric.description || "暂无说明")}</div>
           <div class="toolbar compact-toolbar">
             ${rubric.status === "draft" ? `<button class="secondary" data-edit-rubric="${rubric.id}">调整</button>` : ""}
@@ -609,6 +637,40 @@ function renderRubrics() {
   renderRubricImportPreview();
   renderCriteriaBuilder("new");
   renderRubricEditForm();
+}
+
+function renderSettings() {
+  const identity = document.querySelector("#settings-identity");
+  const organizationSwitcher = document.querySelector("#organization-switcher");
+  const roleHint = document.querySelector("#organization-role-hint");
+  const members = document.querySelector("#organization-members");
+  const inviteForm = document.querySelector("#organization-invite-form");
+  const connectionList = document.querySelector("#ai-connection-list");
+  if (!identity || !organizationSwitcher || !roleHint || !members || !inviteForm || !connectionList) return;
+  if (!state.authRequired || !state.identity?.user) {
+    identity.textContent = "本地模式（未启用登录）";
+    organizationSwitcher.innerHTML = '<option>启用认证后可管理组织</option>';
+    organizationSwitcher.disabled = true;
+    roleHint.textContent = "私有 AI 连接需要已登录的组织身份。";
+    members.innerHTML = '<div class="muted">启用认证后可查看当前组织成员。</div>';
+    inviteForm.classList.add("hidden");
+    connectionList.innerHTML = '<div class="muted">启用认证后可配置私有 AI 连接。</div>';
+    return;
+  }
+  identity.textContent = state.identity.user.display_name || state.identity.user.username;
+  organizationSwitcher.disabled = false;
+  organizationSwitcher.innerHTML = optionHtml(state.organizations, "id", (organization) => `${organization.name} · ${organization.role}`, state.currentOrganizationId);
+  roleHint.textContent = `当前角色：${state.identity.organization?.role || "平台管理员"}`;
+  const canManageMembers = state.identity.organization?.role === "org_admin" || state.identity.user.platform_role === "platform_admin";
+  members.innerHTML = canManageMembers
+    ? (state.organizationMembers.length
+      ? `<table><thead><tr><th>成员</th><th>邮箱</th><th>角色</th><th></th></tr></thead><tbody>${state.organizationMembers.map((member) => `<tr><td>${escapeHtml(member.display_name || member.username)}</td><td>${escapeHtml(member.email || "—")}</td><td><select data-member-role="${escapeHtml(member.user_id)}"><option value="member" ${member.role === "member" ? "selected" : ""}>成员</option><option value="teacher" ${member.role === "teacher" ? "selected" : ""}>教师</option><option value="org_admin" ${member.role === "org_admin" ? "selected" : ""}>组织管理员</option></select></td><td><button class="secondary" data-member-update="${escapeHtml(member.user_id)}" data-member-username="${escapeHtml(member.username)}">保存角色</button></td></tr>`).join("")}</tbody></table>`
+      : '<div class="muted">暂无成员。</div>')
+    : '<div class="muted">仅当前组织管理员可以查看和邀请成员。</div>';
+  inviteForm.classList.toggle("hidden", !canManageMembers);
+  connectionList.innerHTML = state.aiConnections.length
+    ? state.aiConnections.map((connection) => `<article class="item-card"><div class="item-title"><span>${escapeHtml(connection.name)}</span><span class="badge ${connection.status === "active" ? "ok" : "warn"}">${escapeHtml(connection.status)}</span></div><div class="muted">${escapeHtml(connection.provider_type)} · ${escapeHtml(connection.model_name)} · ${escapeHtml(connection.key_masked)} · v${connection.key_version}</div><div class="toolbar compact-toolbar"><button class="secondary" data-ai-test="${connection.id}">测试</button><button class="secondary" data-ai-rotate="${connection.id}">换 Key</button>${connection.status === "active" ? `<button class="secondary" data-ai-disable="${connection.id}">停用</button>` : ""}<button class="secondary" data-ai-delete="${connection.id}">删除</button></div></article>`).join("")
+    : '<div class="muted">还没有私有 AI 连接。保存前可先测试配置。</div>';
 }
 
 function builderCriteria(scope) {
@@ -1159,6 +1221,17 @@ function optionalText(value) {
   return trimmed || null;
 }
 
+function aiConnectionPayload(form) {
+  return {
+    name: String(form.get("name") || "").trim(),
+    provider_type: String(form.get("provider_type") || "").trim(),
+    base_url: String(form.get("base_url") || "").trim(),
+    model_name: String(form.get("model_name") || "").trim(),
+    provider_options: {},
+    api_key: String(form.get("api_key") || ""),
+  };
+}
+
 function criteriaPayloadRows(criteria) {
   return criteria
     .slice()
@@ -1343,6 +1416,49 @@ async function handleAction(event) {
       switchPage("batches");
       return;
     }
+    if (target.dataset.aiTest) {
+      await api(`/ai-connections/${target.dataset.aiTest}/test`, { method: "POST" });
+      showToast("连接已由服务端测试");
+      await loadAll();
+      return;
+    }
+    if (target.dataset.memberUpdate) {
+      const role = document.querySelector(`[data-member-role="${target.dataset.memberUpdate}"]`)?.value;
+      if (!role || !state.currentOrganizationId) throw new Error("无法读取成员角色或当前组织");
+      await api(`/organizations/${state.currentOrganizationId}/members/${target.dataset.memberUpdate}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role }),
+      });
+      await loadAll();
+      showToast("成员角色已更新");
+      return;
+    }
+    if (target.dataset.aiRotate) {
+      const apiKey = window.prompt("输入新的 API Key；它只会发送到本系统后端", "");
+      if (!apiKey) return;
+      await api(`/ai-connections/${target.dataset.aiRotate}/rotate-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      showToast("连接密钥已轮换");
+      await loadAll();
+      return;
+    }
+    if (target.dataset.aiDisable) {
+      await api(`/ai-connections/${target.dataset.aiDisable}/disable`, { method: "POST" });
+      showToast("连接已停用；已绑定的旧任务会安全失败");
+      await loadAll();
+      return;
+    }
+    if (target.dataset.aiDelete) {
+      if (!window.confirm("删除此 AI 连接？已存在的任务不会改用其他连接。")) return;
+      await api(`/ai-connections/${target.dataset.aiDelete}`, { method: "DELETE" });
+      showToast("连接已删除");
+      await loadAll();
+      return;
+    }
     if (target.dataset.addCriterion) {
       addCriterion(target.dataset.addCriterion);
       return;
@@ -1483,10 +1599,11 @@ function bindEvents() {
         (form) => {
           const criteria = JSON.parse(form.get("criteria"));
           return {
-            name: form.get("name"),
-            version: form.get("version"),
-            description: form.get("description"),
-            total_score: criteria.reduce((sum, item) => sum + Number(item.max_score), 0),
+          name: form.get("name"),
+          version: form.get("version"),
+          description: form.get("description"),
+          visibility: form.get("visibility"),
+          total_score: criteria.reduce((sum, item) => sum + Number(item.max_score), 0),
             criteria,
           };
         },
@@ -1572,6 +1689,7 @@ function bindEvents() {
         (form) => ({
           name: form.get("name"),
           rubric_id: form.get("rubric_id"),
+          ai_connection_id: optionalText(form.get("ai_connection_id")),
           department: form.get("department"),
           major: form.get("major"),
         }),
@@ -1580,6 +1698,81 @@ function bindEvents() {
       state.selectedBatchId = created.id;
       await loadAll();
       revealAndScroll("paper-files");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  document.querySelector("#rubric-visibility-filter")?.addEventListener("change", (event) => {
+    state.rubricVisibilityFilter = event.target.value;
+    renderRubrics();
+  });
+
+  document.querySelector("#organization-switcher")?.addEventListener("change", async (event) => {
+    try {
+      const selected = event.target.value;
+      await api("/auth/organization-context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ organization_id: selected }),
+      });
+      state.identity = await api("/auth/me");
+      state.currentOrganizationId = state.identity.organization?.id || "";
+      state.selectedBatchId = "";
+      state.selectedPaperId = "";
+      state.selectedRunId = "";
+      await loadAll();
+      showToast("已切换当前组织");
+    } catch (error) {
+      showToast(error.message, true);
+      renderSettings();
+    }
+  });
+
+  document.querySelector("#organization-invite-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      if (!state.currentOrganizationId) throw new Error("请选择当前组织");
+      const form = new FormData(event.currentTarget);
+      await api(`/organizations/${state.currentOrganizationId}/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: String(form.get("email") || "").trim(), role: form.get("role") }),
+      });
+      event.currentTarget.reset();
+      await loadAll();
+      showToast("邀请已创建；请通过部署配置的邮件流程发送注册链接");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  document.querySelector("#ai-connection-test-draft")?.addEventListener("click", async () => {
+    try {
+      const form = new FormData(document.querySelector("#ai-connection-form"));
+      await api("/ai-connections/test-draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(aiConnectionPayload(form)),
+      });
+      showToast("配置已由服务端测试，尚未保存");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+
+  document.querySelector("#ai-connection-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const form = new FormData(event.currentTarget);
+      await api("/ai-connections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(aiConnectionPayload(form)),
+      });
+      event.currentTarget.elements.api_key.value = "";
+      await loadAll();
+      showToast("私有 AI 连接已加密保存");
     } catch (error) {
       showToast(error.message, true);
     }
@@ -1882,6 +2075,7 @@ function bindAuth() {
         const res = await fetch(`${apiBase()}/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({ username, password }),
         });
         setConnectionStatus("healthy");
@@ -1889,7 +2083,6 @@ function bindAuth() {
           showLogin("用户名或密码错误");
           return;
         }
-        setAuthToken((await res.json()).token);
         hideLogin();
         await refreshAuthState();
         await loadAll();
@@ -1901,12 +2094,90 @@ function bindAuth() {
   }
   const logout = document.querySelector("#logout-btn");
   if (logout) {
-    logout.addEventListener("click", () => {
+    logout.addEventListener("click", async () => {
       closeAccountMenu();
-      setAuthToken("");
+      try {
+        await fetch(`${apiBase()}/auth/logout`, { method: "POST", credentials: "same-origin" });
+      } catch (_) {
+        // The local UI must still leave the authenticated state after a network failure.
+      }
+      state.identity = null;
+      state.organizations = [];
+      state.currentOrganizationId = "";
       setLogoutVisible(false);
       setSidebarUser(null);
       showLogin("已登出");
+    });
+  }
+
+  const registerForm = document.querySelector("#register-form");
+  if (registerForm) {
+    registerForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(registerForm);
+        const payload = Object.fromEntries(form.entries());
+        if (!payload.invitation_token) delete payload.invitation_token;
+        await api("/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        showLogin("注册成功。请先按邮件中的链接验证邮箱，再登录。");
+      } catch (error) {
+        showLogin(error.message);
+      }
+    });
+  }
+  const verificationForm = document.querySelector("#email-verification-form");
+  if (verificationForm) {
+    verificationForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(verificationForm);
+        await api("/auth/verify-email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: String(form.get("token") || "").trim() }),
+        });
+        showLogin("邮箱已验证，现在可以登录。");
+      } catch (error) {
+        showLogin(error.message);
+      }
+    });
+  }
+  const resetForm = document.querySelector("#password-reset-form");
+  if (resetForm) {
+    resetForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(resetForm);
+        await api("/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: String(form.get("email") || "").trim() }),
+        });
+        showLogin("若邮箱已注册，重置说明将按部署配置发送。");
+      } catch (error) {
+        showLogin(error.message);
+      }
+    });
+  }
+  const resetConfirmForm = document.querySelector("#password-reset-confirm-form");
+  if (resetConfirmForm) {
+    resetConfirmForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const form = new FormData(resetConfirmForm);
+        await api("/auth/password-reset/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: String(form.get("token") || "").trim(), password: String(form.get("password") || "") }),
+        });
+        showLogin("密码已更新，请使用新密码登录。");
+      } catch (error) {
+        showLogin(error.message);
+      }
     });
   }
 }

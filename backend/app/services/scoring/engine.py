@@ -27,6 +27,9 @@ from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.services.llm.base import LLMScoringError
 from backend.app.services.llm.factory import get_llm_scorer
+from backend.app.services.ai_connections import resolve_connection_runtime
+from backend.app.services.ai_connections import record_usage_ledger
+from backend.app.services.ai_connections import validate_outbound_base_url
 from backend.app.services.llm.debug_logging import log_llm_throttle_sleep
 from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.cache import llm_cache
@@ -132,6 +135,36 @@ def _close_scorer(scorer):
         close()
 
 
+def _scorer_for_batch(db: Session, batch: GradingBatch):
+    """Use a batch-pinned private connection or the legacy platform runtime."""
+
+    if batch.ai_connection_id is None:
+        return get_llm_scorer()
+    if not batch.owner_id or not batch.organization_id:
+        raise ValueError("BYOK batch has no owner or organization identity")
+    runtime = resolve_connection_runtime(
+        db,
+        connection_id=batch.ai_connection_id,
+        owner_id=batch.owner_id,
+        organization_id=batch.organization_id,
+    )
+    if runtime.key_version != batch.ai_connection_key_version:
+        raise ValueError("AI connection key has changed; recreate the scoring task")
+    if batch.ai_connection_snapshot != runtime.snapshot():
+        raise ValueError("AI connection configuration has changed; recreate the scoring task")
+    validate_outbound_base_url(runtime.base_url)
+    return get_llm_scorer(runtime)
+
+
+def _scorer_for_paper(db: Session, paper_id: str):
+    batch = db.scalar(
+        select(GradingBatch).join(Paper, Paper.batch_id == GradingBatch.id).where(Paper.id == paper_id)
+    )
+    if batch is None:
+        raise ValueError("paper not found")
+    return _scorer_for_batch(db, batch)
+
+
 def score_paper(db: Session, paper_id: str, scorer=None):
     """编排：预取(读) → 释放事务 → 纯计算(LLM，无锁) → 落库(短写)。
 
@@ -139,7 +172,7 @@ def score_paper(db: Session, paper_id: str, scorer=None):
     签名与返回（ScoringRun）保持不变，所有调用方（Web/CLI/eval/score_batch）无需改动。
     """
     owns_scorer = scorer is None  # 自建的 scorer 用完要关其 http client，避免连接池/fd 泄漏
-    scorer = scorer or get_llm_scorer()
+    scorer = scorer or _scorer_for_paper(db, paper_id)
     try:
         mode = settings.SCORING_ENGINE_MODE
         if mode not in {"legacy", "compare", "core"}:
@@ -194,7 +227,7 @@ def retry_score_paper(db: Session, run_id: str, scorer=None):
         return score_paper(db, previous.paper_id, scorer=scorer)
 
     owns_scorer = scorer is None
-    scorer = scorer or get_llm_scorer()
+    scorer = scorer or _scorer_for_paper(db, previous.paper_id)
     try:
         maximum = db.scalar(
             select(func.max(ScoringRun.rescore_generation)).where(
@@ -540,6 +573,7 @@ def _score_paper_core(
         document_snapshot_ref=document_snapshot_ref,
         coherence_findings=coherence_findings,
         format_findings=format_findings,
+        ai_connection_snapshot=getattr(scorer, "_ai_connection_snapshot", None),
     )
 
 
@@ -1034,10 +1068,14 @@ def persist_scoring(db: Session, paper_id, inputs: ScoringInputs, result: Scorin
     run = ScoringRun(
         paper_id=paper_id,
         owner_id=getattr(paper, "owner_id", None),  # 继承论文归属
+        organization_id=getattr(paper, "organization_id", None),
         rubric_id=inputs.rubric_id,
         model_provider=scorer.provider,
         model_name=scorer.model_name,
         model_version=scorer.model_version,
+        ai_connection_id=(getattr(scorer, "_ai_connection_snapshot", {}) or {}).get("ai_connection_id"),
+        ai_connection_key_version=(getattr(scorer, "_ai_connection_snapshot", {}) or {}).get("key_version"),
+        ai_connection_snapshot=getattr(scorer, "_ai_connection_snapshot", None),
         status="scored",
         started_at=started_at,
         finished_at=_utcnow(),
@@ -1093,6 +1131,8 @@ def persist_scoring(db: Session, paper_id, inputs: ScoringInputs, result: Scorin
         )
     paper.status = "pending_review" if result.need_review else "scored"
     db.add(run)
+    db.flush()
+    record_usage_ledger(db, run)
     db.commit()
     db.refresh(run)
     return run
@@ -1228,7 +1268,7 @@ def score_batch(db: Session, batch_id: str, rescore: bool = False):
     batch.status = "scoring"
     db.commit()
 
-    scorer = get_llm_scorer()  # 整批复用一个 scorer（连接池跨论文复用），结束时统一关闭
+    scorer = _scorer_for_batch(db, batch)  # 整批复用一个 scorer（连接池跨论文复用），结束时统一关闭
     try:
         for paper in papers:
             if paper.status == "failed" or not paper.parsed_text_path:
@@ -1746,6 +1786,10 @@ def _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure
     build_envelope = getattr(scorer, "build_prompt_envelope", None)
     score_envelope = getattr(scorer, "score_envelope", None)
     use_envelope = provider != "mock" and callable(build_envelope) and callable(score_envelope)
+    # The legacy cache tables predate tenant identity.  BYOK runs therefore do
+    # not read or write them until the isolated encrypted-cache migration is
+    # active; a miss is safer than any chance of cross-account reuse.
+    byok_runtime = bool(getattr(scorer, "_ai_connection_snapshot", None))
     if use_envelope:
         rubric_snapshot = getattr(criterion, "rubric_snapshot", None) or rubric_version
         policy = getattr(criterion, "frozen_policy", None)
@@ -1764,7 +1808,7 @@ def _score_with_runtime_fallback(scorer, paper, criterion, candidates, structure
                 "PromptEnvelope 构造或身份校验失败：%s" % _short_error(exc)
             ) from exc
     # L0 缓存（设计§7）：仅对真实模型生效；mock 廉价且确定，不缓存。
-    if settings.LLM_CACHE_ENABLED and provider != "mock":
+    if settings.LLM_CACHE_ENABLED and provider != "mock" and not byok_runtime:
         if envelope is not None:
             cache_key = llm_cache.key_of(envelope)
             try:

@@ -2,6 +2,7 @@ from backend.app.core.config import settings
 from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
 from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
+from backend.app.services.ai_connections import ConnectionRuntime
 
 # 云·OpenAI 兼容厂商别名（走 OPENAI_COMPATIBLE_*）
 COMPATIBLE_PROVIDERS = {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope", "google", "gemini", "google_ai_studio"}
@@ -9,10 +10,51 @@ COMPATIBLE_PROVIDERS = {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashs
 LOCAL_PROVIDERS = {"local", "llama", "llamacpp", "llama_cpp", "vllm", "ollama"}
 
 
-def get_llm_scorer():
+def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None):
+    """Return a scorer for either deployment config or one bound BYOK runtime.
+
+    A supplied runtime is intentionally fail-closed: it never consults global
+    provider selection or falls back to Mock, because that would bill or expose
+    a submission through a different account than the task selected.
+    """
+
+    if connection_runtime is not None:
+        options = connection_runtime.provider_options
+        if connection_runtime.provider_type == "openai_responses":
+            scorer = OpenAIResponsesScorer(
+                api_key=connection_runtime.api_key,
+                base_url=connection_runtime.base_url,
+                model_name=connection_runtime.model_name,
+                timeout_seconds=options.get("timeout_seconds"),
+                max_output_tokens=options.get("max_output_tokens"),
+                temperature=options.get("temperature"),
+            )
+        elif connection_runtime.provider_type == "openai_compatible":
+            scorer = OpenAICompatibleChatScorer(
+                api_key=connection_runtime.api_key,
+                base_url=connection_runtime.base_url,
+                model_name=connection_runtime.model_name,
+                provider_name="openai_compatible",
+                timeout_seconds=options.get("timeout_seconds"),
+                max_tokens=options.get("max_tokens"),
+                temperature=options.get("temperature"),
+                response_format_json=options.get("response_format_json"),
+                thinking_type=options.get("thinking_type"),
+            )
+        else:  # Defensive even though the persistence validator already rejects it.
+            raise ValueError("unsupported AI connection provider type")
+        scorer._ai_connection_snapshot = connection_runtime.snapshot()
+        scorer._ai_connection_organization_id = connection_runtime.organization_id
+        return scorer
+
     provider = (settings.LLM_PROVIDER or "mock").lower()
     if provider == "mock":
         return MockLLMScorer()
+    if settings.AUTH_ENABLED and settings.AUTH_PASSWORD and not settings.PLATFORM_MANAGED_LLM_ENABLED:
+        raise RuntimeError(
+            "platform-managed LLM is disabled for authenticated deployments; "
+            "bind a private AI connection or explicitly authorize the platform model"
+        )
     if provider == "openai":
         try:
             return OpenAIResponsesScorer()

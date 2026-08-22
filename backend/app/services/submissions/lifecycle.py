@@ -13,6 +13,9 @@ from backend.app.core.config import settings
 from backend.app.db import models
 from backend.app.services.document_parser.extractor import extract_document
 from backend.app.services.llm.factory import get_llm_scorer
+from backend.app.services.ai_connections import connection_snapshot_for_owner
+from backend.app.services.ai_connections import resolve_connection_runtime
+from backend.app.services.ai_connections import validate_outbound_base_url
 from backend.app.services.scoring.adapters.persistence import (
     CoreRunPersistence,
     LocalDocumentSnapshotStore,
@@ -74,7 +77,7 @@ def _published_version(db, rubric_version_id: str):
     return rubric, version
 
 
-def create_evaluation_batch(db, payload, *, creator_id: str):
+def create_evaluation_batch(db, payload, *, creator_id: str, organization_id: str | None = None):
     rubric, version = _published_version(db, payload.rubric_version_id)
     if version.business_profile_key != payload.business_profile_key:
         raise ResourceConflictError("rubric version business profile key mismatch")
@@ -87,11 +90,26 @@ def create_evaluation_batch(db, payload, *, creator_id: str):
         raise ResourceConflictError(str(exc)) from exc
     except ValueError as exc:
         raise ResourceConflictError(str(exc)) from exc
+    connection_snapshot = None
+    if payload.ai_connection_id is not None:
+        try:
+            connection_snapshot = connection_snapshot_for_owner(
+                db,
+                connection_id=payload.ai_connection_id,
+                owner_id=creator_id,
+                organization_id=organization_id or "",
+            )
+        except ValueError as exc:
+            raise ResourceNotFoundError("AI connection not found") from exc
     batch = models.EvaluationBatch(
         owner_id=creator_id,
+        organization_id=organization_id,
         name=payload.name.strip(),
         rubric_id=rubric.id,
         rubric_version_id=version.id,
+        ai_connection_id=payload.ai_connection_id,
+        ai_connection_key_version=(connection_snapshot["key_version"] if connection_snapshot else None),
+        ai_connection_snapshot=connection_snapshot,
         business_profile_key=payload.business_profile_key,
         business_profile_version=payload.business_profile_version,
         status="active",
@@ -111,6 +129,9 @@ def evaluation_batch_projection(batch) -> dict:
         "rubric_version_id": batch.rubric_version_id,
         "business_profile_key": batch.business_profile_key,
         "business_profile_version": batch.business_profile_version,
+        "ai_connection_id": batch.ai_connection_id,
+        "ai_connection_key_version": batch.ai_connection_key_version,
+        "ai_connection_snapshot": batch.ai_connection_snapshot,
         "status": batch.status,
         "created_at": batch.created_at,
         "updated_at": batch.updated_at,
@@ -163,6 +184,7 @@ def ingest_submission(
 
     artifact_hash = hash_source_artifact(raw_bytes)
     submission = models.Submission(
+        organization_id=batch.organization_id,
         evaluation_batch_id=batch.id,
         source_artifact_hash=artifact_hash,
         source_artifact_ref="blob:sha256:" + artifact_hash,
@@ -389,7 +411,23 @@ def score_generic_submission(
     )
 
     owns_scorer = scorer is None
-    scorer = scorer or get_llm_scorer()
+    if scorer is None and batch.ai_connection_id is not None:
+        if not batch.owner_id or not batch.organization_id:
+            raise ResourceConflictError("BYOK evaluation batch has no owner or organization identity")
+        runtime = resolve_connection_runtime(
+            db,
+            connection_id=batch.ai_connection_id,
+            owner_id=batch.owner_id,
+            organization_id=batch.organization_id,
+        )
+        if runtime.key_version != batch.ai_connection_key_version:
+            raise ResourceConflictError("AI connection key has changed; recreate the scoring task")
+        if runtime.snapshot() != batch.ai_connection_snapshot:
+            raise ResourceConflictError("AI connection configuration has changed; recreate the scoring task")
+        validate_outbound_base_url(runtime.base_url)
+        scorer = get_llm_scorer(runtime)
+    else:
+        scorer = scorer or get_llm_scorer()
     try:
         request_mapping = {
             "schema_version": "scoring-request@2",
@@ -439,6 +477,7 @@ def score_generic_submission(
             },
             workflow_profile=batch.rubric_version.workflow_profile,
             document_snapshot_ref=snapshot.snapshot_ref,
+            ai_connection_snapshot=getattr(scorer, "_ai_connection_snapshot", None),
         )
     finally:
         if owns_scorer:
@@ -483,6 +522,9 @@ def scoring_run_projection(run) -> dict:
         "model_provider": run.model_provider,
         "model_name": run.model_name,
         "model_version": run.model_version,
+        "ai_connection_id": run.ai_connection_id,
+        "ai_connection_key_version": run.ai_connection_key_version,
+        "ai_connection_snapshot": run.ai_connection_snapshot,
         "rescore_generation": run.rescore_generation,
         "idempotency_key": run.idempotency_key,
         "status": run.status,

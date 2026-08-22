@@ -2,7 +2,7 @@
 
 系统实现“评分标准 -> 严格审核发布 -> 批次 -> 上传文档 -> 不可变快照 -> 证据/确定性检查 -> Core 逐项评分 -> 人工复核 -> 报告导出”的闭环；毕业论文是首个兼容业务 Profile，技术方案是第二个生产 Profile。
 
-当前版本提供单租户简单登录（opt-in），暂不实现完整 JWT/RBAC/Celery/OCR/pgvector；真实 LLM 与在线写表通过环境变量启用，未配置时可自动回退到本地 Mock。当前单租户边界、数据归属现状和未来多租户迁移前必须保留的备份见 [docs/单租户基线与多租户迁移备份.md](docs/单租户基线与多租户迁移备份.md)。
+当前版本支持 Cookie 会话、多组织资源隔离、模板分级可见性及私有 BYOK；真实 LLM 与在线写表通过环境变量启用。旧 `.env` 模型仅保留给未绑定私有连接的兼容/演示路径，绝不会复制为用户 Key。迁移前备份与默认组织回填见 [docs/单租户基线与多租户迁移备份.md](docs/单租户基线与多租户迁移备份.md)。
 
 ## 技术栈
 
@@ -12,7 +12,7 @@
 - DB: PostgreSQL
 - Document parsing: python-docx, PyMuPDF
 - Export: openpyxl
-- Current verification: Alembic head `0017_batch_scoring_jobs`; Python 3.12 lock run `1343 passed, 30 warnings`（Python 3.10+ supported）
+- Current verification: Alembic head `0022_legacy_tenant_backfill`; Python 3.12 lock run `1383 passed, 30 warnings`（Python 3.10+ supported）
 
 ## 本地启动
 
@@ -220,13 +220,13 @@ M1/M5/M8 真实发布门禁必须使用 `run_qwk_eval --release-gate` 的仓库�
 ## 部署与运维要点
 
 - **内网试点 Docker 栈**：复制 `.env.intranet.example` 为 `.env.intranet`，改强密码与站点名后运行 `docker compose --env-file .env.intranet up -d --build`。详见 [docs/部署.md](docs/部署.md)。
-- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0017_batch_scoring_jobs`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。
+- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0022_legacy_tenant_backfill`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。0022 会把升级前的单租户资源回填到默认组织，并把旧默认开发用户提升为 Bootstrap Admin；不会复制任何 `.env` LLM Key。
 - **可恢复批量评分**：Web 或 `/api/batches/{id}/score-jobs` 创建任务时必须提交经批准的观察策略 JSON；策略、策略哈希、并发上限、论文级检查点、尝试历史和门禁信号均写入数据库。任务支持运行/租约恢复、取消和仅重试失败项，但其报告固定 `production_default_switch_authorized=false`，最终授权仍属于 GATE-03。
 - **GATE-03 证据与演练**：正式 GATE-03 CLI 必须提供 `--gate03-evidence`，绑定通过的观测快照、获批基线/M5 parity 比较和仓库外逐样本报告 hash；缺项 fail closed。`POST /api/release-gates/profiles/{id}/rehearsals` 只保存合成 test-only 记录，直接终态 `ineligible` 且不可审批。示例归档见 `docs/baselines/gate-03-test-only-rehearsal.json`。
-- **生产门禁与灾备**：`.github/workflows/ci.yml` 分别执行锁文件全量测试及 Postgres 16 的 0011→0017、约束/排序、lossy downgrade 拒绝和隔离备份恢复演练。`python -m backend.app.scripts.ops_backup create|verify|restore` 生成带 SHA-256 manifest 的数据库+storage 包；上线前按 [生产上线与灾备验收清单](docs/上线清单.md) 填写责任人、阈值、RTO/RPO 与证据链接。
+- **生产门禁与灾备**：`.github/workflows/ci.yml` 分别执行锁文件全量测试及 Postgres 16 的 0011→0022、约束/排序、lossy downgrade 拒绝和隔离备份恢复演练。`python -m backend.app.scripts.ops_backup create|verify|restore` 生成带 SHA-256 manifest 的数据库+storage 包；上线前按 [生产上线与灾备验收清单](docs/上线清单.md) 填写责任人、阈值、RTO/RPO 与证据链接。
 - **启动安全**：`AUTH_ENABLED=true` 时弱/占位密码、短/占位 HMAC secret 或 `LLM_DEBUG_LOG_ENABLED=true` 会在 Settings 构造时直接拒绝启动。`/api/system/ops-readiness` 只读展示磁盘、数据库、批任务和安全信号，固定不授予 Core 切换权限。
 - **持久化状态**在 `storage/`：`uploads/`(原文)、`parsed/`(解析 JSON)、`reports/`、`exports/`、`llm_cache.sqlite`(L0 缓存/账本)、`eval/`(评估报告/基线)。除占位 `.gitkeep` 外均已 gitignore。
-- **真实 LLM**：设 `LLM_PROVIDER=openai_compatible` + `OPENAI_COMPATIBLE_*`（见上）；上线前用 `uv run python -m backend.app.scripts.diagnose_llm` 自检连通。未配置自动回退 Mock（评分项标人工复核）。
+- **真实 LLM**：私有 BYOK 任务使用用户绑定连接；若认证部署必须临时使用平台模型，则显式设 `PLATFORM_MANAGED_LLM_ENABLED=true` 并完成数据出境批准。上线前用 `uv run python -m backend.app.scripts.diagnose_llm` 自检连通。未配置时使用 Mock（评分项标人工复核）。
 - **可复现/降本**：`LLM_CACHE_ENABLED=true` 命中即复用；改 prompt 需 bump `cache/llm_cache.PROMPT_VERSION`。
 - **改评分逻辑后**：用 QWK 留出集重跑 `run_qwk_eval` 重新锚定基线，避免静默漂移。
 - 维护/交接速览见 [CLAUDE.md](CLAUDE.md)。

@@ -7,6 +7,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.api.deps import CurrentPrincipal
+from backend.app.api.deps import current_principal
+from backend.app.api.deps import require_organization_role
+from backend.app.db.models import GradingBatch
 from backend.app.db.models import Paper
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import SpreadsheetWriteLog
@@ -22,9 +26,16 @@ from backend.app.services.spreadsheet.writer import write_run_to_sheet
 router = APIRouter(tags=["exports"])
 
 
-def _legacy_thesis_run(db: Session, run_id: str):
+def _legacy_thesis_run(
+    db: Session,
+    run_id: str,
+    principal: CurrentPrincipal,
+) -> ScoringRun:
     run = db.get(ScoringRun, run_id)
-    if run is None:
+    if run is None or (
+        principal.organization_id is not None
+        and run.organization_id != principal.organization_id
+    ):
         raise HTTPException(status_code=404, detail="scoring run not found")
     if run.submission_id is not None:
         raise HTTPException(
@@ -39,17 +50,34 @@ def list_export_logs(
     batch_id: Optional[str] = None,
     run_id: Optional[str] = None,
     db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
 ):
-    query = select(SpreadsheetWriteLog).order_by(SpreadsheetWriteLog.created_at.desc())
+    query = (
+        select(SpreadsheetWriteLog)
+        .join(ScoringRun)
+        .order_by(SpreadsheetWriteLog.created_at.desc())
+    )
+    if principal.organization_id is not None:
+        query = query.where(ScoringRun.organization_id == principal.organization_id)
     if run_id:
         query = query.where(SpreadsheetWriteLog.scoring_run_id == run_id)
     if batch_id:
-        query = query.join(ScoringRun).join(Paper).where(Paper.batch_id == batch_id)
+        query = query.join(Paper).where(Paper.batch_id == batch_id)
     return db.scalars(query).all()
 
 
 @router.get("/batches/{batch_id}/export.xlsx")
-def export_batch(batch_id: str, db: Session = Depends(get_db)):
+def export_batch(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    batch = db.get(GradingBatch, batch_id)
+    if batch is None or (
+        principal.organization_id is not None
+        and batch.organization_id != principal.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="batch not found")
     try:
         path = export_batch_excel(db, batch_id)
     except ValueError as exc:
@@ -62,8 +90,14 @@ def export_batch(batch_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/scoring-runs/{run_id}/write-sheet", response_model=ExportLogRead)
-def write_sheet(run_id: str, payload: WriteSheetRequest | None = None, db: Session = Depends(get_db)):
-    _legacy_thesis_run(db, run_id)
+def write_sheet(
+    run_id: str,
+    payload: WriteSheetRequest | None = None,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _legacy_thesis_run(db, run_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
     try:
         target_id = payload.target_id if payload else None
         return write_run_to_sheet(db, run_id, target_id=target_id)
@@ -74,8 +108,12 @@ def write_sheet(run_id: str, payload: WriteSheetRequest | None = None, db: Sessi
 
 
 @router.get("/scoring-runs/{run_id}/report")
-def report(run_id: str, db: Session = Depends(get_db)):
-    _legacy_thesis_run(db, run_id)
+def report(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _legacy_thesis_run(db, run_id, principal)
     try:
         path = generate_report(db, run_id)
     except ValueError as exc:
@@ -84,9 +122,13 @@ def report(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/scoring-runs/{run_id}/export.json")
-def export_run_json(run_id: str, db: Session = Depends(get_db)):
+def export_run_json(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     """结构化 JSON 导出（运行/论文/逐项/扣分/证据/篇章·格式发现/复核），供下游二次处理。"""
-    _legacy_thesis_run(db, run_id)
+    _legacy_thesis_run(db, run_id, principal)
     try:
         return build_run_export(db, run_id)
     except ValueError as exc:

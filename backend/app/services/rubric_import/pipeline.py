@@ -1343,6 +1343,8 @@ def persist_prepared_import(
     session: Session,
     prepared: Mapping[str, object] | PreparedRubricGraph,
     actor_id: str,
+    organization_id: str | None = None,
+    visibility: str = "private",
     target_rubric_id: str | None = None,
     reason: str = "explicit draft recompilation",
 ) -> PersistedImportIdentity:
@@ -1364,6 +1366,8 @@ def persist_prepared_import(
                 rubric = models.Rubric(
                     id=models.new_id(),
                     owner_id=actor_id,
+                    organization_id=organization_id,
+                    visibility=visibility,
                     name=rubric_data["name"],
                     version=rubric_data["version"],
                     total_score=_decimal(rubric_data["total_score"]),
@@ -1468,6 +1472,7 @@ def persist_prepared_import(
             version = models.RubricVersion(
                 id=models.new_id(),
                 rubric_id=rubric.id,
+                organization_id=rubric.organization_id,
                 compilation=compilation,
                 version=version_data["version"],
                 workflow_profile=version_data["workflow_profile"],
