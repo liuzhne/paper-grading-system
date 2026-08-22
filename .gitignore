@@ -28,4 +28,5 @@ storage/*.sqlite
 docs/QWK基线攻坚-对话全记录.md
 *对话全记录*.md
 .vercel
+supabase/.temp/
 .env*
