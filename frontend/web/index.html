@@ -325,7 +325,7 @@
           <div class="workflow-header"><div><span class="section-kicker">账户与组织</span><h2>账户设置</h2><p>在当前组织内管理成员、模板范围与私有 AI 连接。密钥仅通过 HTTPS 发往本系统后端，浏览器不会直接请求模型厂商。</p></div></div>
           <div class="dashboard-grid settings-grid">
             <section class="panel"><div class="panel-header"><div><span class="section-kicker">当前身份</span><h2 id="settings-identity">未登录</h2></div></div><label>当前组织<select id="organization-switcher"></select></label><p id="organization-role-hint" class="muted"></p></section>
-            <section class="panel"><div class="panel-header"><div><span class="section-kicker">成员与邀请</span><h2>组织成员</h2></div></div><div id="organization-members" class="table-wrap"></div><form id="organization-invite-form" class="form compact hidden"><label>邀请邮箱<input name="email" type="email" autocomplete="email" /></label><label>组织角色<select name="role"><option value="member">成员</option><option value="teacher">教师</option><option value="org_admin">组织管理员</option></select></label><button type="submit" class="secondary">发送邀请</button></form></section>
+            <section class="panel"><div class="panel-header"><div><span class="section-kicker">成员与邀请</span><h2>组织成员</h2></div></div><div id="organization-members" class="table-wrap"></div><form id="organization-invite-form" class="form compact hidden"><label>邀请邮箱<input name="email" type="email" autocomplete="email" /></label><label>组织角色<select name="role"><option value="member">成员</option><option value="teacher">教师</option><option value="org_admin">组织管理员</option></select></label><button type="submit" class="secondary">创建邀请链接</button></form><div id="organization-invitation-result" class="result-box hidden" aria-live="polite"></div></section>
           </div>
           <section class="panel">
             <div class="panel-header"><div><span class="section-kicker">私有 BYOK</span><h2>我的 AI 连接</h2><p class="muted">保存、测试、换 Key、停用和删除都在服务端完成；页面只展示掩码和状态。</p></div></div>
@@ -351,6 +351,6 @@
       </div>
     </div>
     <!-- PGS_CLIENT_CONFIG -->
-    <script src="/assets/app.js?v=20260822-pgs47-settings"></script>
+    <script src="/assets/app.js?v=20260823-invitation-link"></script>
   </body>
 </html>

@@ -126,10 +126,12 @@ def test_invite_only_registration_uses_a_one_time_organization_invitation(client
         json={"email": "invited@example.test", "role": "teacher"},
     )
     assert invited.status_code == 201, invited.text
+    assert invited.json()["invitation_token"]
     with client.session_factory() as session:
         invitation = session.scalar(select(models.OrganizationInvitation))
         assert invitation is not None
         invite_token = invitation.token
+    assert invited.json()["invitation_token"] == invite_token
 
     registered = client.post(
         "/api/auth/register",

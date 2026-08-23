@@ -90,6 +90,7 @@ const state = {
   organizations: [],
   currentOrganizationId: "",
   organizationMembers: [],
+  latestInvitationLink: "",
   aiConnections: [],
   rubricVisibilityFilter: "all",
   llmStatus: { phase: "idle" },
@@ -645,8 +646,9 @@ function renderSettings() {
   const roleHint = document.querySelector("#organization-role-hint");
   const members = document.querySelector("#organization-members");
   const inviteForm = document.querySelector("#organization-invite-form");
+  const invitationResult = document.querySelector("#organization-invitation-result");
   const connectionList = document.querySelector("#ai-connection-list");
-  if (!identity || !organizationSwitcher || !roleHint || !members || !inviteForm || !connectionList) return;
+  if (!identity || !organizationSwitcher || !roleHint || !members || !inviteForm || !invitationResult || !connectionList) return;
   if (!state.authRequired || !state.identity?.user) {
     identity.textContent = "本地模式（未启用登录）";
     organizationSwitcher.innerHTML = '<option>启用认证后可管理组织</option>';
@@ -654,6 +656,7 @@ function renderSettings() {
     roleHint.textContent = "私有 AI 连接需要已登录的组织身份。";
     members.innerHTML = '<div class="muted">启用认证后可查看当前组织成员。</div>';
     inviteForm.classList.add("hidden");
+    invitationResult.classList.add("hidden");
     connectionList.innerHTML = '<div class="muted">启用认证后可配置私有 AI 连接。</div>';
     return;
   }
@@ -668,6 +671,13 @@ function renderSettings() {
       : '<div class="muted">暂无成员。</div>')
     : '<div class="muted">仅当前组织管理员可以查看和邀请成员。</div>';
   inviteForm.classList.toggle("hidden", !canManageMembers);
+  if (canManageMembers && state.latestInvitationLink) {
+    invitationResult.classList.remove("hidden");
+    invitationResult.innerHTML = `<strong>注册链接已创建（仅此一次显示）</strong><p class="muted">请通过受信任渠道安全转发给被邀请人。</p><label>注册链接<input readonly value="${escapeHtml(state.latestInvitationLink)}" aria-label="注册链接" /></label><button type="button" class="secondary" data-copy-invitation-link>复制链接</button>`;
+  } else {
+    invitationResult.classList.add("hidden");
+    invitationResult.innerHTML = "";
+  }
   connectionList.innerHTML = state.aiConnections.length
     ? state.aiConnections.map((connection) => `<article class="item-card"><div class="item-title"><span>${escapeHtml(connection.name)}</span><span class="badge ${connection.status === "active" ? "ok" : "warn"}">${escapeHtml(connection.status)}</span></div><div class="muted">${escapeHtml(connection.provider_type)} · ${escapeHtml(connection.model_name)} · ${escapeHtml(connection.key_masked)} · v${connection.key_version}</div><div class="toolbar compact-toolbar"><button class="secondary" data-ai-test="${connection.id}">测试</button><button class="secondary" data-ai-rotate="${connection.id}">换 Key</button>${connection.status === "active" ? `<button class="secondary" data-ai-disable="${connection.id}">停用</button>` : ""}<button class="secondary" data-ai-delete="${connection.id}">删除</button></div></article>`).join("")
     : '<div class="muted">还没有私有 AI 连接。保存前可先测试配置。</div>';
@@ -1434,6 +1444,12 @@ async function handleAction(event) {
       showToast("成员角色已更新");
       return;
     }
+    if (target.dataset.copyInvitationLink) {
+      if (!state.latestInvitationLink) throw new Error("注册链接已失效，请重新创建邀请");
+      await navigator.clipboard.writeText(state.latestInvitationLink);
+      showToast("注册链接已复制");
+      return;
+    }
     if (target.dataset.aiRotate) {
       const apiKey = window.prompt("输入新的 API Key；它只会发送到本系统后端", "");
       if (!apiKey) return;
@@ -1718,6 +1734,7 @@ function bindEvents() {
       });
       state.identity = await api("/auth/me");
       state.currentOrganizationId = state.identity.organization?.id || "";
+      state.latestInvitationLink = "";
       state.selectedBatchId = "";
       state.selectedPaperId = "";
       state.selectedRunId = "";
@@ -1734,14 +1751,18 @@ function bindEvents() {
     try {
       if (!state.currentOrganizationId) throw new Error("请选择当前组织");
       const form = new FormData(event.currentTarget);
-      await api(`/organizations/${state.currentOrganizationId}/members`, {
+      const invitation = await api(`/organizations/${state.currentOrganizationId}/members`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: String(form.get("email") || "").trim(), role: form.get("role") }),
       });
+      if (!invitation.invitation_token) throw new Error("服务未返回邀请令牌，请重新创建邀请");
+      // The fragment is never sent in HTTP requests, avoiding disclosure in
+      // server logs while still allowing the registration form to receive it.
+      state.latestInvitationLink = `${window.location.origin}/#invite=${encodeURIComponent(invitation.invitation_token)}`;
       event.currentTarget.reset();
-      await loadAll();
-      showToast("邀请已创建；请通过部署配置的邮件流程发送注册链接");
+      renderSettings();
+      showToast("邀请已创建，请复制并安全转发注册链接");
     } catch (error) {
       showToast(error.message, true);
     }
@@ -2104,6 +2125,7 @@ function bindAuth() {
       state.identity = null;
       state.organizations = [];
       state.currentOrganizationId = "";
+      state.latestInvitationLink = "";
       setLogoutVisible(false);
       setSidebarUser(null);
       showLogin("已登出");
@@ -2112,6 +2134,15 @@ function bindAuth() {
 
   const registerForm = document.querySelector("#register-form");
   if (registerForm) {
+    const invitationToken = new URLSearchParams(window.location.hash.slice(1)).get("invite");
+    if (invitationToken) {
+      const tokenInput = registerForm.elements.namedItem("invitation_token");
+      if (tokenInput) tokenInput.value = invitationToken;
+      document.querySelector("#login-register-details")?.setAttribute("open", "");
+      // The recipient has the token in the registration form now; remove it
+      // from the address bar and browser history as soon as it is consumed.
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
     registerForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {

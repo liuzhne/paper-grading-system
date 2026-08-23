@@ -95,7 +95,16 @@ def add_member(
         db.add(invitation)
         audit(db, "organization.member_invited", actor_id=principal.user_id, organization_id=organization_id, metadata={"email": invitation.email, "role": payload.role})
         db.commit()
-        return {"organization_id": organization_id, "email": invitation.email, "role": invitation.role, "status": "invited"}
+        # This deployment does not send email itself.  Return the one-time
+        # token only to the administrator who created the invitation so the
+        # web client can construct a link for them to share.
+        return {
+            "organization_id": organization_id,
+            "email": invitation.email,
+            "role": invitation.role,
+            "status": "invited",
+            "invitation_token": invitation.token,
+        }
     user = db.scalar(select(User).where(User.username == payload.username))
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
