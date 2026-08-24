@@ -70,8 +70,7 @@ class Settings(BaseSettings):
     AUTH_COOKIE_NAME: str = "pgs_session"
     AUTH_COOKIE_SECURE: bool = True
     AUTH_COOKIE_SAMESITE: Literal["lax", "strict"] = "lax"
-    REGISTRATION_MODE: Literal["invite_only", "public"] = "invite_only"
-    EMAIL_VERIFICATION_TOKEN_TTL_SECONDS: int = 86400
+    REGISTRATION_MODE: Literal["invite_only"] = "invite_only"
     PASSWORD_RESET_TOKEN_TTL_SECONDS: int = 3600
     DEFAULT_ORGANIZATION_NAME: str = "Default Organization"
     # Deployment-owned key-encryption material.  It is deliberately separate

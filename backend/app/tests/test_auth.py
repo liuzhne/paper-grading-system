@@ -8,6 +8,13 @@ def test_auth_off_by_default(client):
     assert client.get("/api/batches").status_code == 200  # 免登录
 
 
+def test_public_auth_routes_render_the_same_web_entrypoint(client):
+    for path in ("/", "/login", "/register", "/reset-password"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "衡鉴" in response.text
+
+
 def test_auth_on_gates_data_routes(client, monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENABLED", True)
     monkeypatch.setattr(settings, "AUTH_PASSWORD", "s3cret")

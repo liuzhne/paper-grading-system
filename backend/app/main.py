@@ -91,6 +91,9 @@ def create_app():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
         @app.get("/", include_in_schema=False)
+        @app.get("/login", include_in_schema=False)
+        @app.get("/register", include_in_schema=False)
+        @app.get("/reset-password", include_in_schema=False)
         def web_app():
             # API 路径由当前服务配置注入，前端不提供可编辑入口。
             # JSON 编码可避免配置中的特殊字符破坏页面脚本上下文。

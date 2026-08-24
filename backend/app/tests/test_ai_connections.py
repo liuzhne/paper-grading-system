@@ -9,28 +9,37 @@ def _login(client, monkeypatch, username):
     monkeypatch.setattr(settings, "AUTH_ENABLED", True)
     monkeypatch.setattr(settings, "AUTH_PASSWORD", "bootstrap-admin-password")
     monkeypatch.setattr(settings, "AUTH_SECRET", "r" * 48)
-    monkeypatch.setattr(settings, "REGISTRATION_MODE", "public")
+    monkeypatch.setattr(settings, "REGISTRATION_MODE", "invite_only")
     monkeypatch.setattr(settings, "AUTH_COOKIE_SECURE", False)
     monkeypatch.setattr(settings, "BYOK_MASTER_KEY", "test-only-master-key")
     password = "%s correct password" % username
+    email = "%s@example.test" % username
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "bootstrap-admin-password"}).status_code == 204
+    default_org_id = client.get("/api/organizations").json()[0]["id"]
+    invitation = client.post(f"/api/organizations/{default_org_id}/members", json={"email": email, "role": "member"})
+    assert invitation.status_code == 201, invitation.text
     assert client.post(
         "/api/auth/register",
         json={
             "username": username,
-            "email": "%s@example.test" % username,
+            "email": email,
             "display_name": username,
             "password": password,
+            "invitation_token": invitation.json()["invitation_token"],
         },
     ).status_code == 201
     with client.session_factory() as session:
         user = session.scalar(select(models.User).where(models.User.username == username))
-        verification = session.scalar(
-            select(models.EmailVerificationToken).where(
-                models.EmailVerificationToken.user_id == user.id
-            )
-        )
-    assert client.post("/api/auth/verify-email", json={"token": verification.token}).status_code == 204
+        organization = models.Organization(name="%s workspace" % username, created_by=user.id)
+        session.add(organization)
+        session.flush()
+        session.add(models.OrganizationMember(organization_id=organization.id, user_id=user.id, role="org_admin"))
+        session.commit()
+        organization_id = organization.id
+        session.refresh(user)
+        session.expunge(user)
     assert client.post("/api/auth/login", json={"username": username, "password": password}).status_code == 204
+    assert client.post("/api/auth/organization-context", json={"organization_id": organization_id}).status_code == 200
     return user
 
 

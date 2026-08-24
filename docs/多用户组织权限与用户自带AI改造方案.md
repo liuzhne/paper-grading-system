@@ -44,16 +44,13 @@ API Key 不下发给浏览器，不由浏览器直接调用 AI 厂商，也不�
 
 将现有单租户简单登录升级为：
 
-- 注册、邮箱验证、登录、登出、密码重置；
+- 管理员邀请注册、登录、登出、管理员签发重置令牌后的密码重置；
 - 密码使用 Argon2id（或 bcrypt）哈希；
 - 服务端持久化会话，前端使用 `HttpOnly`、`Secure`、`SameSite` Cookie；
 - 不再将 Bearer Token 保存到浏览器 `localStorage`；
 - `AUTH_USERNAME` / `AUTH_PASSWORD` 仅用于首次部署时创建 Bootstrap Admin，而不是日常共享管理员账号。
 
-注册策略应可配置：
-
-- `invite_only`：默认推荐，适用于学校或机构部署；
-- `public`：开放注册，但必须完成邮箱验证、限流与反滥用校验；新用户进入个人工作区或等待组织邀请。
+注册仅允许 `invite_only`：管理员为指定邮箱和组织角色创建一次性邀请链接；注册请求中的邮箱必须与该邀请记录完全匹配，其他邮箱一律拒绝。邀请码在注册成功后即失效，不依赖邮件验证服务。
 
 ### 3.2 数据模型
 
@@ -62,8 +59,7 @@ API Key 不下发给浏览器，不由浏览器直接调用 AI 厂商，也不�
 - `organizations`：组织；
 - `organization_members`：用户与组织的多对多成员关系及组织角色；
 - `auth_sessions`：可撤销的服务端会话；
-- `email_verification_tokens`：一次性、带过期时间的邮箱验证令牌；
-- `password_reset_tokens`：一次性、带过期时间的密码重置令牌；
+- `password_reset_tokens`：管理员签发、一次性、带过期时间的密码重置令牌；
 - `audit_logs`：重要安全和业务操作审计。
 
 保留现有 `users.password_hash`，但将平台权限与组织权限分离：
@@ -213,14 +209,13 @@ get_llm_scorer(connection_runtime)
 ### 8.1 认证与组织 API
 
 - `POST /api/auth/register`
-- `POST /api/auth/verify-email`
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
-- `POST /api/auth/password-reset/request`
 - `POST /api/auth/password-reset/confirm`
 - `GET /api/auth/me`
 - `GET /api/organizations`
 - `POST /api/organizations/{id}/members`
+- `POST /api/organizations/{id}/members/{user_id}/password-reset-token`
 - `PATCH /api/organizations/{id}/members/{user_id}`
 
 ### 8.2 AI 连接 API

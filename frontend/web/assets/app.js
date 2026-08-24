@@ -91,6 +91,7 @@ const state = {
   currentOrganizationId: "",
   organizationMembers: [],
   latestInvitationLink: "",
+  latestPasswordReset: null,
   aiConnections: [],
   rubricVisibilityFilter: "all",
   llmStatus: { phase: "idle" },
@@ -114,26 +115,53 @@ function apiBase() {
   return typeof configured === "string" ? configured.replace(/\/$/, "") : "/api";
 }
 
-function showLogin(message) {
-  const overlay = document.querySelector("#login-overlay");
-  if (!overlay) return;
-  const err = document.querySelector("#login-error");
-  if (err) {
-    if (message) {
-      err.textContent = message;
-      err.classList.remove("hidden");
-    } else {
-      err.classList.add("hidden");
-    }
+const authPagePaths = {
+  login: "/login",
+  register: "/register",
+  reset: "/reset-password",
+};
+
+function currentAuthPage() {
+  return Object.entries(authPagePaths).find(([, path]) => window.location.pathname === path)?.[0] || null;
+}
+
+function setAuthError(elementId, message) {
+  const error = document.querySelector(elementId);
+  if (!error) return;
+  error.textContent = message || "";
+  error.classList.toggle("hidden", !message);
+}
+
+function showAuthPage(page, { message = "", updateUrl = true } = {}) {
+  const shell = document.querySelector("#auth-shell");
+  if (!shell) return;
+  const pageId = `#auth-${page === "reset" ? "reset-password" : page}-page`;
+  shell.classList.remove("hidden");
+  shell.querySelectorAll(".auth-page").forEach((element) => element.classList.toggle("hidden", `#${element.id}` !== pageId));
+  if (updateUrl && window.location.pathname !== authPagePaths[page]) {
+    window.history.replaceState(null, "", authPagePaths[page]);
   }
-  overlay.classList.remove("hidden");
-  const pwd = document.querySelector("#login-password");
-  if (pwd) pwd.value = "";
+  if (page === "login") {
+    setAuthError("#login-error", message);
+    const password = document.querySelector("#login-password");
+    if (password) password.value = "";
+  }
+}
+
+function showLogin(message) {
+  showAuthPage("login", { message });
 }
 
 function hideLogin() {
-  const overlay = document.querySelector("#login-overlay");
-  if (overlay) overlay.classList.add("hidden");
+  const shell = document.querySelector("#auth-shell");
+  if (shell) shell.classList.add("hidden");
+  if (currentAuthPage()) window.history.replaceState(null, "", "/");
+}
+
+function takeFragmentToken(name) {
+  const token = new URLSearchParams(window.location.hash.slice(1)).get(name);
+  if (token) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  return token || "";
 }
 
 function setLogoutVisible(visible) {
@@ -199,6 +227,7 @@ async function refreshAuthState() {
       state.currentOrganizationId = "";
       setLogoutVisible(false);
       setSidebarUser(null, { localMode: true });
+      hideLogin();
       return true;
     }
     state.authRequired = true;
@@ -210,13 +239,14 @@ async function refreshAuthState() {
       state.organizations = await api("/organizations");
       setLogoutVisible(true);
       setSidebarUser(identity.user, { organizationName: state.organizations.find((item) => item.id === state.currentOrganizationId)?.name || "" });
+      hideLogin();
       return true;
     }
     state.identity = null;
     state.organizations = [];
     state.currentOrganizationId = "";
     setSidebarUser(null);
-    showLogin();
+    if (!currentAuthPage()) showLogin();
     return false;
   } catch (_) {
     setConnectionStatus("failed");
@@ -647,8 +677,9 @@ function renderSettings() {
   const members = document.querySelector("#organization-members");
   const inviteForm = document.querySelector("#organization-invite-form");
   const invitationResult = document.querySelector("#organization-invitation-result");
+  const resetTokenResult = document.querySelector("#organization-reset-token-result");
   const connectionList = document.querySelector("#ai-connection-list");
-  if (!identity || !organizationSwitcher || !roleHint || !members || !inviteForm || !invitationResult || !connectionList) return;
+  if (!identity || !organizationSwitcher || !roleHint || !members || !inviteForm || !invitationResult || !resetTokenResult || !connectionList) return;
   if (!state.authRequired || !state.identity?.user) {
     identity.textContent = "本地模式（未启用登录）";
     organizationSwitcher.innerHTML = '<option>启用认证后可管理组织</option>';
@@ -657,6 +688,7 @@ function renderSettings() {
     members.innerHTML = '<div class="muted">启用认证后可查看当前组织成员。</div>';
     inviteForm.classList.add("hidden");
     invitationResult.classList.add("hidden");
+    resetTokenResult.classList.add("hidden");
     connectionList.innerHTML = '<div class="muted">启用认证后可配置私有 AI 连接。</div>';
     return;
   }
@@ -667,7 +699,7 @@ function renderSettings() {
   const canManageMembers = state.identity.organization?.role === "org_admin" || state.identity.user.platform_role === "platform_admin";
   members.innerHTML = canManageMembers
     ? (state.organizationMembers.length
-      ? `<table><thead><tr><th>成员</th><th>邮箱</th><th>角色</th><th></th></tr></thead><tbody>${state.organizationMembers.map((member) => `<tr><td>${escapeHtml(member.display_name || member.username)}</td><td>${escapeHtml(member.email || "—")}</td><td><select data-member-role="${escapeHtml(member.user_id)}"><option value="member" ${member.role === "member" ? "selected" : ""}>成员</option><option value="teacher" ${member.role === "teacher" ? "selected" : ""}>教师</option><option value="org_admin" ${member.role === "org_admin" ? "selected" : ""}>组织管理员</option></select></td><td><button class="secondary" data-member-update="${escapeHtml(member.user_id)}" data-member-username="${escapeHtml(member.username)}">保存角色</button></td></tr>`).join("")}</tbody></table>`
+      ? `<table><thead><tr><th>成员</th><th>邮箱</th><th>角色</th><th></th></tr></thead><tbody>${state.organizationMembers.map((member) => `<tr><td>${escapeHtml(member.display_name || member.username)}</td><td>${escapeHtml(member.email || "—")}</td><td><select data-member-role="${escapeHtml(member.user_id)}"><option value="member" ${member.role === "member" ? "selected" : ""}>成员</option><option value="teacher" ${member.role === "teacher" ? "selected" : ""}>教师</option><option value="org_admin" ${member.role === "org_admin" ? "selected" : ""}>组织管理员</option></select></td><td><div class="action-row"><button class="secondary" data-member-update="${escapeHtml(member.user_id)}">保存角色</button><button class="secondary" data-member-reset="${escapeHtml(member.user_id)}" data-member-name="${escapeHtml(member.display_name || member.username)}">生成重置令牌</button></div></td></tr>`).join("")}</tbody></table>`
       : '<div class="muted">暂无成员。</div>')
     : '<div class="muted">仅当前组织管理员可以查看和邀请成员。</div>';
   inviteForm.classList.toggle("hidden", !canManageMembers);
@@ -677,6 +709,13 @@ function renderSettings() {
   } else {
     invitationResult.classList.add("hidden");
     invitationResult.innerHTML = "";
+  }
+  if (canManageMembers && state.latestPasswordReset) {
+    resetTokenResult.classList.remove("hidden");
+    resetTokenResult.innerHTML = `<strong>${escapeHtml(state.latestPasswordReset.memberName)} 的重置链接已生成（仅此一次显示）</strong><p class="muted">请通过受信任渠道交给该用户；生成新的令牌会立即作废旧令牌。</p><label>重置链接<input readonly value="${escapeHtml(state.latestPasswordReset.url)}" aria-label="重置链接" /></label><button type="button" class="secondary" data-copy-reset-token>复制重置链接</button>`;
+  } else {
+    resetTokenResult.classList.add("hidden");
+    resetTokenResult.innerHTML = "";
   }
   connectionList.innerHTML = state.aiConnections.length
     ? state.aiConnections.map((connection) => `<article class="item-card"><div class="item-title"><span>${escapeHtml(connection.name)}</span><span class="badge ${connection.status === "active" ? "ok" : "warn"}">${escapeHtml(connection.status)}</span></div><div class="muted">${escapeHtml(connection.provider_type)} · ${escapeHtml(connection.model_name)} · ${escapeHtml(connection.key_masked)} · v${connection.key_version}</div><div class="toolbar compact-toolbar"><button class="secondary" data-ai-test="${connection.id}">测试</button><button class="secondary" data-ai-rotate="${connection.id}">换 Key</button>${connection.status === "active" ? `<button class="secondary" data-ai-disable="${connection.id}">停用</button>` : ""}<button class="secondary" data-ai-delete="${connection.id}">删除</button></div></article>`).join("")
@@ -1444,10 +1483,27 @@ async function handleAction(event) {
       showToast("成员角色已更新");
       return;
     }
+    if (target.dataset.memberReset) {
+      if (!state.currentOrganizationId) throw new Error("请选择当前组织");
+      const issued = await api(`/organizations/${state.currentOrganizationId}/members/${target.dataset.memberReset}/password-reset-token`, {
+        method: "POST",
+      });
+      state.latestPasswordReset = { memberName: target.dataset.memberName || "该成员", token: issued.reset_token };
+      state.latestPasswordReset.url = `${window.location.origin}/reset-password#token=${encodeURIComponent(issued.reset_token)}`;
+      renderSettings();
+      showToast("重置令牌已生成，请安全转交给成员");
+      return;
+    }
     if (target.dataset.copyInvitationLink) {
       if (!state.latestInvitationLink) throw new Error("注册链接已失效，请重新创建邀请");
       await navigator.clipboard.writeText(state.latestInvitationLink);
       showToast("注册链接已复制");
+      return;
+    }
+    if (target.dataset.copyResetToken) {
+      if (!state.latestPasswordReset?.url) throw new Error("重置链接已失效，请重新生成");
+      await navigator.clipboard.writeText(state.latestPasswordReset.url);
+      showToast("重置链接已复制");
       return;
     }
     if (target.dataset.aiRotate) {
@@ -1735,6 +1791,7 @@ function bindEvents() {
       state.identity = await api("/auth/me");
       state.currentOrganizationId = state.identity.organization?.id || "";
       state.latestInvitationLink = "";
+      state.latestPasswordReset = null;
       state.selectedBatchId = "";
       state.selectedPaperId = "";
       state.selectedRunId = "";
@@ -1759,7 +1816,7 @@ function bindEvents() {
       if (!invitation.invitation_token) throw new Error("服务未返回邀请令牌，请重新创建邀请");
       // The fragment is never sent in HTTP requests, avoiding disclosure in
       // server logs while still allowing the registration form to receive it.
-      state.latestInvitationLink = `${window.location.origin}/#invite=${encodeURIComponent(invitation.invitation_token)}`;
+      state.latestInvitationLink = `${window.location.origin}/register#invite=${encodeURIComponent(invitation.invitation_token)}`;
       event.currentTarget.reset();
       renderSettings();
       showToast("邀请已创建，请复制并安全转发注册链接");
@@ -2126,6 +2183,7 @@ function bindAuth() {
       state.organizations = [];
       state.currentOrganizationId = "";
       state.latestInvitationLink = "";
+      state.latestPasswordReset = null;
       setLogoutVisible(false);
       setSidebarUser(null);
       showLogin("已登出");
@@ -2134,63 +2192,25 @@ function bindAuth() {
 
   const registerForm = document.querySelector("#register-form");
   if (registerForm) {
-    const invitationToken = new URLSearchParams(window.location.hash.slice(1)).get("invite");
-    if (invitationToken) {
-      const tokenInput = registerForm.elements.namedItem("invitation_token");
-      if (tokenInput) tokenInput.value = invitationToken;
-      document.querySelector("#login-register-details")?.setAttribute("open", "");
-      // The recipient has the token in the registration form now; remove it
-      // from the address bar and browser history as soon as it is consumed.
-      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-    }
     registerForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      setAuthError("#register-error", "");
       try {
         const form = new FormData(registerForm);
         const payload = Object.fromEntries(form.entries());
-        if (!payload.invitation_token) delete payload.invitation_token;
+        if (payload.password !== payload.password_confirmation) {
+          setAuthError("#register-error", "两次输入的密码不一致");
+          return;
+        }
+        delete payload.password_confirmation;
         await api("/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        showLogin("注册成功。请先按邮件中的链接验证邮箱，再登录。");
+        showLogin("注册成功，请使用用户名和密码登录。");
       } catch (error) {
-        showLogin(error.message);
-      }
-    });
-  }
-  const verificationForm = document.querySelector("#email-verification-form");
-  if (verificationForm) {
-    verificationForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try {
-        const form = new FormData(verificationForm);
-        await api("/auth/verify-email", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: String(form.get("token") || "").trim() }),
-        });
-        showLogin("邮箱已验证，现在可以登录。");
-      } catch (error) {
-        showLogin(error.message);
-      }
-    });
-  }
-  const resetForm = document.querySelector("#password-reset-form");
-  if (resetForm) {
-    resetForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try {
-        const form = new FormData(resetForm);
-        await api("/auth/password-reset/request", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: String(form.get("email") || "").trim() }),
-        });
-        showLogin("若邮箱已注册，重置说明将按部署配置发送。");
-      } catch (error) {
-        showLogin(error.message);
+        setAuthError("#register-error", error.message);
       }
     });
   }
@@ -2198,19 +2218,79 @@ function bindAuth() {
   if (resetConfirmForm) {
     resetConfirmForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      setAuthError("#reset-error", "");
       try {
         const form = new FormData(resetConfirmForm);
+        const password = String(form.get("password") || "");
+        const confirmation = String(form.get("password_confirmation") || "");
+        if (password !== confirmation) {
+          setAuthError("#reset-error", "两次输入的密码不一致");
+          return;
+        }
         await api("/auth/password-reset/confirm", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: String(form.get("token") || "").trim(), password: String(form.get("password") || "") }),
+          body: JSON.stringify({ token: String(form.get("token") || "").trim(), password, password_confirmation: confirmation }),
         });
         showLogin("密码已更新，请使用新密码登录。");
       } catch (error) {
-        showLogin(error.message);
+        setAuthError("#reset-error", error.message);
       }
     });
   }
+
+  prepareAuthPageFromLocation();
+}
+
+async function prepareRegistrationPage() {
+  const form = document.querySelector("#register-form");
+  const pending = document.querySelector("#register-pending");
+  const invalid = document.querySelector("#register-invalid");
+  if (!form || !pending || !invalid) return;
+  form.classList.add("hidden");
+  invalid.classList.add("hidden");
+  pending.classList.remove("hidden");
+  const invitationToken = takeFragmentToken("invite");
+  if (!invitationToken) {
+    pending.classList.add("hidden");
+    invalid.classList.remove("hidden");
+    return;
+  }
+  try {
+    const invitation = await api("/auth/invitations/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: invitationToken }),
+    });
+    form.elements.namedItem("email").value = invitation.email;
+    form.elements.namedItem("invitation_token").value = invitationToken;
+    document.querySelector("#register-organization-name").textContent = invitation.organization_name;
+    document.querySelector("#register-invited-email").textContent = invitation.email;
+    document.querySelector("#register-role-hint").textContent = `加入后角色：${invitation.role}`;
+    pending.classList.add("hidden");
+    form.classList.remove("hidden");
+  } catch (_) {
+    pending.classList.add("hidden");
+    invalid.classList.remove("hidden");
+  }
+}
+
+function prepareResetPasswordPage() {
+  const form = document.querySelector("#password-reset-confirm-form");
+  if (!form) return;
+  const token = takeFragmentToken("token");
+  if (!token) return;
+  form.elements.namedItem("token").value = token;
+  document.querySelector("#reset-token-field")?.classList.add("hidden");
+  document.querySelector("#reset-token-notice")?.classList.remove("hidden");
+}
+
+function prepareAuthPageFromLocation() {
+  const page = currentAuthPage();
+  if (!page) return;
+  showAuthPage(page, { updateUrl: false });
+  if (page === "register") prepareRegistrationPage();
+  if (page === "reset") prepareResetPasswordPage();
 }
 
 bindEvents();

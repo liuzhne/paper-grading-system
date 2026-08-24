@@ -325,7 +325,7 @@
           <div class="workflow-header"><div><span class="section-kicker">账户与组织</span><h2>账户设置</h2><p>在当前组织内管理成员、模板范围与私有 AI 连接。密钥仅通过 HTTPS 发往本系统后端，浏览器不会直接请求模型厂商。</p></div></div>
           <div class="dashboard-grid settings-grid">
             <section class="panel"><div class="panel-header"><div><span class="section-kicker">当前身份</span><h2 id="settings-identity">未登录</h2></div></div><label>当前组织<select id="organization-switcher"></select></label><p id="organization-role-hint" class="muted"></p></section>
-            <section class="panel"><div class="panel-header"><div><span class="section-kicker">成员与邀请</span><h2>组织成员</h2></div></div><div id="organization-members" class="table-wrap"></div><form id="organization-invite-form" class="form compact hidden"><label>邀请邮箱<input name="email" type="email" autocomplete="email" /></label><label>组织角色<select name="role"><option value="member">成员</option><option value="teacher">教师</option><option value="org_admin">组织管理员</option></select></label><button type="submit" class="secondary">创建邀请链接</button></form><div id="organization-invitation-result" class="result-box hidden" aria-live="polite"></div></section>
+            <section class="panel"><div class="panel-header"><div><span class="section-kicker">成员与邀请</span><h2>组织成员</h2></div></div><div id="organization-members" class="table-wrap"></div><form id="organization-invite-form" class="form compact hidden"><label>邀请邮箱<input name="email" type="email" autocomplete="email" /></label><label>组织角色<select name="role"><option value="member">成员</option><option value="teacher">教师</option><option value="org_admin">组织管理员</option></select></label><button type="submit" class="secondary">创建邀请链接</button></form><div id="organization-invitation-result" class="result-box hidden" aria-live="polite"></div><div id="organization-reset-token-result" class="result-box hidden" aria-live="polite"></div></section>
           </div>
           <section class="panel">
             <div class="panel-header"><div><span class="section-kicker">私有 BYOK</span><h2>我的 AI 连接</h2><p class="muted">保存、测试、换 Key、停用和删除都在服务端完成；页面只展示掩码和状态。</p></div></div>
@@ -340,17 +340,35 @@
       </main>
     </div>
 
-    <div id="login-overlay" class="login-overlay hidden">
-      <div class="login-card">
-        <div class="login-brand"><span class="brand-mark">衡</span><span><strong>登录衡鉴</strong><small>进入智能评审工作台</small></span></div>
-        <form id="login-form" class="form compact"><label>用户名<input id="login-username" type="text" value="admin" autocomplete="username" /></label><label>密码<input id="login-password" type="password" autocomplete="current-password" /></label><button type="submit" class="primary">登录</button><div id="login-error" class="login-error hidden"></div></form>
-        <details id="login-register-details"><summary>首次使用？注册账户</summary><form id="register-form" class="form compact"><label>用户名<input name="username" autocomplete="username" required /></label><label>邮箱<input name="email" type="email" autocomplete="email" required /></label><label>显示名称<input name="display_name" required /></label><label>密码（至少 12 位）<input name="password" type="password" autocomplete="new-password" required /></label><label>邀请令牌（如有）<input name="invitation_token" /></label><button type="submit" class="secondary">注册</button></form></details>
-        <details><summary>已收到邮箱验证令牌？</summary><form id="email-verification-form" class="form compact"><label>验证令牌<input name="token" autocomplete="one-time-code" required /></label><button type="submit" class="secondary">验证邮箱</button></form></details>
-        <details id="password-reset-details"><summary>忘记密码？</summary><form id="password-reset-form" class="form compact"><label>注册邮箱<input name="email" type="email" autocomplete="email" required /></label><button type="submit" class="secondary">发送重置说明</button></form></details>
-        <details><summary>已有重置令牌？</summary><form id="password-reset-confirm-form" class="form compact"><label>重置令牌<input name="token" autocomplete="one-time-code" required /></label><label>新密码（至少 12 位）<input name="password" type="password" autocomplete="new-password" required /></label><button type="submit" class="secondary">设置新密码</button></form></details>
-      </div>
-    </div>
+    <main id="auth-shell" class="auth-shell hidden" aria-live="polite">
+      <section id="auth-login-page" class="auth-page" aria-labelledby="auth-login-title">
+        <div class="auth-card">
+          <div class="auth-brand"><span class="brand-mark">衡</span><span><strong>衡鉴</strong><small>智能评审工作台</small></span></div>
+          <div class="auth-heading"><span class="section-kicker">欢迎回来</span><h1 id="auth-login-title">登录衡鉴</h1><p>使用组织账户进入智能评审工作台。</p></div>
+          <form id="login-form" class="form auth-form"><label>用户名<input id="login-username" type="text" autocomplete="username" required /></label><label>密码<input id="login-password" type="password" autocomplete="current-password" required /></label><button type="submit" class="primary full-width">登录</button><div id="login-error" class="auth-error hidden" role="alert"></div></form>
+          <div class="auth-divider"></div>
+          <div class="auth-links"><p><strong>收到管理员邀请链接？</strong><span>请通过该链接打开受邀注册页面。</span></p><a href="/reset-password">管理员已提供重置令牌？<span>设置新密码 →</span></a></div>
+        </div>
+      </section>
+
+      <section id="auth-register-page" class="auth-page hidden" aria-labelledby="auth-register-title">
+        <div class="auth-card">
+          <div class="auth-brand"><span class="brand-mark">衡</span><span><strong>衡鉴</strong><small>智能评审工作台</small></span></div>
+          <div id="register-pending" class="auth-heading"><span class="section-kicker">正在验证邀请</span><h1 id="auth-register-title">准备注册账户</h1><p>请稍候，正在核对邀请链接。</p></div>
+          <div id="register-invalid" class="auth-message auth-message-danger hidden" role="alert"><span class="section-kicker">邀请不可用</span><h1>此邀请链接不可用</h1><p>它可能已过期、已被使用，或不是当前账号对应的邀请。请联系组织管理员重新创建邀请链接。</p><a class="text-link" href="/login">返回登录 →</a></div>
+          <form id="register-form" class="form auth-form hidden"><div class="auth-heading"><span class="section-kicker">受邀注册</span><h1>加入 <span id="register-organization-name">组织</span></h1><p>请设置账号信息。受邀邮箱已锁定，无法修改。</p></div><div class="invite-summary"><span>受邀邮箱</span><strong id="register-invited-email">—</strong><small id="register-role-hint"></small></div><input name="email" type="hidden" /><input name="invitation_token" type="hidden" /><label>用户名<input name="username" autocomplete="username" required /></label><label>显示名称<input name="display_name" autocomplete="name" required /></label><label>设置密码（至少 12 位）<input name="password" type="password" autocomplete="new-password" minlength="12" required /></label><label>确认密码<input name="password_confirmation" type="password" autocomplete="new-password" minlength="12" required /></label><button type="submit" class="primary full-width">创建账户</button><div id="register-error" class="auth-error hidden" role="alert"></div><a class="auth-back-link" href="/login">已有账号？返回登录 →</a></form>
+        </div>
+      </section>
+
+      <section id="auth-reset-password-page" class="auth-page hidden" aria-labelledby="auth-reset-title">
+        <div class="auth-card">
+          <div class="auth-brand"><span class="brand-mark">衡</span><span><strong>衡鉴</strong><small>智能评审工作台</small></span></div>
+          <div class="auth-heading"><span class="section-kicker">账户恢复</span><h1 id="auth-reset-title">设置新密码</h1><p>请输入管理员提供的重置令牌并设置新密码。</p></div>
+          <form id="password-reset-confirm-form" class="form auth-form"><label id="reset-token-field">重置令牌<input name="token" autocomplete="one-time-code" required /></label><p id="reset-token-notice" class="muted hidden">已从重置链接读取令牌。</p><label>新密码（至少 12 位）<input name="password" type="password" autocomplete="new-password" minlength="12" required /></label><label>确认新密码<input name="password_confirmation" type="password" autocomplete="new-password" minlength="12" required /></label><button type="submit" class="primary full-width">设置新密码</button><div id="reset-error" class="auth-error hidden" role="alert"></div><a class="auth-back-link" href="/login">想起密码了？返回登录 →</a></form>
+        </div>
+      </section>
+    </main>
     <!-- PGS_CLIENT_CONFIG -->
-    <script src="/assets/app.js?v=20260823-invitation-link"></script>
+    <script src="/assets/app.js?v=20260824-auth-pages"></script>
   </body>
 </html>

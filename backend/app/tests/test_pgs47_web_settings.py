@@ -11,17 +11,27 @@ from backend.app.db import models
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def _enable_public_auth(monkeypatch):
+def _enable_invite_only_auth(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENABLED", True)
     monkeypatch.setattr(settings, "AUTH_PASSWORD", "bootstrap-admin-password")
     monkeypatch.setattr(settings, "AUTH_SECRET", "w" * 48)
-    monkeypatch.setattr(settings, "REGISTRATION_MODE", "public")
+    monkeypatch.setattr(settings, "REGISTRATION_MODE", "invite_only")
     monkeypatch.setattr(settings, "AUTH_COOKIE_SECURE", False)
 
 
 def _register_and_login(client, monkeypatch, username: str):
-    _enable_public_auth(monkeypatch)
+    _enable_invite_only_auth(monkeypatch)
     password = f"{username} secure password"
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "bootstrap-admin-password"},
+    ).status_code == 204
+    organization_id = client.get("/api/organizations").json()[0]["id"]
+    invitation = client.post(
+        f"/api/organizations/{organization_id}/members",
+        json={"email": f"{username}@example.test", "role": "member"},
+    )
+    assert invitation.status_code == 201, invitation.text
     assert client.post(
         "/api/auth/register",
         json={
@@ -29,16 +39,11 @@ def _register_and_login(client, monkeypatch, username: str):
             "email": f"{username}@example.test",
             "display_name": username,
             "password": password,
+            "invitation_token": invitation.json()["invitation_token"],
         },
     ).status_code == 201
     with client.session_factory() as session:
         user = session.scalar(select(models.User).where(models.User.username == username))
-        token = session.scalar(
-            select(models.EmailVerificationToken.token).where(
-                models.EmailVerificationToken.user_id == user.id
-            )
-        )
-    assert client.post("/api/auth/verify-email", json={"token": token}).status_code == 204
     assert client.post("/api/auth/login", json={"username": username, "password": password}).status_code == 204
     return user
 
@@ -100,9 +105,10 @@ def test_static_web_uses_cookie_session_and_exposes_pgs47_configuration_flow():
         "ai-connection-list",
         "batch-ai-connection",
         "rubric-visibility-filter",
-        "login-register-details",
-        "email-verification-form",
-        "password-reset-details",
+        "auth-login-page",
+        "auth-register-page",
+        "auth-reset-password-page",
+        "register-invited-email",
         "password-reset-confirm-form",
     ):
         assert f'id="{element_id}"' in html
@@ -111,15 +117,17 @@ def test_static_web_uses_cookie_session_and_exposes_pgs47_configuration_flow():
     assert 'credentials: "same-origin"' in script
     for marker in (
         "/auth/register",
-        "/auth/verify-email",
+        "/auth/invitations/resolve",
         "/auth/logout",
-        "/auth/password-reset/request",
         "/auth/password-reset/confirm",
         "/auth/organization-context",
         "/organizations/${state.currentOrganizationId}/members",
         "invitation_token",
-        "#invite=",
+        "/register#invite=",
+        "/reset-password#token=",
         "data-copy-invitation-link",
+        "data-member-reset",
+        "password_confirmation",
         "window.history.replaceState",
         "/members/${target.dataset.memberUpdate}",
         "/ai-connections/test-draft",
@@ -130,3 +138,9 @@ def test_static_web_uses_cookie_session_and_exposes_pgs47_configuration_flow():
         "论文内容将发送至所选厂商",
     ):
         assert marker in script or marker in html
+    assert 'id="email-verification-form"' not in html
+    assert 'id="password-reset-form"' not in html
+    assert 'id="login-overlay"' not in html
+    assert 'id="login-register-details"' not in html
+    assert "/auth/verify-email" not in script
+    assert "/auth/password-reset/request" not in script

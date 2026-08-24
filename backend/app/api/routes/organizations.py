@@ -7,9 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.api.deps import CurrentPrincipal, current_principal
+from backend.app.core.config import settings
 from backend.app.db.models import Organization
 from backend.app.db.models import OrganizationMember
 from backend.app.db.models import OrganizationInvitation
+from backend.app.db.models import PasswordResetToken
 from backend.app.db.models import User
 from backend.app.db.models import utcnow
 from backend.app.db.session import get_db
@@ -26,6 +28,13 @@ class MemberCreate(BaseModel):
 
 class MemberRoleUpdate(BaseModel):
     role: str
+
+
+def _require_member_manager(organization_id: str, principal: CurrentPrincipal):
+    if principal.platform_role != "platform_admin" and (
+        principal.organization_id != organization_id or principal.organization_role != "org_admin"
+    ):
+        raise HTTPException(status_code=403, detail="无权管理组织成员")
 
 
 @router.get("")
@@ -75,10 +84,7 @@ def add_member(
     principal: CurrentPrincipal = Depends(current_principal),
     db: Session = Depends(get_db),
 ):
-    if principal.platform_role != "platform_admin" and (
-        principal.organization_id != organization_id or principal.organization_role != "org_admin"
-    ):
-        raise HTTPException(status_code=403, detail="无权管理组织成员")
+    _require_member_manager(organization_id, principal)
     if payload.role not in {"org_admin", "teacher", "member"}:
         raise HTTPException(status_code=422, detail="无效的组织角色")
     if bool(payload.username) == bool(payload.email):
@@ -122,6 +128,53 @@ def add_member(
     audit(db, "organization.member_upserted", actor_id=principal.user_id, organization_id=organization_id, metadata={"member_id": user.id, "role": payload.role})
     db.commit()
     return {"user_id": user.id, "organization_id": organization_id, "role": membership.role}
+
+
+@router.post("/{organization_id}/members/{user_id}/password-reset-token", status_code=201)
+def create_password_reset_token(
+    organization_id: str,
+    user_id: str,
+    principal: CurrentPrincipal = Depends(current_principal),
+    db: Session = Depends(get_db),
+):
+    """Create one administrator-issued, one-time password reset token."""
+
+    _require_member_manager(organization_id, principal)
+    membership = db.scalar(
+        select(OrganizationMember).where(
+            OrganizationMember.organization_id == organization_id,
+            OrganizationMember.user_id == user_id,
+        )
+    )
+    if membership is None:
+        raise HTTPException(status_code=404, detail="organization member not found")
+    for active_token in db.scalars(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.consumed_at.is_(None),
+        )
+    ):
+        active_token.consumed_at = utcnow()
+    reset_token = PasswordResetToken(
+        token=secrets.token_urlsafe(32),
+        user_id=user_id,
+        expires_at=utcnow() + timedelta(seconds=settings.PASSWORD_RESET_TOKEN_TTL_SECONDS),
+    )
+    db.add(reset_token)
+    audit(
+        db,
+        "organization.member_password_reset_token_created",
+        actor_id=principal.user_id,
+        organization_id=organization_id,
+        metadata={"member_id": user_id},
+    )
+    db.commit()
+    return {
+        "user_id": user_id,
+        "organization_id": organization_id,
+        "reset_token": reset_token.token,
+        "expires_at": reset_token.expires_at,
+    }
 
 
 @router.patch("/{organization_id}/members/{user_id}")

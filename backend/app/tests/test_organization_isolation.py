@@ -8,20 +8,27 @@ def _login_public_user(client, monkeypatch, username):
     monkeypatch.setattr(settings, "AUTH_ENABLED", True)
     monkeypatch.setattr(settings, "AUTH_PASSWORD", "bootstrap-admin-password")
     monkeypatch.setattr(settings, "AUTH_SECRET", "d" * 48)
-    monkeypatch.setattr(settings, "REGISTRATION_MODE", "public")
+    monkeypatch.setattr(settings, "REGISTRATION_MODE", "invite_only")
     monkeypatch.setattr(settings, "AUTH_COOKIE_SECURE", False)
     email = "%s@example.test" % username
     password = "%s correct password" % username
-    assert client.post("/api/auth/register", json={"username": username, "email": email, "display_name": username, "password": password}).status_code == 201
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "bootstrap-admin-password"}).status_code == 204
+    default_org_id = client.get("/api/organizations").json()[0]["id"]
+    invitation = client.post(f"/api/organizations/{default_org_id}/members", json={"email": email, "role": "member"})
+    assert invitation.status_code == 201, invitation.text
+    assert client.post("/api/auth/register", json={"username": username, "email": email, "display_name": username, "password": password, "invitation_token": invitation.json()["invitation_token"]}).status_code == 201
     with client.session_factory() as session:
         user = session.scalar(select(models.User).where(models.User.username == username))
-        verification = session.scalar(select(models.EmailVerificationToken).where(models.EmailVerificationToken.user_id == user.id))
-    assert client.post("/api/auth/verify-email", json={"token": verification.token}).status_code == 204
+        organization = models.Organization(name="%s workspace" % username, created_by=user.id)
+        session.add(organization)
+        session.flush()
+        session.add(models.OrganizationMember(organization_id=organization.id, user_id=user.id, role="org_admin"))
+        user_id = user.id
+        session.commit()
+        organization_id = organization.id
     assert client.post("/api/auth/login", json={"username": username, "password": password}).status_code == 204
-    with client.session_factory() as session:
-        user = session.scalar(select(models.User).where(models.User.username == username))
-        organization_id = session.scalar(select(models.OrganizationMember.organization_id).where(models.OrganizationMember.user_id == user.id))
-    return user.id, organization_id
+    assert client.post("/api/auth/organization-context", json={"organization_id": organization_id}).status_code == 200
+    return user_id, organization_id
 
 
 def test_batches_are_filtered_by_current_organization_and_cross_org_ids_are_hidden(client, monkeypatch):
