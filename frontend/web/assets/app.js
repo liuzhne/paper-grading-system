@@ -1805,9 +1805,10 @@ function bindEvents() {
 
   document.querySelector("#organization-invite-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const inviteForm = event.currentTarget;
     try {
       if (!state.currentOrganizationId) throw new Error("请选择当前组织");
-      const form = new FormData(event.currentTarget);
+      const form = new FormData(inviteForm);
       const invitation = await api(`/organizations/${state.currentOrganizationId}/members`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1817,7 +1818,7 @@ function bindEvents() {
       // The fragment is never sent in HTTP requests, avoiding disclosure in
       // server logs while still allowing the registration form to receive it.
       state.latestInvitationLink = `${window.location.origin}/register#invite=${encodeURIComponent(invitation.invitation_token)}`;
-      event.currentTarget.reset();
+      inviteForm.reset();
       renderSettings();
       showToast("邀请已创建，请复制并安全转发注册链接");
     } catch (error) {
@@ -1841,14 +1842,15 @@ function bindEvents() {
 
   document.querySelector("#ai-connection-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const connectionForm = event.currentTarget;
     try {
-      const form = new FormData(event.currentTarget);
+      const form = new FormData(connectionForm);
       await api("/ai-connections", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(aiConnectionPayload(form)),
       });
-      event.currentTarget.elements.api_key.value = "";
+      connectionForm.elements.api_key.value = "";
       await loadAll();
       showToast("私有 AI 连接已加密保存");
     } catch (error) {
@@ -2088,9 +2090,10 @@ function bindEvents() {
 
   document.querySelector("#anchor-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const anchorForm = event.currentTarget;
     try {
       if (!state.anchorRubricId) throw new Error("请选择评分标准");
-      const form = new FormData(event.currentTarget);
+      const form = new FormData(anchorForm);
       await api("/calibration/anchors", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2104,7 +2107,7 @@ function bindEvents() {
           rationale: optionalText(form.get("rationale")),
         }),
       });
-      event.currentTarget.reset();
+      anchorForm.reset();
       await refreshAnchors();
       renderCalibration();
       showToast("锚点已添加");

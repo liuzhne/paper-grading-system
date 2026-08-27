@@ -143,4 +143,9 @@ def test_static_web_uses_cookie_session_and_exposes_pgs47_configuration_flow():
     assert 'id="login-overlay"' not in html
     assert 'id="login-register-details"' not in html
     assert "/auth/verify-email" not in script
+    assert "const inviteForm = event.currentTarget;" in script
+    assert "const connectionForm = event.currentTarget;" in script
+    assert "const anchorForm = event.currentTarget;" in script
+    assert "event.currentTarget.reset()" not in script
+    assert "event.currentTarget.elements" not in script
     assert "/auth/password-reset/request" not in script
