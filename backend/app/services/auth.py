@@ -82,19 +82,21 @@ def ensure_bootstrap_admin(db: Session) -> User:
 
     username = settings.AUTH_USERNAME.strip()
     user = db.scalar(select(User).where(User.username == username))
-    if user is None:
-        user = User(
-            username=username,
-            display_name="Bootstrap Admin",
-            email="bootstrap-admin@local.invalid",
-            password_hash=hash_password(settings.AUTH_PASSWORD or ""),
-            platform_role="platform_admin",
-            role="platform_admin",
-            email_verified_at=utcnow(),
-        )
-        db.add(user)
-        db.flush()
-        audit(db, "auth.bootstrap_admin_created", actor_id=user.id)
+    if user is not None:
+        return user
+
+    user = User(
+        username=username,
+        display_name="Bootstrap Admin",
+        email="bootstrap-admin@local.invalid",
+        password_hash=hash_password(settings.AUTH_PASSWORD or ""),
+        platform_role="platform_admin",
+        role="platform_admin",
+        email_verified_at=utcnow(),
+    )
+    db.add(user)
+    db.flush()
+    audit(db, "auth.bootstrap_admin_created", actor_id=user.id)
 
     organization = db.scalar(select(Organization).where(Organization.name == settings.DEFAULT_ORGANIZATION_NAME))
     if organization is None:

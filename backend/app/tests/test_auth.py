@@ -3,7 +3,9 @@
 from backend.app.core.config import settings
 
 
-def test_auth_off_by_default(client):
+def test_auth_off_by_default(client, monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    monkeypatch.setattr(settings, "AUTH_PASSWORD", None)
     assert client.get("/api/auth/status").json()["auth_required"] is False
     assert client.get("/api/batches").status_code == 200  # 免登录
 
@@ -13,6 +15,14 @@ def test_public_auth_routes_render_the_same_web_entrypoint(client):
         response = client.get(path)
         assert response.status_code == 200
         assert "衡鉴" in response.text
+
+
+def test_api_responses_expose_request_timings(client, monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    monkeypatch.setattr(settings, "AUTH_PASSWORD", None)
+    response = client.get("/api/batches")
+    timing = response.headers["server-timing"]
+    assert "app;dur=" in timing
 
 
 def test_auth_on_gates_data_routes(client, monkeypatch):

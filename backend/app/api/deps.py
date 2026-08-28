@@ -6,15 +6,19 @@ from fastapi import Cookie
 from fastapi import Depends
 from fastapi import Header
 from fastapi import HTTPException
+from sqlalchemy import and_
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import settings
 from backend.app.db.models import OrganizationMember
+from backend.app.db.models import AuthSession
 from backend.app.db.models import User
+from backend.app.db.models import utcnow
 from backend.app.db.session import get_db
 from backend.app.services.auth import active_session
 from backend.app.services.auth import auth_active
+from backend.app.services.auth import token_digest
 
 
 @dataclass(frozen=True)
@@ -36,28 +40,42 @@ def current_principal(
 ) -> CurrentPrincipal:
     if not auth_active():
         return CurrentPrincipal(settings.DEFAULT_DEV_USER_ID, None, None, "developer")
-    session = active_session(db, _session_token(pgs_session))
-    if session is None:
+    token = _session_token(pgs_session)
+    if not token:
         raise HTTPException(status_code=401, detail="未登录或会话失效")
-    user = db.get(User, session.user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录或会话失效")
-    selected_organization_id = requested_organization_id or session.organization_id
-    membership = None
-    if selected_organization_id:
-        membership = db.scalar(
-            select(OrganizationMember).where(
-                OrganizationMember.organization_id == selected_organization_id,
-                OrganizationMember.user_id == user.id,
-            )
+    membership_organization_id = requested_organization_id or AuthSession.organization_id
+    row = db.execute(
+        select(
+            AuthSession.user_id.label("user_id"),
+            AuthSession.organization_id.label("session_organization_id"),
+            User.platform_role.label("platform_role"),
+            OrganizationMember.role.label("organization_role"),
         )
-        if membership is None and user.platform_role != "platform_admin":
+        .join(User, User.id == AuthSession.user_id)
+        .outerjoin(
+            OrganizationMember,
+            and_(
+                OrganizationMember.user_id == AuthSession.user_id,
+                OrganizationMember.organization_id == membership_organization_id,
+            ),
+        )
+        .where(
+            AuthSession.token_hash == token_digest(token),
+            AuthSession.revoked_at.is_(None),
+            AuthSession.expires_at > utcnow(),
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=401, detail="未登录或会话失效")
+    selected_organization_id = requested_organization_id or row.session_organization_id
+    if selected_organization_id:
+        if row.organization_role is None and row.platform_role != "platform_admin":
             raise HTTPException(status_code=403, detail="无权访问该组织")
     return CurrentPrincipal(
-        user_id=user.id,
+        user_id=row.user_id,
         organization_id=selected_organization_id,
-        organization_role=membership.role if membership else None,
-        platform_role=user.platform_role,
+        organization_role=row.organization_role,
+        platform_role=row.platform_role,
     )
 
 

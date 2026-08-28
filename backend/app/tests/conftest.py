@@ -20,6 +20,23 @@ from backend.app.services.rubric_import.persist import build_criterion
 from backend.app.services.storage.local import ensure_storage_dirs
 
 
+@pytest.fixture(autouse=True)
+def isolate_tests_from_deployment_environment(monkeypatch):
+    """Keep the documented test profile independent from local production env."""
+
+    defaults = {
+        "AUTH_ENABLED": False,
+        "AUTH_PASSWORD": None,
+        "STORAGE_PROVIDER": "local",
+        "LLM_PROVIDER": "mock",
+        "LLM_FALLBACK_TO_MOCK": True,
+        "SHEET_WRITER_PROVIDER": "mock",
+        "SHEET_FALLBACK_TO_MOCK": True,
+    }
+    for name, value in defaults.items():
+        monkeypatch.setattr(settings, name, value)
+
+
 @pytest.fixture()
 def client(tmp_path):
     engine = create_engine(

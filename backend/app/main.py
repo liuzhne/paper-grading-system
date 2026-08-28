@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
+from time import perf_counter
 
 from fastapi import Depends
 from fastapi import FastAPI
@@ -26,6 +27,9 @@ from backend.app.api.routes import scoring
 from backend.app.api.routes import system
 from backend.app.api.routes import submissions_v2
 from backend.app.core.config import settings
+from backend.app.services.observability import begin_request_timing
+from backend.app.services.observability import end_request_timing
+from backend.app.services.observability import server_timing_header
 from backend.app.services.storage.local import ensure_storage_dirs
 
 
@@ -37,6 +41,19 @@ async def lifespan(app):
 
 def create_app():
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+
+    @app.middleware("http")
+    async def attach_server_timing(request, call_next):
+        started_at = perf_counter()
+        token = begin_request_timing()
+        try:
+            response = await call_next(request)
+            response.headers["Server-Timing"] = server_timing_header(
+                (perf_counter() - started_at) * 1000
+            )
+            return response
+        finally:
+            end_request_timing(token)
 
     @app.exception_handler(OperationalError)
     async def database_operational_error_handler(request, exc):

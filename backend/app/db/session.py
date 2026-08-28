@@ -8,6 +8,8 @@ from sqlalchemy.pool import NullPool
 
 from backend.app.core.config import settings
 from backend.app.db.sqlite import enable_sqlite_foreign_keys
+from backend.app.services.observability import install_sqlalchemy_timing
+from backend.app.services.observability import note_session_opened
 
 
 def _engine_options(database_url: str):
@@ -25,11 +27,13 @@ def _engine_options(database_url: str):
 
 engine = create_engine(settings.DATABASE_URL, **_engine_options(settings.DATABASE_URL))
 enable_sqlite_foreign_keys(engine)
+install_sqlalchemy_timing(engine)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, class_=Session)
 
 
 def get_db():
     db = SessionLocal()
+    note_session_opened()
     try:
         yield db
     finally:
