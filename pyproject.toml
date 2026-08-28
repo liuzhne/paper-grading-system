@@ -35,6 +35,9 @@ streamlit = ["streamlit>=1.33.0"]
 [project.scripts]
 pgs = "backend.app.cli.main:run"
 
+[tool.vercel.scripts]
+build = "python scripts/build_web_static.py"
+
 [dependency-groups]
 dev = [
   "pytest>=8.0.0",

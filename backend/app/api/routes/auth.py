@@ -120,9 +120,10 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if not auth_active():
         return Response(status_code=204)
     if payload.username == settings.AUTH_USERNAME:
-        ensure_bootstrap_admin(db)
+        user = ensure_bootstrap_admin(db)
         db.flush()
-    user = db.scalar(select(User).where(User.username == payload.username))
+    else:
+        user = db.scalar(select(User).where(User.username == payload.username))
     if user is None or not password_matches(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     organization_id = primary_organization_id(db, user.id)

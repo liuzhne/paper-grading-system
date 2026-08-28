@@ -1,13 +1,19 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "regions": ["iad1"],
+  "regions": ["sin1"],
   "functions": {
     "api/**/*.py": {
-      "maxDuration": 300,
-      "excludeFiles": "{.env,.env.*,storage/**,backend/app/tests/**,docs/**,.github/**,test/**,frontend/streamlit_app.py,**/*.docx,**/*.pdf,**/*.png,**/*.svg,**/*.mmd}"
+      "maxDuration": 60,
+      "excludeFiles": "{.env,.env.*,storage/**,backend/app/tests/**,docs/**,.github/**,test/**,frontend/**,**/*.docx,**/*.pdf,**/*.png,**/*.svg,**/*.mmd}"
     }
   },
   "headers": [
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        {"key": "Cache-Control", "value": "public, max-age=31536000, immutable"}
+      ]
+    },
     {
       "source": "/(.*)",
       "headers": [
