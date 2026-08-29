@@ -272,7 +272,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install the Vercel CLI
-        run: npm install --global vercel@59.3.0
+        # 58.4.4+ reapplies .vercelignore to Python filePathMap entries during
+        # --prebuilt deploys and can fail remotely with ENOENT. Keep the last
+        # unaffected release until vercel/vercel#17386 is fixed upstream.
+        run: npm install --global vercel@58.4.0
       - name: Pull the Vercel production configuration
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
