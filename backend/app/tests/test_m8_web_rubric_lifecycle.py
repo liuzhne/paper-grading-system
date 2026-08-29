@@ -125,6 +125,10 @@ def test_static_web_exposes_import_preflight_and_strict_lifecycle_controls():
     assert "body: JSON.stringify({ compilation_id:" in script
     assert "await api(\"/rubrics/import-files\"" in script
     assert "state.rubricImportPreview = imported" in script
+    assert 'MISSING_EXECUTABLE_SCORING_MODE: "缺少可执行评分方式"' in script
+    assert 'MISSING_CRITERION_DESCRIPTION: "缺少评分项说明"' in script
+    assert 'severityLabel: "错误"' in script
+    assert "`${warnings.length} 条警告`" in script
 
 
 def test_web_api_lifecycle_import_review_approve_confirm_and_publish(client):

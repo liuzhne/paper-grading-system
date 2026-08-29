@@ -571,7 +571,7 @@ def test_empty_criterion_description_is_an_independent_publish_blocker():
         if item["code"] == "MISSING_CRITERION_DESCRIPTION"
     )
     assert blocker["criterion_code"] == "T02"
-    assert "scoring description" in blocker["message"]
+    assert "评分说明" in blocker["message"]
 
 
 @requires_file_prepare
