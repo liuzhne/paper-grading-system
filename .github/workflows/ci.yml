@@ -229,3 +229,72 @@ jobs:
           path: pgs_docker_artifacts/
           if-no-files-found: error
           retention-days: 30
+
+  deploy-vercel-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - docker-compose-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    concurrency:
+      group: vercel-production
+      cancel-in-progress: false
+    steps:
+      - name: Validate Vercel deployment secrets
+        shell: bash
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN
+          do
+            if [[ -z "${!name:-}" ]]
+            then
+              echo "::error::Required GitHub production environment secret ${name} is not configured."
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install uv and Python for the Vercel Python builder
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Set up Node.js for the Vercel CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the Vercel CLI
+        run: npm install --global vercel@59.3.0
+      - name: Pull the Vercel production configuration
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - name: Build the production deployment
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+      - name: Deploy the prebuilt output to production
+        id: deploy
+        shell: bash
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          deployment_url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")"
+          echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
+          echo "### Vercel production deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "[$deployment_url]($deployment_url)" >> "$GITHUB_STEP_SUMMARY"

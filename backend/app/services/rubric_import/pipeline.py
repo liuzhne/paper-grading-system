@@ -694,7 +694,7 @@ def prepare_file_import(
                     {
                         "code": "HYBRID_WEIGHT_NOT_EXACT",
                         "criterion_code": source_code,
-                        "message": "hybrid leaf weights are not exactly representable",
+                        "message": "混合评分项的子项权重无法精确表示",
                     }
                 )
             continue
@@ -715,8 +715,7 @@ def prepare_file_import(
                     "code": "MISSING_CRITERION_DESCRIPTION",
                     "criterion_code": criterion_code,
                     "message": (
-                        "positive-score criterion requires a scoring description, "
-                        "band, deduction rule, or deterministic checker"
+                        "分值大于零的评分项必须配置评分说明、分档、扣分规则或确定性检查器"
                     ),
                 }
             )
@@ -782,7 +781,7 @@ def prepare_file_import(
                     {
                         "code": "MISSING_EXECUTABLE_SCORING_MODE",
                         "criterion_code": criterion_code,
-                        "message": "criterion requires an explicit band, deduct or review-only mapping",
+                        "message": "评分项必须明确配置分档评分、扣分评分或仅人工复核",
                     }
                 )
             if scorer is not None and deduction_text:
@@ -1032,7 +1031,7 @@ def _manual_nodes(payload: Mapping[str, object]):
                     {
                         "code": "MISSING_EXECUTABLE_SCORING_MODE",
                         "criterion_code": code,
-                        "message": "deductive criterion has no valid structured deduction rule",
+                        "message": "扣分制评分项没有有效的结构化扣分规则",
                     }
                 )
         elif mode == "review_only":
@@ -1062,7 +1061,7 @@ def _manual_nodes(payload: Mapping[str, object]):
                 {
                     "code": "MISSING_EXECUTABLE_SCORING_MODE",
                     "criterion_code": code,
-                    "message": "manual criterion requires explicit executable mapping",
+                    "message": "手工评分项必须明确配置可执行的评分方式",
                 }
             )
             projection["scoring_mode"] = "review_only"

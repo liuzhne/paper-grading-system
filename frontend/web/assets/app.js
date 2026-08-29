@@ -804,17 +804,17 @@ function renderRubricImportPreview() {
   if (!container) return;
   const imported = state.rubricImportPreview;
   if (!imported) {
-    container.innerHTML = '<div class="muted">导入后将在此显示解析摘要、warnings 与待审核提示。</div>';
+    container.innerHTML = '<div class="muted">导入后将在此显示解析摘要、警告与待审核提示。</div>';
     return;
   }
   const warnings = imported.warnings || [];
   const summary = imported.template_summary || {};
   const rubric = imported.rubric || {};
   container.innerHTML = `<article class="item-card">
-    <div class="item-title"><span>导入预检：${escapeHtml(rubric.name || "未命名标准")}</span><span class="badge ${warnings.length ? "warn" : "ok"}">${warnings.length ? `${warnings.length} warnings` : "解析完成"}</span></div>
+    <div class="item-title"><span>导入预检：${escapeHtml(rubric.name || "未命名标准")}</span><span class="badge ${warnings.length ? "warn" : "ok"}">${warnings.length ? `${warnings.length} 条警告` : "解析完成"}</span></div>
     <div class="muted">已生成 ${escapeHtml((rubric.criteria || []).length)} 个评分项；请继续完成规则与模板映射审核，预检完成不等于可发布。</div>
-    ${warnings.length ? `<ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : '<div class="muted">未返回解析 warning。</div>'}
-    <details><summary>template_summary</summary><pre class="lifecycle-json">${escapeHtml(JSON.stringify(summary, null, 2))}</pre></details>
+    ${warnings.length ? `<ul>${warnings.map((item) => `<li>${escapeHtml(lifecycleIssueText(item))}</li>`).join("")}</ul>` : '<div class="muted">没有解析警告。</div>'}
+    <details><summary>模板解析摘要</summary><pre class="lifecycle-json">${escapeHtml(JSON.stringify(summary, null, 2))}</pre></details>
   </article>`;
 }
 
@@ -825,11 +825,31 @@ function lifecycleButton(action, label, attributes = {}) {
   return `<button class="secondary" data-lifecycle-action="${escapeHtml(action)}"${data}>${escapeHtml(label)}</button>`;
 }
 
+const LIFECYCLE_ISSUE_CODE_LABELS = {
+  HYBRID_WEIGHT_NOT_EXACT: "混合评分权重无法精确表示",
+  MISSING_CRITERION_DESCRIPTION: "缺少评分项说明",
+  MISSING_EXECUTABLE_SCORING_MODE: "缺少可执行评分方式",
+  TEMPLATE_FORMAT_PARSE_WARNING: "模板格式解析警告",
+};
+
+// 已保存的历史编译记录仍可能包含旧版英文消息，在展示层兼容翻译，
+// 这样升级前导入的评分标准也无需重新导入即可显示中文提示。
+const LEGACY_LIFECYCLE_ISSUE_MESSAGES = {
+  "hybrid leaf weights are not exactly representable": "混合评分项的子项权重无法精确表示",
+  "positive-score criterion requires a scoring description, band, deduction rule, or deterministic checker": "分值大于零的评分项必须配置评分说明、分档、扣分规则或确定性检查器",
+  "criterion requires an explicit band, deduct or review-only mapping": "评分项必须明确配置分档评分、扣分评分或仅人工复核",
+  "deductive criterion has no valid structured deduction rule": "扣分制评分项没有有效的结构化扣分规则",
+  "manual criterion requires explicit executable mapping": "手工评分项必须明确配置可执行的评分方式",
+};
+
 function lifecycleIssueText(item) {
-  if (typeof item === "string") return item;
+  if (typeof item === "string") return LEGACY_LIFECYCLE_ISSUE_MESSAGES[item] || item;
   if (!item || typeof item !== "object") return String(item ?? "");
-  const code = item.code ? `[${item.code}] ` : "";
-  return `${code}${item.message || item.detail || JSON.stringify(item)}`;
+  const code = item.code ? `[${LIFECYCLE_ISSUE_CODE_LABELS[item.code] || item.code}]` : "";
+  const criterion = item.criterion_code ? `（评分项 ${item.criterion_code}）` : "";
+  const rawMessage = item.message || item.detail || JSON.stringify(item);
+  const message = LEGACY_LIFECYCLE_ISSUE_MESSAGES[rawMessage] || rawMessage;
+  return `${code}${criterion}${code || criterion ? " " : ""}${message}`;
 }
 
 function renderLifecycleIssues(active, ambiguity) {
@@ -838,19 +858,19 @@ function renderLifecycleIssues(active, ambiguity) {
   const blockers = active?.blockers || [];
   const warnings = active?.warnings || [];
   const rows = [];
-  if (ambiguity) rows.push({ tone: "error", label: "歧义", value: ambiguity });
-  blockers.forEach((item) => rows.push({ tone: "error", label: "阻断", value: lifecycleIssueText(item) }));
-  warnings.forEach((item) => rows.push({ tone: "warn", label: "警告", value: lifecycleIssueText(item) }));
+  if (ambiguity) rows.push({ tone: "error", label: "歧义", severityLabel: "错误", value: ambiguity });
+  blockers.forEach((item) => rows.push({ tone: "error", label: "阻断", severityLabel: "错误", value: lifecycleIssueText(item) }));
+  warnings.forEach((item) => rows.push({ tone: "warn", label: "警告", severityLabel: "警告", value: lifecycleIssueText(item) }));
   container.innerHTML = rows.length
-    ? rows.map((item) => `<article class="item-card lifecycle-issue ${item.tone}"><div class="item-title"><span>${escapeHtml(item.label)}</span><span class="badge ${item.tone}">${escapeHtml(item.tone)}</span></div><div>${escapeHtml(item.value)}</div></article>`).join("")
-    : '<div class="muted">活动 compilation 未报告 warning/blocker；仍须完成全部人工签核。</div>';
+    ? rows.map((item) => `<article class="item-card lifecycle-issue ${item.tone}"><div class="item-title"><span>${escapeHtml(item.label)}</span><span class="badge ${item.tone}">${escapeHtml(item.severityLabel)}</span></div><div>${escapeHtml(item.value)}</div></article>`).join("")
+    : '<div class="muted">当前执行草稿没有警告或阻断项；仍须完成全部人工签核。</div>';
 }
 
 function renderLifecycleRules(rules = []) {
   const container = document.querySelector("#rubric-lifecycle-rules");
   if (!container) return;
   if (!rules.length) {
-    container.innerHTML = '<div class="muted">活动 compilation 没有可审核规则。</div>';
+    container.innerHTML = '<div class="muted">当前执行草稿没有可审核规则。</div>';
     return;
   }
   const rows = rules.map((rule) => {

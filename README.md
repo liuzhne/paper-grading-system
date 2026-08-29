@@ -219,6 +219,7 @@ M1/M5/M8 真实发布门禁必须使用 `run_qwk_eval --release-gate` 的仓库�
 
 ## 部署与运维要点
 
+- **Vercel 生产流水线**：推送 `main` 后，只有锁文件全量测试、Postgres 16 迁移/约束/恢复演练和 Docker 冒烟测试全部通过，`deploy-vercel-production` 才会执行 `vercel pull`、`vercel build --prod` 与 `vercel deploy --prebuilt --prod`。在 GitHub 的 `production` Environment 中配置 `VERCEL_TOKEN`、`VERCEL_ORG_ID`、`VERCEL_PROJECT_ID` 三个 Secret；其中项目和组织 ID 可从本地 `vercel link` 生成的 `.vercel/project.json` 获取，Token 在 Vercel Account Settings 创建。`vercel.json` 已关闭 Git 集成的直接部署，连接仓库后也不会与 Actions 重复发布。
 - **内网试点 Docker 栈**：复制 `.env.intranet.example` 为 `.env.intranet`，改强密码与站点名后运行 `docker compose --env-file .env.intranet up -d --build`。详见 [docs/部署.md](docs/部署.md)。
 - **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0022_legacy_tenant_backfill`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。0022 会把升级前的单租户资源回填到默认组织，并把旧默认开发用户提升为 Bootstrap Admin；不会复制任何 `.env` LLM Key。
 - **可恢复批量评分**：Web 或 `/api/batches/{id}/score-jobs` 创建任务时必须提交经批准的观察策略 JSON；策略、策略哈希、并发上限、论文级检查点、尝试历史和门禁信号均写入数据库。任务支持运行/租约恢复、取消和仅重试失败项，但其报告固定 `production_default_switch_authorized=false`，最终授权仍属于 GATE-03。
