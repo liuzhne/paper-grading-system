@@ -345,6 +345,9 @@ def test_executable_launch_checklist_defines_monitoring_ownership_and_evidence()
         "Postgres CI",
         "GATE-03",
         "production_default_switch_authorized=false",
+        "deploy-vercel-production",
+        "VERCEL_TOKEN",
+        "Vercel Git 直部署保持关闭",
     ):
         assert marker in checklist
     for marker in (
