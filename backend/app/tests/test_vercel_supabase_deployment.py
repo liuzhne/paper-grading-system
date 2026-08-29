@@ -117,3 +117,8 @@ def test_vercel_entrypoint_and_bundle_contract():
     ignore_rules = (ROOT / ".vercelignore").read_text(encoding="utf-8").splitlines()
     assert "/storage" in ignore_rules
     assert "storage" not in ignore_rules
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "npm install --global vercel@58.4.0" in workflow
+    assert "vercel deploy --prebuilt --prod" in workflow
