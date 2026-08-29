@@ -122,3 +122,13 @@ def test_vercel_entrypoint_and_bundle_contract():
     )
     assert "npm install --global vercel@58.4.0" in workflow
     assert "vercel deploy --prebuilt --prod" in workflow
+    deployment_guide = (ROOT / "docs" / "部署.md").read_text(encoding="utf-8")
+    for marker in (
+        "GitHub Actions 门禁后部署",
+        "git.deploymentEnabled=false",
+        "deploy-vercel-production",
+        "VERCEL_TOKEN",
+        "vercel@58.4.0",
+        "vercel/vercel#17386",
+    ):
+        assert marker in deployment_guide
