@@ -7,6 +7,7 @@ from fastapi import Depends
 from fastapi import File
 from fastapi import Form
 from fastapi import HTTPException
+from fastapi import Response
 from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy import update
@@ -28,9 +29,12 @@ from backend.app.schemas.paper import PaperChunkRead
 from backend.app.schemas.paper import PaperRead
 from backend.app.schemas.paper import PaperUpdate
 from backend.app.schemas.paper import ParsedPaperResponse
+from backend.app.services.auth import audit
 from backend.app.services.papers.ingestion import parse_and_store
 from backend.app.services.storage.local import artifact_not_found
+from backend.app.services.storage.local import artifact_key_invalid
 from backend.app.services.storage.local import create_signed_upload
+from backend.app.services.storage.local import delete_private_object
 from backend.app.services.storage.local import ensure_storage_dirs
 from backend.app.services.storage.local import private_object_path
 from backend.app.services.storage.local import private_object_ref
@@ -308,6 +312,53 @@ def complete_direct_upload(
 @router.get("/{paper_id}", response_model=PaperRead)
 def get_paper(paper_id: str, db: Session = Depends(get_db), principal: CurrentPrincipal = Depends(current_principal)):
     return _visible_paper(db, paper_id, principal)
+
+
+@router.delete("/{paper_id}", status_code=204)
+def delete_incomplete_upload(
+    paper_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """Discard a direct-upload reservation that never completed archival."""
+
+    paper = _visible_paper(db, paper_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    if paper.status != "uploading":
+        _paper_problem(
+            409,
+            "PAPER_DELETE_STATE_INVALID",
+            "仅能删除尚未完成的失败上传记录。",
+            "已归档或已解析的材料请保留；如需移除，请使用对应的数据管理流程。",
+            retryable=False,
+        )
+
+    if paper.file_path.startswith("supabase://"):
+        try:
+            delete_private_object(paper.file_path)
+        except Exception as exc:
+            # Historical Unicode keys were rejected before an object could be
+            # created. Treat both that case and an already-missing object as a
+            # successful cleanup, while keeping the row on genuine outages.
+            if not (artifact_not_found(exc) or artifact_key_invalid(exc)):
+                _paper_problem(
+                    502,
+                    "FAILED_UPLOAD_CLEANUP_FAILED",
+                    "暂时无法清理私有存储中的失败上传。",
+                    "请稍后重试删除；当前记录和文件引用均已保留。",
+                    retryable=True,
+                )
+
+    audit(
+        db,
+        "paper.failed_upload_deleted",
+        actor_id=principal.user_id,
+        organization_id=paper.organization_id,
+        metadata={"paper_id": paper.id, "batch_id": paper.batch_id},
+    )
+    db.delete(paper)
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.patch("/{paper_id}", response_model=PaperRead)
