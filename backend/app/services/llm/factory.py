@@ -39,7 +39,10 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None):
                 max_tokens=options.get("max_tokens"),
                 temperature=options.get("temperature"),
                 response_format_json=options.get("response_format_json"),
-                thinking_type=options.get("thinking_type"),
+                # BYOK endpoints are only protocol-compatible, not guaranteed
+                # to accept the platform provider's non-standard `thinking`
+                # extension.  Send it only when this connection opted in.
+                thinking_type=options.get("thinking_type", ""),
             )
         else:  # Defensive even though the persistence validator already rejects it.
             raise ValueError("unsupported AI connection provider type")

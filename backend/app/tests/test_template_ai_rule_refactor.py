@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from backend.app.services.rubric_import.ai_rule_drafter import (
@@ -20,6 +21,21 @@ class _DraftScorer:
     def complete_json(self, instructions, payload):
         self.payloads.append((instructions, payload))
         return self.result
+
+
+class _RejectedDraftScorer:
+    provider = "openai_compatible"
+    model_name = "openai/gpt-oss-120b"
+    model_version = "chat-completions"
+
+    def complete_json(self, _instructions, _payload):
+        request = httpx.Request(
+            "POST", "https://api.groq.com/openai/v1/chat/completions"
+        )
+        response = httpx.Response(400, request=request)
+        raise httpx.HTTPStatusError(
+            "provider rejected request", request=request, response=response
+        )
 
 
 def _criterion(**overrides):
@@ -283,6 +299,53 @@ def test_draft_endpoint_returns_structured_suggestions_without_mutating_rubric(
     after = client.get(f"/api/rubrics/{rubric_id}/execution-draft").json()
     assert after["active_compilation"]["id"] == before["active_compilation"]["id"]
     assert len(after["compilations"]) == 1
+
+
+def test_ai_drafter_reports_non_retryable_provider_rejection_without_body():
+    with pytest.raises(AIRuleDraftValidationError) as captured:
+        draft_deduction_rules(
+            criterion=_criterion(),
+            input_analysis=analyze_rule_input([], criterion_code="T02"),
+            scorer=_RejectedDraftScorer(),
+            business_profile_key="thesis",
+        )
+
+    assert captured.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "拒绝" in captured.value.message
+    assert "测试当前 AI 连接" in captured.value.user_action
+    assert "groq" not in str(captured.value).lower()
+
+
+def test_draft_endpoint_maps_provider_rejection_to_safe_non_retryable_problem(
+    client,
+    monkeypatch,
+):
+    from backend.app.api.routes import rubrics as rubric_routes
+
+    created = client.post(
+        "/api/rubrics",
+        json={
+            "name": "AI provider rejection",
+            "version": "v1",
+            "total_score": 20,
+            "criteria": [_criterion(scoring_mode="review_only")],
+        },
+    )
+    assert created.status_code == 200, created.text
+    monkeypatch.setattr(
+        rubric_routes, "get_llm_scorer", lambda *_: _RejectedDraftScorer()
+    )
+
+    response = client.post(
+        f"/api/rubrics/{created.json()['id']}/draft-deduction-rules",
+        json={"criteria": [_criterion()]},
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["code"] == "AI_DRAFT_PROVIDER_REJECTED"
+    assert detail["retryable"] is False
+    assert "测试当前 AI 连接" in detail["user_action"]
 
 
 def test_range_and_unconfirmed_ai_rules_remain_blocked_until_confirmation(client):
