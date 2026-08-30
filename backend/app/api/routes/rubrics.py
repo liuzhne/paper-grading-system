@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCompilation
+from backend.app.db.models import RubricVersion
 from backend.app.db.models import ScoringRun
 from backend.app.db.session import get_db
 from backend.app.schemas.rubric import RubricCreate
@@ -25,6 +26,7 @@ from backend.app.schemas.rubric import RubricLifecycleReason
 from backend.app.schemas.rubric import RubricPublishRequest
 from backend.app.schemas.rubric import RubricRead
 from backend.app.schemas.rubric import RubricDraftRecompileRequest
+from backend.app.schemas.rubric import RubricAIRuleDraftRequest
 from backend.app.schemas.rubric import RubricExecutionDraftRead
 from backend.app.schemas.rubric import TemplateLinkReviewRequest
 from backend.app.schemas.rubric import RubricUpdate
@@ -42,10 +44,39 @@ from backend.app.services.rubric_import.persist import extra_criterion_fields
 from backend.app.services.rubric_import.template import build_rubric_import_template
 from backend.app.services.scoring.core.policy import validate_weight_configuration
 from backend.app.services.rubric_import import pipeline as rubric_pipeline
+from backend.app.services.rubric_import.ai_rule_drafter import (
+    AIRuleDraftValidationError,
+    draft_deduction_rules,
+)
+from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 from backend.app.services.rubrics.draft_graph import read_execution_draft
+from backend.app.services.ai_connections import resolve_connection_runtime
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
+
+
+def _rubric_problem(
+    *,
+    code: str,
+    message: str,
+    user_action: str,
+    severity: str = "error",
+    retryable: bool = False,
+    criterion_code: str | None = None,
+    field_path: str | None = None,
+    context: dict | None = None,
+) -> dict:
+    return {
+        "code": code,
+        "message": message,
+        "user_action": user_action,
+        "severity": severity,
+        "retryable": retryable,
+        "criterion_code": criterion_code,
+        "field_path": field_path,
+        "context": context or {},
+    }
 
 
 def _scoped_duplicate(
@@ -318,6 +349,104 @@ def get_rubric_execution_draft(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/{rubric_id}/draft-deduction-rules")
+def draft_rubric_deduction_rules(
+    rubric_id: str,
+    payload: RubricAIRuleDraftRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """Return non-persistent, human-confirmable AI rule suggestions."""
+
+    _visible_rubric(db, rubric_id, principal)
+    execution = read_execution_draft(session=db, rubric_id=rubric_id)
+    active = execution.get("active_compilation") or {}
+    version = active.get("version") or {}
+    try:
+        if payload.ai_connection_id:
+            if not principal.organization_id:
+                raise AIRuleDraftValidationError(
+                    "AI_DRAFT_CONNECTION_MISSING",
+                    "当前上下文不能使用私有 AI 连接。",
+                    "请选择组织后重试，或使用平台已授权的真实模型。",
+                )
+            runtime = resolve_connection_runtime(
+                db,
+                connection_id=payload.ai_connection_id,
+                owner_id=principal.user_id,
+                organization_id=principal.organization_id,
+            )
+            scorer = get_llm_scorer(runtime)
+        else:
+            scorer = get_llm_scorer()
+
+        items = []
+        for criterion in payload.criteria:
+            criterion_value = criterion.model_dump(mode="json")
+            analysis = analyze_rule_input(
+                criterion_value.get("deduction_rules") or [],
+                criterion_code=criterion.code,
+            )
+            if not (
+                analysis["needs_ai_draft"]
+                or analysis["needs_severity_expansion"]
+            ):
+                items.append(
+                    {
+                        "criterion_code": criterion.code,
+                        "input_analysis": analysis,
+                        "status": "already_structured",
+                        "draft": None,
+                    }
+                )
+                continue
+            items.append(
+                {
+                    "criterion_code": criterion.code,
+                    "input_analysis": analysis,
+                    "status": "pending_confirmation",
+                    "draft": draft_deduction_rules(
+                        criterion=criterion_value,
+                        input_analysis=analysis,
+                        scorer=scorer,
+                        business_profile_key=(
+                            version.get("business_profile_key") or "thesis"
+                        ),
+                    ),
+                }
+            )
+        return {"rubric_id": rubric_id, "items": items}
+    except AIRuleDraftValidationError as exc:
+        status_code = (
+            503
+            if exc.code
+            in {
+                "AI_DRAFT_CONNECTION_MISSING",
+                "AI_DRAFT_PROVIDER_ERROR",
+            }
+            else 422
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail=_rubric_problem(
+                code=exc.code,
+                message=exc.message,
+                user_action=exc.user_action,
+                retryable=exc.code == "AI_DRAFT_PROVIDER_ERROR",
+            ),
+        ) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=_rubric_problem(
+                code="AI_DRAFT_CONNECTION_MISSING",
+                message="当前没有可用于起草扣分细则的真实 AI 连接。",
+                user_action="请配置真实 AI 连接，或将评分项改为仅人工复核。",
+                retryable=False,
+            ),
+        ) from exc
+
+
 @router.post("/{rubric_id}/submit-review", response_model=RubricRead)
 def submit_rubric_review(
     rubric_id: str,
@@ -327,8 +456,33 @@ def submit_rubric_review(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        execution = read_execution_draft(session=db, rubric_id=rubric_id)
+        active = execution.get("active_compilation")
+        blocker_count = len((active or {}).get("blockers") or [])
+        if (
+            active is None
+            or active.get("status") != "validated"
+            or blocker_count
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=_rubric_problem(
+                    code="RUBRIC_REVIEW_BLOCKED",
+                    message=(
+                        f"当前执行草稿仍有 {blocker_count} 个阻断项，不能提交审核。"
+                        if blocker_count
+                        else "当前模板还没有校验通过的执行草稿，不能提交审核。"
+                    ),
+                    user_action="请返回第 2 步处理阻断项并保存重新校验。",
+                    retryable=False,
+                    context={"blocker_count": blocker_count},
+                ),
+            )
         rubric_lifecycle.submit_for_review(db, rubric_id)
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except rubric_lifecycle.RubricLifecycleError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -366,11 +520,70 @@ def recompile_rubric_draft(
     rubric = _visible_rubric(db, rubric_id, principal)
     if rubric.status != "draft":
         raise HTTPException(
-            status_code=400,
-            detail="only a draft rubric can be recompiled",
+            status_code=409,
+            detail=_rubric_problem(
+                code="RUBRIC_NOT_EDITABLE",
+                message="当前评分模板不是可编辑草稿。",
+                user_action="已发布模板请先复制为新版本后再编辑。",
+            ),
         )
-    _validate_criteria_total(rubric.total_score, payload.criteria)
-    command = _manual_recompile_command(rubric, payload)
+    predecessor_version = db.scalar(
+        select(RubricVersion).where(
+            RubricVersion.compilation_id == payload.supersedes_compilation_id,
+            RubricVersion.rubric_id == rubric_id,
+        )
+    )
+    if predecessor_version is None:
+        raise HTTPException(
+            status_code=409,
+            detail=_rubric_problem(
+                code="RUBRIC_RECOMPILE_STALE",
+                message="当前编辑基于的执行草稿已经失效。",
+                user_action="请保留当前修改并刷新最新执行草稿后重试。",
+                retryable=True,
+            ),
+        )
+    next_total = payload.total_score or float(rubric.total_score)
+    _validate_criteria_total(next_total, payload.criteria)
+    next_name = payload.name or rubric.name
+    duplicate = _scoped_duplicate(
+        db,
+        name=next_name,
+        version=payload.version,
+        visibility=rubric.visibility,
+        principal=principal,
+        exclude_id=rubric.id,
+    )
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=_rubric_problem(
+                code="RUBRIC_NAME_VERSION_CONFLICT",
+                message="同一范围内已经存在相同名称和版本的模板。",
+                user_action="请修改模板名称或版本后重新保存。",
+                retryable=False,
+                field_path="/version",
+            ),
+        )
+    used_versions = set(
+        db.scalars(
+            select(RubricVersion.version).where(
+                RubricVersion.rubric_id == rubric.id
+            )
+        ).all()
+    )
+    compiled_version = payload.version
+    if compiled_version in used_versions:
+        ordinal = 2
+        while f"{payload.version}-draft.{ordinal}" in used_versions:
+            ordinal += 1
+        compiled_version = f"{payload.version}-draft.{ordinal}"
+    command = _manual_recompile_command(
+        rubric,
+        payload,
+        predecessor_version=predecessor_version,
+        compiled_version=compiled_version,
+    )
     try:
         # Preparation is DB-free.  End the read transaction before the
         # persistence service takes its short lock/commit transaction.
@@ -385,7 +598,16 @@ def recompile_rubric_draft(
         )
     except ValueError as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422,
+            detail=_rubric_problem(
+                code="RUBRIC_RECOMPILE_BLOCKED",
+                message="当前修改无法生成新的执行草稿。",
+                user_action="请根据第 2 步字段提示修正规则后重试。",
+                retryable=False,
+                context={"reason": str(exc)},
+            ),
+        ) from exc
     return _load_rubric(db, identity.rubric_id)
 
 
@@ -547,7 +769,14 @@ def update_rubric(
     ensure_dev_user(db)
     rubric = _visible_rubric(db, rubric_id, principal)
     if rubric.status != "draft":
-        raise HTTPException(status_code=400, detail="only draft rubrics can be edited; clone published rubrics first")
+        raise HTTPException(
+            status_code=409,
+            detail=_rubric_problem(
+                code="RUBRIC_NOT_EDITABLE",
+                message="当前评分模板不是可编辑草稿。",
+                user_action="已发布模板请先复制为新版本后再编辑。",
+            ),
+        )
 
     updates = payload.model_dump(exclude_unset=True)
     versioned = db.scalar(
@@ -557,10 +786,11 @@ def update_rubric(
     )
     if versioned is not None and updates:
         raise HTTPException(
-            status_code=400,
-            detail=(
-                "versioned rubric content must be changed through AtomicRule "
-                "editing/recompilation or clone-for-edit"
+            status_code=409,
+            detail=_rubric_problem(
+                code="RUBRIC_RECOMPILE_REQUIRED",
+                message="该模板已经有执行草稿，不能直接覆盖历史内容。",
+                user_action="请使用第 2 步的“保存并重新校验”生成新的执行草稿。",
             ),
         )
     scored_run_id = db.scalar(select(ScoringRun.id).where(ScoringRun.rubric_id == rubric.id).limit(1))
@@ -678,27 +908,37 @@ def _manual_import_command(payload: RubricCreate) -> dict:
     }
 
 
-def _manual_recompile_command(rubric: Rubric, payload: RubricDraftRecompileRequest) -> dict:
+def _manual_recompile_command(
+    rubric: Rubric,
+    payload: RubricDraftRecompileRequest,
+    *,
+    predecessor_version: RubricVersion,
+    compiled_version: str,
+) -> dict:
     return {
         "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
         "source_kind": "manual_json",
         "rubric": {
-            "name": rubric.name,
-            "version": rubric.version,
-            "description": rubric.description,
-            "total_score": float(rubric.total_score),
+            "name": payload.name or rubric.name,
+            "version": payload.version,
+            "description": (
+                payload.description
+                if "description" in payload.model_fields_set
+                else rubric.description
+            ),
+            "total_score": payload.total_score or float(rubric.total_score),
             "format_spec": dict(rubric.format_spec or {}),
             "criteria": [
                 item.model_dump(mode="json") for item in payload.criteria
             ],
-            "business_profile_key": payload.business_profile_key,
-            "workflow_profile": payload.workflow_profile,
-            "global_policy": dict(payload.global_policy),
+            "business_profile_key": predecessor_version.business_profile_key,
+            "workflow_profile": predecessor_version.workflow_profile,
+            "global_policy": dict(predecessor_version.global_policy or {}),
         },
         "compiler": _compiler_identity("manual-json-parser@1"),
         "version": {
             "hash_scheme": "rubric-content-v2",
-            "version": payload.version,
+            "version": compiled_version,
         },
         "draft_recompile": {
             "mode": "supersede_unpublished",

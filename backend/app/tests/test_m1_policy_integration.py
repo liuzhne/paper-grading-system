@@ -313,8 +313,8 @@ def test_rubric_create_accepts_weight_scale_independent_configuration(client):
         f"/api/rubrics/{rubric['id']}",
         json={"description": "legacy whole-rubric patch"},
     )
-    assert immutable_update.status_code == 400, immutable_update.text
-    assert "AtomicRule" in immutable_update.json()["detail"]
+    assert immutable_update.status_code == 409, immutable_update.text
+    assert immutable_update.json()["detail"]["code"] == "RUBRIC_RECOMPILE_REQUIRED"
 
 
 @requires_policy_api

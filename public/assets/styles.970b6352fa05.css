@@ -943,6 +943,42 @@ h3 {
   background: var(--danger-soft);
 }
 
+.operation-message {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  line-height: 1.55;
+}
+
+.operation-message.warning {
+  border-color: #f1c36d;
+  background: #fff9ea;
+  color: #7a4b00;
+}
+
+.operation-message.error {
+  border-color: #f2aaa4;
+  background: #fff2f0;
+  color: #9f2019;
+}
+
+.ai-rule-draft {
+  margin-top: 12px;
+  border: 1px solid #a8bff2;
+  border-radius: 10px;
+  padding: 12px;
+  background: #f5f8ff;
+}
+
+.ai-rule-group + .ai-rule-group {
+  margin-top: 10px;
+}
+
+.criterion-editor.field-error {
+  outline: 2px solid #d73a2f;
+  outline-offset: 2px;
+}
+
 .criterion-fields {
   padding: 12px;
   display: grid;

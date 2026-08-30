@@ -62,7 +62,12 @@ const defaultCriteria = [
     deduction_rules: ["参考文献数量或格式不足，扣 1 到 4 分"],
     display_order: 7,
   },
-];
+].map((item) => ({
+  ...item,
+  criterion_type: "llm_judgment",
+  scoring_mode: "deductive",
+  deduction_rules_structured: [],
+}));
 
 const state = {
   page: "dashboard",
@@ -99,6 +104,9 @@ const state = {
   newCriteriaDraft: JSON.parse(JSON.stringify(defaultCriteria)),
   editCriteriaDraft: [],
   editCriteriaRubricId: "",
+  rubricEditStatus: "clean",
+  rubricEditError: null,
+  aiRuleDrafts: {},
 };
 
 const pageMeta = {
@@ -275,15 +283,18 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     let detail = response.statusText;
+    let problem = null;
     const text = await response.text();
     try {
       const payload = text ? JSON.parse(text) : {};
       detail = payload.detail || JSON.stringify(payload);
+      if (detail && typeof detail === "object") problem = detail;
     } catch (_) {
       detail = text || response.statusText;
     }
-    const error = new Error(detail);
+    const error = new Error(problem?.message || String(detail));
     error.status = response.status;
+    error.problem = problem;
     throw error;
   }
   const type = response.headers.get("content-type") || "";
@@ -297,6 +308,43 @@ function showToast(message, isError = false) {
   toast.className = `toast${isError ? " error" : ""}`;
   window.clearTimeout(showToast.timer);
   showToast.timer = window.setTimeout(() => toast.classList.add("hidden"), 3600);
+}
+
+function renderRubricOperationError(error) {
+  const problem = error?.problem || {
+    code: "RUBRIC_OPERATION_FAILED",
+    message: error?.message || "模板操作失败。",
+    user_action: "请检查当前输入后重试。",
+    retryable: false,
+  };
+  state.rubricEditError = problem;
+  state.rubricEditStatus = "save_failed";
+  renderRubricEditFeedback();
+}
+
+function renderRubricEditFeedback() {
+  const status = document.querySelector("#rubric-edit-status");
+  const error = document.querySelector("#rubric-edit-error");
+  if (status) {
+    const activeId = state.rubricLifecycle?.active_compilation?.id;
+    const copy = {
+      dirty: `当前修改尚未保存；第 3 步仍显示执行草稿 ${shortId(activeId) || "—"} 的旧校验结果。`,
+      generating: "正在由 AI 起草缺失的扣分细则，当前输入会被保留。",
+      ai_draft_pending: "AI 已生成建议，请确认后再保存并重新校验。",
+      saving: "正在保存并生成新的执行草稿……",
+      save_failed: "修改未保存；第 3 步仍显示上一次成功保存的校验结果。",
+      clean: "",
+    };
+    status.textContent = copy[state.rubricEditStatus] || "";
+    status.classList.toggle("hidden", !status.textContent);
+  }
+  if (error) {
+    const problem = state.rubricEditError;
+    error.innerHTML = problem
+      ? `<strong>${escapeHtml(problem.message || "模板操作失败")}</strong><div>${escapeHtml(problem.user_action || "请检查当前输入后重试。")}</div>`
+      : "";
+    error.classList.toggle("hidden", !problem);
+  }
 }
 
 function escapeHtml(value) {
@@ -764,6 +812,20 @@ function selectedOption(value, expected) {
   return value === expected ? "selected" : "";
 }
 
+function renderAIRuleDraft(criterion) {
+  const draft = state.aiRuleDrafts[criterion.code];
+  if (!draft) return "";
+  const groups = draft.rule_groups || [];
+  const rows = groups.flatMap((group) => (group.rules || []).map((rule) => `
+    <tr><td>${escapeHtml(group.issue || group.group_code)}</td><td>${escapeHtml({ minor: "轻微", moderate: "中等", severe: "严重" }[rule.severity] || rule.severity)}</td><td>${escapeHtml(rule.trigger)}</td><td>${escapeHtml(rule.points)} 分</td></tr>`)).join("");
+  return `<div class="ai-rule-draft" data-ai-draft-code="${escapeHtml(criterion.code)}">
+    <div class="item-title"><span>AI 起草建议</span><span class="badge warn">待确认</span></div>
+    <div class="muted">共 ${escapeHtml(groups.length)} 组规则；确认前不会进入正式评分规则。</div>
+    <div class="table-wrap"><table><thead><tr><th>问题</th><th>程度</th><th>触发条件</th><th>扣分</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="toolbar"><button type="button" class="secondary" data-confirm-ai-rules="${escapeHtml(criterion.code)}">确认并应用此项</button><button type="button" class="secondary" data-draft-criterion="${escapeHtml(criterion.code)}">重新生成</button></div>
+  </div>`;
+}
+
 function renderCriteriaBuilder(scope) {
   const criteria = builderCriteria(scope);
   const container = document.querySelector(`#${scope}-criteria-builder`);
@@ -774,18 +836,19 @@ function renderCriteriaBuilder(scope) {
   container.innerHTML = criteria.length
     ? criteria
         .map(
-          (item, index) => `<article class="criterion-editor">
-            <div class="criterion-editor-header"><span><span class="badge">${index + 1}</span>${escapeHtml(item.name || "未命名评分项")}</span><button type="button" data-remove-criterion="${scope}" data-index="${index}">删除</button></div>
+          (item, index) => `<article class="criterion-editor" data-criterion-code="${escapeHtml(item.code || "")}">
+            <div class="criterion-editor-header"><span><span class="badge">${index + 1}</span>${escapeHtml(item.name || "未命名评分项")}</span><div class="toolbar">${scope === "edit" ? `<button type="button" class="secondary" data-draft-criterion="${escapeHtml(item.code || "")}">AI 起草</button>` : ""}<button type="button" data-remove-criterion="${scope}" data-index="${index}">删除</button></div></div>
             <div class="criterion-fields">
               <label>编码<input data-builder-scope="${scope}" data-index="${index}" data-criterion-field="code" value="${escapeHtml(item.code || "")}" /></label>
               <label>名称<input data-builder-scope="${scope}" data-index="${index}" data-criterion-field="name" value="${escapeHtml(item.name || "")}" /></label>
               <label>满分<input type="number" min="0.5" step="0.5" data-builder-scope="${scope}" data-index="${index}" data-criterion-field="max_score" value="${escapeHtml(item.max_score ?? 0)}" /></label>
               <label>判定方式<select data-builder-scope="${scope}" data-index="${index}" data-criterion-field="criterion_type"><option value="llm_judgment" ${selectedOption(item.criterion_type || "llm_judgment", "llm_judgment")}>智能判断</option><option value="deterministic" ${selectedOption(item.criterion_type, "deterministic")}>确定性检查</option><option value="hybrid" ${selectedOption(item.criterion_type, "hybrid")}>混合检查</option></select></label>
-              <label>计分方式<select data-builder-scope="${scope}" data-index="${index}" data-criterion-field="scoring_mode"><option value="llm_direct" ${selectedOption(item.scoring_mode || "llm_direct", "llm_direct")}>直接评分</option><option value="deductive" ${selectedOption(item.scoring_mode, "deductive")}>逐项扣分</option><option value="banded" ${selectedOption(item.scoring_mode, "banded")}>档位评分</option></select></label>
+              <label>计分方式<select data-builder-scope="${scope}" data-index="${index}" data-criterion-field="scoring_mode"><option value="review_only" ${selectedOption(item.scoring_mode || ((item.deduction_rules || []).length ? "deductive" : "review_only"), "review_only")}>仅人工复核</option><option value="deductive" ${selectedOption(item.scoring_mode || ((item.deduction_rules || []).length ? "deductive" : "review_only"), "deductive")}>逐项扣分</option><option value="banded" ${selectedOption(item.scoring_mode, "banded")}>档位评分</option></select></label>
               <label class="wide">评分说明<textarea rows="2" data-builder-scope="${scope}" data-index="${index}" data-criterion-field="description">${escapeHtml(item.description || "")}</textarea></label>
               <label class="half-wide">证据位置提示<input data-builder-scope="${scope}" data-index="${index}" data-criterion-field="evidence_hints" value="${escapeHtml((item.evidence_hints || []).join("，"))}" placeholder="用逗号分隔" /></label>
               <label class="half-wide">基础扣分说明<textarea rows="2" data-builder-scope="${scope}" data-index="${index}" data-criterion-field="deduction_rules" placeholder="每行一条">${escapeHtml((item.deduction_rules || []).join("\n"))}</textarea></label>
             </div>
+            ${scope === "edit" ? renderAIRuleDraft(item) : ""}
           </article>`,
         )
         .join("")
@@ -859,14 +922,14 @@ function renderLifecycleIssues(active, ambiguity) {
   const warnings = active?.warnings || [];
   const rows = [];
   if (ambiguity) rows.push({ tone: "error", label: "歧义", severityLabel: "错误", value: ambiguity });
-  blockers.forEach((item) => rows.push({ tone: "error", label: "阻断", severityLabel: "错误", value: lifecycleIssueText(item) }));
+  blockers.forEach((item) => rows.push({ tone: "error", label: "阻断", severityLabel: "错误", value: lifecycleIssueText(item), issue: item }));
   warnings.forEach((item) => rows.push({ tone: "warn", label: "警告", severityLabel: "警告", value: lifecycleIssueText(item) }));
   container.innerHTML = rows.length
-    ? rows.map((item) => `<article class="item-card lifecycle-issue ${item.tone}"><div class="item-title"><span>${escapeHtml(item.label)}</span><span class="badge ${item.tone}">${escapeHtml(item.severityLabel)}</span></div><div>${escapeHtml(item.value)}</div></article>`).join("")
+    ? rows.map((item) => `<article class="item-card lifecycle-issue ${item.tone}"><div class="item-title"><span>${escapeHtml(item.label)}</span><span class="badge ${item.tone}">${escapeHtml(item.severityLabel)}</span></div><div>${escapeHtml(item.value)}</div>${item.issue?.criterion_code ? `<div class="toolbar"><button type="button" class="secondary" data-fix-blocker="${escapeHtml(item.issue.criterion_code)}" data-fix-field="${escapeHtml(item.issue.field_path || "")}">去修改 ${escapeHtml(item.issue.criterion_code)}</button></div>` : ""}</article>`).join("")
     : '<div class="muted">当前执行草稿没有警告或阻断项；仍须完成全部人工签核。</div>';
 }
 
-function renderLifecycleRules(rules = []) {
+function renderLifecycleRules(rules = [], canReview = true) {
   const container = document.querySelector("#rubric-lifecycle-rules");
   if (!container) return;
   if (!rules.length) {
@@ -875,7 +938,9 @@ function renderLifecycleRules(rules = []) {
   }
   const rows = rules.map((rule) => {
     let actions = '<span class="muted">无可用动作</span>';
-    if (rule.status === "draft") {
+    if (!canReview) {
+      actions = '<span class="muted">请先处理执行草稿阻断项</span>';
+    } else if (rule.status === "draft") {
       actions = lifecycleButton("rule-submit", "提交审核", { "rule-code": rule.rule_code });
     } else if (rule.status === "review") {
       actions = `${lifecycleButton("rule-approve", "批准", { "rule-code": rule.rule_code })}${lifecycleButton("rule-reject", "驳回", { "rule-code": rule.rule_code })}`;
@@ -884,7 +949,12 @@ function renderLifecycleRules(rules = []) {
     }
     return `<tr><td>${escapeHtml(rule.rule_code)}</td><td>${escapeHtml(rule.name)}</td><td>${escapeHtml(rule.judge_type)} / ${escapeHtml(rule.direction)}</td><td><span class="badge">${escapeHtml(rule.status)}</span></td><td><div class="toolbar">${actions}</div></td></tr>`;
   }).join("");
-  container.innerHTML = `<table><thead><tr><th>规则</th><th>名称</th><th>判定/方向</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const draftCount = rules.filter((rule) => rule.status === "draft").length;
+  const reviewCount = rules.filter((rule) => rule.status === "review").length;
+  const bulkActions = canReview
+    ? `<div class="toolbar">${draftCount ? lifecycleButton("rules-submit-all", `批量提交 ${draftCount} 条评分规则`) : ""}${reviewCount ? lifecycleButton("rules-approve-all", `批量批准 ${reviewCount} 条评分规则`) : ""}</div>`
+    : "";
+  container.innerHTML = `${bulkActions}<table><thead><tr><th>规则</th><th>名称</th><th>判定/方向</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function renderLifecycleTemplateLinks(links = []) {
@@ -930,20 +1000,27 @@ function renderRubricLifecycle() {
   const version = active?.version || {};
   const selectedRubric = state.rubrics.find((item) => item.id === lifecycle.rubric_id);
   const actions = [];
-  if (lifecycle.rubric_status === "draft") actions.push(lifecycleButton("rubric-submit", "提交模板审核"));
+  if (lifecycle.rubric_status === "draft") {
+    const blockerCount = (active?.blockers || []).length;
+    if (active?.status === "validated" && blockerCount === 0) {
+      actions.push(lifecycleButton("rubric-submit", "提交模板审核"));
+    } else {
+      actions.push(`<button class="secondary" disabled>请先处理 ${escapeHtml(blockerCount)} 个阻断项</button>`);
+    }
+  }
   if (lifecycle.rubric_status === "review") {
     actions.push(lifecycleButton("rubric-return", "退回草稿"));
     if (active?.status === "validated") actions.push(lifecycleButton("rubric-publish", "发布此版本"));
   }
   summary.innerHTML = `<article class="item-card">
     <div class="item-title"><span>${escapeHtml(selectedRubric?.name || "评分模板")}</span><span class="badge ${statusTone(lifecycle.rubric_status)}">${escapeHtml(statusLabel(lifecycle.rubric_status))}</span></div>
-    ${active ? `<div>执行草稿 <code>${escapeHtml(shortId(active.id))}</code> · <span class="badge ${active.status === "validated" ? "ok" : "warn"}">${escapeHtml(active.status === "validated" ? "校验通过" : active.status)}</span></div>
-      <div class="muted">版本 ${escapeHtml(version.version || "-")} · Profile ${escapeHtml(version.business_profile_key || "-")} · ${escapeHtml(version.workflow_profile || "-")}</div>` : `<div class="muted">${escapeHtml(lifecycle.ambiguity || "当前没有可审核的执行草稿，请返回上一步保存模板。")}</div>`}
+    ${active ? `<div>执行草稿 <code>${escapeHtml(shortId(active.id))}</code> · <span class="badge ${active.status === "validated" ? "ok" : "warn"}">${escapeHtml(active.status === "validated" ? "校验通过" : "存在阻断")}</span></div>
+      <div class="muted">校验版本 ${escapeHtml(version.version || "-")}</div>` : `<div class="muted">${escapeHtml(lifecycle.ambiguity || "当前没有可审核的执行草稿，请返回上一步保存模板。")}</div>`}
     <div class="toolbar">${actions.join("") || '<span class="muted">完成当前待办后，下一步操作会在这里出现。</span>'}</div>
-    <details><summary>查看编译历史</summary><pre class="lifecycle-json">${escapeHtml(JSON.stringify(lifecycle.compilations || [], null, 2))}</pre></details>
+    <details><summary>查看执行草稿历史</summary><pre class="lifecycle-json">${escapeHtml(JSON.stringify(lifecycle.compilations || [], null, 2))}</pre></details>
   </article>`;
   renderLifecycleIssues(active, lifecycle.ambiguity);
-  renderLifecycleRules(active?.rules || []);
+  renderLifecycleRules(active?.rules || [], active?.status === "validated");
   renderLifecycleTemplateLinks(active?.template_links || []);
 }
 
@@ -966,6 +1043,9 @@ function renderRubricEditForm() {
   if (rubric?.id !== state.editCriteriaRubricId) {
     state.editCriteriaRubricId = rubric?.id || "";
     state.editCriteriaDraft = rubric ? criteriaPayloadRows(rubric.criteria || []) : [];
+    state.aiRuleDrafts = {};
+    state.rubricEditStatus = "clean";
+    state.rubricEditError = null;
   }
   renderCriteriaBuilder("edit");
   for (const field of ["name", "version", "description", "criteria"]) {
@@ -973,6 +1053,7 @@ function renderRubricEditForm() {
   }
   form.querySelector('button[type="submit"]').disabled = !rubric;
   document.querySelector('[data-add-criterion="edit"]').disabled = !rubric;
+  renderRubricEditFeedback();
 }
 
 function renderBatches() {
@@ -1349,7 +1430,7 @@ function criteriaPayloadRows(criteria) {
       deduction_rules: item.deduction_rules || [],
       display_order: item.display_order ?? index,
       criterion_type: item.criterion_type || "llm_judgment",
-      scoring_mode: item.scoring_mode || "llm_direct",
+      scoring_mode: item.scoring_mode || ((item.deduction_rules || []).length ? "deductive" : "review_only"),
       applies_to: item.applies_to || "global",
       rubric_levels: item.rubric_levels || [],
       sub_checks: item.sub_checks || [],
@@ -1385,7 +1466,7 @@ async function handleRubricLifecycleAction(target) {
   const action = target.dataset.lifecycleAction;
   const rubricId = state.selectedLifecycleRubricId;
   const active = state.rubricLifecycle?.active_compilation;
-  if (!action || !rubricId) throw new Error("请选择具有活动 compilation 的评分标准");
+  if (!action || !rubricId) throw new Error("请选择具有活动执行草稿的评分标准");
 
   if (action === "rubric-submit") {
     await api(`/rubrics/${rubricId}/submit-review`, { method: "POST" });
@@ -1394,7 +1475,7 @@ async function handleRubricLifecycleAction(target) {
     await api(`/rubrics/${rubricId}/return-to-draft`, { method: "POST" });
     showToast("Rubric 已退回草稿，可继续处理规则或映射");
   } else if (action === "rubric-publish") {
-    if (!active?.id) throw new Error("没有可显式发布的活动 compilation");
+    if (!active?.id) throw new Error("没有可发布的活动执行草稿");
     const reason = requireLifecycleReason("发布冻结版本");
     if (reason === null) return;
     await api(`/rubrics/${rubricId}/publish`, {
@@ -1402,10 +1483,25 @@ async function handleRubricLifecycleAction(target) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ compilation_id: active.id, reason }),
     });
-    showToast("评分标准已发布并冻结 immutable RubricVersion");
+    showToast("评分模板已发布并冻结为不可修改的正式版本");
+  } else if (action === "rules-submit-all" || action === "rules-approve-all") {
+    const desiredStatus = action === "rules-submit-all" ? "draft" : "review";
+    const suffix = action === "rules-submit-all" ? "/submit-review" : "/approve";
+    const label = action === "rules-submit-all" ? "批量提交评分规则" : "批量批准评分规则";
+    const rules = (active?.rules || []).filter((rule) => rule.status === desiredStatus);
+    const reason = requireLifecycleReason(label);
+    if (reason === null) return;
+    for (const rule of rules) {
+      await api(`/rubrics/${rubricId}/rules/${encodeURIComponent(rule.rule_code)}${suffix}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+    }
+    showToast(`${label}已完成，共处理 ${rules.length} 条`);
   } else if (action.startsWith("rule-")) {
     const ruleCode = target.dataset.ruleCode;
-    if (!ruleCode) throw new Error("缺少 AtomicRule code");
+    if (!ruleCode) throw new Error("缺少评分规则编号");
     const operation = {
       "rule-submit": ["/submit-review", "提交规则审核"],
       "rule-approve": ["/approve", "批准规则"],
@@ -1467,14 +1563,82 @@ function addCriterion(scope) {
     deduction_rules: [],
     display_order: criteria.length + 1,
     criterion_type: "llm_judgment",
-    scoring_mode: "llm_direct",
+    scoring_mode: "review_only",
     applies_to: "global",
     rubric_levels: [],
     sub_checks: [],
     dimension: null,
     deduction_rules_structured: [],
   });
+  if (scope === "edit") state.rubricEditStatus = "dirty";
   renderCriteriaBuilder(scope);
+  renderRubricEditFeedback();
+}
+
+async function draftAIRules(criteria) {
+  if (!state.selectedRubricId) throw new Error("请选择要调整的评分模板");
+  state.rubricEditStatus = "generating";
+  state.rubricEditError = null;
+  renderRubricEditFeedback();
+  const activeConnection = state.aiConnections.find((item) => item.status === "active");
+  try {
+    const result = await api(`/rubrics/${state.selectedRubricId}/draft-deduction-rules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        criteria,
+        ai_connection_id: activeConnection?.id || null,
+      }),
+    });
+    for (const item of result.items || []) {
+      if (item.draft) state.aiRuleDrafts[item.criterion_code] = item.draft;
+    }
+    state.rubricEditStatus = Object.keys(state.aiRuleDrafts).length ? "ai_draft_pending" : "dirty";
+    renderCriteriaBuilder("edit");
+    renderRubricEditFeedback();
+    showToast("AI 扣分细则已生成，请确认后保存");
+  } catch (error) {
+    renderRubricOperationError(error);
+  }
+}
+
+function applyConfirmedAIRules(criterionCode) {
+  const draft = state.aiRuleDrafts[criterionCode];
+  const criterion = state.editCriteriaDraft.find((item) => item.code === criterionCode);
+  if (!draft || !criterion) return false;
+  criterion.scoring_mode = "deductive";
+  criterion.deduction_rules_structured = (draft.rule_groups || []).flatMap((group) =>
+    (group.rules || []).map((rule, index) => ({
+      match: rule.trigger,
+      trigger: rule.trigger,
+      points: rule.points,
+      reason: rule.reason,
+      severity: rule.severity,
+      repeat_policy: rule.repeat_policy || "once",
+      cap_points: group.cap_points,
+      mutex_group: group.mutex_group,
+      source: rule.source || "ai_inferred",
+      source_refs: rule.source_refs || [],
+      generation_fingerprint: draft.generation_metadata?.fingerprint,
+      confirmed: true,
+      display_order: index,
+    })),
+  );
+  delete state.aiRuleDrafts[criterionCode];
+  state.rubricEditStatus = "dirty";
+  state.rubricEditError = null;
+  syncCriteriaTextarea("edit");
+  return true;
+}
+
+function confirmAllAIRules() {
+  let confirmed = 0;
+  for (const criterionCode of Object.keys(state.aiRuleDrafts)) {
+    if (applyConfirmedAIRules(criterionCode)) confirmed += 1;
+  }
+  renderCriteriaBuilder("edit");
+  renderRubricEditFeedback();
+  if (confirmed) showToast(`已确认并应用 ${confirmed} 个评分项的 AI 建议`);
 }
 
 function updateCriterionField(element) {
@@ -1487,6 +1651,12 @@ function updateCriterionField(element) {
   else if (field === "evidence_hints") criterion[field] = element.value.split(/[,，]/).map((value) => value.trim()).filter(Boolean);
   else if (field === "deduction_rules") criterion[field] = element.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
   else criterion[field] = element.value;
+  if (scope === "edit") {
+    state.rubricEditStatus = "dirty";
+    state.rubricEditError = null;
+    delete state.aiRuleDrafts[criterion.code];
+    renderRubricEditFeedback();
+  }
   const total = document.querySelector(`#${scope}-criteria-total`);
   if (total) {
     const criteria = builderCriteria(scope);
@@ -1585,6 +1755,43 @@ async function handleAction(event) {
       await loadAll();
       return;
     }
+    if (target.dataset.draftRulesAll !== undefined) {
+      await draftAIRules(state.editCriteriaDraft);
+      return;
+    }
+    if (target.dataset.draftCriterion) {
+      const criterion = state.editCriteriaDraft.find((item) => item.code === target.dataset.draftCriterion);
+      if (!criterion) throw new Error("没有找到要起草规则的评分项");
+      await draftAIRules([criterion]);
+      return;
+    }
+    if (target.dataset.confirmAiRules) {
+      applyConfirmedAIRules(target.dataset.confirmAiRules);
+      renderCriteriaBuilder("edit");
+      renderRubricEditFeedback();
+      showToast("AI 建议已确认并应用，保存后将重新校验");
+      return;
+    }
+    if (target.dataset.confirmAiRulesAll !== undefined) {
+      confirmAllAIRules();
+      return;
+    }
+    if (target.dataset.fixBlocker) {
+      state.selectedRubricId = state.selectedLifecycleRubricId;
+      state.editCriteriaRubricId = "";
+      renderRubricEditForm();
+      revealAndScroll("template-editor");
+      window.setTimeout(() => {
+        const card = document.querySelector(`[data-criterion-code="${CSS.escape(target.dataset.fixBlocker)}"]`);
+        if (!card) return;
+        card.classList.add("field-error");
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        const fieldPath = target.dataset.fixField || "";
+        const field = fieldPath.includes("description") ? "description" : fieldPath.includes("scoring_mode") ? "scoring_mode" : "deduction_rules";
+        card.querySelector(`[data-criterion-field="${field}"]`)?.focus();
+      }, 50);
+      return;
+    }
     if (target.dataset.addCriterion) {
       addCriterion(target.dataset.addCriterion);
       return;
@@ -1594,7 +1801,12 @@ async function handleAction(event) {
       const criteria = builderCriteria(scope);
       if (criteria.length <= 1) throw new Error("模板至少需要一个评分项");
       criteria.splice(Number(target.dataset.index), 1);
+      if (scope === "edit") {
+        state.rubricEditStatus = "dirty";
+        state.rubricEditError = null;
+      }
       renderCriteriaBuilder(scope);
+      renderRubricEditFeedback();
       return;
     }
     if (target.dataset.action === "reload") {
@@ -1699,6 +1911,11 @@ function bindEvents() {
   document.body.addEventListener("input", (event) => {
     const field = event.target.closest?.("[data-criterion-field]");
     if (field) updateCriterionField(field);
+    else if (event.target.closest?.("#rubric-edit-form")) {
+      state.rubricEditStatus = "dirty";
+      state.rubricEditError = null;
+      renderRubricEditFeedback();
+    }
   });
 
   for (const [selector, scope] of [["#rubric-form textarea[name='criteria']", "new"], ["#rubric-edit-form textarea[name='criteria']", "edit"]]) {
@@ -1768,9 +1985,11 @@ function bindEvents() {
     window.open(`${apiBase()}/rubrics/import-template.xlsx`, "_blank");
   });
 
-  document.querySelector("#rubric-edit-select").addEventListener("change", (event) => {
+  document.querySelector("#rubric-edit-select").addEventListener("change", async (event) => {
     state.selectedRubricId = event.target.value;
+    state.selectedLifecycleRubricId = event.target.value;
     state.editCriteriaRubricId = "";
+    await refreshRubricLifecycle();
     render();
   });
 
@@ -1784,12 +2003,33 @@ function bindEvents() {
     event.preventDefault();
     try {
       if (!state.selectedRubricId) throw new Error("请选择草稿评分标准");
+      if (Object.keys(state.aiRuleDrafts).length) {
+        const error = new Error("AI 已生成扣分细则，但尚未确认。");
+        error.problem = {
+          code: "AI_DRAFT_PENDING_CONFIRMATION",
+          message: "AI 已生成扣分细则，但尚未确认。",
+          user_action: "请确认并应用 AI 建议，或排除不需要的规则后再保存。",
+          retryable: false,
+        };
+        throw error;
+      }
       const form = new FormData(event.currentTarget);
       const criteria = JSON.parse(form.get("criteria"));
-      await api(`/rubrics/${state.selectedRubricId}`, {
-        method: "PATCH",
+      if (state.selectedLifecycleRubricId !== state.selectedRubricId) {
+        state.selectedLifecycleRubricId = state.selectedRubricId;
+        await refreshRubricLifecycle();
+      }
+      const active = state.rubricLifecycle?.active_compilation;
+      if (!active?.id) throw new Error("当前没有可重新校验的执行草稿，请刷新后重试");
+      state.rubricEditStatus = "saving";
+      state.rubricEditError = null;
+      renderRubricEditFeedback();
+      await api(`/rubrics/${state.selectedRubricId}/recompile`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          supersedes_compilation_id: active.id,
+          reason: "用户在模板中心确认修改并重新校验",
           name: String(form.get("name") || "").trim(),
           version: String(form.get("version") || "").trim(),
           description: optionalText(form.get("description")),
@@ -1798,11 +2038,13 @@ function bindEvents() {
         }),
       });
       state.editCriteriaRubricId = "";
-      showToast("模板草稿已保存并重新校验");
+      state.rubricEditStatus = "clean";
+      state.rubricEditError = null;
+      showToast("模板已保存并生成新的执行草稿");
       await loadAll();
       revealAndScroll("template-review");
     } catch (error) {
-      showToast(error.message, true);
+      renderRubricOperationError(error);
     }
   });
 

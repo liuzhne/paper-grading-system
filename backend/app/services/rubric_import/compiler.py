@@ -20,6 +20,9 @@ RULE_INSTRUCTIONS = (
 
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _POINTS_TAIL_RE = re.compile(r"\s*扣?\s*\d+(?:\s*[-~至]\s*\d+)?\s*分?\s*$")
+_POINT_RANGE_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:-|~|至|到)\s*\d+(?:\.\d+)?\s*分?"
+)
 
 
 def parse_explicit_rules(deduction_rules):
@@ -37,6 +40,60 @@ def parse_explicit_rules(deduction_rules):
         match = _POINTS_TAIL_RE.sub("", text).strip(" ：:-，,。")
         rules.append({"match": match or text, "points": points, "reason": text, "source": "excel"})
     return rules
+
+
+def analyze_rule_input(deduction_rules, *, criterion_code):
+    """Separate missing author input from deterministic parse failure.
+
+    The original text is authoritative author data.  Callers must never infer
+    that an empty parse result means the author supplied no rule: unresolved
+    segments are retained for AI-assisted interpretation and confirmation.
+    """
+
+    raw_segments = [
+        str(value).strip()
+        for value in (deduction_rules or [])
+        if str(value).strip()
+    ]
+    parsed_rules = []
+    unresolved_segments = []
+    needs_severity_expansion = False
+    for index, text in enumerate(raw_segments):
+        source_ref = f"/criteria/{criterion_code}/deduction_rules/{index}"
+        parsed = parse_explicit_rules([text])
+        if not parsed:
+            unresolved_segments.append(
+                {"text": text, "source_refs": [source_ref], "index": index}
+            )
+            continue
+        rule = dict(parsed[0])
+        rule["source_refs"] = [source_ref]
+        rule["source"] = "user_text"
+        parsed_rules.append(rule)
+        if _POINT_RANGE_RE.search(text):
+            needs_severity_expansion = True
+
+    if not raw_segments:
+        input_state = "absent"
+    elif parsed_rules and unresolved_segments:
+        input_state = "partial"
+    elif parsed_rules:
+        input_state = "parsed"
+    else:
+        input_state = "unparsed"
+
+    return {
+        "input_state": input_state,
+        "raw_segments": raw_segments,
+        "parsed_rules": parsed_rules,
+        "unresolved_segments": unresolved_segments,
+        "needs_ai_draft": input_state in {"absent", "partial", "unparsed"},
+        "needs_severity_expansion": needs_severity_expansion,
+        "source_refs": [
+            f"/criteria/{criterion_code}/deduction_rules/{index}"
+            for index in range(len(raw_segments))
+        ],
+    }
 
 
 def normalize_rules_llm(criterion, annotation_texts, scorer):
