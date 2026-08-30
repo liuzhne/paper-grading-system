@@ -12,6 +12,8 @@ from hashlib import sha256
 import json
 from typing import Mapping
 
+import httpx
+
 
 AI_RULE_DRAFT_SCHEMA_VERSION = "ai-deduction-draft@1"
 AI_RULE_DRAFT_PROMPT_VERSION = "rubric-rule-draft@1"
@@ -203,6 +205,23 @@ def draft_deduction_rules(
     }
     try:
         raw = scorer.complete_json(AI_RULE_DRAFT_INSTRUCTIONS, payload)
+    except httpx.HTTPStatusError as exc:
+        status_code = getattr(exc.response, "status_code", None)
+        if (
+            status_code is not None
+            and 400 <= status_code < 500
+            and status_code != 429
+        ):
+            raise AIRuleDraftValidationError(
+                "AI_DRAFT_PROVIDER_REJECTED",
+                "当前 AI 连接或模型拒绝了起草请求。",
+                "请到账户设置测试当前 AI 连接；若测试通过，请检查模型兼容参数或更换模型。",
+            ) from exc
+        raise AIRuleDraftValidationError(
+            "AI_DRAFT_PROVIDER_ERROR",
+            "AI 起草服务暂时不可用。",
+            "请稍后重新生成；当前输入不会丢失。",
+        ) from exc
     except Exception as exc:
         raise AIRuleDraftValidationError(
             "AI_DRAFT_PROVIDER_ERROR",

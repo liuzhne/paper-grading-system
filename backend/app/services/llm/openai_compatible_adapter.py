@@ -131,13 +131,13 @@ class OpenAICompatibleChatScorer(LLMScorer):
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            "temperature": settings.OPENAI_COMPATIBLE_TEMPERATURE,
-            "max_tokens": settings.OPENAI_COMPATIBLE_MAX_TOKENS,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
-        thinking_type = (settings.OPENAI_COMPATIBLE_THINKING_TYPE or "").strip()
+        thinking_type = (self.thinking_type or "").strip()
         if thinking_type:
             body["thinking"] = {"type": thinking_type}
-        if settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON:
+        if self.response_format_json:
             body["response_format"] = {"type": "json_object"}
         response = self._post_with_retry(body)
         response.raise_for_status()

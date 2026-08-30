@@ -6,6 +6,7 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.schemas.scoring import ScoreItemRead
+from backend.app.services.ai_connections import ConnectionRuntime
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
 from backend.app.services.llm.openai_compatible_adapter import _parse_chat_json_output
@@ -236,6 +237,50 @@ def test_factory_returns_openai_compatible_scorer(monkeypatch):
     monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_API_KEY", "test-key")
     scorer = get_llm_scorer()
     assert isinstance(scorer, OpenAICompatibleChatScorer)
+
+
+def test_byok_compatible_connection_does_not_inherit_platform_thinking(monkeypatch):
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_THINKING_TYPE", "disabled")
+    runtime = ConnectionRuntime(
+        connection_id="groq-connection",
+        key_version=1,
+        organization_id="org-1",
+        provider_type="openai_compatible",
+        base_url="https://api.groq.com/openai/v1",
+        model_name="openai/gpt-oss-120b",
+        provider_options={},
+        api_key="test-key",
+    )
+
+    scorer = get_llm_scorer(runtime)
+
+    assert scorer.thinking_type == ""
+    scorer.close()
+
+
+def test_complete_json_uses_connection_options_instead_of_platform_defaults(monkeypatch):
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_THINKING_TYPE", "disabled")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON", False)
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MAX_TOKENS", 1200)
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_TEMPERATURE", 0.0)
+    client = FakeOpenAICompatibleClient()
+    scorer = OpenAICompatibleChatScorer(
+        api_key="test-key",
+        base_url="https://api.groq.com/openai/v1",
+        model_name="openai/gpt-oss-120b",
+        client=client,
+        thinking_type="",
+        response_format_json=True,
+        max_tokens=4096,
+        temperature=0.25,
+    )
+
+    scorer.complete_json("只返回 JSON", {"criterion": "T01"})
+
+    assert client.payload["max_tokens"] == 4096
+    assert client.payload["temperature"] == 0.25
+    assert client.payload["response_format"] == {"type": "json_object"}
+    assert "thinking" not in client.payload
 
 
 def test_factory_local_provider_uses_local_defaults(monkeypatch):

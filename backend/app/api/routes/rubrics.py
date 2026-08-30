@@ -417,15 +417,15 @@ def draft_rubric_deduction_rules(
             )
         return {"rubric_id": rubric_id, "items": items}
     except AIRuleDraftValidationError as exc:
-        status_code = (
-            503
-            if exc.code
-            in {
-                "AI_DRAFT_CONNECTION_MISSING",
-                "AI_DRAFT_PROVIDER_ERROR",
-            }
-            else 422
-        )
+        if exc.code == "AI_DRAFT_PROVIDER_REJECTED":
+            status_code = 502
+        elif exc.code in {
+            "AI_DRAFT_CONNECTION_MISSING",
+            "AI_DRAFT_PROVIDER_ERROR",
+        }:
+            status_code = 503
+        else:
+            status_code = 422
         raise HTTPException(
             status_code=status_code,
             detail=_rubric_problem(
