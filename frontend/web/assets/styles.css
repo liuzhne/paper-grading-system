@@ -1262,6 +1262,51 @@ h3 {
   margin-top: 16px;
 }
 
+.paper-upload-queue {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.paper-upload-item {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  gap: 7px;
+}
+
+.paper-upload-item.error {
+  border-color: #efb7ad;
+  background: var(--danger-soft);
+}
+
+.paper-upload-title,
+.paper-upload-detail {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.paper-upload-title span,
+.paper-upload-detail span {
+  color: var(--muted);
+}
+
+.paper-upload-item.error .paper-upload-detail span,
+.table-error {
+  color: var(--danger);
+}
+
+.table-error {
+  margin-top: 4px;
+  max-width: 360px;
+  font-size: 11px;
+}
+
 .metadata-panel,
 .run-config {
   margin-top: 16px;

@@ -3,6 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import Field
 
 
 class PaperUpdate(BaseModel):
@@ -12,6 +13,17 @@ class PaperUpdate(BaseModel):
     department: Optional[str] = None
     major: Optional[str] = None
     advisor: Optional[str] = None
+
+
+class DirectUploadIntentCreate(BaseModel):
+    batch_id: str
+    file_name: str = Field(min_length=1, max_length=500)
+    content_type: str = Field(default="application/octet-stream", max_length=200)
+    byte_size: int = Field(gt=0)
+
+
+class CompleteDirectUpload(BaseModel):
+    byte_size: int = Field(gt=0)
 
 
 class PaperRead(BaseModel):
@@ -32,6 +44,17 @@ class PaperRead(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class DirectUploadIntentRead(BaseModel):
+    paper: PaperRead
+    mode: str
+    signed_url: str
+    token: str
+    tus_endpoint: str
+    bucket_name: str
+    object_path: str
+    threshold_bytes: int
 
 
 class PaperChunkRead(BaseModel):

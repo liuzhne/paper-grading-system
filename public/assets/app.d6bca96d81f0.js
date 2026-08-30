@@ -107,6 +107,8 @@ const state = {
   rubricEditStatus: "clean",
   rubricEditError: null,
   aiRuleDrafts: {},
+  paperUploadQueue: [],
+  paperUploadRunning: false,
 };
 
 const pageMeta = {
@@ -302,6 +304,311 @@ async function api(path, options = {}) {
   return response;
 }
 
+const TUS_CHUNK_SIZE = 6 * 1024 * 1024;
+const TUS_VERSION = "1.0.0";
+
+function uploadError(message, kind = "http", status = 0) {
+  const error = new Error(message);
+  error.kind = kind;
+  error.status = status;
+  return error;
+}
+
+function directUploadMessage(error, fallback = "文件处理失败") {
+  const message = error?.problem?.message || error?.message || fallback;
+  const action = error?.problem?.user_action;
+  return action ? `${message} ${action}` : message;
+}
+
+function uploadViaSignedUrl(file, intent, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", intent.signed_url, true);
+    request.timeout = 120000;
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded, event.total);
+    };
+    request.onerror = () => reject(uploadError("网络连接中断", "network"));
+    request.ontimeout = () => reject(uploadError("上传等待超时", "network"));
+    request.onabort = () => reject(uploadError("上传已取消", "abort"));
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) resolve();
+      else reject(uploadError(`私有存储拒绝上传（${request.status}）`, "http", request.status));
+    };
+    const body = new FormData();
+    body.append("cacheControl", "3600");
+    body.append("", file, file.name);
+    request.send(body);
+  });
+}
+
+function base64Metadata(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return window.btoa(binary);
+}
+
+function tusMetadata(intent, file) {
+  const fields = {
+    bucketName: intent.bucket_name,
+    objectName: intent.object_path,
+    contentType: file.type || "application/octet-stream",
+    cacheControl: "3600",
+  };
+  return Object.entries(fields)
+    .map(([name, value]) => `${name} ${base64Metadata(value)}`)
+    .join(",");
+}
+
+function tusFingerprint(intent, file) {
+  return `pgs:tus:${intent.paper.id}:${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function savedTusUrl(key) {
+  try { return window.sessionStorage.getItem(key) || ""; } catch (_) { return ""; }
+}
+
+function rememberTusUrl(key, value) {
+  try {
+    if (value) window.sessionStorage.setItem(key, value);
+    else window.sessionStorage.removeItem(key);
+  } catch (_) {
+    // 隐私模式可能禁用会话存储；当前页面内仍可继续完成上传。
+  }
+}
+
+async function tusRequest(url, options) {
+  let response;
+  try {
+    response = await fetch(url, Object.assign({ credentials: "omit" }, options));
+  } catch (_) {
+    throw uploadError("网络连接中断", "network");
+  }
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw uploadError(detail || `TUS 请求失败（${response.status}）`, "http", response.status);
+  }
+  return response;
+}
+
+function tusHeaders(intent, extra = {}) {
+  return Object.assign({
+    "Tus-Resumable": TUS_VERSION,
+    "x-signature": intent.token,
+  }, extra);
+}
+
+async function readTusOffset(uploadUrl, intent) {
+  const response = await tusRequest(uploadUrl, {
+    method: "HEAD",
+    headers: tusHeaders(intent),
+  });
+  const offset = Number(response.headers.get("Upload-Offset"));
+  if (!Number.isFinite(offset) || offset < 0) throw uploadError("TUS 返回了无效断点", "http");
+  return offset;
+}
+
+async function createTusUpload(file, intent) {
+  const response = await tusRequest(intent.tus_endpoint, {
+    method: "POST",
+    headers: tusHeaders(intent, {
+      "Upload-Length": String(file.size),
+      "Upload-Metadata": tusMetadata(intent, file),
+      "x-upsert": "false",
+    }),
+  });
+  const location = response.headers.get("Location");
+  if (!location) throw uploadError("TUS 未返回可恢复地址", "http");
+  return new URL(location, `${new URL(intent.tus_endpoint).origin}/`).href;
+}
+
+async function uploadViaTus(file, intent, onProgress) {
+  const fingerprint = tusFingerprint(intent, file);
+  let uploadUrl = savedTusUrl(fingerprint);
+  let offset = 0;
+  if (uploadUrl) {
+    try {
+      offset = await readTusOffset(uploadUrl, intent);
+    } catch (error) {
+      if (![404, 410].includes(error.status)) throw error;
+      uploadUrl = "";
+      rememberTusUrl(fingerprint, "");
+    }
+  }
+  if (!uploadUrl) {
+    uploadUrl = await createTusUpload(file, intent);
+    rememberTusUrl(fingerprint, uploadUrl);
+  }
+
+  let retryCount = 0;
+  while (offset < file.size) {
+    const end = Math.min(offset + TUS_CHUNK_SIZE, file.size);
+    try {
+      const response = await tusRequest(uploadUrl, {
+        method: "PATCH",
+        headers: tusHeaders(intent, {
+          "Upload-Offset": String(offset),
+          "Content-Type": "application/offset+octet-stream",
+        }),
+        body: file.slice(offset, end),
+      });
+      const reported = Number(response.headers.get("Upload-Offset"));
+      offset = Number.isFinite(reported) && reported >= end ? reported : end;
+      retryCount = 0;
+      onProgress(offset, file.size);
+    } catch (error) {
+      const recoverable = error.kind === "network" || error.status === 409 || error.status >= 500;
+      if (!recoverable || retryCount >= 4) throw error;
+      retryCount += 1;
+      await new Promise((resolve) => window.setTimeout(resolve, [0, 1000, 3000, 5000][retryCount - 1]));
+      offset = await readTusOffset(uploadUrl, intent);
+      onProgress(offset, file.size);
+    }
+  }
+  rememberTusUrl(fingerprint, "");
+}
+
+function updateUploadItem(item, patch) {
+  Object.assign(item, patch);
+  renderPaperUploadQueue();
+}
+
+async function confirmDirectUpload(item) {
+  const paper = await api(`/papers/${item.intent.paper.id}/complete-upload`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ byte_size: item.file.size }),
+  });
+  item.archived = true;
+  item.paperId = paper.id;
+  return paper;
+}
+
+async function processUploadItem(item) {
+  try {
+    updateUploadItem(item, { status: "preparing", progress: 0, message: "正在申请安全上传凭证…" });
+    if (!item.intent) {
+      item.intent = await api("/papers/direct-upload-intents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batch_id: item.batchId,
+          file_name: item.file.name,
+          content_type: item.file.type || "application/octet-stream",
+          byte_size: item.file.size,
+        }),
+      });
+      item.paperId = item.intent.paper.id;
+    }
+    item.mode = item.intent.mode;
+    const onProgress = (loaded, total) => updateUploadItem(item, {
+      status: "uploading",
+      progress: total ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+      message: item.mode === "tus" ? "正在断点续传到私有存储…" : "正在直传到私有存储…",
+    });
+
+    let alreadyArchived = item.archived;
+    if (!item.transferComplete && item.mode === "standard") {
+      try {
+        await uploadViaSignedUrl(item.file, item.intent, onProgress);
+        item.transferComplete = true;
+      } catch (error) {
+        if (error.kind !== "network") throw error;
+        updateUploadItem(item, { mode: "tus", message: "检测到网络不稳定，已自动切换 TUS 断点续传…" });
+        try {
+          await confirmDirectUpload(item);
+          alreadyArchived = true; // 标准上传可能已完成，只是浏览器未收到响应。
+          item.transferComplete = true;
+        } catch (confirmError) {
+          const code = confirmError?.problem?.code;
+          if (!["ARCHIVED_OBJECT_NOT_FOUND", "ARCHIVED_OBJECT_SIZE_MISMATCH"].includes(code)) throw confirmError;
+        }
+        if (!alreadyArchived) {
+          await uploadViaTus(item.file, item.intent, onProgress);
+          item.transferComplete = true;
+        }
+      }
+    } else if (!item.transferComplete) {
+      await uploadViaTus(item.file, item.intent, onProgress);
+      item.transferComplete = true;
+    }
+
+    if (!alreadyArchived) {
+      updateUploadItem(item, { status: "confirming", progress: 100, message: "正在确认私有桶归档完整性…" });
+      await confirmDirectUpload(item);
+    }
+    updateUploadItem(item, { status: "parsing", message: "文件已归档，正在解析单份材料…" });
+    const parsed = await api(`/papers/${item.paperId}/parse`, { method: "POST" });
+    if (parsed.status !== "parsed") {
+      const error = new Error(parsed.error_message || "材料解析失败");
+      error.phase = "parse";
+      throw error;
+    }
+    updateUploadItem(item, { status: "completed", progress: 100, message: "上传、归档和解析均已完成。" });
+  } catch (error) {
+    updateUploadItem(item, {
+      status: item.archived ? "parse_failed" : item.transferComplete ? "confirm_failed" : "upload_failed",
+      message: directUploadMessage(error),
+    });
+  }
+}
+
+async function runPaperUploads(files) {
+  const additions = Array.from(files).map((file) => ({
+    id: window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    file,
+    batchId: state.selectedBatchId,
+    fileName: file.name,
+    status: "queued",
+    progress: 0,
+    message: "等待上传",
+    intent: null,
+    archived: false,
+    transferComplete: false,
+  }));
+  state.paperUploadQueue.push(...additions);
+  state.paperUploadRunning = true;
+  renderPaperUploadQueue();
+  for (const item of additions) await processUploadItem(item);
+  state.paperUploadRunning = false;
+  await loadAll();
+  const failed = additions.filter((item) => !["completed"].includes(item.status)).length;
+  showToast(failed ? `${additions.length - failed} 个完成，${failed} 个需要处理` : `${additions.length} 个文件已归档并完成解析`, Boolean(failed));
+}
+
+function renderPaperUploadQueue() {
+  const container = document.querySelector("#paper-upload-queue");
+  if (!container) return;
+  const button = document.querySelector("#upload-btn");
+  if (button) button.disabled = state.paperUploadRunning;
+  if (!state.paperUploadQueue.length) {
+    container.innerHTML = '<div class="muted">文件将先直传私有存储，再逐份解析；失败项可单独恢复。</div>';
+    return;
+  }
+  const visibleItems = state.paperUploadQueue.filter((item) => item.batchId === state.selectedBatchId);
+  if (!visibleItems.length) {
+    container.innerHTML = '<div class="muted">文件将先直传私有存储，再逐份解析；失败项可单独恢复。</div>';
+    return;
+  }
+  container.innerHTML = visibleItems.map((item) => {
+    const failed = ["upload_failed", "confirm_failed", "parse_failed"].includes(item.status);
+    const retry = item.status === "upload_failed"
+      ? `<button class="text-button" data-retry-upload="${escapeHtml(item.id)}">重试上传</button>`
+      : item.status === "confirm_failed"
+        ? `<button class="text-button" data-retry-upload="${escapeHtml(item.id)}">重试归档确认</button>`
+      : item.status === "parse_failed" && item.paperId
+        ? `<button class="text-button" data-retry-parse="${escapeHtml(item.paperId)}" data-upload-item="${escapeHtml(item.id)}">重新解析</button>`
+        : "";
+    const mode = item.mode ? (item.mode === "tus" ? "TUS 断点续传" : "标准签名直传") : "";
+    return `<article class="paper-upload-item ${failed ? "error" : ""}">
+      <div class="paper-upload-title"><strong>${escapeHtml(item.fileName)}</strong><span>${escapeHtml(mode)}</span></div>
+      <div class="progress-track"><span style="width:${Number(item.progress || 0)}%"></span></div>
+      <div class="paper-upload-detail"><span>${escapeHtml(item.message)}</span>${retry}</div>
+    </article>`;
+  }).join("");
+}
+
 function showToast(message, isError = false) {
   const toast = document.querySelector("#toast");
   toast.textContent = message;
@@ -367,6 +674,9 @@ function statusLabel(status) {
     completed: "已完成",
     completed_with_errors: "部分完成",
     failed: "失败",
+    uploading: "上传中",
+    uploaded: "已归档",
+    parsing: "解析中",
     canceled: "已取消",
     cancel_requested: "取消中",
     parsed: "已解析",
@@ -1070,12 +1380,13 @@ function renderBatches() {
       .join("") || '<div class="muted">暂无评分任务</div>';
 
   document.querySelector("#paper-list").innerHTML = state.papers.length
-    ? `<table><thead><tr><th>材料</th><th>作者 / 编号</th><th>状态</th><th>解析质量</th></tr></thead><tbody>${state.papers
+    ? `<table><thead><tr><th>材料</th><th>作者 / 编号</th><th>状态</th><th>解析质量</th><th>操作</th></tr></thead><tbody>${state.papers
         .map(
-          (paper) => `<tr><td><strong>${escapeHtml(paper.title || paper.file_name)}</strong></td><td>${escapeHtml(paper.student_name || paper.student_id || "未识别")}</td><td><span class="badge ${statusTone(paper.status)}">${escapeHtml(statusLabel(paper.status))}</span></td><td>${escapeHtml(paper.parse_quality ?? "—")}</td></tr>`,
+          (paper) => `<tr><td><strong>${escapeHtml(paper.title || paper.file_name)}</strong></td><td>${escapeHtml(paper.student_name || paper.student_id || "未识别")}</td><td><span class="badge ${statusTone(paper.status)}">${escapeHtml(statusLabel(paper.status))}</span>${paper.error_message ? `<div class="table-error">${escapeHtml(paper.error_message)}</div>` : ""}</td><td>${escapeHtml(paper.parse_quality ?? "—")}</td><td>${paper.status === "failed" ? `<button class="text-button" data-retry-parse="${paper.id}">重新解析</button>` : "—"}</td></tr>`,
         )
         .join("")}</tbody></table>`
     : '<div class="muted">选择左侧任务后，在此上传第一份待评材料。</div>';
+  renderPaperUploadQueue();
   renderBatchWorkflowSteps();
   renderPaperEditForm();
   renderBatchScoreJob();
@@ -1102,13 +1413,17 @@ function renderBatchScoreJob() {
   const signals = document.querySelector("#batch-score-job-signals");
   if (!status || !errors || !signals) return;
   const selected = Boolean(state.selectedBatchId);
-  document.querySelector("#create-batch-score-job-btn").disabled = !selected || Boolean(job && ["queued", "running", "cancel_requested"].includes(job.status));
+  const hasUnparsedPapers = state.papers.some((paper) => paper.status !== "parsed");
+  document.querySelector("#create-batch-score-job-btn").disabled = !selected || hasUnparsedPapers || Boolean(job && ["queued", "running", "cancel_requested"].includes(job.status));
   document.querySelector("#run-batch-score-job-btn").disabled = !job || job.status !== "queued";
   document.querySelector("#cancel-batch-score-job-btn").disabled = !job || !["queued", "running", "cancel_requested"].includes(job.status);
   document.querySelector("#retry-batch-score-job-btn").disabled = !job || !["canceled", "completed_with_errors", "failed"].includes(job.status);
   if (!job) {
+    const pendingPapers = state.papers.filter((paper) => paper.status !== "parsed");
     status.innerHTML = state.papers.length
-      ? '<div class="muted">材料已经就绪。填写下方经批准的观察策略，创建可恢复的批量评分任务。</div>'
+      ? pendingPapers.length
+        ? `<div class="inline-error">请先处理 ${pendingPapers.length} 份尚未完成解析的材料，再运行批量评分。</div>`
+        : '<div class="muted">材料已经就绪。填写下方经批准的观察策略，创建可恢复的批量评分任务。</div>'
       : '<div class="muted">上传至少一份待评材料后，才能进入批量评分。</div>';
     errors.innerHTML = '<div class="muted">暂无错误</div>';
     signals.innerHTML = '<div class="muted">任务运行后显示门禁信号</div>';
@@ -1681,6 +1996,31 @@ async function handleAction(event) {
       revealAndScroll(scrollControl.dataset.scrollTo);
       return;
     }
+    if (target.dataset.retryUpload) {
+      const item = state.paperUploadQueue.find((candidate) => candidate.id === target.dataset.retryUpload);
+      if (!item) throw new Error("没有找到需要重试的文件");
+      state.paperUploadRunning = true;
+      item.archived = false;
+      await processUploadItem(item);
+      state.paperUploadRunning = false;
+      await loadAll();
+      return;
+    }
+    if (target.dataset.retryParse) {
+      const item = state.paperUploadQueue.find((candidate) => candidate.id === target.dataset.uploadItem);
+      try {
+        if (item) updateUploadItem(item, { status: "parsing", message: "正在恢复单文件解析…" });
+        const paper = await api(`/papers/${target.dataset.retryParse}/parse`, { method: "POST" });
+        if (paper.status !== "parsed") throw new Error(paper.error_message || "材料解析仍未成功");
+        if (item) updateUploadItem(item, { status: "completed", progress: 100, message: "重新解析已完成。" });
+        await loadAll();
+        showToast("材料已重新解析");
+      } catch (error) {
+        if (item) updateUploadItem(item, { status: "parse_failed", message: directUploadMessage(error) });
+        throw error;
+      }
+      return;
+    }
     if (target.dataset.openBatch) {
       state.selectedBatchId = target.dataset.openBatch;
       state.selectedPaperId = "";
@@ -2188,12 +2528,8 @@ function bindEvents() {
       if (!state.selectedBatchId) throw new Error("请先选择或创建评分任务");
       const files = document.querySelector("#paper-files").files;
       if (!files.length) throw new Error("请选择待评材料");
-      const formData = new FormData();
-      formData.append("batch_id", state.selectedBatchId);
-      for (const file of files) formData.append("files", file);
-      await api("/papers/bulk-upload", { method: "POST", body: formData });
-      showToast("材料已上传并完成解析");
-      await loadAll();
+      await runPaperUploads(files);
+      document.querySelector("#paper-files").value = "";
       revealAndScroll("batch-score-job-panel");
     } catch (error) {
       showToast(error.message, true);
@@ -2204,6 +2540,8 @@ function bindEvents() {
     try {
       if (!state.selectedBatchId) throw new Error("请先选择评分任务");
       if (!state.papers.length) throw new Error("请先上传待评材料");
+      const pending = state.papers.filter((paper) => paper.status !== "parsed");
+      if (pending.length) throw new Error(`请先处理 ${pending.length} 份尚未完成解析的材料`);
       const config = document.querySelector(".run-config");
       if (config) config.open = true;
       revealAndScroll("batch-score-job-form");
@@ -2217,6 +2555,8 @@ function bindEvents() {
     event.preventDefault();
     try {
       if (!state.selectedBatchId) throw new Error("请选择批次");
+      const pending = state.papers.filter((paper) => paper.status !== "parsed");
+      if (pending.length) throw new Error(`请先处理 ${pending.length} 份尚未完成解析的材料`);
       const form = new FormData(event.currentTarget);
       const policyText = String(form.get("observation_policy") || "").trim();
       if (!policyText) throw new Error("请粘贴经批准的观察策略 JSON");

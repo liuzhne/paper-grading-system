@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="模板驱动的智能评审与评分工作台" />
     <title>衡鉴 · 智能评审工作台</title>
-    <link rel="stylesheet" href="/assets/styles.970b6352fa05.css" />
+    <link rel="stylesheet" href="/assets/styles.4b0e1f1ffc8a.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -248,11 +248,12 @@
               </section>
 
               <section class="panel workflow-step-panel">
-                <div class="step-panel-header"><span class="step-number">2</span><div><h2>上传待评材料</h2><p>支持批量上传 Word 或 PDF；解析后可先核对基本信息。</p></div></div>
+                <div class="step-panel-header"><span class="step-number">2</span><div><h2>上传待评材料</h2><p>文件先直传私有存储，再逐份解析；网络不稳定时自动断点续传。</p></div></div>
                 <div class="upload-surface">
-                  <label class="upload-picker"><span class="upload-icon">↑</span><span><strong>选择或拖入文件</strong><small>DOCX、PDF，可多选</small></span><input id="paper-files" type="file" accept=".docx,.pdf" multiple /></label>
-                  <button id="upload-btn">上传并解析</button>
+                  <label class="upload-picker"><span class="upload-icon">↑</span><span><strong>选择或拖入文件</strong><small>DOCX、PDF，可多选；大于 6 MiB 自动使用 TUS</small></span><input id="paper-files" type="file" accept=".docx,.pdf" multiple /></label>
+                  <button id="upload-btn">安全上传并解析</button>
                 </div>
+                <div id="paper-upload-queue" class="paper-upload-queue"><div class="muted">文件将先直传私有存储，再逐份解析；失败项可单独恢复。</div></div>
                 <div id="paper-list" class="table-wrap material-list"></div>
                 <details class="subpanel metadata-panel">
                   <summary><span><strong>校正材料信息</strong><small>仅在自动识别不准确时修改</small></span><span>展开</span></summary>
@@ -370,6 +371,6 @@
         </div>
       </section>
     </main>
-    <script src="/assets/app.ec127e7951e2.js"></script>
+    <script src="/assets/app.d6bca96d81f0.js"></script>
   </body>
 </html>
