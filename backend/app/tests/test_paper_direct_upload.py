@@ -86,6 +86,10 @@ def test_direct_upload_intent_uses_standard_then_tus_at_six_mib(client, monkeypa
     assert standard_body["mode"] == "standard"
     assert standard_body["threshold_bytes"] == 6 * MIB
     assert standard_body["paper"]["status"] == "uploading"
+    assert standard_body["paper"]["file_name"] == "论文.docx"
+    assert standard_body["object_path"].isascii()
+    assert "论文" not in standard_body["object_path"]
+    assert standard_body["object_path"].endswith(".docx")
     assert standard_body["signed_url"].startswith("https://project-ref.supabase.co/")
     assert standard_body["tus_endpoint"] == (
         "https://project-ref.storage.supabase.co/storage/v1/upload/resumable"
@@ -99,6 +103,7 @@ def test_direct_upload_intent_uses_standard_then_tus_at_six_mib(client, monkeypa
     assert "must-never-leak" not in serialized
     assert all(path.startswith("uploads/") for path, _ in bucket.signed_paths)
     assert all(".." not in path for path, _ in bucket.signed_paths)
+    assert all(path.isascii() for path, _ in bucket.signed_paths)
 
 
 def test_direct_upload_intent_rejects_bad_type_size_and_missing_storage(client, monkeypatch):
@@ -239,6 +244,8 @@ def test_web_uses_file_level_direct_upload_tus_fallback_and_visible_recovery():
     assert "uploadViaSignedUrl" in script
     assert 'request.open("PUT", intent.signed_url' in script
     assert 'body.append("cacheControl", "3600")' in script
+    assert "request.responseText" in script
+    assert "storageUploadErrorMessage" in script
     assert "uploadViaTus" in script
     assert "Tus-Resumable" in script
     assert "x-signature" in script

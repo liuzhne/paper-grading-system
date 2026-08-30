@@ -133,6 +133,13 @@
 - 定向回归：直传、既有核心流程、ingestion、Supabase 部署契约和静态构建共 `15 passed`。
 - 全量回归：`.venv/bin/python -m pytest -q` 为 `1417 passed, 46 warnings`；warnings 均为既有依赖/SQLite Python 3.12 弃用提示。
 - JavaScript 语法：`node --check frontend/web/assets/app.js` 通过；`git diff --check` 通过。
-- 静态产物：源码与 `public/assets` 的 SHA-256 一致，当前文件名为 `app.d6bca96d81f0.js`、`styles.4b0e1f1ffc8a.css`。
+- 静态产物：源码与 `public/assets` 的 SHA-256 一致；中文文件名修复后的文件名为 `app.5abb8249978c.js`、`styles.4b0e1f1ffc8a.css`。
 - 安全兼容：TUS 恢复地址使用 `sessionStorage`，满足既有“前端不使用 localStorage 保存会话/敏感数据”门禁；API/静态资源未包含 Supabase Secret Key。
 - 范围审计：所有改动均位于第 4 节允许范围；其中 `backend/app/services/papers/ingestion.py` 无需修改，既有成功后替换 chunks 的语义直接复用。
+
+### 8.1 中文文件名生产修复
+
+- 生产诊断确认三条失败记录均停在 `uploading`；Supabase 对原对象路径返回 `400 InvalidKey`，没有形成存储对象。
+- Paper 的 `file_name` 继续保存中文原名；Storage 对象名改为 `{byte_size}-source{suffix}`，其余路径段均为服务端 UUID，保证整个对象 Key 为 ASCII。
+- 前端标准签名上传会解析 Supabase `responseText`，把 `message/error/code` 呈现给用户，不再只显示笼统 HTTP 状态。
+- 修复测试先行：新增断言初始为 `2 failed`，实现后中文展示名、ASCII 对象 Key 和错误响应契约全部通过。

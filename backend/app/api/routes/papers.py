@@ -199,7 +199,10 @@ def create_direct_upload_intent(
     db.add(paper)
     db.flush()
     organization_segment = batch.organization_id or "legacy"
-    object_name = f"{payload.byte_size}-{filename}"
+    # Supabase Storage rejects non-ASCII object keys with ``InvalidKey``.
+    # Keep the original, user-facing filename on Paper.file_name, while the
+    # private object path uses only server-generated ASCII identity.
+    object_name = f"{payload.byte_size}-source{suffix}"
     object_path = (
         f"uploads/{organization_segment}/{batch.id}/{paper.id}/{object_name}"
     )
