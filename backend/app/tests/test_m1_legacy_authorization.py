@@ -979,20 +979,13 @@ def test_publish_gate_rejects_unsupported_criteria_before_batch_creation(
     )
     assert create_response.status_code == 200, create_response.text
     rubric_id = create_response.json()["id"]
-    identity = review_rubric_via_api(client, rubric_id)
-
-    response = client.post(
-        f"/api/rubrics/{rubric_id}/publish",
-        json={
-            "compilation_id": identity["compilation_id"],
-            "reason": "不支持的旧评分项必须在发布前被拦截",
-        },
-    )
-
-    assert response.status_code == 400, response.text
-    assert "validated" in response.text.lower() or "不可发布" in response.text
+    execution = client.get(f"/api/rubrics/{rubric_id}/execution-draft").json()
+    compilation_id = execution["active_compilation"]["id"]
+    response = client.post(f"/api/rubrics/{rubric_id}/submit-review")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "RUBRIC_REVIEW_BLOCKED"
     with client.session_factory() as db:
-        compilation = db.get(RubricCompilation, identity["compilation_id"])
+        compilation = db.get(RubricCompilation, compilation_id)
         assert compilation.status == "blocked"
         assert any(
             blocker.get("code") == "MISSING_EXECUTABLE_SCORING_MODE"

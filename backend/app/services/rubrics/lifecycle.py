@@ -1128,6 +1128,24 @@ def submit_for_review(session: Session, rubric_id: str) -> models.Rubric:
     with session.no_autoflush:
         rubric = _require_rubric(session, rubric_id, for_update=True)
         _require_state(rubric, "draft", "submit_for_review")
+        active_compilations = session.scalars(
+            select(models.RubricCompilation)
+            .where(
+                models.RubricCompilation.rubric_id == rubric_id,
+                models.RubricCompilation.published_at.is_(None),
+                models.RubricCompilation.status != "superseded",
+            )
+            .with_for_update()
+        ).all()
+        if len(active_compilations) != 1:
+            raise RubricLifecycleError(
+                "当前模板没有唯一的活动执行草稿，不能提交审核"
+            )
+        active = active_compilations[0]
+        if active.status != "validated" or active.blockers:
+            raise RubricLifecycleError(
+                "当前执行草稿仍有阻断项，请先返回模板调整并重新校验"
+            )
         rubric.status = "review"
         with _lifecycle_operation(session, "submit_for_review"):
             session.flush()

@@ -359,7 +359,7 @@ def test_cli_graph_discovery_and_explicit_m4_publish_chain(tmp_path, local):
 
 def test_cli_rubric_return_draft_and_explicit_legacy_upgrade(tmp_path, local):
     rules = tmp_path / "return-rules.xlsx"
-    rules.write_bytes(make_rules_xlsx().getvalue())
+    rules.write_bytes(real_rules_xlsx_bytes())
     imported = runner.invoke(
         app,
         ["import", str(rules), "--name", "CLI return lifecycle", *local],

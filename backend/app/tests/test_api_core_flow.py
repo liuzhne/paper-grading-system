@@ -142,8 +142,8 @@ def test_core_api_flow(client, monkeypatch):
         "/api/rubrics/%s" % rubric_id,
         json=rubric_update_payload,
     )
-    assert rubric_update_response.status_code == 400, rubric_update_response.text
-    assert "AtomicRule" in rubric_update_response.json()["detail"]
+    assert rubric_update_response.status_code == 409, rubric_update_response.text
+    assert rubric_update_response.json()["detail"]["code"] == "RUBRIC_RECOMPILE_REQUIRED"
     unchanged = client.get("/api/rubrics/%s" % rubric_id).json()
     assert unchanged["name"] == rubric_payload["name"]
     assert unchanged["criteria"][0]["max_score"] == 15
@@ -152,7 +152,7 @@ def test_core_api_flow(client, monkeypatch):
     assert publish_response["status"] == "published"
 
     update_published_response = client.patch("/api/rubrics/%s" % rubric_id, json={"description": "发布后修改"})
-    assert update_published_response.status_code == 400
+    assert update_published_response.status_code == 409
 
     clone_response = client.post("/api/rubrics/%s/clone" % rubric_id, json={"new_version": "v1.1"})
     assert clone_response.status_code == 200, clone_response.text

@@ -64,10 +64,18 @@ class AtomicRuleEditRequest(RubricLifecycleReason):
 class RubricDraftRecompileRequest(RubricLifecycleReason):
     supersedes_compilation_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
+    name: Optional[str] = Field(default=None, min_length=1)
+    description: Optional[str] = None
+    total_score: Optional[float] = Field(default=None, gt=0)
     criteria: list[RubricCriterionCreate] = Field(min_length=1)
     global_policy: dict = Field(default_factory=dict)
     workflow_profile: str = Field(default="manual_json", min_length=1)
     business_profile_key: str = Field(default="thesis", min_length=1)
+
+
+class RubricAIRuleDraftRequest(BaseModel):
+    criteria: list[RubricCriterionCreate] = Field(min_length=1)
+    ai_connection_id: Optional[str] = None
 
 
 class ExecutionDraftVersionRead(BaseModel):

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.db import models
 from backend.app.services.rubric_import.docx_comments import parse_comments
+from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubric_import.parser import _criterion_from_row
 from backend.app.services.rubric_import.parser import _find_header
 from backend.app.services.rubric_import.parser import _rows_with_merged_values
@@ -278,6 +279,7 @@ def _rule(
     max_points: object = None,
     repeat_policy: str | None = None,
     cap_points: object = None,
+    mutex_group: str | None = None,
     levels: list[dict] | None = None,
     strictness: str = "required",
     applies_to: str = "global",
@@ -314,7 +316,7 @@ def _rule(
         "boundary_example": None,
         "strictness": strictness if strictness in {"required", "preferred", "unknown"} else "required",
         "applies_to": applies_to or "global",
-        "mutex_group": None,
+        "mutex_group": mutex_group,
         "depends_on_rule_codes": [],
         "status": "draft",
         "creation_method": creation_method,
@@ -907,6 +909,22 @@ def _manual_nodes(payload: Mapping[str, object]):
                 }
             )
         mode = _text(item.get("scoring_mode")) or ("banded" if levels else "review_only")
+        structured_deductions = deepcopy(item.get("deduction_rules_structured") or [])
+        severity_confirmation_required = False
+        if mode in {"deductive", "deduct"} and not structured_deductions:
+            input_analysis = analyze_rule_input(
+                item.get("deduction_rules") or [], criterion_code=code
+            )
+            severity_confirmation_required = input_analysis["needs_severity_expansion"]
+            if not severity_confirmation_required:
+                structured_deductions = [
+                    {
+                        **rule,
+                        "source": "user_text",
+                        "confirmed": True,
+                    }
+                    for rule in input_analysis["parsed_rules"]
+                ]
         projection = {
             "code": code,
             "name": _text(item.get("name")) or code,
@@ -922,7 +940,7 @@ def _manual_nodes(payload: Mapping[str, object]):
             "rubric_levels": deepcopy(levels),
             "sub_checks": deepcopy(item.get("sub_checks") or []),
             "dimension": item.get("dimension"),
-            "deduction_rules_structured": deepcopy(item.get("deduction_rules_structured") or []),
+            "deduction_rules_structured": structured_deductions,
         }
         criteria.append(projection)
         source_rules.append(
@@ -965,6 +983,21 @@ def _manual_nodes(payload: Mapping[str, object]):
             ):
                 if not isinstance(deduction, Mapping):
                     continue
+                source = str(deduction.get("source") or "")
+                if source.startswith("ai_") and deduction.get("confirmed") is not True:
+                    blockers.append(
+                        {
+                            "code": "AI_DRAFT_PENDING_CONFIRMATION",
+                            "criterion_code": code,
+                            "field_path": (
+                                f"/criteria/{code}/deduction_rules_structured/"
+                                f"{deduction_index - 1}"
+                            ),
+                            "rule_index": deduction_index - 1,
+                            "message": "AI 起草的扣分规则必须由用户确认后才能生效",
+                        }
+                    )
+                    continue
                 points = _decimal(
                     deduction.get("points") or deduction.get("max_points")
                 )
@@ -976,7 +1009,7 @@ def _manual_nodes(payload: Mapping[str, object]):
                     if projection["criterion_type"] == "deterministic"
                     else "semantic"
                 )
-                match = deepcopy(deduction.get("match"))
+                match = deepcopy(deduction.get("match") or deduction.get("trigger"))
                 rule_text = _text(deduction.get("reason")) or (
                     json.dumps(match, ensure_ascii=False, sort_keys=True)
                     if isinstance(match, (dict, list))
@@ -1021,6 +1054,7 @@ def _manual_nodes(payload: Mapping[str, object]):
                         max_points=points,
                         repeat_policy=deduction.get("repeat_policy") or "once",
                         cap_points=deduction.get("cap_points"),
+                        mutex_group=deduction.get("mutex_group"),
                         applies_to=projection["applies_to"],
                         creation_method="manual",
                         source_rule_codes=[code],
@@ -1031,9 +1065,41 @@ def _manual_nodes(payload: Mapping[str, object]):
                     {
                         "code": "MISSING_EXECUTABLE_SCORING_MODE",
                         "criterion_code": code,
+                        "field_path": f"/criteria/{code}/deduction_rules",
                         "message": "扣分制评分项没有有效的结构化扣分规则",
                     }
                 )
+        elif mode in {"deductive", "deduct"} and severity_confirmation_required:
+            blockers.append(
+                {
+                    "code": "SEVERITY_CONFIRMATION_REQUIRED",
+                    "criterion_code": code,
+                    "field_path": f"/criteria/{code}/deduction_rules",
+                    "message": "扣分区间必须拆分为固定的严重程度规则并由用户确认",
+                }
+            )
+            projection["scoring_mode"] = "review_only"
+            rules.append(
+                _rule(
+                    rule_code=f"manual.{code.lower()}.review.v1",
+                    criterion_code=code,
+                    name=projection["name"],
+                    rule_text=projection["description"] or projection["name"],
+                    direction="none",
+                    effect_type="review",
+                    judge_type="semantic",
+                    checker_key=None,
+                    checker_params={},
+                    evidence_policy={
+                        "mode": "source_quote",
+                        "requirement": "required",
+                        "minimum_coverage": "1",
+                    },
+                    applies_to=projection["applies_to"],
+                    creation_method="manual",
+                    source_rule_codes=[code],
+                )
+            )
         elif mode == "review_only":
             rules.append(
                 _rule(
@@ -1386,6 +1452,8 @@ def persist_prepared_import(
                     raise ValueError("target rubric does not exist")
                 if rubric.status != "draft":
                     raise ValueError("only a draft rubric may receive an upgrade compilation")
+                rubric.name = str(rubric_data["name"])
+                rubric.version = str(rubric_data["version"])
                 rubric.total_score = _decimal(rubric_data["total_score"])
                 rubric.description = rubric_data.get("description")
                 rubric.format_spec = deepcopy(rubric_data.get("format_spec") or {})

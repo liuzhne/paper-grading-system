@@ -1676,11 +1676,13 @@ def test_upgraded_legacy_draft_uses_the_same_rule_and_rubric_signoff_services(
             "旧草稿规则完成统一审核",
             now=base_time + timedelta(minutes=10 + index),
         )
-    lifecycle.submit_for_review(lifecycle_db, rubric.id)
     lifecycle_db.commit()
+    with pytest.raises(lifecycle.RubricLifecycleError, match="仍有阻断项"):
+        lifecycle.submit_for_review(lifecycle_db, rubric.id)
+    lifecycle_db.rollback()
     lifecycle_db.refresh(rubric)
     compilation = lifecycle_db.get(models.RubricCompilation, version.compilation_id)
-    assert rubric.status == "review"
+    assert rubric.status == "draft"
     for rule in rules:
         lifecycle_db.refresh(rule)
         assert rule.status == "approved"
