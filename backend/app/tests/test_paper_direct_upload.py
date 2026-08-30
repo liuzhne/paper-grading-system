@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from backend.app.core.config import settings
-from backend.app.db.models import GradingBatch, Paper, Rubric
+from backend.app.db.models import AuditLog, GradingBatch, Paper, Rubric
 from backend.app.db.models import utcnow
 from backend.app.services.storage import local as storage_module
 
@@ -19,6 +19,7 @@ class FakeSupabaseBucket:
     def __init__(self):
         self.objects = {}
         self.signed_paths = []
+        self.removed_paths = []
 
     def create_signed_upload_url(self, path, options=None):
         self.signed_paths.append((path, options))
@@ -37,6 +38,12 @@ class FakeSupabaseBucket:
             error.status = "404"
             raise error
         return {"name": Path(path).name, "metadata": {"size": self.objects[path]}}
+
+    def remove(self, paths):
+        self.removed_paths.extend(paths)
+        for path in paths:
+            self.objects.pop(path, None)
+        return []
 
 
 def _make_batch(client):
@@ -149,6 +156,100 @@ def test_complete_upload_verifies_private_object_and_is_idempotent(client, monke
     assert repeated.json()["status"] == "uploaded"
 
 
+def test_incomplete_direct_upload_can_be_deleted_with_private_object(client, monkeypatch):
+    bucket = _enable_supabase(monkeypatch)
+    batch_id = _make_batch(client)
+    intent = _create_intent(client, batch_id, size=3210).json()
+    paper_id = intent["paper"]["id"]
+    bucket.objects[intent["object_path"]] = 3210
+
+    deleted = client.delete(f"/api/papers/{paper_id}")
+
+    assert deleted.status_code == 204, deleted.text
+    assert bucket.removed_paths == [intent["object_path"]]
+    assert intent["object_path"] not in bucket.objects
+    with client.session_factory() as db:
+        assert db.get(Paper, paper_id) is None
+        assert "paper.failed_upload_deleted" in db.scalars(
+            select(AuditLog.event_type)
+        ).all()
+
+
+def test_delete_incomplete_upload_tolerates_legacy_invalid_storage_key(client, monkeypatch):
+    bucket = _enable_supabase(monkeypatch)
+    batch_id = _make_batch(client)
+    with client.session_factory() as db:
+        batch = db.get(GradingBatch, batch_id)
+        paper = Paper(
+            batch_id=batch_id,
+            organization_id=batch.organization_id,
+            file_name="旧论文.docx",
+            file_path=(
+                "supabase://paper-grading-private/uploads/legacy/旧论文.docx"
+            ),
+            status="uploading",
+        )
+        db.add(paper)
+        db.commit()
+        paper_id = paper.id
+
+    class InvalidKeyError(Exception):
+        status = 400
+        code = "InvalidKey"
+
+    def reject_invalid_key(paths):
+        raise InvalidKeyError("Invalid key")
+
+    monkeypatch.setattr(bucket, "remove", reject_invalid_key)
+
+    deleted = client.delete(f"/api/papers/{paper_id}")
+
+    assert deleted.status_code == 204, deleted.text
+    with client.session_factory() as db:
+        assert db.get(Paper, paper_id) is None
+
+
+def test_completed_upload_cannot_be_deleted_from_failed_upload_action(client, monkeypatch):
+    bucket = _enable_supabase(monkeypatch)
+    batch_id = _make_batch(client)
+    intent = _create_intent(client, batch_id, size=3210).json()
+    paper_id = intent["paper"]["id"]
+    bucket.objects[intent["object_path"]] = 3210
+    completed = client.post(
+        f"/api/papers/{paper_id}/complete-upload", json={"byte_size": 3210}
+    )
+    assert completed.status_code == 200
+
+    rejected = client.delete(f"/api/papers/{paper_id}")
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "PAPER_DELETE_STATE_INVALID"
+    assert bucket.removed_paths == []
+    with client.session_factory() as db:
+        assert db.get(Paper, paper_id) is not None
+
+
+def test_delete_incomplete_upload_keeps_record_when_storage_cleanup_is_unavailable(
+    client, monkeypatch
+):
+    bucket = _enable_supabase(monkeypatch)
+    batch_id = _make_batch(client)
+    intent = _create_intent(client, batch_id, size=3210).json()
+    paper_id = intent["paper"]["id"]
+
+    def fail_cleanup(paths):
+        raise RuntimeError("storage temporarily unavailable")
+
+    monkeypatch.setattr(bucket, "remove", fail_cleanup)
+
+    rejected = client.delete(f"/api/papers/{paper_id}")
+
+    assert rejected.status_code == 502
+    assert rejected.json()["detail"]["code"] == "FAILED_UPLOAD_CLEANUP_FAILED"
+    with client.session_factory() as db:
+        assert db.get(Paper, paper_id) is not None
+
+
 def test_parse_claim_is_committed_before_work_and_failed_paper_can_retry(client, monkeypatch):
     bucket = _enable_supabase(monkeypatch)
     batch_id = _make_batch(client)
@@ -254,4 +355,7 @@ def test_web_uses_file_level_direct_upload_tus_fallback_and_visible_recovery():
     assert "6 * 1024 * 1024" in script
     assert "network" in script and "TUS" in script
     assert "重新解析" in script
+    assert 'data-delete-failed-upload="${paper.id}"' in script
+    assert 'api(`/papers/${target.dataset.deleteFailedUpload}`, { method: "DELETE" })' in script
+    assert "删除这条失败上传记录" in script
     assert 'api("/papers/bulk-upload"' not in script

@@ -127,6 +127,13 @@ def private_object_size(ref: str) -> int:
     raise ValueError("Supabase object metadata does not contain a byte size")
 
 
+def delete_private_object(ref: str) -> None:
+    """Delete one private Supabase object addressed by its durable reference."""
+
+    bucket, object_path = _parse_supabase_uri(ref)
+    _storage_bucket(bucket).remove([object_path])
+
+
 def artifact_ref(namespace: str, filename: str):
     """Return the durable reference used by the configured artifact store."""
 
@@ -188,6 +195,15 @@ def artifact_not_found(exc: Exception) -> bool:
     status = str(getattr(exc, "status", ""))
     code = str(getattr(exc, "code", "")).casefold()
     return status == "404" or code in {"404", "not_found", "notfound"}
+
+
+def artifact_key_invalid(exc: Exception) -> bool:
+    """Recognize legacy object keys that Supabase refused before upload."""
+
+    status = str(getattr(exc, "status", ""))
+    code = str(getattr(exc, "code", "")).casefold().replace("_", "")
+    message = str(exc).casefold().replace(" ", "")
+    return status == "400" and (code == "invalidkey" or "invalidkey" in message)
 
 
 def materialize(ref) -> Path:

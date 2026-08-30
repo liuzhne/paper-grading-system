@@ -108,6 +108,14 @@ button.text-button:hover {
   color: var(--brand-hover);
 }
 
+button.text-button.danger {
+  color: var(--danger);
+}
+
+button.text-button.danger:hover {
+  color: #912018;
+}
+
 input,
 select,
 textarea {

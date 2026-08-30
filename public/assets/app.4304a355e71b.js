@@ -1394,7 +1394,7 @@ function renderBatches() {
   document.querySelector("#paper-list").innerHTML = state.papers.length
     ? `<table><thead><tr><th>材料</th><th>作者 / 编号</th><th>状态</th><th>解析质量</th><th>操作</th></tr></thead><tbody>${state.papers
         .map(
-          (paper) => `<tr><td><strong>${escapeHtml(paper.title || paper.file_name)}</strong></td><td>${escapeHtml(paper.student_name || paper.student_id || "未识别")}</td><td><span class="badge ${statusTone(paper.status)}">${escapeHtml(statusLabel(paper.status))}</span>${paper.error_message ? `<div class="table-error">${escapeHtml(paper.error_message)}</div>` : ""}</td><td>${escapeHtml(paper.parse_quality ?? "—")}</td><td>${paper.status === "failed" ? `<button class="text-button" data-retry-parse="${paper.id}">重新解析</button>` : "—"}</td></tr>`,
+          (paper) => `<tr><td><strong>${escapeHtml(paper.title || paper.file_name)}</strong></td><td>${escapeHtml(paper.student_name || paper.student_id || "未识别")}</td><td><span class="badge ${statusTone(paper.status)}">${escapeHtml(statusLabel(paper.status))}</span>${paper.error_message ? `<div class="table-error">${escapeHtml(paper.error_message)}</div>` : ""}</td><td>${escapeHtml(paper.parse_quality ?? "—")}</td><td>${paper.status === "failed" ? `<button class="text-button" data-retry-parse="${paper.id}">重新解析</button>` : paper.status === "uploading" ? `<button class="text-button danger" data-delete-failed-upload="${paper.id}">删除失败上传</button>` : "—"}</td></tr>`,
         )
         .join("")}</tbody></table>`
     : '<div class="muted">选择左侧任务后，在此上传第一份待评材料。</div>';
@@ -2016,6 +2016,19 @@ async function handleAction(event) {
       await processUploadItem(item);
       state.paperUploadRunning = false;
       await loadAll();
+      return;
+    }
+    if (target.dataset.deleteFailedUpload) {
+      const paper = state.papers.find((candidate) => candidate.id === target.dataset.deleteFailedUpload);
+      const name = paper?.file_name || "该材料";
+      if (!window.confirm(`删除这条失败上传记录“${name}”？此操作无法撤销。`)) return;
+      await api(`/papers/${target.dataset.deleteFailedUpload}`, { method: "DELETE" });
+      if (state.selectedPaperId === target.dataset.deleteFailedUpload) state.selectedPaperId = "";
+      state.paperUploadQueue = state.paperUploadQueue.filter(
+        (item) => item.paperId !== target.dataset.deleteFailedUpload,
+      );
+      await loadAll();
+      showToast("失败上传记录已删除");
       return;
     }
     if (target.dataset.retryParse) {
