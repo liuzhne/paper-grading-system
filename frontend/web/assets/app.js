@@ -320,6 +320,18 @@ function directUploadMessage(error, fallback = "文件处理失败") {
   return action ? `${message} ${action}` : message;
 }
 
+function storageUploadErrorMessage(request) {
+  let detail = "";
+  try {
+    const payload = request.responseText ? JSON.parse(request.responseText) : {};
+    detail = payload.message || payload.error || payload.code || "";
+  } catch (_) {
+    detail = String(request.responseText || "").trim();
+  }
+  const safeDetail = String(detail).slice(0, 240);
+  return `私有存储拒绝上传（${request.status}）${safeDetail ? `：${safeDetail}` : ""}`;
+}
+
 function uploadViaSignedUrl(file, intent, onProgress) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
@@ -333,7 +345,7 @@ function uploadViaSignedUrl(file, intent, onProgress) {
     request.onabort = () => reject(uploadError("上传已取消", "abort"));
     request.onload = () => {
       if (request.status >= 200 && request.status < 300) resolve();
-      else reject(uploadError(`私有存储拒绝上传（${request.status}）`, "http", request.status));
+      else reject(uploadError(storageUploadErrorMessage(request), "http", request.status));
     };
     const body = new FormData();
     body.append("cacheControl", "3600");
