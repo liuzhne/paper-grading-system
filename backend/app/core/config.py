@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     SUPABASE_SECRET_KEY: Optional[str] = None
     SUPABASE_STORAGE_BUCKET: str = "paper-grading-private"
     MAX_UPLOAD_SIZE_MB: int = 50
+    DIRECT_UPLOAD_MAX_SIZE_MB: int = 50
+    DIRECT_UPLOAD_TUS_THRESHOLD_MB: int = 6
+    PAPER_PARSE_LEASE_SECONDS: int = 600
     OFFLINE_MODE: bool = False  # True=硬禁止一切外呼（网络型导出报错提示改用 Excel）；CLI 可经 --offline 开启
     DEFAULT_DEV_USER_ID: str = "00000000-0000-0000-0000-000000000001"
     DEFAULT_DEV_USERNAME: str = "dev-user"

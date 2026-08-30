@@ -6,6 +6,9 @@ from hashlib import sha256
 from mimetypes import guess_type
 from pathlib import Path
 from typing import BinaryIO
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
+
 from backend.app.core.config import settings
 
 
@@ -58,6 +61,70 @@ def _storage_bucket(bucket: str | None = None):
     return _supabase_client().storage.from_(
         bucket or settings.SUPABASE_STORAGE_BUCKET
     )
+
+
+def create_signed_upload(object_path: str) -> dict[str, str]:
+    """Create a write-only token for one new object in the private bucket."""
+
+    if settings.STORAGE_PROVIDER != "supabase":
+        raise RuntimeError("direct upload requires Supabase Storage")
+    result = _storage_bucket().create_signed_upload_url(object_path)
+    signed_url = str(result.get("signed_url") or result.get("signedUrl") or "")
+    token = str(result.get("token") or "")
+    if not signed_url or not token:
+        raise RuntimeError("Supabase Storage did not return a signed upload token")
+    return {"signed_url": signed_url, "token": token, "path": object_path}
+
+
+def private_object_ref(object_path: str) -> str:
+    """Build the durable private-bucket reference for a reserved object path."""
+
+    return _supabase_uri(object_path)
+
+
+def supabase_tus_endpoint() -> str:
+    """Return Supabase's direct Storage hostname for resumable uploads."""
+
+    raw = str(settings.SUPABASE_URL or "").strip().rstrip("/")
+    if not raw:
+        raise RuntimeError("SUPABASE_URL is required for resumable uploads")
+    parsed = urlsplit(raw)
+    hostname = parsed.hostname or ""
+    if hostname.endswith(".supabase.co") and not hostname.endswith(".storage.supabase.co"):
+        hostname = hostname[: -len(".supabase.co")] + ".storage.supabase.co"
+    if parsed.port:
+        hostname = f"{hostname}:{parsed.port}"
+    return urlunsplit(
+        (parsed.scheme or "https", hostname, "/storage/v1/upload/resumable", "", "")
+    )
+
+
+def private_object_info(ref: str) -> dict:
+    """Read authoritative metadata for one private Supabase object."""
+
+    bucket, object_path = _parse_supabase_uri(ref)
+    return _storage_bucket(bucket).info(object_path)
+
+
+def private_object_path(ref: str) -> str:
+    """Return the bucket-relative path without exposing storage credentials."""
+
+    _, object_path = _parse_supabase_uri(ref)
+    return object_path
+
+
+def private_object_size(ref: str) -> int:
+    info = private_object_info(ref)
+    metadata = info.get("metadata") if isinstance(info, dict) else None
+    candidates = [
+        info.get("size") if isinstance(info, dict) else None,
+        metadata.get("size") if isinstance(metadata, dict) else None,
+        metadata.get("contentLength") if isinstance(metadata, dict) else None,
+    ]
+    for value in candidates:
+        if value is not None:
+            return int(value)
+    raise ValueError("Supabase object metadata does not contain a byte size")
 
 
 def artifact_ref(namespace: str, filename: str):
