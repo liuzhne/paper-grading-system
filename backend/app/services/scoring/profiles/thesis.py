@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from types import MappingProxyType
 
 from backend.app.services.llm.base import LLMScoringError
+from backend.app.services.llm.core_adapter import CORE_PROVIDER_PROMPT_VERSION
+from backend.app.services.llm.core_adapter import core_runtime_provider_contract
 from backend.app.services.checkers import run_deterministic_checker
 from backend.app.services.scoring.adapters.legacy_paper import LegacyPaperAdapter
 from backend.app.services.scoring.core.canonical import canonical_sha256
@@ -738,38 +740,30 @@ class ThesisProfile:
         provider_name = str(getattr(scorer, "provider", "unknown"))
         model_name = str(getattr(scorer, "model_name", "unknown"))
         model_version = str(getattr(scorer, "model_version", "unknown"))
-        provider_artifact = canonical_sha256(
-            {
-                "scheme": "thesis-core-provider-artifact-v1",
-                "provider": provider_name,
-                "model": model_name,
-                "model_version": model_version,
-                "adapter": type(scorer).__module__
-                + "."
-                + type(scorer).__qualname__,
-            }
-        )
+        artifact_projection = {
+            "scheme": "thesis-core-provider-artifact-v1",
+            "provider": provider_name,
+            "model": model_name,
+            "model_version": model_version,
+            "adapter": type(scorer).__module__
+            + "."
+            + type(scorer).__qualname__,
+        }
+        if provider_name != "mock":
+            artifact_projection["provider_prompt_version"] = (
+                CORE_PROVIDER_PROMPT_VERSION
+            )
+        provider_artifact = canonical_sha256(artifact_projection)
         return {
             "engine_contract_version": "scoring-core@1",
             "engine_version": "thesis-core-adapter@1",
             "profile_key": self.profile_key,
             "profile_version": self.profile_version,
             "prompt_version": self.prompt_version,
-            "provider": {
-                "name": provider_name,
-                "model": model_name,
-                "model_version": model_version,
-                "sampling": {
-                    "temperature": "0",
-                    "top_p": "1",
-                    "seed": 0,
-                    "max_tokens": 512,
-                },
-                "thinking": {"enabled": False, "type": None},
-                "response_format": "json_schema",
-                "response_schema": "atomic-rule-decisions@1",
-                "artifact_hash": provider_artifact,
-            },
+            "provider": core_runtime_provider_contract(
+                scorer,
+                artifact_hash=provider_artifact,
+            ),
             "calibration_anchors_hash": canonical_sha256([]),
         }
 

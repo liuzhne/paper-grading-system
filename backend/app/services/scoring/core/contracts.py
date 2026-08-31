@@ -1858,7 +1858,13 @@ def _normalize_runtime_provider(value, path):
         "sampling": {
             "temperature": _decimal_text(value["sampling"]["temperature"], path + ".sampling.temperature"),
             "top_p": _decimal_text(value["sampling"]["top_p"], path + ".sampling.top_p"),
-            "seed": _assert_integer(value["sampling"]["seed"], path + ".sampling.seed"),
+            "seed": (
+                None
+                if value["sampling"]["seed"] is None
+                else _assert_integer(
+                    value["sampling"]["seed"], path + ".sampling.seed"
+                )
+            ),
             "max_tokens": _assert_integer(value["sampling"]["max_tokens"], path + ".sampling.max_tokens", minimum=1),
         },
         "thinking": {
