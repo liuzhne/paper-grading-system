@@ -27,7 +27,7 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV2
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-08-22-1"  # BYOK tenant/connection cache partition identity
+PROMPT_VERSION = "2026-08-31-1"  # Core V3 real-provider boundary + BYOK partition identity
 
 
 @dataclass(frozen=True)

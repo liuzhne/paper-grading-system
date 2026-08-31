@@ -7,6 +7,10 @@ import httpx
 from backend.app.core.config import settings
 from backend.app.services.llm.base import LLMScorer
 from backend.app.services.llm.base import validated_envelope_provider
+from backend.app.services.llm.core_adapter import core_envelope_instructions
+from backend.app.services.llm.core_adapter import core_response_json_schema
+from backend.app.services.llm.core_adapter import normalize_core_provider_response
+from backend.app.services.llm.core_adapter import validated_core_envelope_provider
 from backend.app.services.llm.debug_logging import log_llm_exception
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
@@ -114,6 +118,50 @@ class OpenAIResponsesScorer(LLMScorer):
         output["provider_response_id"] = data.get("id")
         output["usage"] = _usage_from_responses(data)
         return output
+
+    def score_core_envelope(self, *, envelope):
+        """Score one immutable PromptEnvelopeV3 semantic rule."""
+
+        envelope, provider = validated_core_envelope_provider(self, envelope)
+        envelope_payload = envelope.to_mapping()
+        if provider["thinking"] != {"enabled": False, "type": None}:
+            raise ValueError(
+                "OpenAI Responses PromptEnvelopeV3 does not support thinking controls"
+            )
+        if provider["response_format"] != "json_schema":
+            raise ValueError(
+                "OpenAI Responses PromptEnvelopeV3 requires json_schema response_format"
+            )
+        sampling = provider["sampling"]
+        if sampling["seed"] is not None:
+            raise ValueError("OpenAI Responses PromptEnvelopeV3 seed is not supported")
+        payload = {
+            "model": provider["model"],
+            "temperature": float(sampling["temperature"]),
+            "top_p": float(sampling["top_p"]),
+            "instructions": core_envelope_instructions(),
+            "input": json.dumps(
+                envelope_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "max_output_tokens": sampling["max_tokens"],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "semantic_rule_response",
+                    "strict": True,
+                    "schema": core_response_json_schema(envelope),
+                }
+            },
+        }
+        response = self._post_with_retry(payload)
+        response.raise_for_status()
+        data = response.json()
+        return normalize_core_provider_response(
+            envelope,
+            _parse_json_output(data),
+        )
 
     def complete_json(self, instructions, payload):
         body = {

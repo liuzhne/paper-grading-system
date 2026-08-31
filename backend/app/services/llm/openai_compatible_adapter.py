@@ -7,6 +7,9 @@ import httpx
 from backend.app.core.config import settings
 from backend.app.services.llm.base import LLMScorer
 from backend.app.services.llm.base import validated_envelope_provider
+from backend.app.services.llm.core_adapter import core_envelope_instructions
+from backend.app.services.llm.core_adapter import normalize_core_provider_response
+from backend.app.services.llm.core_adapter import validated_core_envelope_provider
 from backend.app.services.llm.debug_logging import log_llm_exception
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
@@ -123,6 +126,49 @@ class OpenAICompatibleChatScorer(LLMScorer):
         output["provider_response_id"] = data.get("id")
         output["usage"] = _usage_from_chat(data)
         return output
+
+    def score_core_envelope(self, *, envelope):
+        """Score one immutable PromptEnvelopeV3 over a compatible chat API."""
+
+        envelope, provider = validated_core_envelope_provider(self, envelope)
+        envelope_payload = envelope.to_mapping()
+        if provider["response_format"] not in {"none", "json_object"}:
+            raise ValueError(
+                "OpenAI-compatible PromptEnvelopeV3 response_format is unsupported"
+            )
+        sampling = provider["sampling"]
+        payload = {
+            "model": provider["model"],
+            "messages": [
+                {"role": "system", "content": core_envelope_instructions()},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        envelope_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                },
+            ],
+            "temperature": float(sampling["temperature"]),
+            "top_p": float(sampling["top_p"]),
+            "max_tokens": sampling["max_tokens"],
+        }
+        if sampling["seed"] is not None:
+            payload["seed"] = sampling["seed"]
+        thinking_type = provider["thinking"]["type"]
+        if thinking_type:
+            payload["thinking"] = {"type": thinking_type}
+        if provider["response_format"] == "json_object":
+            payload["response_format"] = {"type": "json_object"}
+
+        response = self._post_with_retry(payload)
+        response.raise_for_status()
+        data = response.json()
+        return normalize_core_provider_response(
+            envelope,
+            _parse_chat_json_output(data),
+        )
 
     def complete_json(self, instructions, payload):
         body = {
