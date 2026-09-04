@@ -27,6 +27,9 @@ storage/*.sqlite
 # 含学生个人信息（姓名/学号/成绩）的对话记录与转录，禁止入库，仅保留本地
 docs/QWK基线攻坚-对话全记录.md
 *对话全记录*.md
+
+# 参赛材料，不入库
+docs/参赛材料/
 .vercel
 supabase/.temp/
 .env*
