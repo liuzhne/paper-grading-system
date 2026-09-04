@@ -91,7 +91,8 @@ jobs:
             0019_resource_organization_scope \
             0020_rubric_visibility_scope \
             0021_private_ai_connections \
-            0022_legacy_tenant_backfill
+            0022_legacy_tenant_backfill \
+            0023_rule_scoring_review_tasks
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
@@ -120,7 +121,7 @@ jobs:
           uv run python -m backend.app.scripts.ops_backup create \
             --storage-root pgs_ops_storage \
             --destination pgs_ops_backups \
-            --migration-head 0022_legacy_tenant_backfill \
+            --migration-head 0023_rule_scoring_review_tasks \
             --revision "$GITHUB_SHA" \
             | tee pgs_ops_artifacts/backup-create.json
           package="$(find pgs_ops_backups -mindepth 1 -maxdepth 1 -type d | head -1)"
@@ -205,7 +206,7 @@ jobs:
             python -m backend.app.scripts.ops_backup create \
             --storage-root /app/storage \
             --destination /app/ops_backups \
-            --migration-head 0022_legacy_tenant_backfill \
+            --migration-head 0023_rule_scoring_review_tasks \
             --revision "$GITHUB_SHA" \
             | tee pgs_docker_artifacts/container-backup-create.json
           docker compose --env-file .env.intranet.example exec -T app sh -ec '

@@ -5,14 +5,12 @@ from email.utils import parsedate_to_datetime
 import httpx
 
 from backend.app.core.config import settings
-
-RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
-
+from backend.app.services.llm.errors import project_provider_error
 
 def is_retryable_http_error(exc):
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
-    return exc.response.status_code in RETRYABLE_STATUS_CODES
+    return project_provider_error(exc).retryable
 
 
 def retry_delay_seconds(exc, attempt):
@@ -31,10 +29,11 @@ def exponential_delay_seconds(attempt):
 
 
 def retry_reason(exc):
-    if isinstance(exc, httpx.HTTPStatusError):
-        if exc.response.status_code == 429:
-            return "rate_limited_429"
-        return "retryable_http_%s" % exc.response.status_code
+    if isinstance(exc, (httpx.HTTPStatusError, httpx.TransportError)):
+        projected = project_provider_error(exc)
+        if projected.http_status is not None:
+            return "%s_%s" % (projected.code, projected.http_status)
+        return projected.code
     return exc.__class__.__name__
 
 

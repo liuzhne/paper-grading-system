@@ -21,7 +21,11 @@ from backend.app.db.models import (
     ScoreItem,
     ScoringRun,
     Submission,
+    RuleScoringTask,
+    ManualReviewTask,
+    Organization,
 )
+from backend.app.core.config import settings
 from backend.app.services.storage.local import (
     artifact_not_found,
     artifact_ref,
@@ -402,6 +406,128 @@ def _score_items(
     return items
 
 
+def _persist_rule_task_checkpoints(*, db, run, request, outcome, criterion_id_by_code):
+    if not settings.SCORING_RULE_TASKS_ENABLED:
+        return
+    organization_id = run.organization_id
+    if not organization_id:
+        # Auth-disabled local/test runs predate tenant selection.  Bind new
+        # workflow facts to the same explicit default organization used by
+        # migration 0022 instead of creating tenant-ambiguous rows.
+        organization = db.scalar(
+            select(Organization).where(
+                Organization.name == settings.DEFAULT_ORGANIZATION_NAME
+            )
+        )
+        if organization is None:
+            organization = Organization(
+                name=settings.DEFAULT_ORGANIZATION_NAME,
+                created_by=run.owner_id,
+            )
+            db.add(organization)
+            db.flush()
+        organization_id = organization.id
+        run.organization_id = organization_id
+    grouped = _group_rule_results(request, outcome)
+    item_by_criterion = {
+        code: next(
+            item
+            for item in run.items
+            if item.criterion_id == criterion_id
+        )
+        for code, criterion_id in criterion_id_by_code.items()
+    }
+    issues_by_rule = {}
+    for issue in outcome["review_issues"]:
+        rule_code = issue.get("rule_code")
+        if rule_code:
+            issues_by_rule.setdefault(rule_code, []).append(issue)
+
+    now = _utcnow()
+    for node in request["plan"]["nodes"]:
+        if node.get("node_kind") != "atomic_rule":
+            continue
+        rule = node["atomic_rule_snapshot"]
+        criterion_code = node["criterion_code"]
+        result = next(
+            (
+                value
+                for value in grouped.get(criterion_code, [])
+                if value["rule_code"] == node["rule_code"]
+            ),
+            None,
+        )
+        decision_status = None if result is None else result["status"]
+        task_issues = issues_by_rule.get(node["rule_code"], [])
+        blocking = decision_status == "invalid" or any(
+            issue.get("severity") == "block" for issue in task_issues
+        )
+        if decision_status == "invalid":
+            status = "failed_exhausted"
+        elif decision_status == "skipped":
+            status = "skipped"
+        elif any(issue.get("severity") == "review" for issue in task_issues):
+            status = "review_required"
+        else:
+            status = "succeeded"
+        provider_issue = next(
+            (
+                issue
+                for issue in task_issues
+                if str(issue.get("code") or "").startswith(
+                    ("PROVIDER_", "TOKEN_BUDGET_")
+                )
+            ),
+            None,
+        )
+        task = RuleScoringTask(
+            organization_id=organization_id,
+            scoring_run_id=run.id,
+            score_item_id=item_by_criterion[criterion_code].id,
+            criterion_code=criterion_code,
+            rule_code=node["rule_code"],
+            judge_type=rule["judge_type"],
+            dependency_rule_codes=deepcopy(rule["depends_on_rule_codes"]),
+            status=status,
+            blocking_final_total=blocking,
+            attempt_count=1,
+            max_attempts=3 if rule["judge_type"] == "semantic" else 1,
+            provider_error=(
+                None
+                if provider_issue is None
+                else {
+                    "code": provider_issue["code"],
+                    "message": provider_issue["message"],
+                }
+            ),
+            result_snapshot=deepcopy(result),
+            started_at=now,
+            finished_at=now,
+        )
+        db.add(task)
+        db.flush()
+        if blocking and settings.MANUAL_REVIEW_QUEUE_ENABLED:
+            issue = task_issues[0] if task_issues else {
+                "code": "AUTOMATIC_RULE_INVALID",
+                "message": "automatic rule result is invalid",
+            }
+            db.add(
+                ManualReviewTask(
+                    organization_id=organization_id,
+                    scoring_run_id=run.id,
+                    rule_scoring_task_id=task.id,
+                    score_item_id=task.score_item_id,
+                    criterion_code=criterion_code,
+                    rule_code=node["rule_code"],
+                    trigger_code=issue["code"],
+                    trigger_message=issue["message"],
+                    blocking_final_total=True,
+                    status="open",
+                    priority=80,
+                )
+            )
+
+
 class CoreRunPersistence:
     """Persist one immutable Core request/outcome with DB-backed idempotency."""
 
@@ -647,6 +773,13 @@ class CoreRunPersistence:
         )
         self.db.add(run)
         self.db.flush()
+        _persist_rule_task_checkpoints(
+            db=self.db,
+            run=run,
+            request=request_mapping,
+            outcome=outcome_mapping,
+            criterion_id_by_code=criterion_id_by_code,
+        )
         record_usage_ledger(self.db, run)
         target = paper if paper is not None else stored_submission
         target.status = "pending_review" if run.need_manual_review else "scored"

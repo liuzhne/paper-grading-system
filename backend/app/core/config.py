@@ -91,6 +91,19 @@ class Settings(BaseSettings):
     # ``compare`` executes a non-authoritative Core candidate and ``core`` is
     # reserved for explicitly isolated vertical validation until M8.
     SCORING_ENGINE_MODE: Literal["legacy", "compare", "core"] = "legacy"
+    # Core provider input rollout.  V3 remains replayable and is the explicit
+    # emergency rollback; new production calls use rule-scoped V4 evidence.
+    SCORING_PROMPT_ENVELOPE_VERSION: Literal["v3", "v4"] = "v4"
+    SCORING_EVIDENCE_SELECTION_MODE: Literal["all", "scoped"] = "scoped"
+    SCORING_EVIDENCE_TOP_K: int = Field(default=12, ge=1, le=100)
+    SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=32768, ge=1024)
+    SCORING_CONTEXT_SAFETY_MARGIN_TOKENS: int = Field(default=1024, ge=0)
+    SCORING_RULE_TASKS_ENABLED: bool = True
+    MANUAL_REVIEW_QUEUE_ENABLED: bool = True
+    PROVIDER_CIRCUIT_BREAKER_ENABLED: bool = True
+    PROVIDER_GLOBAL_CONCURRENCY: int = Field(default=4, ge=1, le=32)
+    PROVIDER_CIRCUIT_FAILURE_THRESHOLD: int = Field(default=5, ge=1, le=100)
+    PROVIDER_CIRCUIT_COOLDOWN_SECONDS: int = Field(default=30, ge=1, le=3600)
     LLM_FALLBACK_TO_MOCK: bool = True
     LLM_CACHE_ENABLED: bool = True  # L0 缓存/账本（设计§7）：按输入哈希复用 LLM 评分结果
     COHERENCE_SEMANTIC_ENABLED: bool = False  # §8 语义一致性核验（研究问题↔结论等）：每篇额外一次 LLM 调用，故默认 opt-in（设计「LLM 按需」）
@@ -103,6 +116,18 @@ class Settings(BaseSettings):
     # the setting altogether.
     LLM_DEBUG_LOG_ENABLED: bool = False
     LLM_DEBUG_LOG_MAX_CHARS: int = 12000
+    LLM_OBSERVABILITY_ENABLED: bool = False
+    LLM_OBSERVABILITY_EXPORTER: Literal["none", "langfuse"] = "none"
+    LLM_OBSERVABILITY_CONTENT_MODE: Literal["metadata_only", "redacted"] = (
+        "metadata_only"
+    )
+    LLM_OBSERVABILITY_SUCCESS_SAMPLE_RATE: float = Field(default=1.0, ge=0, le=1)
+    LLM_OBSERVABILITY_MAX_CONTENT_CHARS: int = Field(default=2000, ge=256, le=20000)
+    LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    LANGFUSE_SECRET_KEY: Optional[str] = None
+    LANGFUSE_BASE_URL: Optional[str] = None
+    LANGFUSE_ENVIRONMENT: str = "development"
+    LANGFUSE_RELEASE: Optional[str] = None
     LLM_RATE_LIMIT_SLEEP_SECONDS: float = 1.0
     LLM_RETRY_BASE_DELAY_SECONDS: float = 1.0
     LLM_RETRY_MAX_DELAY_SECONDS: float = 30.0
@@ -124,6 +149,9 @@ class Settings(BaseSettings):
     OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON: bool = False
     OPENAI_COMPATIBLE_THINKING_TYPE: Optional[str] = "disabled"
     OPENAI_COMPATIBLE_TEMPERATURE: float = 0.0
+    OPENAI_COMPATIBLE_SERVICE_TIER: Optional[
+        Literal["auto", "on_demand", "flex", "performance"]
+    ] = None
     # 本地私有模型：LLM_PROVIDER=local（或 llama/ollama/vllm）即用本块，走 OpenAI 兼容协议连本地端口，零外呼。
     LOCAL_LLM_BASE_URL: str = "http://localhost:8080/v1"  # llama.cpp llama-server 默认端口；Ollama 用 11434
     LOCAL_LLM_MODEL: str = "local-model"  # llama.cpp 忽略请求名用已加载模型；Ollama/vLLM 需填实际模型名
@@ -183,6 +211,25 @@ class Settings(BaseSettings):
     def _validate_protected_deployment(self):
         """Fail closed when auth marks this process as a protected deployment."""
 
+        if self.LLM_OBSERVABILITY_ENABLED:
+            if self.LLM_OBSERVABILITY_EXPORTER != "langfuse":
+                raise ValueError(
+                    "LLM observability is enabled without the langfuse exporter"
+                )
+            missing = [
+                name
+                for name in (
+                    "LANGFUSE_PUBLIC_KEY",
+                    "LANGFUSE_SECRET_KEY",
+                    "LANGFUSE_BASE_URL",
+                )
+                if not str(getattr(self, name) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    "Langfuse observability configuration missing: %s"
+                    % ", ".join(missing)
+                )
         if not self.AUTH_ENABLED:
             return self
         issues = deployment_security_issues(self)

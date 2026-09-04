@@ -14,17 +14,24 @@ from backend.app.services.llm.debug_logging import log_llm_exception
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
 from backend.app.services.llm.debug_logging import log_llm_retry_sleep
+from backend.app.services.llm.errors import project_provider_error
+from backend.app.services.llm.errors import raise_provider_call_error
 from backend.app.services.llm.retry import exponential_delay_seconds
 from backend.app.services.llm.retry import is_retryable_http_error
 from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_reason
+from backend.app.services.llm.rate_limit import provider_request_slot
+from backend.app.services.llm_observability import observation
+from backend.app.services.scoring.retrieval.selection import (
+    preflight_v4_provider_payload,
+)
 
 
 class OpenAICompatibleChatScorer(LLMScorer):
     provider = "openai_compatible"
     model_version = "chat-completions"
 
-    def __init__(self, api_key=None, base_url=None, model_name=None, provider_name=None, client=None, timeout_seconds=None, max_tokens=None, temperature=None, response_format_json=None, thinking_type=None):
+    def __init__(self, api_key=None, base_url=None, model_name=None, provider_name=None, client=None, timeout_seconds=None, max_tokens=None, temperature=None, response_format_json=None, thinking_type=None, service_tier=None):
         self.api_key = api_key or settings.OPENAI_COMPATIBLE_API_KEY
         if not self.api_key:
             raise ValueError("OPENAI_COMPATIBLE_API_KEY is required when LLM_PROVIDER=openai_compatible")
@@ -39,6 +46,13 @@ class OpenAICompatibleChatScorer(LLMScorer):
         self.temperature = float(temperature if temperature is not None else settings.OPENAI_COMPATIBLE_TEMPERATURE)
         self.response_format_json = settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON if response_format_json is None else bool(response_format_json)
         self.thinking_type = settings.OPENAI_COMPATIBLE_THINKING_TYPE if thinking_type is None else thinking_type
+        self.service_tier = (
+            settings.OPENAI_COMPATIBLE_SERVICE_TIER
+            if service_tier is None
+            else service_tier
+        )
+        if self.service_tier not in {None, "auto", "on_demand", "flex", "performance"}:
+            raise ValueError("unsupported OpenAI-compatible service_tier")
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=self.timeout_seconds)
 
@@ -67,6 +81,8 @@ class OpenAICompatibleChatScorer(LLMScorer):
             payload["thinking"] = {"type": thinking_type}
         if self.response_format_json:
             payload["response_format"] = {"type": "json_object"}
+        if self.service_tier:
+            payload["service_tier"] = self.service_tier
 
         response = self._post_with_retry(payload)
         response.raise_for_status()
@@ -114,6 +130,8 @@ class OpenAICompatibleChatScorer(LLMScorer):
             payload["thinking"] = {"type": thinking_type}
         if provider["response_format"] == "json_object":
             payload["response_format"] = {"type": "json_object"}
+        if self.service_tier:
+            payload["service_tier"] = self.service_tier
 
         response = self._post_with_retry(payload)
         response.raise_for_status()
@@ -137,10 +155,13 @@ class OpenAICompatibleChatScorer(LLMScorer):
                 "OpenAI-compatible PromptEnvelopeV3 response_format is unsupported"
             )
         sampling = provider["sampling"]
+        system_instructions = core_envelope_instructions(envelope)
+        if envelope_payload["schema_version"] == "prompt-envelope@4":
+            preflight_v4_provider_payload(envelope, system_instructions)
         payload = {
             "model": provider["model"],
             "messages": [
-                {"role": "system", "content": core_envelope_instructions()},
+                {"role": "system", "content": system_instructions},
                 {
                     "role": "user",
                     "content": json.dumps(
@@ -161,6 +182,8 @@ class OpenAICompatibleChatScorer(LLMScorer):
             payload["thinking"] = {"type": thinking_type}
         if provider["response_format"] == "json_object":
             payload["response_format"] = {"type": "json_object"}
+        if self.service_tier:
+            payload["service_tier"] = self.service_tier
 
         response = self._post_with_retry(payload)
         response.raise_for_status()
@@ -185,6 +208,8 @@ class OpenAICompatibleChatScorer(LLMScorer):
             body["thinking"] = {"type": thinking_type}
         if self.response_format_json:
             body["response_format"] = {"type": "json_object"}
+        if self.service_tier:
+            body["service_tier"] = self.service_tier
         response = self._post_with_retry(body)
         response.raise_for_status()
         return _parse_chat_json_output(response.json())
@@ -197,31 +222,107 @@ class OpenAICompatibleChatScorer(LLMScorer):
         }
         attempts = max(1, settings.OPENAI_COMPATIBLE_MAX_RETRIES + 1)
         last_error = None
-        for attempt in range(attempts):
-            try:
-                log_llm_request(self.provider_name, url, headers, payload, attempt, attempts)
-                started = time.perf_counter()
-                response = self.client.post(url, headers=headers, json=payload)
-                elapsed_ms = (time.perf_counter() - started) * 1000
-                log_llm_response(self.provider_name, response, elapsed_ms, attempt, attempts)
-                response.raise_for_status()
-                return response
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                log_llm_exception(self.provider_name, exc, attempt, attempts)
-                if not is_retryable_http_error(exc) or attempt == attempts - 1:
-                    raise
-                delay_seconds = retry_delay_seconds(exc, attempt)
-                log_llm_retry_sleep(self.provider_name, delay_seconds, attempt, attempts, retry_reason(exc))
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last_error = exc
-                log_llm_exception(self.provider_name, exc, attempt, attempts)
-                if attempt == attempts - 1:
-                    raise
-                delay_seconds = exponential_delay_seconds(attempt)
-                log_llm_retry_sleep(self.provider_name, delay_seconds, attempt, attempts, retry_reason(exc))
-            time.sleep(delay_seconds)
-        raise last_error
+        with observation(
+            "llm_generation",
+            as_type="generation",
+            input=payload,
+            model=self.model_name,
+            model_parameters={
+                "temperature": payload.get("temperature"),
+                "top_p": payload.get("top_p"),
+                "max_tokens": payload.get("max_tokens"),
+            },
+            metadata={
+                "gen_ai.provider.name": self.provider_name,
+                "gen_ai.operation.name": "chat",
+                "server.address": self.base_url,
+                "attempt_limit": attempts,
+            },
+        ) as generation:
+            for attempt in range(attempts):
+                try:
+                    log_llm_request(
+                        self.provider_name, url, headers, payload, attempt, attempts
+                    )
+                    started = time.perf_counter()
+                    with observation(
+                        "retry_attempt",
+                        metadata={"attempt": attempt + 1, "attempt_limit": attempts},
+                    ):
+                        connection_key = (
+                            getattr(self, "_ai_connection_snapshot", None) or {}
+                        ).get("ai_connection_id") or self.base_url
+                        with provider_request_slot(
+                            provider=self.provider_name,
+                            connection_key=connection_key,
+                        ) as slot:
+                            response = self.client.post(
+                                url, headers=headers, json=payload
+                            )
+                            slot.record_response(response)
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    log_llm_response(
+                        self.provider_name,
+                        response,
+                        elapsed_ms,
+                        attempt,
+                        attempts,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    generation.update(
+                        output={
+                            "provider_response_id": data.get("id"),
+                            "status_code": getattr(response, "status_code", 200),
+                            "service_tier": data.get("service_tier"),
+                        },
+                        usage_details=_langfuse_usage(_usage_from_chat(data)),
+                        metadata={
+                            "elapsed_ms": round(elapsed_ms, 2),
+                            "attempts_used": attempt + 1,
+                        },
+                    )
+                    return response
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    projected = project_provider_error(exc)
+                    generation.update(
+                        level="ERROR",
+                        status_message=projected.code,
+                        metadata={"provider_error": projected.to_mapping()},
+                    )
+                    log_llm_exception(self.provider_name, exc, attempt, attempts)
+                    if not projected.retryable or attempt == attempts - 1:
+                        raise_provider_call_error(self.provider_name, exc)
+                    delay_seconds = retry_delay_seconds(exc, attempt)
+                    log_llm_retry_sleep(
+                        self.provider_name,
+                        delay_seconds,
+                        attempt,
+                        attempts,
+                        retry_reason(exc),
+                    )
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_error = exc
+                    projected = project_provider_error(exc)
+                    generation.update(
+                        level="ERROR",
+                        status_message=projected.code,
+                        metadata={"provider_error": projected.to_mapping()},
+                    )
+                    log_llm_exception(self.provider_name, exc, attempt, attempts)
+                    if attempt == attempts - 1:
+                        raise_provider_call_error(self.provider_name, exc)
+                    delay_seconds = exponential_delay_seconds(attempt)
+                    log_llm_retry_sleep(
+                        self.provider_name,
+                        delay_seconds,
+                        attempt,
+                        attempts,
+                        retry_reason(exc),
+                    )
+                time.sleep(delay_seconds)
+        raise_provider_call_error(self.provider_name, last_error)
 
 
 def _usage_from_chat(data):
@@ -230,6 +331,18 @@ def _usage_from_chat(data):
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
         "total_tokens": usage.get("total_tokens"),
+    }
+
+
+def _langfuse_usage(usage):
+    return {
+        key: value
+        for key, value in {
+            "input_tokens": usage.get("prompt_tokens"),
+            "output_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }.items()
+        if value is not None
     }
 
 

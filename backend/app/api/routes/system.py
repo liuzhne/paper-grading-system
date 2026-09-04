@@ -13,6 +13,7 @@ from backend.app.services.llm.factory import LOCAL_PROVIDERS
 from backend.app.services.llm.factory import provider_network_scope
 from backend.app.services.offline import network_touchpoints
 from backend.app.services.offline import offline_ready
+from backend.app.services.llm_observability import observability_status
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -36,6 +37,7 @@ def integration_status():
     static_web_ready = (web_dir / "index.html").exists() and (web_dir / "assets" / "app.js").exists()
     return {
         "llm": _llm_status(llm_provider),
+        "llm_observability": observability_status(),
         "offline_ready": offline_ready(),
         "network_touchpoints": network_touchpoints(),
         "sheets": {

@@ -7,6 +7,7 @@ import pytest
 
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.policy import build_corrected_thesis_policy
+from backend.app.services.scoring.profiles.thesis import THESIS_PROMPT_VERSION
 from backend.app.services.scoring.profiles.thesis import ThesisProfile
 from backend.app.eval.labeled_dataset import _run_identity_projection
 
@@ -49,7 +50,7 @@ def _runtime_identity():
         "engine_version": "thesis-core-adapter@1",
         "profile_key": "thesis",
         "profile_version": "thesis-legacy-profile@1",
-        "prompt_version": "2026-08-02-9",
+        "prompt_version": THESIS_PROMPT_VERSION,
         "provider": {
             "name": "mock",
             "model": "mock-criterion-scorer",
@@ -109,7 +110,7 @@ def _run():
         model_name="mock-criterion-scorer",
         model_version="v1",
         engine_version="thesis-core-adapter@1",
-        prompt_version="2026-08-02-9",
+        prompt_version=THESIS_PROMPT_VERSION,
         runtime_identity=_runtime_identity(),
         source_artifact_hash="f" * 64,
         normalized_content_hash="1" * 64,

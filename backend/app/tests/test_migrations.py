@@ -71,6 +71,8 @@ def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
             "email_verification_tokens",
             "password_reset_tokens",
             "audit_logs",
+            "rule_scoring_tasks",
+            "manual_review_tasks",
         }.issubset(tables)
         user_cols = {col["name"] for col in inspector.get_columns("users")}
         assert {"email", "email_verified_at", "platform_role"}.issubset(user_cols)
@@ -118,6 +120,28 @@ def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
             "telemetry",
             "attempt_history",
         }.issubset(item_cols)
+        rule_task_cols = {
+            col["name"] for col in inspector.get_columns("rule_scoring_tasks")
+        }
+        assert {
+            "organization_id",
+            "scoring_run_id",
+            "rule_code",
+            "status",
+            "provider_error",
+            "result_snapshot",
+        }.issubset(rule_task_cols)
+        manual_task_cols = {
+            col["name"] for col in inspector.get_columns("manual_review_tasks")
+        }
+        assert {
+            "organization_id",
+            "scoring_run_id",
+            "rule_scoring_task_id",
+            "status",
+            "resolution_evidence",
+            "version",
+        }.issubset(manual_task_cols)
         # 0005 模板格式规格
         assert "format_spec" in {col["name"] for col in inspector.get_columns("rubrics")}
         # 0008 owner_id 预留（单租户起步，为多用户铺路）
@@ -125,6 +149,77 @@ def test_alembic_migrations_apply_to_head(monkeypatch, tmp_path):
             assert "owner_id" in {col["name"] for col in inspector.get_columns(table)}
     finally:
         engine.dispose()
+
+
+def test_0023_review_task_migration_downgrades_empty_and_replays(
+    monkeypatch,
+    tmp_path,
+):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "review-tasks-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+
+    command.upgrade(config, "head")
+    command.downgrade(config, "0022_legacy_tenant_backfill")
+    engine = create_engine(url)
+    try:
+        tables = set(inspect(engine).get_table_names())
+        assert {"rule_scoring_tasks", "manual_review_tasks"}.isdisjoint(tables)
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(url)
+    try:
+        assert {"rule_scoring_tasks", "manual_review_tasks"}.issubset(
+            inspect(engine).get_table_names()
+        )
+    finally:
+        engine.dispose()
+
+
+def test_0023_review_task_migration_refuses_lossy_downgrade(
+    monkeypatch,
+    tmp_path,
+):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "review-tasks-guard.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "head")
+
+    engine = create_engine(url)
+    now = datetime(2026, 9, 4)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            connection.execute(
+                text(
+                    "INSERT INTO rule_scoring_tasks "
+                    "(id, organization_id, scoring_run_id, criterion_code, rule_code, "
+                    "judge_type, dependency_rule_codes, status, blocking_final_total, "
+                    "attempt_count, max_attempts, created_at, updated_at) VALUES "
+                    "('task-1', 'org-1', 'run-1', 'criterion-1', 'rule-1', "
+                    "'llm', '[]', 'failed_exhausted', 1, 1, 3, :now, :now)"
+                ),
+                {"now": now},
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="would lose workflow audit history"):
+        command.downgrade(config, "0022_legacy_tenant_backfill")
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "0023_rule_scoring_review_tasks"
+    finally:
+        engine.dispose()
+
 
 def test_0017_batch_scoring_job_migration_downgrades_empty_and_replays(
     monkeypatch,

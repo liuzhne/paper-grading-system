@@ -25,6 +25,10 @@ from backend.app.schemas.submission import SubmissionRead
 from backend.app.schemas.submission import V2ReviewLogRead
 from backend.app.schemas.submission import V2ScoreItemRead
 from backend.app.schemas.submission import V2ScoringRunRead
+from backend.app.schemas.submission import ManualReviewResolve
+from backend.app.schemas.submission import ManualReviewTaskRead
+from backend.app.schemas.submission import ManualReviewVersion
+from backend.app.schemas.submission import RuleScoringTaskRead
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.llm.base import LLMScoringError
 from backend.app.services.report.generic_export import build_run_export_v2
@@ -48,6 +52,14 @@ from backend.app.services.submissions.review import review_log_projection
 from backend.app.services.submissions.review import review_logs
 from backend.app.services.submissions.review import submit_generic_review
 from backend.app.services.submissions.review import update_generic_score_item
+from backend.app.services.submissions.review_tasks import claim_manual_task
+from backend.app.services.submissions.review_tasks import get_manual_task
+from backend.app.services.submissions.review_tasks import list_manual_tasks
+from backend.app.services.submissions.review_tasks import list_rule_tasks
+from backend.app.services.submissions.review_tasks import manual_task_projection
+from backend.app.services.submissions.review_tasks import release_manual_task
+from backend.app.services.submissions.review_tasks import resolve_manual_task
+from backend.app.services.submissions.review_tasks import rule_task_projection
 
 
 router = APIRouter(prefix="/v2", tags=["v2-submissions"])
@@ -267,6 +279,145 @@ def read_scoring_run(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     return scoring_run_projection(_visible_scoring_run(db, run_id, principal))
+
+
+@router.get(
+    "/scoring-runs/{run_id}/rule-tasks",
+    response_model=list[RuleScoringTaskRead],
+)
+def read_rule_tasks(
+    run_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _visible_scoring_run(db, run_id, principal)
+    return [
+        rule_task_projection(task)
+        for task in list_rule_tasks(
+            db,
+            run_id=run_id,
+            organization_id=principal.organization_id,
+        )
+    ]
+
+
+@router.get(
+    "/manual-review-tasks",
+    response_model=list[ManualReviewTaskRead],
+)
+def read_manual_review_tasks(
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    require_organization_role(principal, "org_admin", "teacher")
+    return [
+        manual_task_projection(task)
+        for task in list_manual_tasks(
+            db,
+            organization_id=principal.organization_id,
+            status=status,
+        )
+    ]
+
+
+@router.get(
+    "/manual-review-tasks/{task_id}",
+    response_model=ManualReviewTaskRead,
+)
+def read_manual_review_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        task = get_manual_task(
+            db,
+            task_id=task_id,
+            organization_id=principal.organization_id,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_http(exc)
+    return manual_task_projection(task)
+
+
+@router.post(
+    "/manual-review-tasks/{task_id}/claim",
+    response_model=ManualReviewTaskRead,
+)
+def post_claim_manual_review_task(
+    task_id: str,
+    payload: ManualReviewVersion,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
+):
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        task = claim_manual_task(
+            db,
+            task_id=task_id,
+            organization_id=principal.organization_id,
+            reviewer_id=user_id,
+            version=payload.version,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_http(exc)
+    return manual_task_projection(task)
+
+
+@router.post(
+    "/manual-review-tasks/{task_id}/release",
+    response_model=ManualReviewTaskRead,
+)
+def post_release_manual_review_task(
+    task_id: str,
+    payload: ManualReviewVersion,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
+):
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        task = release_manual_task(
+            db,
+            task_id=task_id,
+            organization_id=principal.organization_id,
+            reviewer_id=user_id,
+            version=payload.version,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_http(exc)
+    return manual_task_projection(task)
+
+
+@router.post(
+    "/manual-review-tasks/{task_id}/resolve",
+    response_model=ManualReviewTaskRead,
+)
+def post_resolve_manual_review_task(
+    task_id: str,
+    payload: ManualReviewResolve,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
+):
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        task = resolve_manual_task(
+            db,
+            task_id=task_id,
+            organization_id=principal.organization_id,
+            reviewer_id=user_id,
+            version=payload.version,
+            final_score=payload.final_score,
+            reason=payload.reason,
+            evidence=payload.evidence,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_http(exc)
+    return manual_task_projection(task)
 
 
 @router.patch(

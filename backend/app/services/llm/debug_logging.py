@@ -2,6 +2,7 @@ import json
 import logging
 
 from backend.app.core.config import settings
+from backend.app.services.llm_observability import project_content
 
 logger = logging.getLogger("paper_grading.llm")
 
@@ -30,7 +31,7 @@ def log_llm_request(provider, url, headers, payload, attempt, attempts):
             "method": "POST",
             "url": url,
             "headers": _sanitize(headers),
-            "payload": _sanitize(payload),
+            "payload": project_content(_sanitize(payload)),
         },
     )
 
@@ -47,7 +48,7 @@ def log_llm_response(provider, response, elapsed_ms, attempt, attempts):
             "status_code": getattr(response, "status_code", None),
             "elapsed_ms": round(elapsed_ms, 2),
             "headers": _sanitize(dict(getattr(response, "headers", {}) or {})),
-            "body": _response_text(response),
+            "body": project_content(_response_text(response)),
         },
     )
 

@@ -6,7 +6,7 @@
       "execution_plan_hash": "7c06d04261705c7eec8a47022159a0c99c2ee4b42b4c46cee3628076cc009d23",
       "policy_hash": "961fe94278a5ad785f39fff960ce26f9a91b61abe3c5027a8e26fe5bb9861631",
       "rubric_snapshot_hash": "6c549d0a27342aae5f0e708910a44a5b173250a6408e9e8a742394dbbf80c901",
-      "runtime_identity_sha256": "ad478d38da3c5256cd7be3a341d09662c544deeba790bda5acbe6581698c6e53"
+      "runtime_identity_sha256": "9ccb5dab7b056ae697603177e7589db9de1222753942be208e49258d8c5e910a"
     },
     "node_kinds": [
       "atomic_rule",
@@ -39,7 +39,7 @@
     "plan_schema_version": "rule-execution-plan@3",
     "profile_key": "thesis",
     "profile_version": "thesis-legacy-profile@1",
-    "prompt_version": "2026-08-02-9"
+    "prompt_version": "2026-09-03-10"
   },
   "compatibility": {
     "core_persisted_item_order": [

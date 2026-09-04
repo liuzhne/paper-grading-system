@@ -25,6 +25,7 @@ MIGRATION_SEQUENCE = (
     "0020_rubric_visibility_scope",
     "0021_private_ai_connections",
     "0022_legacy_tenant_backfill",
+    "0023_rule_scoring_review_tasks",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -56,6 +57,8 @@ def verify_postgres(session):
         "organization_members",
         "ai_connections",
         "ai_usage_ledger",
+        "rule_scoring_tasks",
+        "manual_review_tasks",
     }
     missing = sorted(required_tables - tables)
     if missing:
@@ -96,6 +99,30 @@ def verify_postgres(session):
         "ck_ai_connections_status",
     }.issubset(connection_checks):
         raise RuntimeError("AI connection security constraints are incomplete")
+    runtime_role_exists = bool(
+        session.scalar(
+            text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgs_app')")
+        )
+    )
+    if runtime_role_exists:
+        for table in ("rule_scoring_tasks", "manual_review_tasks"):
+            access = session.execute(
+                text(
+                    "SELECT c.relrowsecurity, "
+                    "has_table_privilege('pgs_app', :table, "
+                    "'SELECT,INSERT,UPDATE,DELETE'), "
+                    "EXISTS (SELECT 1 FROM pg_policies p "
+                    "WHERE p.schemaname = 'public' AND p.tablename = :table "
+                    "AND p.policyname = 'pgs_app_dml') "
+                    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND c.relname = :table"
+                ),
+                {"table": table},
+            ).one_or_none()
+            if access != (True, True, True):
+                raise RuntimeError(
+                    "runtime role access/RLS is incomplete for %s" % table
+                )
     ordered_rows = session.execute(
         text(
             "SELECT id, created_at FROM batch_scoring_items "
