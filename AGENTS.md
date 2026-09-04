@@ -10,7 +10,7 @@
 - CI/生产发布：`.github/workflows/ci.yml` 包含锁文件全量测试、Postgres 16 的逐版本迁移/约束/排序、拒绝 lossy downgrade、备份恢复演练和 Docker 冒烟；推送 `main` 且全部门禁通过后，才由 `deploy-vercel-production` 使用 GitHub `production` Environment 部署 Vercel。Vercel Git 直部署已关闭；当前 CLI 因上游 prebuilt 回归固定为 `58.4.0`。本机 SQLite 通过不能替代真实 CI artifact。
 
 ## 当前发布边界
-- Alembic head：`0022_legacy_tenant_backfill`（将旧单租户资源安全回填至默认组织；有真实归属数据时降级 fail-closed）。
+- Alembic head：`0023_rule_scoring_review_tasks`（0022 将旧单租户资源安全回填至默认组织；0023 持久化规则检查点与人工复核任务；两者有真实状态数据时降级 fail-closed）。
 - v1 `score_paper()` 与 v2 `score_generic_submission()` 并存；正式 RubricVersion 走 AtomicRule Core，未版本化标准只能走显式 compatibility。
 - `SCORING_ENGINE_MODE` 当前默认 `legacy`；它只控制未版本化兼容路径。真实 `GATE-03` 达到 `gating_eligible=true` 且取得维护者发布批准前，禁止改为默认 Core。
 
@@ -44,8 +44,15 @@
 确定性优先(代码做判定题、LLM 做判断题)、原子评分项、每个扣分/选档强制带证据(抗幻觉)、结构化优先、无状态可缓存可复现、人在回路。**扣哪项/扣几分来自用户授权的模板/Excel 编译，不写死。**
 
 ## 约定
-- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0022_legacy_tenant_backfill`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
+- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0023_rule_scoring_review_tasks`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
 - 改 prompt/输入构造要 bump `cache/llm_cache.PROMPT_VERSION`。
 - 改评分逻辑后用 §15 QWK 留出集重新锚定基线。
 - 生产变更需完成 `docs/上线清单.md`；备份恢复必须先 verify，restore 只允许显式确认的数据库与空 storage 目标。
 - 进度与待办见 `代码改造计划.md §7`。
+
+## 修复方案与三文档同步（强制）
+- 每次提出或落地 bug、故障、回归、安全问题、数据问题的修复方案，都必须在同一变更中同步检查并更新根目录的 `ARCHITECTURE.md`、`DECISIONS.md`、`RUNBOOK.md`；三者缺一时，修复不算完成。
+- `ARCHITECTURE.md` 写修复后的事实：受影响模块边界、核心调用链、数据流、不变量或外部依赖。即使边界未改变，也要在维护记录中说明本次核对范围和“不变”的结论。
+- `DECISIONS.md` 写决策：问题背景、所选方案、为什么这样选、放弃的方案、代价与后续约束；不得把临时猜测写成已接受决策。
+- `RUNBOOK.md` 写可执行操作：复现/症状、诊断、修复后的验证、发布与回滚步骤；命令必须与当前仓库入口一致且不得包含真实 Secret、论文原文或学生 PII。
+- 文档描述必须以当前代码、迁移 head、Accepted ADR 和 CI 配置为依据。若三文档与实现冲突，先修正文档再交付，并在三份文档各自的“维护记录”追加同一日期/主题的条目。

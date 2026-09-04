@@ -141,6 +141,63 @@ class GenericReviewSubmit(BaseModel):
     reason: str = Field(min_length=1)
 
 
+class RuleScoringTaskRead(BaseModel):
+    id: str
+    organization_id: str
+    scoring_run_id: str
+    score_item_id: str | None = None
+    criterion_code: str
+    rule_code: str
+    judge_type: str
+    dependency_rule_codes: list[str]
+    status: str
+    blocking_final_total: bool
+    attempt_count: int
+    max_attempts: int
+    provider_error: dict | None = None
+    result_snapshot: dict | None = None
+    next_attempt_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ManualReviewTaskRead(BaseModel):
+    id: str
+    organization_id: str
+    scoring_run_id: str
+    rule_scoring_task_id: str | None = None
+    score_item_id: str | None = None
+    criterion_code: str
+    rule_code: str | None = None
+    trigger_code: str
+    trigger_message: str
+    blocking_final_total: bool
+    status: str
+    priority: int
+    assigned_reviewer_id: str | None = None
+    claimed_at: datetime | None = None
+    due_at: datetime | None = None
+    resolved_at: datetime | None = None
+    resolution_type: str | None = None
+    resolution_reason: str | None = None
+    resolution_evidence: list | None = None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ManualReviewVersion(BaseModel):
+    version: int = Field(ge=1)
+
+
+class ManualReviewResolve(ManualReviewVersion):
+    final_score: float = Field(ge=0)
+    reason: str = Field(min_length=1)
+    evidence: list[dict] = Field(min_length=1)
+
+
 class V2ReviewLogRead(BaseModel):
     id: str
     scoring_run_id: str
@@ -160,6 +217,10 @@ __all__ = [
     "EvaluationBatchRead",
     "GenericReviewSubmit",
     "GenericScoreItemReview",
+    "ManualReviewResolve",
+    "ManualReviewTaskRead",
+    "ManualReviewVersion",
+    "RuleScoringTaskRead",
     "ScoreSubmissionRequest",
     "SubmissionRead",
     "V2ReviewLogRead",

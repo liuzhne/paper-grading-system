@@ -51,6 +51,7 @@ from backend.app.services.retrieval.keyword import retrieve_for_criterion_in_chu
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import RuleExecutionPlan, ScoringRequest
 from backend.app.services.scoring.core.engine import score_submission
+from backend.app.services.scoring.observed import score_submission_observed
 from backend.app.services.scoring.core.identity import hash_source_artifact
 from backend.app.services.scoring.core.identity import (
     scoring_request_idempotency_projection,
@@ -547,11 +548,13 @@ def _score_paper_core(
         scorer,
         rescore_generation=rescore_generation,
     )
-    outcome = score_submission(
+    outcome = score_submission_observed(
         request=request,
         checker_registry=registry,
         llm_runtime=profile.build_llm_runtime(scorer),
         profile=profile,
+        organization_id=getattr(paper, "organization_id", None),
+        score_fn=score_submission,
     )
     snapshot_store = LocalDocumentSnapshotStore()
     document_snapshot_ref = snapshot_store.put(request.document)
@@ -608,11 +611,13 @@ def _record_core_comparison(*, db, paper_id, scorer, legacy_run):
     ) = _core_request_context(
         db, paper_id, scorer
     )
-    outcome = score_submission(
+    outcome = score_submission_observed(
         request=request,
         checker_registry=registry,
         llm_runtime=profile.build_llm_runtime(scorer),
         profile=profile,
+        organization_id=getattr(_paper, "organization_id", None),
+        score_fn=score_submission,
     )
     outcome_mapping = outcome.to_mapping()
     get_comparison_artifact_sink().record(

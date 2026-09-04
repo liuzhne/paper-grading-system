@@ -15,7 +15,7 @@ def test_operator_guides_share_current_runtime_migration_and_profile_facts():
     for path in ("README.md", "AGENTS.md", "CLAUDE.md"):
         text = _read(path)
         assert "Python 3.10+" in text
-        assert "0022_legacy_tenant_backfill" in text
+        assert "0023_rule_scoring_review_tasks" in text
         assert "technical_proposal / technical-proposal-profile@1" in text
         assert "SCORING_ENGINE_MODE" in text
         assert "默认" in text and "legacy" in text
@@ -42,7 +42,7 @@ def test_web_cli_matrix_and_deployment_docs_describe_m8_boundaries():
     assert "core-cutover-audit" in matrix
     assert "Rubric 严格审核/发布" in matrix
     assert "静态 Web 生命周期闭环" in matrix
-    assert "0022_legacy_tenant_backfill" in deployment
+    assert "0023_rule_scoring_review_tasks" in deployment
     assert "batch_scoring_jobs" in deployment
     assert "经批准的观察策略" in deployment
     assert "GATE-03" in deployment

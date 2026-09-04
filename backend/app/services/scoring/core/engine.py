@@ -14,6 +14,7 @@ from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3, ScoringRequest
 from backend.app.services.scoring.core.policy import aggregate_scores, compile_scoring_policy
 from backend.app.services.scoring.core.results import ScoringOutcome
+from backend.app.services.scoring.core.failures import project_rule_execution_failure
 from backend.app.services.scoring.core.legacy_compatibility import (
     execute_legacy_compatibility_plan,
 )
@@ -22,7 +23,7 @@ from backend.app.services.scoring.core.rule_executor import execute_rule_plan
 
 # This value is deliberately mirrored by services.cache.llm_cache.  Importing
 # that adapter from Core would violate the M2 dependency boundary.
-PROMPT_VERSION = "2026-08-02-9"
+PROMPT_VERSION = "2026-09-03-1"
 
 
 def _plain(value):
@@ -164,7 +165,7 @@ def _prompt_envelope(
         raise TypeError("profile.prompt_version must be a non-empty string")
     if runtime_prompt_version != prompt_version:
         raise ValueError("profile prompt version does not match runtime identity")
-    return PromptEnvelopeV3.from_mapping(
+    envelope = PromptEnvelopeV3.from_mapping(
         {
             "schema_version": "prompt-envelope@3",
             "prompt_version": prompt_version,
@@ -192,6 +193,10 @@ def _prompt_envelope(
             "profile_prompt_extensions": _plain(extensions),
         }
     )
+    build_provider_envelope = getattr(profile, "build_provider_envelope", None)
+    if callable(build_provider_envelope):
+        return build_provider_envelope(base_envelope=envelope)
+    return envelope
 
 
 def _blocked_outcome(
@@ -369,8 +374,31 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
         elif rule["judge_type"] == "semantic":
             if rule["direction"] != "band":
                 raise ValueError("M3 supports only semantic band selection")
-            envelope = _prompt_envelope(request=value, node=node, profile=profile)
-            response = llm_runtime.score(envelope=envelope)
+            try:
+                envelope = _prompt_envelope(request=value, node=node, profile=profile)
+                response = llm_runtime.score(envelope=envelope)
+            except Exception as exc:
+                failure_code, failure_message = project_rule_execution_failure(exc)
+                decisions.append(
+                    {
+                        "rule_code": rule_code,
+                        "status": "invalid",
+                        "evidence_refs": [],
+                    }
+                )
+                criterion_states.append(
+                    {
+                        "criterion_code": criterion_code,
+                        "status": "invalid",
+                        "auto_score": None,
+                        "final_score": None,
+                        "max_score": criterion["max_score"],
+                    }
+                )
+                issues.append(
+                    _issue(failure_code, criterion_code, rule_code, failure_message)
+                )
+                continue
             if not isinstance(response, Mapping):
                 response = {}
 
@@ -412,15 +440,7 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
                 issues.append(
                     _issue(failure_code, criterion_code, rule_code, failure_message)
                 )
-                # Preserve already calculated criteria as audit facts, but a
-                # required invalid semantic result blocks all aggregate fields.
-                return _blocked_outcome(
-                    request=value,
-                    criterion_states=criterion_states,
-                    decisions=decisions,
-                    contributions=contributions,
-                    issues=issues,
-                )
+                continue
 
             score = Decimal(level["points"])
             decisions.append(
@@ -458,6 +478,15 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
                 "final_score": _decimal_text(score),
                 "auto_score_status": "calculated",
             }
+        )
+
+    if any(item["status"] in {"invalid", "blocked"} for item in criterion_states):
+        return _blocked_outcome(
+            request=value,
+            criterion_states=criterion_states,
+            decisions=decisions,
+            contributions=contributions,
+            issues=issues,
         )
 
     policy = compile_scoring_policy(

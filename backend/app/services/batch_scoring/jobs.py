@@ -30,6 +30,7 @@ from backend.app.db.models import Paper
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import utcnow
+from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.scoring.core.canonical import canonical_sha256
 
 
@@ -532,6 +533,13 @@ def _worker(session_factory, score_item, *, paper_id, job_id):
 
 
 def _classify_failure(exc):
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ProviderCallError):
+            return current.error.code, "llm"
+        current = current.__cause__ or current.__context__
     text = str(exc).lower()
     name = type(exc).__name__.lower()
     if "429" in text or "rate limit" in text or "ratelimit" in name:

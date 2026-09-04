@@ -2135,6 +2135,213 @@ def _normalize_prompt_envelope_v3(value):
     }
 
 
+def _normalize_prompt_envelope_v4(value):
+    """Normalize a rule-scoped, token-budgeted provider/cache payload.
+
+    V4 deliberately reuses V3's frozen rule, rubric, submission and evidence
+    contracts.  Its additional identities prove how the smaller authorized
+    evidence set was selected and that the provider request was preflighted.
+    """
+
+    extra_fields = {
+        "evidence_selection_identity",
+        "token_budget_identity",
+        "coverage_mode",
+    }
+    v3_fields = {
+        "schema_version",
+        "prompt_version",
+        "runtime_identity",
+        "rubric_identity",
+        "rubric_snapshot_hash",
+        "plan_hash",
+        "policy_hash",
+        "criterion_snapshot",
+        "atomic_rule_snapshot",
+        "submission",
+        "evidence_units",
+        "profile_prompt_extensions",
+    }
+    _assert_closed_mapping(
+        value,
+        fields=v3_fields | extra_fields,
+        path="PromptEnvelopeV4",
+    )
+    if value["schema_version"] != "prompt-envelope@4":
+        raise ValueError("unsupported PromptEnvelope schema_version")
+
+    base_payload = dict(value)
+    for field in extra_fields:
+        base_payload.pop(field)
+    base_payload["schema_version"] = "prompt-envelope@3"
+    normalized = _normalize_prompt_envelope_v3(base_payload)
+    normalized["schema_version"] = "prompt-envelope@4"
+
+    coverage_mode = _assert_text(
+        value["coverage_mode"], "PromptEnvelopeV4.coverage_mode"
+    )
+    if coverage_mode not in {"top_k", "exhaustive", "hierarchical"}:
+        raise ValueError("PromptEnvelopeV4 coverage_mode is unsupported")
+
+    selection = value["evidence_selection_identity"]
+    selection_fields = {
+        "schema_version",
+        "selector_version",
+        "criterion_code",
+        "rule_code",
+        "query_hash",
+        "selected_evidence_unit_ids",
+        "section_coverage",
+        "selection_hash",
+    }
+    _assert_closed_mapping(
+        selection,
+        fields=selection_fields,
+        path="PromptEnvelopeV4.evidence_selection_identity",
+    )
+    if selection["schema_version"] != "evidence-selection-snapshot@1":
+        raise ValueError("unsupported EvidenceSelectionSnapshot schema_version")
+    raw_selected_ids = selection["selected_evidence_unit_ids"]
+    if not isinstance(raw_selected_ids, (list, tuple)) or not raw_selected_ids:
+        raise ValueError("PromptEnvelopeV4 selected evidence must be a non-empty array")
+    selected_ids = [
+        _assert_sha256(
+            item,
+            "PromptEnvelopeV4.evidence_selection_identity.selected_evidence_unit_ids[%s]"
+            % index,
+        )
+        for index, item in enumerate(raw_selected_ids)
+    ]
+    if len(selected_ids) != len(set(selected_ids)):
+        raise ValueError("PromptEnvelopeV4 selected evidence contains duplicates")
+    evidence_ids = [item["evidence_unit_id"] for item in normalized["evidence_units"]]
+    if selected_ids != evidence_ids:
+        raise ValueError("PromptEnvelopeV4 selected evidence does not match payload")
+    section_coverage = _assert_json_value(
+        selection["section_coverage"],
+        "PromptEnvelopeV4.evidence_selection_identity.section_coverage",
+    )
+    if not isinstance(section_coverage, list):
+        raise TypeError("PromptEnvelopeV4 section coverage must be an array")
+    selection_projection = {
+        "schema_version": "evidence-selection-snapshot@1",
+        "selector_version": _assert_text(
+            selection["selector_version"],
+            "PromptEnvelopeV4.evidence_selection_identity.selector_version",
+        ),
+        "criterion_code": _assert_text(
+            selection["criterion_code"],
+            "PromptEnvelopeV4.evidence_selection_identity.criterion_code",
+        ),
+        "rule_code": _assert_text(
+            selection["rule_code"],
+            "PromptEnvelopeV4.evidence_selection_identity.rule_code",
+        ),
+        "query_hash": _assert_sha256(
+            selection["query_hash"],
+            "PromptEnvelopeV4.evidence_selection_identity.query_hash",
+        ),
+        "selected_evidence_unit_ids": selected_ids,
+        "section_coverage": section_coverage,
+    }
+    if selection_projection["criterion_code"] != normalized["criterion_snapshot"]["criterion_code"]:
+        raise ValueError("PromptEnvelopeV4 selection criterion identity mismatch")
+    if selection_projection["rule_code"] != normalized["atomic_rule_snapshot"]["rule_code"]:
+        raise ValueError("PromptEnvelopeV4 selection rule identity mismatch")
+    selection_hash = _assert_sha256(
+        selection["selection_hash"],
+        "PromptEnvelopeV4.evidence_selection_identity.selection_hash",
+    )
+    if selection_hash != canonical_sha256(
+        {**selection_projection, "coverage_mode": coverage_mode}
+    ):
+        raise ValueError("PromptEnvelopeV4 selection hash mismatch")
+    normalized["evidence_selection_identity"] = {
+        **selection_projection,
+        "selection_hash": selection_hash,
+    }
+
+    budget = value["token_budget_identity"]
+    budget_fields = {
+        "schema_version",
+        "policy_version",
+        "estimator_version",
+        "context_window_tokens",
+        "reserved_output_tokens",
+        "safety_margin_tokens",
+        "estimated_input_tokens",
+        "total_reserved_tokens",
+        "within_budget",
+        "policy_hash",
+    }
+    _assert_closed_mapping(
+        budget,
+        fields=budget_fields,
+        path="PromptEnvelopeV4.token_budget_identity",
+    )
+    if budget["schema_version"] != "token-budget@1":
+        raise ValueError("unsupported token budget schema_version")
+    budget_projection = {
+        "schema_version": "token-budget@1",
+        "policy_version": _assert_text(
+            budget["policy_version"], "PromptEnvelopeV4.token_budget_identity.policy_version"
+        ),
+        "estimator_version": _assert_text(
+            budget["estimator_version"], "PromptEnvelopeV4.token_budget_identity.estimator_version"
+        ),
+        "context_window_tokens": _assert_integer(
+            budget["context_window_tokens"],
+            "PromptEnvelopeV4.token_budget_identity.context_window_tokens",
+            minimum=1,
+        ),
+        "reserved_output_tokens": _assert_integer(
+            budget["reserved_output_tokens"],
+            "PromptEnvelopeV4.token_budget_identity.reserved_output_tokens",
+            minimum=1,
+        ),
+        "safety_margin_tokens": _assert_integer(
+            budget["safety_margin_tokens"],
+            "PromptEnvelopeV4.token_budget_identity.safety_margin_tokens",
+            minimum=0,
+        ),
+        "estimated_input_tokens": _assert_integer(
+            budget["estimated_input_tokens"],
+            "PromptEnvelopeV4.token_budget_identity.estimated_input_tokens",
+            minimum=1,
+        ),
+        "total_reserved_tokens": _assert_integer(
+            budget["total_reserved_tokens"],
+            "PromptEnvelopeV4.token_budget_identity.total_reserved_tokens",
+            minimum=1,
+        ),
+        "within_budget": _assert_boolean(
+            budget["within_budget"],
+            "PromptEnvelopeV4.token_budget_identity.within_budget",
+        ),
+    }
+    expected_total = (
+        budget_projection["estimated_input_tokens"]
+        + budget_projection["reserved_output_tokens"]
+        + budget_projection["safety_margin_tokens"]
+    )
+    if budget_projection["total_reserved_tokens"] != expected_total:
+        raise ValueError("PromptEnvelopeV4 token budget total mismatch")
+    if not budget_projection["within_budget"] or expected_total > budget_projection["context_window_tokens"]:
+        raise ValueError("PromptEnvelopeV4 token budget is exceeded")
+    policy_hash = _assert_sha256(
+        budget["policy_hash"],
+        "PromptEnvelopeV4.token_budget_identity.policy_hash",
+    )
+    if policy_hash != canonical_sha256(budget_projection):
+        raise ValueError("PromptEnvelopeV4 token policy hash mismatch")
+    normalized["token_budget_identity"] = {
+        **budget_projection,
+        "policy_hash": policy_hash,
+    }
+    normalized["coverage_mode"] = coverage_mode
+    return normalized
+
+
 class _ImmutableContract:
     """Closed, recursively immutable mapping contract shared by Core DTOs."""
 
@@ -2252,6 +2459,13 @@ class PromptEnvelopeV3(_ImmutableContract):
     _normalizer = staticmethod(_normalize_prompt_envelope_v3)
 
 
+class PromptEnvelopeV4(_ImmutableContract):
+    """Closed rule-scoped provider payload with selection/budget identity."""
+
+    __slots__ = ()
+    _normalizer = staticmethod(_normalize_prompt_envelope_v4)
+
+
 __all__ = [
     "AtomicRuleSnapshot",
     "CompositeCriterionNode",
@@ -2262,6 +2476,7 @@ __all__ = [
     "PromptEnvelopeV1",
     "PromptEnvelopeV2",
     "PromptEnvelopeV3",
+    "PromptEnvelopeV4",
     "RuleExecutionPlan",
     "ScoringRequest",
     "SemanticRuleResponseV2",

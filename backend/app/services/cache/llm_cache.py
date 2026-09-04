@@ -25,9 +25,10 @@ from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV1
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV2
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
+from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-08-31-1"  # Core V3 real-provider boundary + BYOK partition identity
+PROMPT_VERSION = "2026-09-03-1"  # Core V4 scoped evidence + token-budget identity
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ class CacheRetentionPolicy:
 class CacheEnvelopeEntry:
     key: str
     original_envelope_hash: str
-    original_envelope: Optional[PromptEnvelopeV1 | PromptEnvelopeV3]
+    original_envelope: Optional[PromptEnvelopeV1 | PromptEnvelopeV3 | PromptEnvelopeV4]
     redacted_audit_projection: dict
     response: object
     access_scope: str
@@ -108,7 +109,7 @@ def build_request(scorer, criterion, candidates, structure_checks, rubric_versio
 
 
 def key_of(request):
-    if isinstance(request, (PromptEnvelopeV1, PromptEnvelopeV3)):
+    if isinstance(request, (PromptEnvelopeV1, PromptEnvelopeV3, PromptEnvelopeV4)):
         return canonical_sha256(request.to_mapping())
     blob = json.dumps(request, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -161,10 +162,12 @@ def _parse_timestamp(value):
 
 
 def _coerce_prompt_envelope(value):
-    if isinstance(value, (PromptEnvelopeV1, PromptEnvelopeV3)):
+    if isinstance(value, (PromptEnvelopeV1, PromptEnvelopeV3, PromptEnvelopeV4)):
         return value
     if isinstance(value, Mapping):
         schema_version = value.get("schema_version")
+        if schema_version == "prompt-envelope@4":
+            return PromptEnvelopeV4.from_mapping(value)
         if schema_version == "prompt-envelope@3":
             return PromptEnvelopeV3.from_mapping(value)
         if schema_version == "prompt-envelope@2":
@@ -184,7 +187,7 @@ def redact_prompt_envelope(envelope):
 
     envelope = _coerce_prompt_envelope(envelope)
     projection = envelope.to_mapping()
-    if projection["schema_version"] == "prompt-envelope@3":
+    if projection["schema_version"] in {"prompt-envelope@3", "prompt-envelope@4"}:
         for unit in projection["evidence_units"]:
             unit["normalized_text"] = "[REDACTED]"
     else:

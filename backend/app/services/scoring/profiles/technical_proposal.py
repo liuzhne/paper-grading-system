@@ -27,7 +27,7 @@ from backend.app.services.scoring.core.identity import hash_normalized_content
 
 PROFILE_KEY = "technical_proposal"
 TECHNICAL_PROPOSAL_PROFILE_VERSION = "technical-proposal-profile@1"
-TECHNICAL_PROPOSAL_PROMPT_VERSION = "technical-proposal-prompt@1"
+TECHNICAL_PROPOSAL_PROMPT_VERSION = "technical-proposal-prompt@2"
 CHECKER_VERSION = "1.0.0"
 TECHNICAL_PROPOSAL_CHECKER_KEYS = MappingProxyType(
     {
@@ -530,6 +530,32 @@ class TechnicalProposalLLMRuntime:
         self.scorer = scorer
 
     def score(self, *, envelope):
+        from backend.app.services.llm_observability import observation
+
+        value = envelope.to_mapping()
+        rule = value["atomic_rule_snapshot"]
+        with observation(
+            "rule_scoring_task",
+            as_type="chain",
+            metadata={
+                "criterion_code": rule.get("criterion_code"),
+                "atomic_rule_code": rule["rule_code"],
+                "prompt_schema_version": value.get("schema_version"),
+                "document_snapshot_hash": (value.get("submission") or {}).get(
+                    "document_snapshot_hash"
+                ),
+                "coverage_mode": value.get("coverage_mode"),
+                "evidence_selection_hash": (
+                    value.get("evidence_selection_identity") or {}
+                ).get("selection_hash"),
+                "token_policy_hash": (
+                    value.get("token_budget_identity") or {}
+                ).get("policy_hash"),
+            },
+        ):
+            return self._score(envelope=envelope, value=value, rule=rule)
+
+    def _score(self, *, envelope, value, rule):
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
             return explicit(envelope=envelope)
@@ -537,8 +563,6 @@ class TechnicalProposalLLMRuntime:
             raise LLMScoringError(
                 "selected provider does not implement PromptEnvelopeV3 Core scoring"
             )
-        value = envelope.to_mapping()
-        rule = value["atomic_rule_snapshot"]
         criterion = value["criterion_snapshot"]
         extensions = value["profile_prompt_extensions"]["profile_extensions"]
         if rule["direction"] == "band":
@@ -670,6 +694,49 @@ class TechnicalProposalProfile:
             ),
         }
 
+    def build_provider_envelope(self, *, base_envelope):
+        from backend.app.core.config import settings
+        from backend.app.services.llm_observability import observation
+        from backend.app.services.scoring.retrieval.selection import build_v4_envelope
+
+        if settings.SCORING_PROMPT_ENVELOPE_VERSION == "v3":
+            return base_envelope
+        value = base_envelope.to_mapping()
+        top_k = (
+            len(value["evidence_units"])
+            if settings.SCORING_EVIDENCE_SELECTION_MODE == "all"
+            else settings.SCORING_EVIDENCE_TOP_K
+        )
+        with observation(
+            "evidence_retrieval",
+            metadata={
+                "criterion_code": value["criterion_snapshot"]["criterion_code"],
+                "rule_code": value["atomic_rule_snapshot"]["rule_code"],
+                "candidate_count": len(value["evidence_units"]),
+            },
+        ) as retrieval:
+            envelope = build_v4_envelope(
+                base_envelope,
+                context_window_tokens=settings.SCORING_CONTEXT_WINDOW_TOKENS,
+                reserved_output_tokens=value["runtime_identity"]["provider"]["sampling"]["max_tokens"],
+                safety_margin_tokens=settings.SCORING_CONTEXT_SAFETY_MARGIN_TOKENS,
+                top_k=top_k,
+            )
+            selected = envelope.to_mapping()["evidence_selection_identity"]
+            retrieval.update(
+                output={
+                    "selected_evidence_unit_ids": selected[
+                        "selected_evidence_unit_ids"
+                    ],
+                    "selection_hash": selected["selection_hash"],
+                }
+            )
+        with observation("token_preflight") as preflight:
+            preflight.update(
+                output=envelope.to_mapping()["token_budget_identity"]
+            )
+        return envelope
+
     def build_export_extensions(self, *, submission, document_snapshot, run):
         del run
         metadata = self.select_prompt_metadata(
@@ -734,6 +801,9 @@ class TechnicalProposalProfile:
         if provider_name != "mock":
             artifact_projection["provider_prompt_version"] = (
                 CORE_PROVIDER_PROMPT_VERSION
+            )
+            artifact_projection["service_tier"] = getattr(
+                scorer, "service_tier", None
             )
         artifact_hash = canonical_sha256(artifact_projection)
         return {

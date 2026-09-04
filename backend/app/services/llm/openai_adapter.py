@@ -15,10 +15,17 @@ from backend.app.services.llm.debug_logging import log_llm_exception
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
 from backend.app.services.llm.debug_logging import log_llm_retry_sleep
+from backend.app.services.llm.errors import project_provider_error
+from backend.app.services.llm.errors import raise_provider_call_error
 from backend.app.services.llm.retry import exponential_delay_seconds
 from backend.app.services.llm.retry import is_retryable_http_error
 from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_reason
+from backend.app.services.llm.rate_limit import provider_request_slot
+from backend.app.services.llm_observability import observation
+from backend.app.services.scoring.retrieval.selection import (
+    preflight_v4_provider_payload,
+)
 
 
 class OpenAIResponsesScorer(LLMScorer):
@@ -135,11 +142,14 @@ class OpenAIResponsesScorer(LLMScorer):
         sampling = provider["sampling"]
         if sampling["seed"] is not None:
             raise ValueError("OpenAI Responses PromptEnvelopeV3 seed is not supported")
+        system_instructions = core_envelope_instructions(envelope)
+        if envelope_payload["schema_version"] == "prompt-envelope@4":
+            preflight_v4_provider_payload(envelope, system_instructions)
         payload = {
             "model": provider["model"],
             "temperature": float(sampling["temperature"]),
             "top_p": float(sampling["top_p"]),
-            "instructions": core_envelope_instructions(),
+            "instructions": system_instructions,
             "input": json.dumps(
                 envelope_payload,
                 ensure_ascii=False,
@@ -183,31 +193,102 @@ class OpenAIResponsesScorer(LLMScorer):
         }
         attempts = max(1, settings.OPENAI_MAX_RETRIES + 1)
         last_error = None
-        for attempt in range(attempts):
-            try:
-                log_llm_request(self.provider, url, headers, payload, attempt, attempts)
-                started = time.perf_counter()
-                response = self.client.post(url, headers=headers, json=payload)
-                elapsed_ms = (time.perf_counter() - started) * 1000
-                log_llm_response(self.provider, response, elapsed_ms, attempt, attempts)
-                response.raise_for_status()
-                return response
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                log_llm_exception(self.provider, exc, attempt, attempts)
-                if not is_retryable_http_error(exc) or attempt == attempts - 1:
-                    raise
-                delay_seconds = retry_delay_seconds(exc, attempt)
-                log_llm_retry_sleep(self.provider, delay_seconds, attempt, attempts, retry_reason(exc))
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last_error = exc
-                log_llm_exception(self.provider, exc, attempt, attempts)
-                if attempt == attempts - 1:
-                    raise
-                delay_seconds = exponential_delay_seconds(attempt)
-                log_llm_retry_sleep(self.provider, delay_seconds, attempt, attempts, retry_reason(exc))
-            time.sleep(delay_seconds)
-        raise last_error
+        with observation(
+            "llm_generation",
+            as_type="generation",
+            input=payload,
+            model=self.model_name,
+            model_parameters={
+                "temperature": payload.get("temperature"),
+                "top_p": payload.get("top_p"),
+                "max_output_tokens": payload.get("max_output_tokens"),
+            },
+            metadata={
+                "gen_ai.provider.name": self.provider,
+                "gen_ai.operation.name": "responses",
+                "server.address": self.base_url,
+                "attempt_limit": attempts,
+            },
+        ) as generation:
+            for attempt in range(attempts):
+                try:
+                    log_llm_request(
+                        self.provider, url, headers, payload, attempt, attempts
+                    )
+                    started = time.perf_counter()
+                    with observation(
+                        "retry_attempt",
+                        metadata={"attempt": attempt + 1, "attempt_limit": attempts},
+                    ):
+                        connection_key = (
+                            getattr(self, "_ai_connection_snapshot", None) or {}
+                        ).get("ai_connection_id") or self.base_url
+                        with provider_request_slot(
+                            provider=self.provider,
+                            connection_key=connection_key,
+                        ) as slot:
+                            response = self.client.post(
+                                url, headers=headers, json=payload
+                            )
+                            slot.record_response(response)
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    log_llm_response(
+                        self.provider, response, elapsed_ms, attempt, attempts
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    generation.update(
+                        output={
+                            "provider_response_id": data.get("id"),
+                            "status_code": getattr(response, "status_code", 200),
+                        },
+                        usage_details=_langfuse_usage(_usage_from_responses(data)),
+                        metadata={
+                            "elapsed_ms": round(elapsed_ms, 2),
+                            "attempts_used": attempt + 1,
+                        },
+                    )
+                    return response
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    projected = project_provider_error(exc)
+                    generation.update(
+                        level="ERROR",
+                        status_message=projected.code,
+                        metadata={"provider_error": projected.to_mapping()},
+                    )
+                    log_llm_exception(self.provider, exc, attempt, attempts)
+                    if not projected.retryable or attempt == attempts - 1:
+                        raise_provider_call_error(self.provider, exc)
+                    delay_seconds = retry_delay_seconds(exc, attempt)
+                    log_llm_retry_sleep(
+                        self.provider,
+                        delay_seconds,
+                        attempt,
+                        attempts,
+                        retry_reason(exc),
+                    )
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_error = exc
+                    projected = project_provider_error(exc)
+                    generation.update(
+                        level="ERROR",
+                        status_message=projected.code,
+                        metadata={"provider_error": projected.to_mapping()},
+                    )
+                    log_llm_exception(self.provider, exc, attempt, attempts)
+                    if attempt == attempts - 1:
+                        raise_provider_call_error(self.provider, exc)
+                    delay_seconds = exponential_delay_seconds(attempt)
+                    log_llm_retry_sleep(
+                        self.provider,
+                        delay_seconds,
+                        attempt,
+                        attempts,
+                        retry_reason(exc),
+                    )
+                time.sleep(delay_seconds)
+        raise_provider_call_error(self.provider, last_error)
 
 
 def _usage_from_responses(data):
@@ -216,6 +297,18 @@ def _usage_from_responses(data):
         "prompt_tokens": usage.get("input_tokens"),
         "completion_tokens": usage.get("output_tokens"),
         "total_tokens": usage.get("total_tokens"),
+    }
+
+
+def _langfuse_usage(usage):
+    return {
+        key: value
+        for key, value in {
+            "input_tokens": usage.get("prompt_tokens"),
+            "output_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }.items()
+        if value is not None
     }
 
 

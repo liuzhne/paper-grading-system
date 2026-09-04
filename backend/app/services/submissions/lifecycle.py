@@ -29,6 +29,7 @@ from backend.app.services.scoring.core.contracts import (
     ScoringRequest,
     SubmissionSnapshot,
 )
+from backend.app.services.scoring.observed import score_submission_observed
 from backend.app.services.scoring.core.engine import score_submission
 from backend.app.services.scoring.core.execution_plan import RuleExecutionPlanBuilder
 from backend.app.services.scoring.core.identity import hash_source_artifact
@@ -455,11 +456,13 @@ def score_generic_submission(
                     "idempotency key is occupied by a different scoring target"
                 )
             return existing
-        outcome = score_submission(
+        outcome = score_submission_observed(
             request=request,
             checker_registry=registry,
             llm_runtime=profile.build_llm_runtime(scorer),
             profile=profile,
+            organization_id=batch.organization_id,
+            score_fn=score_submission,
         )
         rubric = db.get(models.Rubric, batch.rubric_id)
         return CoreRunPersistence(

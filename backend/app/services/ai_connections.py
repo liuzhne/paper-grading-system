@@ -32,6 +32,7 @@ _ALLOWED_OPTION_KEYS = {
     "top_p",
     "response_format_json",
     "thinking_type",
+    "service_tier",
 }
 _RATE_LOCK = threading.Lock()
 _RATE_WINDOWS: dict[str, deque[float]] = {}
@@ -197,6 +198,13 @@ def validate_provider_options(options: dict | None) -> dict:
         raise ValueError("response_format_json must be boolean")
     if "thinking_type" in normalized and not isinstance(normalized["thinking_type"], str):
         raise ValueError("thinking_type must be text")
+    if "service_tier" in normalized and normalized["service_tier"] not in {
+        "auto",
+        "on_demand",
+        "flex",
+        "performance",
+    }:
+        raise ValueError("service_tier is unsupported")
     return normalized
 
 

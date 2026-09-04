@@ -19,9 +19,10 @@ from backend.app.services.scoring.core.contracts import (
     SemanticRuleResponseV2,
 )
 from backend.app.services.scoring.core.results import RuleExecutionResult
+from backend.app.services.scoring.core.failures import project_rule_execution_failure
 
 
-PROMPT_VERSION = "2026-08-02-9"
+PROMPT_VERSION = "2026-09-03-1"
 OCCURRENCE_SCHEME = "occurrence-id-v1"
 
 
@@ -95,7 +96,7 @@ def _prompt_envelope(*, request, node, profile):
         raise TypeError("profile.prompt_version must be a non-empty string")
     if runtime_prompt_version != prompt_version:
         raise ValueError("profile prompt version does not match runtime identity")
-    return PromptEnvelopeV3.from_mapping(
+    envelope = PromptEnvelopeV3.from_mapping(
         {
             "schema_version": "prompt-envelope@3",
             "prompt_version": prompt_version,
@@ -125,6 +126,10 @@ def _prompt_envelope(*, request, node, profile):
             ),
         }
     )
+    build_provider_envelope = getattr(profile, "build_provider_envelope", None)
+    if callable(build_provider_envelope):
+        return build_provider_envelope(base_envelope=envelope)
+    return envelope
 
 
 def _topological_order(nodes_by_code):
@@ -884,24 +889,28 @@ def execute_rule_plan(*, request, checker_registry, llm_runtime, profile):
             decision_by_code[code] = decision
             continue
 
-        if rule["judge_type"] == "deterministic":
-            decision, error, message = _deterministic_decision(
-                request=value,
-                node=node,
-                checker_registry=checker_registry,
-                occurrence_payloads=occurrence_payloads,
-            )
-        elif rule["judge_type"] == "semantic":
-            decision, error, message = _semantic_decision(
-                request=value,
-                node=node,
-                llm_runtime=llm_runtime,
-                profile=profile,
-                occurrence_payloads=occurrence_payloads,
-            )
-        else:
+        try:
+            if rule["judge_type"] == "deterministic":
+                decision, error, message = _deterministic_decision(
+                    request=value,
+                    node=node,
+                    checker_registry=checker_registry,
+                    occurrence_payloads=occurrence_payloads,
+                )
+            elif rule["judge_type"] == "semantic":
+                decision, error, message = _semantic_decision(
+                    request=value,
+                    node=node,
+                    llm_runtime=llm_runtime,
+                    profile=profile,
+                    occurrence_payloads=occurrence_payloads,
+                )
+            else:
+                decision = _decision_skeleton(value["plan"], rule)
+                error, message = "RULE_DECISION_INVALID", "judge_type is unsupported"
+        except Exception as exc:
             decision = _decision_skeleton(value["plan"], rule)
-            error, message = "RULE_DECISION_INVALID", "judge_type is unsupported"
+            error, message = project_rule_execution_failure(exc)
         if error:
             decision["status"] = "invalid"
             decision["evidence_refs"] = []

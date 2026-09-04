@@ -29,7 +29,7 @@ from backend.app.services.document_parser.parser import interpret_thesis_documen
 
 
 THESIS_PROFILE_VERSION = "thesis-legacy-profile@1"
-THESIS_PROMPT_VERSION = "2026-08-02-9"
+THESIS_PROMPT_VERSION = "2026-09-03-10"
 CHECKER_VERSION = "1.0.0"
 THESIS_CHECKER_KEYS = MappingProxyType(
     {
@@ -422,6 +422,32 @@ class ThesisLLMRuntime:
         self.scorer = scorer
 
     def score(self, *, envelope):
+        from backend.app.services.llm_observability import observation
+
+        value = envelope.to_mapping()
+        rule = value["atomic_rule_snapshot"]
+        with observation(
+            "rule_scoring_task",
+            as_type="chain",
+            metadata={
+                "criterion_code": rule.get("criterion_code"),
+                "atomic_rule_code": rule["rule_code"],
+                "prompt_schema_version": value.get("schema_version"),
+                "document_snapshot_hash": (value.get("submission") or {}).get(
+                    "document_snapshot_hash"
+                ),
+                "coverage_mode": value.get("coverage_mode"),
+                "evidence_selection_hash": (
+                    value.get("evidence_selection_identity") or {}
+                ).get("selection_hash"),
+                "token_policy_hash": (
+                    value.get("token_budget_identity") or {}
+                ).get("policy_hash"),
+            },
+        ):
+            return self._score(envelope=envelope, value=value, rule=rule)
+
+    def _score(self, *, envelope, value, rule):
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
             return explicit(envelope=envelope)
@@ -429,8 +455,6 @@ class ThesisLLMRuntime:
             raise LLMScoringError(
                 "selected provider does not implement PromptEnvelopeV3 Core scoring"
             )
-        value = envelope.to_mapping()
-        rule = value["atomic_rule_snapshot"]
         levels = sorted(
             rule["levels"],
             key=lambda item: (item["display_order"], item["level_code"]),
@@ -607,6 +631,49 @@ class ThesisProfile:
             ),
         }
 
+    def build_provider_envelope(self, *, base_envelope):
+        from backend.app.core.config import settings
+        from backend.app.services.llm_observability import observation
+        from backend.app.services.scoring.retrieval.selection import build_v4_envelope
+
+        if settings.SCORING_PROMPT_ENVELOPE_VERSION == "v3":
+            return base_envelope
+        value = base_envelope.to_mapping()
+        top_k = (
+            len(value["evidence_units"])
+            if settings.SCORING_EVIDENCE_SELECTION_MODE == "all"
+            else settings.SCORING_EVIDENCE_TOP_K
+        )
+        with observation(
+            "evidence_retrieval",
+            metadata={
+                "criterion_code": value["criterion_snapshot"]["criterion_code"],
+                "rule_code": value["atomic_rule_snapshot"]["rule_code"],
+                "candidate_count": len(value["evidence_units"]),
+            },
+        ) as retrieval:
+            envelope = build_v4_envelope(
+                base_envelope,
+                context_window_tokens=settings.SCORING_CONTEXT_WINDOW_TOKENS,
+                reserved_output_tokens=value["runtime_identity"]["provider"]["sampling"]["max_tokens"],
+                safety_margin_tokens=settings.SCORING_CONTEXT_SAFETY_MARGIN_TOKENS,
+                top_k=top_k,
+            )
+            selected = envelope.to_mapping()["evidence_selection_identity"]
+            retrieval.update(
+                output={
+                    "selected_evidence_unit_ids": selected[
+                        "selected_evidence_unit_ids"
+                    ],
+                    "selection_hash": selected["selection_hash"],
+                }
+            )
+        with observation("token_preflight") as preflight:
+            preflight.update(
+                output=envelope.to_mapping()["token_budget_identity"]
+            )
+        return envelope
+
     def build_export_extensions(self, *, submission, document_snapshot, run):
         metadata = self.select_prompt_metadata(
             metadata=dict(submission.submission_metadata or {})
@@ -752,6 +819,9 @@ class ThesisProfile:
         if provider_name != "mock":
             artifact_projection["provider_prompt_version"] = (
                 CORE_PROVIDER_PROMPT_VERSION
+            )
+            artifact_projection["service_tier"] = getattr(
+                scorer, "service_tier", None
             )
         provider_artifact = canonical_sha256(artifact_projection)
         return {

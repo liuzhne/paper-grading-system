@@ -114,8 +114,9 @@ def test_openai_compatible_debug_logs_request_and_response_with_redacted_key(mon
     assert "[LLM request]" in messages
     assert "[LLM response]" in messages
     assert "chat/completions" in messages
-    assert "论文题目" in messages
-    assert "chatcmpl_test" in messages
+    assert "论文题目" not in messages
+    assert "content_sha256" in messages
+    assert "chatcmpl_test" not in messages
     assert "Bearer test-key" not in messages
     assert '"Authorization": "Bearer' not in messages
     assert "***REDACTED***" in messages

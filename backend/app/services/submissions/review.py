@@ -120,6 +120,17 @@ def recalculate_generic_run(db, run) -> None:
         final_result.need_manual_review
         or unresolved_automatic_failures(db, run)
     )
+    unresolved_tasks = db.scalar(
+        select(models.ManualReviewTask.id).where(
+            models.ManualReviewTask.scoring_run_id == run.id,
+            models.ManualReviewTask.blocking_final_total.is_(True),
+            models.ManualReviewTask.status.in_(("open", "claimed")),
+        )
+    )
+    if unresolved_tasks is not None:
+        run.final_total_score = None
+        run.grade = None
+        run.need_manual_review = True
 
 
 def update_generic_score_item(

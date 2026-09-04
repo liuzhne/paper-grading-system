@@ -184,6 +184,7 @@ def test_openai_compatible_scores_prompt_envelope_v3_with_connection_controls(
         max_tokens=700,
         response_format_json=json_mode,
         thinking_type="",
+        service_tier="flex",
     )
     envelope = _core_envelope(scorer)
     client.output = _provider_response(envelope)
@@ -200,6 +201,7 @@ def test_openai_compatible_scores_prompt_envelope_v3_with_connection_controls(
         assert "response_format" not in client.payload
     assert "seed" not in client.payload
     assert "thinking" not in client.payload
+    assert client.payload["service_tier"] == "flex"
     assert jsonlib.loads(client.payload["messages"][1]["content"]) == (
         envelope.to_mapping()
     )

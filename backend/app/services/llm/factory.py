@@ -43,6 +43,7 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None):
                 # to accept the platform provider's non-standard `thinking`
                 # extension.  Send it only when this connection opted in.
                 thinking_type=options.get("thinking_type", ""),
+                service_tier=options.get("service_tier"),
             )
         else:  # Defensive even though the persistence validator already rejects it.
             raise ValueError("unsupported AI connection provider type")

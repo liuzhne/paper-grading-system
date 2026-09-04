@@ -85,6 +85,7 @@ def test_ci_has_locked_unit_postgres_migration_and_restore_gates():
         "0011_version_hash_on_update",
         "0017_batch_scoring_jobs",
         "0022_legacy_tenant_backfill",
+        "0023_rule_scoring_review_tasks",
         "verify_postgres_ops",
         "ops_backup",
         "pgs_ops_artifacts",
@@ -151,7 +152,7 @@ def test_backup_is_atomic_verifiable_complete_and_never_serializes_database_secr
             database_url="postgresql+psycopg://paper:secret@db/source",
             storage_root=storage,
             destination_root=storage / "backups",
-            migration_head="0022_legacy_tenant_backfill",
+            migration_head="0023_rule_scoring_review_tasks",
             revision="unsafe",
             rto_minutes=120,
             rpo_minutes=1440,
@@ -166,7 +167,7 @@ def test_backup_is_atomic_verifiable_complete_and_never_serializes_database_secr
         ),
         storage_root=storage,
         destination_root=tmp_path / "backups",
-        migration_head="0022_legacy_tenant_backfill",
+        migration_head="0023_rule_scoring_review_tasks",
         revision="abcdef123456",
         rto_minutes=120,
         rpo_minutes=1440,
@@ -176,7 +177,7 @@ def test_backup_is_atomic_verifiable_complete_and_never_serializes_database_secr
     assert not any(path.name.endswith(".partial") for path in package.parent.iterdir())
     manifest = verify_backup(package)
     assert manifest["schema_version"] == "paper-grading-backup@1"
-    assert manifest["migration_head"] == "0022_legacy_tenant_backfill"
+    assert manifest["migration_head"] == "0023_rule_scoring_review_tasks"
     assert manifest["revision"] == "abcdef123456"
     assert manifest["recovery_objectives"] == {
         "rto_minutes": 120,
@@ -208,7 +209,7 @@ def test_restore_verifies_confirmation_empty_target_and_hashes_before_commands(t
         database_url="postgresql+psycopg://paper:source-secret@db/source_db",
         storage_root=storage,
         destination_root=tmp_path / "backups",
-        migration_head="0022_legacy_tenant_backfill",
+        migration_head="0023_rule_scoring_review_tasks",
         revision="revision-1",
         rto_minutes=120,
         rpo_minutes=1440,
@@ -276,6 +277,7 @@ def test_postgres_verifier_freezes_complete_migration_and_stable_order_contract(
         "0020_rubric_visibility_scope",
         "0021_private_ai_connections",
         "0022_legacy_tenant_backfill",
+        "0023_rule_scoring_review_tasks",
     )
     assert stable_ordering_clause() == ("created_at", "id")
     script = (ROOT / "backend/app/scripts/verify_postgres_ops.py").read_text(

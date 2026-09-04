@@ -2229,6 +2229,16 @@ class ScoringRun(Base):
         cascade="all, delete-orphan",
         order_by="ScoreItem.created_at",
     )
+    rule_tasks: Mapped[list["RuleScoringTask"]] = relationship(
+        back_populates="scoring_run",
+        cascade="all, delete-orphan",
+        order_by="(RuleScoringTask.created_at, RuleScoringTask.id)",
+    )
+    manual_review_tasks: Mapped[list["ManualReviewTask"]] = relationship(
+        back_populates="scoring_run",
+        cascade="all, delete-orphan",
+        order_by="(ManualReviewTask.created_at, ManualReviewTask.id)",
+    )
 
 
 class ScoreItem(Base):
@@ -2319,6 +2329,144 @@ class ReviewLog(Base):
     policy_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolution_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class RuleScoringTask(Base):
+    """Durable audit/checkpoint for one AtomicRule execution."""
+
+    __tablename__ = "rule_scoring_tasks"
+    __table_args__ = (
+        UniqueConstraint(
+            "scoring_run_id",
+            "rule_code",
+            name="uq_rule_scoring_tasks_run_rule",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'retry_wait', "
+            "'failed_exhausted', 'skipped', 'review_required', 'canceled', "
+            "'deferred_provider')",
+            name="ck_rule_scoring_tasks_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0 AND max_attempts >= 1",
+            name="ck_rule_scoring_tasks_attempts",
+        ),
+        Index("ix_rule_scoring_tasks_run_status", "scoring_run_id", "status"),
+        Index("ix_rule_scoring_tasks_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=False
+    )
+    scoring_run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("scoring_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    score_item_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("score_items.id", ondelete="SET NULL"), nullable=True
+    )
+    criterion_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    rule_code: Mapped[str] = mapped_column(String(200), nullable=False)
+    judge_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    dependency_rule_codes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    blocking_final_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    provider_error: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    result_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    scoring_run: Mapped["ScoringRun"] = relationship(back_populates="rule_tasks")
+    score_item: Mapped["ScoreItem | None"] = relationship()
+    manual_review_task: Mapped["ManualReviewTask | None"] = relationship(
+        back_populates="rule_scoring_task", uselist=False
+    )
+
+
+class ManualReviewTask(Base):
+    """Tenant-scoped, claimable workflow for a blocking automatic result."""
+
+    __tablename__ = "manual_review_tasks"
+    __table_args__ = (
+        UniqueConstraint(
+            "rule_scoring_task_id",
+            name="uq_manual_review_tasks_rule_task",
+        ),
+        CheckConstraint(
+            "status IN ('open', 'claimed', 'resolved', 'canceled', 'superseded')",
+            name="ck_manual_review_tasks_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_manual_review_tasks_version"),
+        CheckConstraint(
+            "priority >= 0 AND priority <= 100",
+            name="ck_manual_review_tasks_priority",
+        ),
+        Index("ix_manual_review_tasks_org_status", "organization_id", "status"),
+        Index("ix_manual_review_tasks_run_status", "scoring_run_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=False
+    )
+    scoring_run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("scoring_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    rule_scoring_task_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("rule_scoring_tasks.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    score_item_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("score_items.id", ondelete="SET NULL"), nullable=True
+    )
+    criterion_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    rule_code: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    trigger_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    trigger_message: Mapped[str] = mapped_column(Text, nullable=False)
+    blocking_final_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="open")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    assigned_reviewer_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolution_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolution_evidence: Mapped[list | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    scoring_run: Mapped["ScoringRun"] = relationship(
+        back_populates="manual_review_tasks"
+    )
+    rule_scoring_task: Mapped["RuleScoringTask | None"] = relationship(
+        back_populates="manual_review_task"
+    )
+    score_item: Mapped["ScoreItem | None"] = relationship()
+    assigned_reviewer: Mapped["User | None"] = relationship()
 
 
 class CalibrationAnchor(Base):
