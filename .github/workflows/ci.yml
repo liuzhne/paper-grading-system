@@ -92,7 +92,7 @@ jobs:
       - name: Install the Playwright browser
         working-directory: frontend/workbench
         run: npx playwright install --with-deps chromium
-      - name: Run browser acceptance (V01-V13)
+      - name: Run browser acceptance (V03-V07, V09, V11, V12)
         working-directory: frontend/workbench
         env:
           # webServer 起的是真实 FastAPI + 统一组装产物，不是 Vite dev server：
