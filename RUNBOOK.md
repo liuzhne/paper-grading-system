@@ -364,6 +364,39 @@ docker compose --env-file .env.intranet logs -f app caddy
 - [ ] 三份文档的维护记录使用同一日期/主题。
 - [ ] 最小测试和全套测试按风险通过；生产变更取得 Postgres/CI/恢复证据。
 
+### 11.1 前端 v2 计划审查与后续验证
+
+2026-09-07 完成计划审查及用户确认后的修订，未实施前端或后端改造。初稿的问题包括正式 Core 证据无法直接关联 chunk、阻塞复核缺少操作入口、直传恢复遗漏、Excel 历史日志回填错误，以及本地/Docker 与 Vercel 部署方案不完整。修订后的 `docs/前端v2改造计划.md` §13 提供 R1–R8 闭环表，§12 提供 V01–V13 浏览器与接口验收矩阵。
+
+在仓库根目录复查现有合同：
+
+```bash
+rg -n 'evidence_unit_id|confidence=None' backend/app/services/scoring/adapters/persistence.py backend/app/services/scoring/core/engine.py
+rg -n 'manual-review-tasks|claim|resolve' backend/app/api/routes/submissions_v2.py
+rg -n 'direct-upload-intents|complete-upload|uploadViaTus' frontend/web/assets/app.js
+rg -n 'target_type=' backend/app/services/spreadsheet
+.venv/bin/python -m pytest -q backend/app/tests/test_p3_manual_review_tasks.py backend/app/tests/test_paper_direct_upload.py backend/app/tests/test_api_core_flow.py backend/app/tests/test_m4_rule_executor.py::test_authorized_quote_is_bound_to_validated_unit_and_canonical_locator
+```
+
+审查时上述定向测试为 `15 passed`，只确认现有行为，不能证明 v2 计划已实现。计划修订使用下列现有文档核验入口；Vite/Playwright/Vitest 和前端 npm 脚本在阶段 0 实现后再补实际操作命令，不能提前记为已通过。
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_m8_documentation_contract.py
+git diff --check
+```
+
+后续实现的验收需覆盖：
+
+- 正式 RubricVersion 的 Core 证据可追溯至运行快照；无置信度/无页码/非引用证据有明确展示；阻塞任务领取冲突、证据校验和解决前总分为空均保留。
+- 批量采纳的 run 范围、并发改分和重复提交有明确结果；不能覆盖已修改分数或隐式解决阻塞项。
+- 大文件签名直传、TUS 恢复、归档确认与解析重试可用；组织切换时清理旧数据和在途请求；运维角色与组织范围由服务端验证。
+- 导出迁移保留四种已有通道，说明批次导出与逐 run 日志的关系；状态机覆盖取消、失败、重试和重评，并禁止客户端任意设置终态。
+- 浏览器完成登录/邀请/密码重置、创建批次、上传、正式评分、复核和导出；Vercel 与本地/Docker 均验证资源、深链接刷新、新旧页跳转和旧页回退。现有 Python 静态源码断言不能替代 Vue 页面行为验收。
+
+后续计划执行顺序为：阶段 0 完成三部署、权限和浏览器门禁；阶段 1 建立状态及最小冻结正文查看器；阶段 2 完成普通/阻塞复核及原因；阶段 3～5 交付工作区、上传和模板/账户/运维；阶段 6A 扩展导出事件，6B 幂等补录历史并切入口。每阶段按计划退出条件保存证据，当前不得执行计划编号的迁移或调用计划新增端点。
+
+本轮无需部署或数据库回滚。后续发布沿用 §9 的 main/CI/production 流程，新增前端 job 必须进入 deploy 的依赖；新增迁移需 PostgreSQL 证据，prompt 改动需 QWK 重锚。应用回退按 §10 保留数据库审计状态，使用已适配权限/复核守卫的兼容版本与归档静态产物；旧日志表首版保留，回退期产生的旧日志在重新前进时幂等补录，不默认执行有损 downgrade。已接受的设计见 D-019，代码仍待实施。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
@@ -371,3 +404,5 @@ docker compose --env-file .env.intranet logs -f app caddy
 | 2026-09-01 | 初始化三文档 | 汇总 SQLite/PostgreSQL/CLI/Compose/Vercel 启动、测试、诊断、批任务、备份恢复、发布和回滚步骤；未执行生产变更。 |
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
+| 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |
