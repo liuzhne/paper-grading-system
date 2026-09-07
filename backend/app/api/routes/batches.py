@@ -16,6 +16,7 @@ from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricVersion
 from backend.app.db.session import get_db
 from backend.app.schemas.batch import BatchCreate
+from backend.app.schemas.batch import BatchOverviewRead
 from backend.app.schemas.batch import BatchProgressRead
 from backend.app.schemas.batch import BatchRead
 from backend.app.schemas.batch import BatchScoreResult
@@ -35,6 +36,9 @@ from backend.app.services.calibration.analytics import score_drift
 from backend.app.services.scoring.engine import score_batch
 
 router = APIRouter(prefix="/batches", tags=["batches"])
+
+#: 仍需要注意力的阶段。已复核与已归档属于「做完了」，不占用待办计数。
+_TODO_STAGES = ("draft", "parsing", "scoring", "scored", "scored_with_errors")
 
 
 def _visible_batch(db: Session, batch_id: str, principal: CurrentPrincipal) -> GradingBatch:
@@ -172,6 +176,46 @@ def list_batches(db: Session = Depends(get_db), principal: CurrentPrincipal = De
     if principal.organization_id is not None:
         query = query.where(GradingBatch.organization_id == principal.organization_id)
     return db.scalars(query).all()
+
+
+@router.get("/overview", response_model=BatchOverviewRead)
+def batches_overview(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """工作台 KPI（计划 §6）。
+
+    材料计数经结果选择器，与评分任务页、复核页同源——否则各页面会给出互相
+    矛盾的数字。已归档批次不计入待办口径，否则待评数永远降不下去。
+    """
+    query = select(GradingBatch)
+    if principal.organization_id is not None:
+        query = query.where(GradingBatch.organization_id == principal.organization_id)
+    batches = db.scalars(query).all()
+
+    stage_counts = {stage: 0 for stage in state.BATCH_STAGES}
+    materials = {"total": 0, "scored": 0, "reviewed": 0, "failed": 0, "pending": 0}
+    active = 0
+    for batch in batches:
+        stage_counts[batch.status] = stage_counts.get(batch.status, 0) + 1
+        if batch.status in _TODO_STAGES:
+            active += 1
+        if batch.status == "archived":
+            # 归档批次只读，其材料不再是待办。
+            continue
+        selection = select_current_results(db, batch)
+        materials["total"] += selection.total_count
+        materials["scored"] += selection.scored_count
+        materials["reviewed"] += selection.reviewed_count
+        materials["failed"] += selection.failed_count
+        materials["pending"] += selection.pending_count
+
+    return {
+        "total_batches": len(batches),
+        "active_batches": active,
+        "stage_counts": stage_counts,
+        "material_counts": materials,
+    }
 
 
 @router.post("/{batch_id}/score", response_model=BatchScoreResult)

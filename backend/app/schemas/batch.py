@@ -122,3 +122,21 @@ class BatchProgressRead(BaseModel):
     job: Optional[BatchProgressJob] = None
     #: 服务端给出的可执行动作，前端不自行推断转移合法性。
     available_actions: list[str]
+
+
+class BatchOverviewMaterials(BaseModel):
+    total: int
+    scored: int
+    reviewed: int
+    failed: int
+    pending: int
+
+
+class BatchOverviewRead(BaseModel):
+    """工作台 KPI。与 `GET /batches` 的数组合同分开，避免为加字段破坏旧客户端。"""
+
+    total_batches: int
+    #: 待办口径：不含已归档与已复核。
+    active_batches: int
+    stage_counts: dict[str, int]
+    material_counts: BatchOverviewMaterials
