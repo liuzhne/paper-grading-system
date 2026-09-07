@@ -19,6 +19,7 @@ from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.session import get_db
 from backend.app.services.scoring import document_view
+from backend.app.services.scoring.evidence_view import build_evidence_view
 from backend.app.schemas.scoring import ReviewLogRead
 from backend.app.schemas.scoring import ReviewSubmit
 from backend.app.schemas.scoring import ScoreItemRead
@@ -175,19 +176,33 @@ def retry_scoring_run(
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@router.get("/scoring-runs/{run_id}/items", response_model=list[ScoreItemRead])
+@router.get("/scoring-runs/{run_id}/items")
 def list_score_items(
     run_id: str,
+    include_view: bool = False,
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    _visible_run(db, run_id, principal)
-    return db.scalars(
+    """评分项列表。
+
+    ``include_view=true`` 附加 ``evidence_view`` 展示投影（计划 §5-A）。
+    默认响应形状保持不变——原始 ``evidence`` 承载审计语义，不就地改写，
+    旧客户端与 golden 不受影响。
+    """
+    run = _visible_run(db, run_id, principal)
+    items = db.scalars(
         select(ScoreItem)
         .where(ScoreItem.scoring_run_id == run_id)
         .options(selectinload(ScoreItem.criterion))
         .order_by(ScoreItem.created_at)
     ).all()
+    payload = [
+        ScoreItemRead.model_validate(item).model_dump(mode="json") for item in items
+    ]
+    if include_view:
+        for item, projected in zip(items, payload):
+            projected["evidence_view"] = build_evidence_view(db, run, item)
+    return payload
 
 
 @router.patch("/score-items/{item_id}", response_model=ScoreItemRead)
