@@ -60,8 +60,9 @@ export class StaleContextError extends Error {
 
 /**
  * @param {string} path 以 / 开头的 API 路径（不含 /api 前缀）
- * @param {{method?: string, body?: unknown, organizationId?: string|null,
- *          signal?: AbortSignal, headers?: Record<string,string>}} [options]
+ * @param {{method?: string, body?: unknown, formData?: FormData,
+ *          organizationId?: string|null, signal?: AbortSignal,
+ *          headers?: Record<string,string>}} [options]
  */
 export async function request(path, options = {}) {
   const version = contextVersion;
@@ -81,7 +82,10 @@ export async function request(path, options = {}) {
   }
 
   let body;
-  if (options.body !== undefined) {
+  if (options.formData !== undefined) {
+    // multipart：绝不手工设置 Content-Type，浏览器要自己补 boundary。
+    body = options.formData;
+  } else if (options.body !== undefined) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(options.body);
   }
