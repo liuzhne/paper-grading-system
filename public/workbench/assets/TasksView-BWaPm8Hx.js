@@ -1,1 +1,0 @@
-import{S as t}from"./StageStub-B1F2rJ6l.js";import{s as e,o}from"./index-D0OR-0yb.js";import"./_plugin-vue_export-helper-DlAUqK2U.js";const _={__name:"TasksView",setup(s){return(a,r)=>(o(),e(t,{title:"评分任务",stage:"1",summary:"阶段筛选与计数、进度、任务状态与恢复操作。",scope:["七种业务阶段筛选与计数，同时显示 job 状态与未完成 / 失败计数","进度条在失败或取消时展示失败与待恢复计数","保留启动、取消、定向重试及获授权观察策略录入（教师日常控制不迁走）"]}))}};export{_ as default};
