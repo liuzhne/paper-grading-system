@@ -19,7 +19,7 @@ def _parser():
     create.add_argument("--database-url", default=settings.DATABASE_URL)
     create.add_argument("--storage-root", default=str(settings.STORAGE_ROOT))
     create.add_argument("--destination", required=True)
-    create.add_argument("--migration-head", default="0026_review_command_receipts")
+    create.add_argument("--migration-head", default="0027_export_events")
     create.add_argument("--revision", default=os.environ.get("GITHUB_SHA", "local"))
     create.add_argument("--rto-minutes", type=int, default=settings.OPS_RTO_MINUTES)
     create.add_argument("--rpo-minutes", type=int, default=settings.OPS_RPO_MINUTES)

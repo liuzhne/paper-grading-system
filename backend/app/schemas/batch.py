@@ -174,3 +174,11 @@ class UploadPrecheckRequest(BaseModel):
     """只接收已归档的 paper ID；预检不重传文件也不重新解析（计划 §5-E）。"""
 
     paper_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class ExportEventCreate(BaseModel):
+    """记录一次导出请求。状态只到「已生成」——客户端断开证明不了文件已落地。"""
+
+    channel: Literal["html_report", "xlsx", "json", "sheets", "mock_sheet"]
+    scope: str = Field(min_length=1, max_length=50)
+    result_revision: str = Field(min_length=16)

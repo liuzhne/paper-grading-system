@@ -2387,6 +2387,32 @@ class ReviewCommandReceipt(Base):
     )
 
 
+class ExportEvent(Base):
+    """一次导出请求的事件级记录（前端 v2 计划 §5-F）。
+
+    与 :class:`SpreadsheetWriteLog` **并存**，不取代它：旧表的表名、四种
+    target_type 与既有写入口原样保留，回退窗口内的旧应用仍要能写日志。
+
+    状态只到「已生成」。客户端断开证明不了文件已落地，把生成成功写成
+    「已下载」是在记录一件没有发生过的事。
+    """
+
+    __tablename__ = "export_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    grading_batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    #: 展示通道：html_report / xlsx / json / sheets / mock_sheet
+    channel: Mapped[str] = mapped_column(String(50), nullable=False)
+    scope: Mapped[str] = mapped_column(String(50), nullable=False)
+    #: 导出时的结果集合摘要，用于回答「这份成绩单对应哪一版结果」。
+    result_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="generated")
+    actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
 class RuleScoringTask(Base):
     """Durable audit/checkpoint for one AtomicRule execution."""
 

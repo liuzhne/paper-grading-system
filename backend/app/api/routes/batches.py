@@ -10,6 +10,7 @@ from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
 from backend.app.api.deps import require_organization_role
 from backend.app.core.config import settings
+from backend.app.db.models import ExportEvent
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import Paper
 from backend.app.db.models import Rubric
@@ -24,6 +25,7 @@ from backend.app.schemas.batch import BatchScoreResult
 from backend.app.schemas.batch import BatchSummary
 from backend.app.schemas.batch import BatchUpdate
 from backend.app.schemas.batch import CompleteReviewRequest
+from backend.app.schemas.batch import ExportEventCreate
 from backend.app.schemas.batch import ReviewAcceptRequest
 from backend.app.schemas.batch import UploadPrecheckRequest
 from backend.app.schemas.batch import ReviewAcceptResult
@@ -32,6 +34,7 @@ from backend.app.services.auth import auth_active
 from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.batches import review_accept
+from backend.app.services.batches import exports
 from backend.app.services.batches import review_queue
 from backend.app.services.papers import precheck
 from backend.app.services.batches import review_stats
@@ -448,6 +451,72 @@ def batch_upload_precheck(
     if set(requested) - found or any(paper.batch_id != batch_id for paper in papers):
         raise HTTPException(status_code=404, detail="paper not found in batch")
     return precheck.build_precheck(papers)
+
+
+@router.get("/{batch_id}/export-precheck")
+def batch_export_precheck(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """导出前检查（计划 §5-F）。
+
+    正式成绩要求复核清零；报告与结构化审计导出允许在中间状态进行，只是会
+    标注未完成——不用新界面放宽旧服务已有的边界。
+    """
+    batch = _visible_batch(db, batch_id, principal)
+    return exports.build_export_precheck(db, batch)
+
+
+@router.get("/{batch_id}/export-history")
+def batch_export_history(
+    batch_id: str,
+    limit: int = Query(default=exports.DEFAULT_LIMIT, ge=1, le=exports.MAX_LIMIT),
+    cursor: str | None = None,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """全通道导出历史。新事件与旧 run 日志并存展示，不合并成假的批次事件。"""
+    batch = _visible_batch(db, batch_id, principal)
+    return exports.build_export_history(db, batch, limit=limit, cursor=cursor)
+
+
+@router.post("/{batch_id}/export-events", status_code=201)
+def create_export_event(
+    batch_id: str,
+    payload: ExportEventCreate,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
+):
+    ensure_dev_user(db)
+    batch = _visible_batch(db, batch_id, principal)
+    selection = select_current_results(db, batch)
+    if selection.revision != payload.result_revision:
+        raise HTTPException(status_code=409, detail="批次结果已更新，请刷新后重试。")
+
+    event = ExportEvent(
+        organization_id=principal.organization_id,
+        grading_batch_id=batch.id,
+        channel=payload.channel,
+        scope=payload.scope,
+        result_revision=selection.revision,
+        # 只记录到「已生成」。
+        status="generated",
+        actor_id=user_id,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return {
+        "id": event.id,
+        "channel": event.channel,
+        "scope": event.scope,
+        "status": event.status,
+        "actor_id": event.actor_id,
+        "result_revision": event.result_revision,
+        "created_at": event.created_at,
+    }
 
 
 @router.get("/{batch_id}/ranking")
