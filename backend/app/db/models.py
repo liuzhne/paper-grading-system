@@ -2275,6 +2275,9 @@ class ScoreItem(Base):
             "AND length(rule_results_schema_version) > 0)",
             name="ck_score_items_rule_results_identity",
         ),
+        CheckConstraint(
+            "review_revision >= 1", name="ck_score_items_review_revision_positive"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -2295,6 +2298,12 @@ class ScoreItem(Base):
     suggestion: Mapped[str] = mapped_column(Text, nullable=True)
     confidence: Mapped[float] = mapped_column(Numeric(5, 3), nullable=True)
     need_manual_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 「为什么这条要我看」。结构化在先，review_reason 只是派生展示文本。
+    # 历史行保持 NULL——不为补一个展示字段而重评权威结果。
+    review_reasons: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    review_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 复核写入的乐观并发游标：两个复核者不得静默覆盖彼此。
+    review_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     raw_model_output: Mapped[dict] = mapped_column(JSON, nullable=True)
     aggregation: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     aggregation_schema_version: Mapped[str | None] = mapped_column(String(100), nullable=True)

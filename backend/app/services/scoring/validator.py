@@ -1,5 +1,8 @@
 import math
 
+from backend.app.services.scoring.review_reasons import derive as derive_review_reasons
+from backend.app.services.scoring.review_reasons import to_display_text as review_reason_text
+
 from backend.app.services.scoring.core.evidence import detect_injection
 
 
@@ -70,6 +73,12 @@ def validate_score_output(output, criterion, evidence_candidates):
         output["deduction_items"].append(_blank_deduction(note))
     # deductions（list[str]）始终是 deduction_items 的展示投影，保持二者一致。
     output["deductions"] = [_format_deduction(item) for item in output["deduction_items"]]
+    # 「为什么这条要我看」。上面两条覆盖发生在模型返回之后，模型无从知晓；
+    # 不在此补上，原因栏会显示模型的「我很确定」，与实际标记矛盾。
+    output["review_reasons"] = derive_review_reasons(
+        output, criterion=criterion, notes=notes
+    )
+    output["review_reason"] = review_reason_text(output["review_reasons"])
     return output
 
 

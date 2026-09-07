@@ -20,6 +20,10 @@ from sqlalchemy.orm import selectinload
 from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
 from backend.app.services.batches import state as batch_state
+from backend.app.services.scoring.review_reasons import derive as derive_review_reasons
+from backend.app.services.scoring.review_reasons import (
+    to_display_text as review_reason_text,
+)
 from backend.app.db.models import Paper
 from backend.app.db.models import ReviewLog
 from backend.app.db.models import RubricCompilation
@@ -1125,6 +1129,21 @@ def persist_scoring(db: Session, paper_id, inputs: ScoringInputs, result: Scorin
                 suggestion=data["suggestion"],
                 confidence=data["confidence"],
                 need_manual_review=data["need_manual_review"],
+                # 结构化在先；review_reason 是派生展示文本，两者不一致时以
+                # 列表为准。非 LLM 路径（deterministic/hybrid）也要有原因，
+                # 否则复核队列里那几条会空着。
+                review_reasons=_plain_contract(
+                    data.get("review_reasons")
+                    or derive_review_reasons(data, notes=())
+                ),
+                review_reason=(
+                    data.get("review_reason")
+                    or review_reason_text(
+                        data.get("review_reasons")
+                        or derive_review_reasons(data, notes=())
+                    )
+                    or None
+                ),
                 raw_model_output=_plain_contract(data["raw_model_output"]),
                 aggregation=(data.get("aggregation") if inputs.authoritative else None),
                 aggregation_schema_version=(
