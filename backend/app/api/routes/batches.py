@@ -22,6 +22,7 @@ from backend.app.schemas.batch import BatchRead
 from backend.app.schemas.batch import BatchScoreResult
 from backend.app.schemas.batch import BatchSummary
 from backend.app.schemas.batch import BatchUpdate
+from backend.app.schemas.batch import CompleteReviewRequest
 from backend.app.schemas.batch import ReviewAcceptRequest
 from backend.app.schemas.batch import ReviewAcceptResult
 from backend.app.services.dev_user import ensure_dev_user
@@ -30,6 +31,7 @@ from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.batches import review_accept
 from backend.app.services.batches import review_queue
+from backend.app.services.batches import review_stats
 from backend.app.services.batches import state
 from backend.app.services.batches import state as batch_state_module
 from backend.app.services.batches.results import current_job
@@ -355,6 +357,70 @@ def accept_review_queue_items(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     db.commit()
     return result
+
+
+@router.get("/{batch_id}/review-stats")
+def batch_review_stats(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """复核统计（计划 §5-B）。已确认数按当前评分项算，不按日志条数累加。"""
+    batch = _visible_batch(db, batch_id, principal)
+    return review_stats.build_review_stats(db, batch)
+
+
+@router.get("/{batch_id}/review-timeline")
+def batch_review_timeline(
+    batch_id: str,
+    limit: int = Query(default=review_stats.DEFAULT_LIMIT, ge=1, le=review_stats.MAX_LIMIT),
+    cursor: str | None = None,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """复核审计流，按时间倒序。"""
+    batch = _visible_batch(db, batch_id, principal)
+    return review_stats.build_review_timeline(db, batch, limit=limit, cursor=cursor)
+
+
+@router.post("/{batch_id}/complete-review", response_model=BatchRead)
+def complete_batch_review(
+    batch_id: str,
+    payload: CompleteReviewRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """完成复核并转 reviewed（计划 §5-C）。
+
+    前置条件由服务端重算：普通待确认为 0、阻塞为 0、结果集合未变。客户端
+    不能只凭「界面上看着清空了」就完成复核。
+    """
+    ensure_dev_user(db)
+    batch = _visible_batch(db, batch_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+
+    stats = review_stats.build_review_stats(db, batch)
+    if stats["result_revision"] != payload.result_revision:
+        raise HTTPException(status_code=409, detail="批次结果已更新，请刷新后重试。")
+    if stats["ordinary_pending"]:
+        raise HTTPException(
+            status_code=409,
+            detail="仍有 %d 项待确认，无法完成复核。" % stats["ordinary_pending"],
+        )
+    if stats["blocking_open"]:
+        raise HTTPException(
+            status_code=409,
+            detail="仍有 %d 个阻塞任务未解决，无法完成复核。" % stats["blocking_open"],
+        )
+
+    try:
+        state.apply_event(db, batch, "complete_review")
+    except state.BatchStateError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(batch)
+    return batch
 
 
 @router.get("/{batch_id}/ranking")

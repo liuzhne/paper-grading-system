@@ -162,3 +162,9 @@ class ReviewAcceptResult(BaseModel):
     result_revision: str
     #: 幂等重放；未产生新的复核记录。
     replayed: bool
+
+
+class CompleteReviewRequest(BaseModel):
+    """完成复核。带上结果集合 revision，过期请求不得完成复核。"""
+
+    result_revision: str = Field(min_length=16)
