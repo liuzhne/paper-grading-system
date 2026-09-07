@@ -214,6 +214,12 @@ def _seed_batch_with_review_work(session, rubric):
                 (criteria[2], 22, 0.9, False, None, []),
             ]
 
+        # 总分按逐项求和回填：写死一个数会和右栏的评分表对不上，而工作台的
+        # 分布图读的正是 run 上的总分。
+        run.ai_total_score = sum(item[1] for item in items)
+        run.final_total_score = run.ai_total_score
+        session.add(run)
+
         for criterion, score, confidence, need_review, reasons, evidence in items:
             session.add(
                 ScoreItem(

@@ -22,6 +22,7 @@ from backend.app.schemas.batch import BatchOverviewRead
 from backend.app.schemas.batch import BatchProgressRead
 from backend.app.schemas.batch import BatchRead
 from backend.app.schemas.batch import BatchScoreResult
+from backend.app.schemas.batch import BatchStageActionRequest
 from backend.app.schemas.batch import BatchSummary
 from backend.app.schemas.batch import BatchUpdate
 from backend.app.schemas.batch import CompleteReviewRequest
@@ -32,6 +33,7 @@ from backend.app.schemas.batch import ReviewAcceptResult
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.auth import auth_active
 from backend.app.services.ai_connections import connection_snapshot_for_owner
+from backend.app.services.batches import distribution
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.batches import review_accept
 from backend.app.services.batches import exports
@@ -310,6 +312,22 @@ def batch_progress_endpoint(
     }
 
 
+@router.get("/{batch_id}/score-distribution")
+def batch_score_distribution(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """有效终分分布与缺结果计数（计划 §6，阶段 1/6）。
+
+    分桶与「上一批次」差值仍是 §11 未决项，这里不提供；`bucketing` 显式为
+    null，让前端能区分「还没定」和「算出来是空」。
+    """
+    ensure_dev_user(db)
+    batch = _visible_batch(db, batch_id, principal)
+    return distribution.build_score_distribution(db, batch)
+
+
 @router.get("/{batch_id}/review-queue")
 def batch_review_queue(
     batch_id: str,
@@ -427,6 +445,53 @@ def complete_batch_review(
     db.commit()
     db.refresh(batch)
     return batch
+
+
+def _apply_stage_action(db, batch, event, expected_version):
+    try:
+        state.apply_event(db, batch, event, expected_version=expected_version)
+    except state.BatchStateError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(batch)
+    return batch
+
+
+@router.post("/{batch_id}/archive", response_model=BatchRead)
+def archive_batch(
+    batch_id: str,
+    payload: BatchStageActionRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """归档批次（计划 §6，阶段 1/2）。
+
+    只有 `reviewed` 能归档：归档意味着结论已定并转为只读，把一个还没有结论的
+    批次冻住，之后只能靠重新打开才能继续，等于用一次误操作换一次额外授权。
+    """
+    ensure_dev_user(db)
+    batch = _visible_batch(db, batch_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    return _apply_stage_action(db, batch, "archive", payload.state_version)
+
+
+@router.post("/{batch_id}/reopen", response_model=BatchRead)
+def reopen_batch(
+    batch_id: str,
+    payload: BatchStageActionRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """重新打开已归档批次。
+
+    目标阶段由 `state.stable_stage()` 从当前结果推导，回到归档前的稳定阶段；
+    调用方不能指定，否则可以借重开把批次直接送进一个它从未到达过的阶段。
+    """
+    ensure_dev_user(db)
+    batch = _visible_batch(db, batch_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    return _apply_stage_action(db, batch, "reopen", payload.state_version)
 
 
 @router.post("/{batch_id}/upload-precheck")

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
 import { useBatchesStore } from "@/stores/batches.js";
@@ -35,6 +35,37 @@ function percent(ratio) {
 
 function openBatch(batch) {
   router.push({ name: "grade", params: { batchId: batch.id } });
+}
+
+const busy = ref(null);
+const actionError = ref(null);
+
+/**
+ * 归档 / 重开。
+ *
+ * 只有 `reviewed` 能归档：归档意味着结论已定并转为只读。可执行性按服务端状态机
+ * 的同一份规则判断——点下去再拿 409，是把守卫当成错误提示用。
+ */
+function canArchive(batch) {
+  return batch.status === "reviewed";
+}
+
+function canReopen(batch) {
+  return batch.status === "archived";
+}
+
+async function runStageAction(batch, action) {
+  busy.value = batch.id;
+  actionError.value = null;
+  try {
+    await (action === "archive" ? store.archive(batch.id) : store.reopen(batch.id));
+    // 阶段变了，进度口径跟着变。
+    await store.loadProgress(batch.id);
+  } catch (err) {
+    actionError.value = err?.message || "操作失败，请刷新后重试。";
+  } finally {
+    busy.value = null;
+  }
 }
 
 onMounted(async () => {
@@ -76,6 +107,7 @@ onMounted(async () => {
     </div>
 
     <div class="layout">
+      <p v-if="actionError" class="notice notice-danger" role="alert">{{ actionError }}</p>
       <div class="card table-wrap">
         <table class="table">
           <thead>
@@ -85,6 +117,7 @@ onMounted(async () => {
               <th>进度</th>
               <th>阶段</th>
               <th>更新时间</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -133,9 +166,31 @@ onMounted(async () => {
                 <div class="faint mono code">{{ batch.status }}</div>
               </td>
               <td class="num muted">{{ formatTime(batch.updated_at) }}</td>
+              <!-- @click.stop：整行点击会打开工作区，动作按钮不该顺带跳走。 -->
+              <td class="actions" @click.stop>
+                <button
+                  v-if="canArchive(batch)"
+                  class="btn btn-sm"
+                  type="button"
+                  :disabled="busy === batch.id"
+                  @click="runStageAction(batch, 'archive')"
+                >
+                  归档
+                </button>
+                <button
+                  v-else-if="canReopen(batch)"
+                  class="btn btn-sm"
+                  type="button"
+                  :disabled="busy === batch.id"
+                  @click="runStageAction(batch, 'reopen')"
+                >
+                  重新打开
+                </button>
+                <span v-else class="faint">—</span>
+              </td>
             </tr>
             <tr v-if="!store.visible.length && !store.loading">
-              <td class="table-empty" colspan="5">
+              <td class="table-empty" colspan="6">
                 {{ store.stageFilter ? "该阶段暂无批次。" : "还没有评分任务。" }}
               </td>
             </tr>
@@ -215,6 +270,10 @@ onMounted(async () => {
 }
 
 .sub,
+.actions {
+  white-space: nowrap;
+}
+
 .code {
   font-size: 11.5px;
   margin-top: 3px;

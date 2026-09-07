@@ -27,6 +27,8 @@ from backend.app.api.routes import scoring
 from backend.app.api.routes import system
 from backend.app.api.routes import submissions_v2
 from backend.app.core.config import settings
+from backend.app.services.batches.state import BatchArchived
+from backend.app.services.batches.state import BatchStateConflict
 from backend.app.services.observability import begin_request_timing
 from backend.app.services.observability import end_request_timing
 from backend.app.services.observability import server_timing_header
@@ -73,6 +75,17 @@ def create_app():
             return response
         finally:
             end_request_timing(token)
+
+    # 归档批次的写请求与阶段并发冲突都是 409，不是服务端故障。挂在应用级而不是
+    # 逐个路由 try/except：`guard_writable` 也从 service 层调用，漏一处就是一个
+    # 500——前端会把「需要先重新打开」显示成「服务器出错」。
+    @app.exception_handler(BatchArchived)
+    async def batch_archived_handler(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(BatchStateConflict)
+    async def batch_state_conflict_handler(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(OperationalError)
     async def database_operational_error_handler(request, exc):

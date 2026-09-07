@@ -174,3 +174,32 @@ test.describe("V09 评分标准", () => {
     await expect(row).toContainText("待确认");
   });
 });
+
+test.describe("V07 归档与分布", () => {
+  test("未复核的批次不给归档按钮", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    // scored_with_errors 的批次结论还没定，归档会把它冻在一个未完成状态。
+    const row = page.locator("tbody tr", { hasText: "2026 届毕业论文评分" });
+    await expect(row.getByRole("button", { name: "归档" })).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "重新打开" })).toHaveCount(0);
+  });
+
+  test("分数分布只画有效终分并标明缺结果", async ({ page }) => {
+    await page.goto("/workbench/");
+
+    const card = page.locator(".dist");
+    await expect(card).toBeVisible();
+    // 分桶未定，界面必须说清楚这一点，否则读者会把原始终分当成已分档结果。
+    await expect(card.getByText(/分档口径与跨批次比较尚未确定/)).toBeVisible();
+  });
+
+  test("分布不把缺结果的材料算成 0 分", async ({ page }) => {
+    await page.goto("/workbench/");
+
+    const card = page.locator(".dist");
+    const bars = card.locator(".bar");
+    // 种子里两份材料都有终分；缺结果的计数走单独文案，不产生高度为 0 的柱子。
+    await expect(bars).toHaveCount(2);
+  });
+});

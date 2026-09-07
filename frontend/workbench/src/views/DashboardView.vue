@@ -33,6 +33,26 @@ const continueProgress = computed(() =>
   continueWith.value ? store.progressFor(continueWith.value.id) : null,
 );
 
+const distribution = computed(() =>
+  continueWith.value ? store.distributionFor(continueWith.value.id) : null,
+);
+
+/**
+ * 分布条形：只按当前这批的最大分归一，**不做跨批次分桶**。
+ *
+ * 分桶策略与「上一批次」的定义都还没定（计划 §11）：rubric 满分可变，非论文
+ * Profile 量纲也不同，先编一套档位出来会把两个不可比的批次画进同一张图。
+ */
+const bars = computed(() => {
+  const payload = distribution.value;
+  if (!payload || !payload.scores.length) return [];
+  const ceiling = payload.max_score || Math.max(...payload.scores);
+  return payload.scores.map((score) => ({
+    score,
+    height: ceiling ? Math.max(4, Math.round((score / ceiling) * 100)) : 4,
+  }));
+});
+
 function toneClass(code) {
   return { ok: "chip-ok", warn: "chip-warn", active: "chip-ok" }[stageTone(code)] || "";
 }
@@ -57,6 +77,15 @@ onMounted(async () => {
   }
   await store.load();
   await Promise.all(store.batches.map((b) => store.loadProgress(b.id)));
+  // 分布只为「继续处理」那一个批次加载：列表里每个批次都拉一次，等于为一张
+  // 不显示的图付出 N 次请求。
+  if (continueWith.value) {
+    try {
+      await store.loadDistribution(continueWith.value.id);
+    } catch {
+      // 分布是补充信息，取不到不该挡住整个工作台。
+    }
+  }
 });
 </script>
 
@@ -125,6 +154,43 @@ onMounted(async () => {
         <p v-else class="faint">当前没有需要继续处理的批次。</p>
       </section>
 
+      <!-- 分数分布。分桶未定（计划 §11），这里画的是原始有效终分。 -->
+      <section v-if="distribution" class="card card-pad dist">
+        <div class="card-head">
+          <h2 class="card-title">分数分布</h2>
+          <span class="faint mono">{{ continueWith?.name }}</span>
+        </div>
+
+        <template v-if="bars.length">
+          <div class="bars" role="img" :aria-label="`${bars.length} 份材料的终分分布`">
+            <div
+              v-for="(bar, index) in bars"
+              :key="index"
+              class="bar"
+              :style="{ height: bar.height + '%' }"
+              :title="`${bar.score} / ${distribution.max_score ?? '—'}`"
+            ></div>
+          </div>
+          <div class="mini">
+            <div><span class="faint">已出结果</span><b class="mono">{{ distribution.scored_count }}</b></div>
+            <div>
+              <span class="faint">平均</span>
+              <b class="mono">{{ distribution.average === null ? "—" : distribution.average.toFixed(1) }}</b>
+            </div>
+            <div><span class="faint">满分</span><b class="mono">{{ distribution.max_score ?? "—" }}</b></div>
+          </div>
+        </template>
+        <p v-else class="faint">该批次还没有有效终分。</p>
+
+        <!-- 缺结果不是 0 分：并进分布会把平均分拉低成一个假数字。 -->
+        <p v-if="distribution.without_results" class="faint dist-note">
+          另有 {{ distribution.without_results }} 份材料没有有效结果，未计入分布。
+        </p>
+        <p v-if="distribution.bucketing === null" class="faint dist-note">
+          分档口径与跨批次比较尚未确定，此处显示原始终分。
+        </p>
+      </section>
+
       <!-- 最近批次 -->
       <section class="card recent">
         <div class="card-head">
@@ -191,6 +257,27 @@ onMounted(async () => {
 
 .kpi-danger {
   background: var(--danger-surface);
+}
+
+
+.dist .bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 120px;
+  margin: 12px 0;
+}
+
+.dist .bar {
+  flex: 1;
+  min-width: 6px;
+  background: var(--accent, #4a6cf7);
+  border-radius: 3px 3px 0 0;
+}
+
+.dist-note {
+  margin-top: 6px;
+  font-size: 12px;
 }
 
 .kpi-label {

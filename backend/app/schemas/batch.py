@@ -164,6 +164,16 @@ class ReviewAcceptResult(BaseModel):
     replayed: bool
 
 
+class BatchStageActionRequest(BaseModel):
+    """归档 / 重新打开。
+
+    只带 `state_version`，**不带目标阶段**：目标由服务端从状态机推导。让客户端
+    指定目标等于把「重开后回到哪一步」交给一个可能已经过期的页面去决定。
+    """
+
+    state_version: int = Field(ge=0)
+
+
 class CompleteReviewRequest(BaseModel):
     """完成复核。带上结果集合 revision，过期请求不得完成复核。"""
 

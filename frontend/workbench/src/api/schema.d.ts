@@ -377,6 +377,29 @@ export interface paths {
         patch: operations["update_batch_api_batches__batch_id__patch"];
         trace?: never;
     };
+    "/api/batches/{batch_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive Batch
+         * @description 归档批次（计划 §6，阶段 1/2）。
+         *
+         *     只有 `reviewed` 能归档：归档意味着结论已定并转为只读，把一个还没有结论的
+         *     批次冻住，之后只能靠重新打开才能继续，等于用一次误操作换一次额外授权。
+         */
+        post: operations["archive_batch_api_batches__batch_id__archive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batches/{batch_id}/complete-review": {
         parameters: {
             query?: never;
@@ -551,6 +574,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/{batch_id}/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reopen Batch
+         * @description 重新打开已归档批次。
+         *
+         *     目标阶段由 `state.stable_stage()` 从当前结果推导，回到归档前的稳定阶段；
+         *     调用方不能指定，否则可以借重开把批次直接送进一个它从未到达过的阶段。
+         */
+        post: operations["reopen_batch_api_batches__batch_id__reopen_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batches/{batch_id}/review-queue": {
         parameters: {
             query?: never;
@@ -663,6 +709,29 @@ export interface paths {
         put?: never;
         /** Score Batch Endpoint */
         post: operations["score_batch_endpoint_api_batches__batch_id__score_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{batch_id}/score-distribution": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Batch Score Distribution
+         * @description 有效终分分布与缺结果计数（计划 §6，阶段 1/6）。
+         *
+         *     分桶与「上一批次」差值仍是 §11 未决项，这里不提供；`bucketing` 显式为
+         *     null，让前端能区分「还没定」和「算出来是空」。
+         */
+        get: operations["batch_score_distribution_api_batches__batch_id__score_distribution_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2577,6 +2646,17 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /**
+         * BatchStageActionRequest
+         * @description 归档 / 重新打开。
+         *
+         *     只带 `state_version`，**不带目标阶段**：目标由服务端从状态机推导。让客户端
+         *     指定目标等于把「重开后回到哪一步」交给一个可能已经过期的页面去决定。
+         */
+        BatchStageActionRequest: {
+            /** State Version */
+            state_version: number;
         };
         /** BatchSummary */
         BatchSummary: {
@@ -4975,6 +5055,45 @@ export interface operations {
             };
         };
     };
+    archive_batch_api_batches__batch_id__archive_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchStageActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     complete_batch_review_api_batches__batch_id__complete_review_post: {
         parameters: {
             query?: never;
@@ -5301,6 +5420,45 @@ export interface operations {
             };
         };
     };
+    reopen_batch_api_batches__batch_id__reopen_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchStageActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     batch_review_queue_api_batches__batch_id__review_queue_get: {
         parameters: {
             query?: {
@@ -5513,6 +5671,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BatchScoreResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    batch_score_distribution_api_batches__batch_id__score_distribution_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

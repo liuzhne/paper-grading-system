@@ -18,6 +18,8 @@ export const useBatchesStore = defineStore("batches", () => {
   const stageFilter = ref(null);
   /** batch_id -> progress payload */
   const progress = ref({});
+  /** batch_id -> score-distribution payload */
+  const distribution = ref({});
 
   const total = computed(() => batches.value.length);
 
@@ -70,9 +72,59 @@ export const useBatchesStore = defineStore("batches", () => {
     return progress.value[batchId] ?? null;
   }
 
+  async function loadDistribution(batchId) {
+    try {
+      const payload = await api.get(`/batches/${batchId}/score-distribution`);
+      distribution.value = { ...distribution.value, [batchId]: payload };
+      return payload;
+    } catch (err) {
+      if (err instanceof StaleContextError) return null;
+      throw err;
+    }
+  }
+
+  function distributionFor(batchId) {
+    return distribution.value[batchId] ?? null;
+  }
+
+  /**
+   * 归档 / 重开。
+   *
+   * 带上本地已知的 `state_version` 做前置条件：这两个动作改的是批次能不能被
+   * 写，凭一个过期的页面状态执行等于让并发的两个人互相覆盖。目标阶段由服务端
+   * 推导——重开不一定回 reviewed，空批次会落回 draft。
+   */
+  function stageActionBody(batchId) {
+    const batch = batches.value.find((item) => item.id === batchId);
+    if (!batch) {
+      throw new Error("找不到该评分任务，请刷新后重试。");
+    }
+    return { state_version: batch.state_version };
+  }
+
+  function applyStageResult(batchId, updated) {
+    batches.value = batches.value.map((item) =>
+      item.id === batchId ? { ...item, ...updated } : item,
+    );
+    return updated;
+  }
+
+  // 路径写死两条，不拼 `${action}`：拼出来的路径静态查不出来，
+  // `test_frontend_api_contract` 这道门禁就漏过去了。
+  async function archive(batchId) {
+    const body = stageActionBody(batchId);
+    return applyStageResult(batchId, await api.post(`/batches/${batchId}/archive`, body));
+  }
+
+  async function reopen(batchId) {
+    const body = stageActionBody(batchId);
+    return applyStageResult(batchId, await api.post(`/batches/${batchId}/reopen`, body));
+  }
+
   function reset() {
     batches.value = [];
     progress.value = {};
+    distribution.value = {};
     stageFilter.value = null;
     error.value = null;
   }
@@ -89,6 +141,10 @@ export const useBatchesStore = defineStore("batches", () => {
     load,
     loadProgress,
     progressFor,
+    loadDistribution,
+    distributionFor,
+    archive,
+    reopen,
     reset,
   };
 });
