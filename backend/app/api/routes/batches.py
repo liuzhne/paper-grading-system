@@ -24,6 +24,7 @@ from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.auth import auth_active
 from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.batches import get_batch_summary
+from backend.app.services.batches import state
 from backend.app.services.calibration.analytics import batch_ranking
 from backend.app.services.calibration.analytics import drift_monitor
 from backend.app.services.calibration.analytics import review_sample
@@ -151,7 +152,7 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
             connection_snapshot["key_version"] if connection_snapshot else None
         ),
         ai_connection_snapshot=connection_snapshot,
-        status=payload.status,
+        status="draft",
         created_by=user_id,
         owner_id=user_id,
         organization_id=principal.organization_id,
@@ -271,6 +272,21 @@ def update_batch(
     require_organization_role(principal, "org_admin", "teacher")
 
     updates = payload.model_dump(exclude_unset=True)
+
+    # 阶段不能由客户端直接写（前端 v2 计划 §5-C）。兼容期允许旧客户端回传
+    # **未变化**的 status 作为 no-op；任何真正的阶段变更必须走动作服务，
+    # 否则会绕过转移合法性、归档守卫与 state_version 并发检查。
+    requested_status = updates.pop("status", None)
+    if requested_status is not None and requested_status != batch.status:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "批次阶段不能通过 PATCH 修改（当前 %s，请求 %s）；"
+                "请使用对应的阶段动作端点。" % (batch.status, requested_status)
+            ),
+        )
+    state.guard_writable(batch)
+
     rubric_id_present = "rubric_id" in updates
     version_id_present = "rubric_version_id" in updates
     requested_rubric_id = updates.pop("rubric_id", batch.rubric_id)

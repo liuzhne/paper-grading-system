@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from typing import Optional
 
 from pydantic import BaseModel
@@ -15,7 +16,9 @@ class BatchCreate(BaseModel):
     major: Optional[str] = None
     academic_year: Optional[str] = None
     paper_type: Optional[str] = None
-    status: str = "draft"
+    # 创建只允许 draft（前端 v2 计划 §5-C）。旧客户端显式传 "draft" 仍可用；
+    # 任何其它阶段必须走动作服务，不能由客户端在创建时直接指定。
+    status: Literal["draft"] = "draft"
 
 
 class BatchUpdate(BaseModel):
@@ -45,6 +48,8 @@ class BatchRead(BaseModel):
     ai_connection_key_version: Optional[int] = None
     ai_connection_snapshot: Optional[dict] = None
     status: str
+    # 乐观并发游标：客户端带回它，过期的写请求会冲突失败而非静默覆盖。
+    state_version: int
     owner_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime

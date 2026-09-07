@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
+from backend.app.services.batches import state as batch_state
 from backend.app.db.models import Paper
 from backend.app.db.models import ReviewLog
 from backend.app.db.models import RubricCompilation
@@ -1270,7 +1271,8 @@ def score_batch(db: Session, batch_id: str, rescore: bool = False):
         "run_ids": [],
         "errors": [],
     }
-    batch.status = "scoring"
+    # 阶段变更统一走状态机：它负责转移合法性、归档守卫与 state_version。
+    batch_state.apply_event(db, batch, "start_scoring")
     db.commit()
 
     scorer = _scorer_for_batch(db, batch)  # 整批复用一个 scorer（连接池跨论文复用），结束时统一关闭
@@ -1309,11 +1311,12 @@ def score_batch(db: Session, batch_id: str, rescore: bool = False):
 
     batch = db.get(GradingBatch, batch_id)
     if result["failed_count"]:
-        batch.status = "scored_with_errors"
+        batch_state.apply_event(db, batch, "finish_scoring", outcome="scored_with_errors")
     elif result["scored_count"] or result["skipped_count"]:
-        batch.status = "scored"
+        batch_state.apply_event(db, batch, "finish_scoring", outcome="scored")
     else:
-        batch.status = "draft"
+        # 一份都没评出结果：这不是「已评分」，回落到取消语义而非伪造终态。
+        batch_state.apply_event(db, batch, "cancel")
     db.commit()
     return result
 

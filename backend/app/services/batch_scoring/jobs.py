@@ -26,6 +26,7 @@ from sqlalchemy.orm import selectinload
 from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
+from backend.app.services.batches import state as batch_state
 from backend.app.db.models import Paper
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
@@ -845,6 +846,11 @@ def run_batch_scoring_job(
         job.heartbeat_at = now
         job.started_at = job.started_at or now
         job.finished_at = None
+        # 批次业务阶段随执行进入 scoring。恢复既有 running 任务时阶段已经是
+        # scoring，重复触发会被状态机判为非法转移，因此只在需要时推进。
+        batch = session.get(GradingBatch, job.grading_batch_id)
+        if batch is not None and batch.status != "scoring":
+            batch_state.apply_event(session, batch, "start_scoring")
         pending = [(item.id, item.paper_id) for item in job.items if item.status == "pending"]
         session.commit()
         max_workers = job.max_workers
@@ -917,9 +923,11 @@ def run_batch_scoring_job(
         batch = session.get(GradingBatch, job.grading_batch_id)
         if batch is not None:
             if job.status == "completed":
-                batch.status = "scored"
+                batch_state.apply_event(session, batch, "finish_scoring", outcome="scored")
             elif job.status == "completed_with_errors":
-                batch.status = "scored_with_errors"
+                batch_state.apply_event(
+                    session, batch, "finish_scoring", outcome="scored_with_errors"
+                )
         session.commit()
         job_id = job.id
     with session_factory() as session:

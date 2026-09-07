@@ -1767,6 +1767,16 @@ class GradingBatch(Base):
             name="fk_grading_batches_rubric_version_rubric",
             ondelete="RESTRICT",
         ),
+        # 业务阶段枚举。约束只是最后一道数据校验：合法转移由
+        # services/batches/state.py 统一裁决，客户端不能直接写阶段。
+        CheckConstraint(
+            "status IN ('draft', 'parsing', 'scoring', 'scored', "
+            "'scored_with_errors', 'reviewed', 'archived')",
+            name="ck_grading_batches_status",
+        ),
+        CheckConstraint(
+            "state_version >= 1", name="ck_grading_batches_state_version_positive"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -1785,6 +1795,9 @@ class GradingBatch(Base):
     ai_connection_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True, deferred=True)
     ai_connection_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True, deferred=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="draft")
+    # 乐观并发：每次经 state.apply_event 的阶段变更 +1。客户端带上它就能
+    # 让过期请求冲突失败，而不是静默覆盖别人的结果。
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
