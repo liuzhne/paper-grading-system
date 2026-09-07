@@ -168,3 +168,9 @@ class CompleteReviewRequest(BaseModel):
     """完成复核。带上结果集合 revision，过期请求不得完成复核。"""
 
     result_revision: str = Field(min_length=16)
+
+
+class UploadPrecheckRequest(BaseModel):
+    """只接收已归档的 paper ID；预检不重传文件也不重新解析（计划 §5-E）。"""
+
+    paper_ids: list[str] = Field(min_length=1, max_length=500)

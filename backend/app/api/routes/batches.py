@@ -11,6 +11,7 @@ from backend.app.api.deps import current_user_id
 from backend.app.api.deps import require_organization_role
 from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
+from backend.app.db.models import Paper
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricVersion
@@ -24,6 +25,7 @@ from backend.app.schemas.batch import BatchSummary
 from backend.app.schemas.batch import BatchUpdate
 from backend.app.schemas.batch import CompleteReviewRequest
 from backend.app.schemas.batch import ReviewAcceptRequest
+from backend.app.schemas.batch import UploadPrecheckRequest
 from backend.app.schemas.batch import ReviewAcceptResult
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.auth import auth_active
@@ -31,6 +33,7 @@ from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.batches import review_accept
 from backend.app.services.batches import review_queue
+from backend.app.services.papers import precheck
 from backend.app.services.batches import review_stats
 from backend.app.services.batches import state
 from backend.app.services.batches import state as batch_state_module
@@ -421,6 +424,30 @@ def complete_batch_review(
     db.commit()
     db.refresh(batch)
     return batch
+
+
+@router.post("/{batch_id}/upload-precheck")
+def batch_upload_precheck(
+    batch_id: str,
+    payload: UploadPrecheckRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """解析预检（计划 §5-E）。
+
+    只汇总既有解析诊断——不重传文件、不额外跑一次全文解析，否则一次预检会
+    把整批材料重解析一遍，还可能得出与后续评分实际使用的解析结果不一致的
+    结论。
+    """
+    _visible_batch(db, batch_id, principal)
+    requested = list(dict.fromkeys(payload.paper_ids))
+    papers = db.scalars(
+        select(Paper).where(Paper.id.in_(requested)).order_by(Paper.created_at, Paper.id)
+    ).all()
+    found = {paper.id for paper in papers}
+    if set(requested) - found or any(paper.batch_id != batch_id for paper in papers):
+        raise HTTPException(status_code=404, detail="paper not found in batch")
+    return precheck.build_precheck(papers)
 
 
 @router.get("/{batch_id}/ranking")
