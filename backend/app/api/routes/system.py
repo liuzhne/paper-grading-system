@@ -6,12 +6,15 @@ from sqlalchemy.orm import Session
 
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
-from backend.app.api.deps import enforce_auth
+from backend.app.api.deps import require_organization_role
+from backend.app.api.deps import require_platform_admin
+from backend.app.api.deps import require_selected_organization
 from backend.app.core.config import settings
 from backend.app.db.session import get_db
 from backend.app.schemas.system import CapabilitiesRead
 from backend.app.services.auth import auth_active
 from backend.app.services.deployment.readiness import build_ops_readiness
+from backend.app.services.deployment.readiness import build_organization_readiness
 from backend.app.services.llm.diagnostics import check_connectivity
 from backend.app.services.llm.factory import LOCAL_PROVIDERS
 from backend.app.services.llm.factory import provider_network_scope
@@ -22,9 +25,34 @@ from backend.app.services.llm_observability import observability_status
 router = APIRouter(prefix="/system", tags=["system"])
 
 
-@router.get("/ops-readiness", dependencies=[Depends(enforce_auth)])
-def ops_readiness(db: Session = Depends(get_db)):
+@router.get("/ops-readiness")
+def ops_readiness(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """Platform-wide readiness. Restricted to platform administrators.
+
+    Carries host facts (disk, database size, deployment security) that must not
+    reach an organization administrator; they use ``/organization-readiness``
+    instead (frontend v2 plan §2.1).
+    """
+    require_platform_admin(principal)
     return build_ops_readiness(db)
+
+
+@router.get("/organization-readiness")
+def organization_readiness(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """Batch-scoring health for the caller's currently selected organization.
+
+    Filters before aggregating; a missing organization context is rejected
+    rather than silently widened to a platform-wide query.
+    """
+    organization_id = require_selected_organization(principal)
+    require_organization_role(principal, "org_admin")
+    return build_organization_readiness(db, organization_id)
 
 
 @router.get("/capabilities", response_model=CapabilitiesRead)
@@ -34,8 +62,14 @@ def capabilities(principal: CurrentPrincipal = Depends(current_principal)):
     前端只用它决定导航与控件可见性；**真正的权限一律由各端点服务端执行**。
     本响应不包含任何 Key、Secret 或平台敏感配置。
     """
-    is_platform_admin = principal.platform_role == "platform_admin"
+    # 与 deps.require_platform_admin / require_selected_organization 保持同一判据：
+    # 关闭鉴权的显式开发模式下守卫放行，能力表也必须放行，否则会出现
+    # 「页面可访问但导航不显示」的错位。它不是生产权限证明，调用方看
+    # auth_enforced 字段即可区分。
+    dev_mode = not auth_active()
+    is_platform_admin = dev_mode or principal.platform_role == "platform_admin"
     is_org_admin = is_platform_admin or principal.organization_role == "org_admin"
+    has_org_context = dev_mode or bool(principal.organization_id)
     sheet_provider = (settings.SHEET_WRITER_PROVIDER or "mock").lower()
     sheets_available = (
         not settings.OFFLINE_MODE
@@ -49,7 +83,8 @@ def capabilities(principal: CurrentPrincipal = Depends(current_principal)):
         "platform_role": principal.platform_role,
         "auth_enforced": auth_active(),
         "abilities": {
-            "view_organization_ops": is_org_admin,
+            # 组织视图需要已选定组织；缺上下文时端点会拒绝，导航也不应出现。
+            "view_organization_ops": is_org_admin and has_org_context,
             "view_platform_ops": is_platform_admin,
             "manage_members": is_org_admin,
             "manage_own_ai_connections": True,
@@ -68,8 +103,14 @@ def capabilities(principal: CurrentPrincipal = Depends(current_principal)):
 
 
 @router.get("/llm-check")
-def llm_check():
-    """LLM 连通自检（mock 直接 ok；真实 provider 发极小请求测连通+延迟）。"""
+def llm_check(principal: CurrentPrincipal = Depends(current_principal)):
+    """LLM 连通自检（mock 直接 ok；真实 provider 发极小请求测连通+延迟）。
+
+    这条检查用的是**平台配置的** provider，会暴露部署侧的连通性与延迟，
+    因此限平台管理员。用户自带连接（BYOK）的测试走 `/ai-connections`
+    的所有者校验路径，不受此限制（前端 v2 计划 §2.1）。
+    """
+    require_platform_admin(principal)
     return check_connectivity()
 
 

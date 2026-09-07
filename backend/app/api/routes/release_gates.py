@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from backend.app.api.deps import current_user_id
+from backend.app.api.deps import enforce_platform_admin
 from backend.app.db.session import get_db
 from backend.app.schemas.release_gate import ReleaseGateApprovalCreate
 from backend.app.schemas.release_gate import ReleaseGateProfileCreate
@@ -14,7 +15,15 @@ from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services import release_gates
 
 
-router = APIRouter(prefix="/release-gates", tags=["release-gates"])
+# GATE-03 是平台级发布门禁：候选生成、演练与批准都不属于组织管理员的
+# 职权范围（前端 v2 计划 §2.1）。路由级守卫保证无论如何挂载都生效；
+# 它只做角色收紧，**不替代** release_gates 服务原有的候选身份、门禁条件
+# 与人工批准约束。
+router = APIRouter(
+    prefix="/release-gates",
+    tags=["release-gates"],
+    dependencies=[Depends(enforce_platform_admin)],
+)
 
 
 def _service_error(exc):

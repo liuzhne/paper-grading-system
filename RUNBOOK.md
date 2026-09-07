@@ -395,7 +395,37 @@ git diff --check
 
 后续计划执行顺序为：阶段 0 完成三部署、权限和浏览器门禁；阶段 1 建立状态及最小冻结正文查看器；阶段 2 完成普通/阻塞复核及原因；阶段 3～5 交付工作区、上传和模板/账户/运维；阶段 6A 扩展导出事件，6B 幂等补录历史并切入口。每阶段按计划退出条件保存证据，当前不得执行计划编号的迁移或调用计划新增端点。
 
-本轮无需部署或数据库回滚。后续发布沿用 §9 的 main/CI/production 流程，新增前端 job 必须进入 deploy 的依赖；新增迁移需 PostgreSQL 证据，prompt 改动需 QWK 重锚。应用回退按 §10 保留数据库审计状态，使用已适配权限/复核守卫的兼容版本与归档静态产物；旧日志表首版保留，回退期产生的旧日志在重新前进时幂等补录，不默认执行有损 downgrade。已接受的设计见 D-019，代码仍待实施。
+本轮无需部署或数据库回滚。后续发布沿用 §9 的 main/CI/production 流程，新增前端 job 必须进入 deploy 的依赖；新增迁移需 PostgreSQL 证据，prompt 改动需 QWK 重锚。应用回退按 §10 保留数据库审计状态，使用已适配权限/复核守卫的兼容版本与归档静态产物；旧日志表首版保留，回退期产生的旧日志在重新前进时幂等补录，不默认执行有损 downgrade。已接受的设计见 D-019。
+
+### 11.2 阶段 0 已交付部分与操作命令
+
+已实施：Vite + Vue 3 脚手架（`frontend/workbench/`）、`/workbench/*` 双入口托管、`GET /api/system/capabilities`、运维与门禁端点的角色收紧、CI 前端 job。
+
+**尚未实施**：Playwright 与 V01–V13 浏览器验收矩阵、IBM Plex Mono 字体落盘（当前回落系统等宽栈）。`npm run test:e2e` 会显式失败退出，不得记为通过。
+
+```bash
+cd frontend/workbench && npm ci && npm run test:unit && npm run build
+```
+
+产物组装与漂移核验（Vercel 的 build hook 不带 `--with-workbench`，部署用的是仓库里已提交的 `public/workbench`，因此源码改动后必须重建并提交，否则 CI 的 `frontend-workbench` job 会拦截）：
+
+```bash
+.venv/bin/python scripts/build_web_static.py --with-workbench && git status --porcelain -- public/
+```
+
+本地起服务查看新页（`/workbench` 深链接刷新回 HTML，缺失资源 404，`/api` 不被 SPA 回退吞掉）：
+
+```bash
+DATABASE_URL=sqlite+pysqlite:////tmp/dev.db AUTH_ENABLED=false .venv/bin/python -m uvicorn backend.app.main:app --port 8000
+```
+
+权限收紧的定向验证（这些用例在 `AUTH_ENABLED=True` 下运行；仓库默认的开发模式会放行守卫，覆盖不到真实判定）：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_ops_permissions.py backend/app/tests/test_system_capabilities.py backend/app/tests/test_workbench_hosting.py
+```
+
+角色边界现状：`/system/ops-readiness` 与 `/system/llm-check` 限平台管理员；`/release-gates/*` 由路由级守卫限平台管理员，**只收紧角色，不替代**服务原有的候选身份、门禁条件与人工批准约束；`/system/organization-readiness` 限 org_admin 或已选组织的平台管理员，先按组织过滤再聚合，且不下发磁盘/数据库/部署安全等宿主事实。缺少组织上下文时直接拒绝，不回落为全局查询。
 
 ## 12. 维护记录
 
