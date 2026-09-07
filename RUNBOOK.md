@@ -404,8 +404,20 @@ git diff --check
 浏览器验收与 IBM Plex Mono 自托管已于阶段 6B 落地，见 §11.3。验收覆盖 §12.1 矩阵的 V03–V07、V09、V11、V12；**V01、V02、V08、V10、V13 仍无自动化用例**（需真实 Supabase、多身份会话或 `AUTH_ENABLED=true` 的多组织数据，一次性验收后端不具备），不得记为已通过。
 
 ```bash
-cd frontend/workbench && npm ci && npm run test:unit && npm run build
+cd frontend/workbench && npm ci && npm run test:unit && npm run typecheck && npm run build
 ```
+
+**API 合同门禁**（后端改了路由/模型而前端类型没跟上，会显示成 `schema.d.ts` 的
+diff）：
+
+```bash
+cd frontend/workbench && npm run api:dump && npm run api:check
+```
+
+`openapi.json` 从代码现导出、不入库；`src/api/schema.d.ts` 入库，比对的就是它。
+另有 `backend/app/tests/test_frontend_api_contract.py` 把前端源码里的调用路径逐条
+比对真实 OpenAPI——前端是纯 JS，调错路径没有编译期报错，只在浏览器里变成一个
+404，而 404 常被页面当成「暂无数据」渲染掉。
 
 产物组装与漂移核验（Vercel 的 build hook 不带 `--with-workbench`，部署用的是仓库里已提交的 `public/workbench`，因此源码改动后必须重建并提交，否则 CI 的 `frontend-workbench` job 会拦截）：
 
@@ -481,5 +493,5 @@ Mock LLM，库与存储建在临时目录，因此截图与 trace 可安全归�
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
-| 2026-09-08 | 阶段 6B 与浏览器验收 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。未运行生产操作。 |
+| 2026-09-08 | 阶段 6B、浏览器验收与合同门禁 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。补齐 §12.2 的类型与 OpenAPI 合同门禁（`api:dump` / `api:check` + 前端调用路径静态契约）。未运行生产操作。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |

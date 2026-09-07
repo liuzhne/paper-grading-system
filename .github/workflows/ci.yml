@@ -58,11 +58,24 @@ jobs:
       - name: Run component and state tests
         working-directory: frontend/workbench
         run: npm run test:unit
-      - name: Install uv and Python for the static assembly step
+      - name: Install uv and Python for the contract and assembly steps
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           python-version: "3.12"
           enable-cache: true
+      # 浏览器验收的 webServer 是真实 FastAPI，OpenAPI 快照也要从真实应用导出；
+      # 只装 uv 而不 sync，两者都只会报成超时或 ModuleNotFoundError。
+      - name: Install the locked backend environment
+        run: uv sync --locked
+      - name: Check types
+        working-directory: frontend/workbench
+        run: npm run typecheck
+      # 前端是纯 JS，调错路径没有编译期报错，只在浏览器里变成一个 404。这一步
+      # 从真实应用导出 OpenAPI，重新生成类型，与已提交的 schema.d.ts 比对：
+      # 后端合同变了而前端没跟上，会直接显示成 diff。
+      - name: Check the API contract snapshot
+        working-directory: frontend/workbench
+        run: npm run api:dump && npm run api:check
       # Vercel's build hook runs scripts/build_web_static.py without
       # --with-workbench, so the deployed workbench is whatever public/workbench
       # holds in the repository. Rebuild it here and fail on any drift: without
@@ -84,11 +97,6 @@ jobs:
             echo "$drift"
             exit 1
           fi
-      # 验收的 webServer 是真实 FastAPI，需要后端依赖；只装 uv 而不 sync，
-      # e2e_server 会因 ModuleNotFoundError 起不来，Playwright 只会报
-      # webServer 超时，掩盖真正的原因。
-      - name: Install the locked backend environment for the acceptance server
-        run: uv sync --locked
       - name: Install the Playwright browser
         working-directory: frontend/workbench
         run: npx playwright install --with-deps chromium

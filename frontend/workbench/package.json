@@ -15,9 +15,10 @@
     "test:unit:watch": "vitest",
     "test:e2e": "playwright test",
     "typecheck": "vue-tsc --noEmit -p jsconfig.json",
-    "api:generate": "openapi-typescript ../../storage/openapi.json -o src/api/schema.d.ts",
+    "api:generate": "openapi-typescript openapi.json -o src/api/schema.d.ts",
     "api:check": "npm run api:generate && git diff --exit-code -- src/api/schema.d.ts",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "api:dump": "cd ../.. && ${PGS_PYTHON:-.venv/bin/python} -m backend.app.scripts.dump_openapi"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.1.1",

@@ -41,3 +41,6 @@ supabase/.temp/
 frontend/workbench/test-results/
 frontend/workbench/playwright-report/
 frontend/workbench/blob-report/
+
+# OpenAPI 快照从代码派生，CI 每次现导出；提交一份就多一处会过期的副本
+frontend/workbench/openapi.json
