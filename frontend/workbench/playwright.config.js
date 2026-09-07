@@ -34,7 +34,9 @@ export default defineConfig({
     { name: "mobile", use: { ...devices["Pixel 5"] }, testMatch: /responsive\.spec\.js/ },
   ],
   webServer: {
-    command: `python -m e2e_server ${PORT}`,
+    // 显式指向仓库 venv：`python` 在 PATH 上可能是系统解释器，那里没有本项目
+    // 的依赖，webServer 会静默起不来、Playwright 一直等到超时。
+    command: `${process.env.PGS_PYTHON || "../../.venv/bin/python"} -m e2e_server ${PORT}`,
     cwd: "../..",
     url: `http://127.0.0.1:${PORT}/api/system/integrations`,
     reuseExistingServer: !process.env.CI,

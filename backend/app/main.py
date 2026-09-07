@@ -149,16 +149,36 @@ def create_app():
     if web_dir.exists() and assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-        @app.get("/", include_in_schema=False)
-        @app.get("/login", include_in_schema=False)
-        @app.get("/register", include_in_schema=False)
-        @app.get("/reset-password", include_in_schema=False)
-        def web_app():
+        def _legacy_shell():
             return HTMLResponse(
                 _inject_client_config(
                     (web_dir / "index.html").read_text(encoding="utf-8")
                 )
             )
+
+        @app.get("/", include_in_schema=False)
+        def root_entry():
+            """默认入口。
+
+            切换由 WORKBENCH_DEFAULT_ENTRY 控制而不是靠删掉旧页：出问题时改
+            一个环境变量就退回去，不必重新发版（计划 §8.3 的回退窗口）。
+            """
+            index = workbench_dir / "index.html"
+            if settings.WORKBENCH_DEFAULT_ENTRY and index.is_file():
+                return HTMLResponse(
+                    _inject_client_config(index.read_text(encoding="utf-8"))
+                )
+            return _legacy_shell()
+
+        # 旧入口始终可达，不只在切换之后——否则这条回退路径要等到切换当天
+        # 才第一次被验证。
+        @app.get("/legacy", include_in_schema=False)
+        @app.get("/legacy/", include_in_schema=False)
+        @app.get("/login", include_in_schema=False)
+        @app.get("/register", include_in_schema=False)
+        @app.get("/reset-password", include_in_schema=False)
+        def web_app():
+            return _legacy_shell()
 
     return app
 
