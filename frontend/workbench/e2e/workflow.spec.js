@@ -1,0 +1,170 @@
+import { expect, test } from "@playwright/test";
+
+/**
+ * V03/V04/V05/V06/V07/V11 · 评审动线（前端 v2 计划 §12.1）。
+ *
+ * 断言集中在**不能造假**的那几条：置信度缺失不显示成 0、引文失配不高亮、
+ * 阻塞项不可批量采纳、生成不等于下载、旧日志不补造操作人。
+ */
+
+test.describe("V07 评分任务与阶段", () => {
+  test("阶段标签与内部编码并列，任务故障单独显示", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    const row = page.locator("tbody tr", { hasText: "2026 届毕业论文评分" });
+    await expect(row).toBeVisible();
+    await expect(row.getByText("已评分 · 含异常项")).toBeVisible();
+    // 内部编码对照，便于与后端状态和工单沟通。
+    await expect(row.getByText("scored_with_errors")).toBeVisible();
+  });
+
+  test("空批次显示「暂无材料」而不是 0%", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    const row = page.locator("tbody tr", { hasText: "软件工程导论" });
+    await expect(row.getByText("暂无材料")).toBeVisible();
+    await expect(row.getByText("0%")).toHaveCount(0);
+  });
+
+  test("状态图例列出全部七态", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    for (const code of [
+      "draft",
+      "parsing",
+      "scoring",
+      "scored",
+      "scored_with_errors",
+      "reviewed",
+      "archived",
+    ]) {
+      await expect(page.locator(".legend").getByText(code, { exact: true })).toBeVisible();
+    }
+  });
+});
+
+test.describe("V05/V06 复核队列", () => {
+  test("阻塞任务排在普通确认之前", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    const first = page.locator("tbody tr").first();
+    await expect(first.getByText("阻塞")).toBeVisible();
+  });
+
+  test("置信度缺失显示「未提供」而不是 0%", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    await expect(page.getByText("未提供").first()).toBeVisible();
+    await expect(page.locator("tbody").getByText("0%")).toHaveCount(0);
+  });
+
+  test("阻塞未清空时「完成复核」不可点", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    await expect(page.getByRole("button", { name: "完成复核" })).toBeDisabled();
+  });
+
+  test("批量采纳只计入可采纳项", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    const button = page.getByRole("button", { name: /采纳本页可采纳项/ });
+    // 阻塞任务与无 AI 分的项都不在其中。
+    await expect(button).toContainText("（1）");
+  });
+
+  test("采纳后写入复核记录且队列缩短", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    await page.getByRole("button", { name: /采纳本页可采纳项/ }).click();
+    await expect(page.getByText(/已采纳 1 项/)).toBeVisible();
+    await expect(page.locator(".timeline li")).not.toHaveCount(0);
+  });
+});
+
+test.describe("V03/V04 评分工作区与证据", () => {
+  async function openWorkspace(page) {
+    await page.goto("/workbench/tasks");
+    await page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }).click();
+    await expect(page.getByText("材料 ·")).toBeVisible();
+  }
+
+  test("legacy 正文标注为当前解析结果", async ({ page }) => {
+    await openWorkspace(page);
+
+    // 不能让复核者以为自己在核对判分时的冻结快照。
+    await expect(page.getByText(/当前解析得到的正文/)).toBeVisible();
+  });
+
+  test("点已验证证据后精确高亮引文", async ({ page }) => {
+    await openWorkspace(page);
+
+    await page.getByRole("button", { name: /3\.2 研究方法/ }).click();
+    const marks = page.locator("mark");
+    await expect(marks).toHaveCount(1);
+    await expect(marks.first()).toHaveText("本文采用分层抽样方法");
+  });
+
+  test("引文与当前文本失配时跳到块但不高亮", async ({ page }) => {
+    await openWorkspace(page);
+
+    const chip = page.getByRole("button", { name: /4\.1 实验设计/ });
+    await expect(chip).toHaveAttribute("title", /无法精确高亮/);
+    await chip.click();
+    // 高亮到错误位置比不高亮更糟。
+    await expect(page.locator("mark")).toHaveCount(0);
+    await expect(page.locator(".block.anchored")).toHaveCount(1);
+  });
+
+  test("键盘可切换上一份 / 下一份", async ({ page }) => {
+    await openWorkspace(page);
+
+    const before = await page.locator(".ident .mono").textContent();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator(".ident .mono")).not.toHaveText(before);
+  });
+});
+
+test.describe("V11 导出", () => {
+  test("未完成复核挡住成绩单但不挡审计导出", async ({ page }) => {
+    await page.goto("/workbench/exports");
+
+    const grades = page.locator(".channel", { hasText: "成绩单" });
+    await expect(grades.getByRole("button")).toBeDisabled();
+    // 报告与结构化数据仍可导出，只是会标注未完成。
+    const report = page.locator(".channel", { hasText: "HTML 评审报告" });
+    await expect(report.getByRole("button")).toBeEnabled();
+  });
+
+  test("旧日志不补造操作人", async ({ page }) => {
+    await page.goto("/workbench/exports");
+
+    await expect(page.getByText("历史记录未记录操作人")).toBeVisible();
+    await expect(page.getByText("（旧记录 excel）")).toBeVisible();
+  });
+
+  test("导出记录状态是「已生成」而非「已下载」", async ({ page }) => {
+    await page.goto("/workbench/exports");
+
+    await page.locator(".channel", { hasText: "HTML 评审报告" }).getByRole("button").click();
+    await expect(page.locator("tbody").getByText("已生成").first()).toBeVisible();
+    await expect(page.getByText("已下载")).toHaveCount(0);
+  });
+});
+
+test.describe("V09 评分标准", () => {
+  test("没有扣分细则的评分项显示为阻断并说明后果", async ({ page }) => {
+    await page.goto("/workbench/rubrics");
+
+    await expect(page.getByText(/存在 1 个阻断项/)).toBeVisible();
+    await expect(page.getByText(/评分到该项时没有判据可用/)).toBeVisible();
+  });
+
+  test("规则来源分列原文与 AI", async ({ page }) => {
+    await page.goto("/workbench/rubrics");
+
+    const row = page.locator("tbody tr", { hasText: "研究方法与技术方案" });
+    await expect(row).toContainText("原文");
+    await expect(row).toContainText("AI");
+    await expect(row).toContainText("待确认");
+  });
+});

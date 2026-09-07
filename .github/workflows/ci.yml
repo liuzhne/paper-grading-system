@@ -151,7 +151,8 @@ jobs:
             0024_batch_status_machine \
             0025_review_contract \
             0026_review_command_receipts \
-            0027_export_events
+            0027_export_events \
+            0028_export_event_backfill
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
@@ -180,7 +181,7 @@ jobs:
           uv run python -m backend.app.scripts.ops_backup create \
             --storage-root pgs_ops_storage \
             --destination pgs_ops_backups \
-            --migration-head 0027_export_events \
+            --migration-head 0028_export_event_backfill \
             --revision "$GITHUB_SHA" \
             | tee pgs_ops_artifacts/backup-create.json
           package="$(find pgs_ops_backups -mindepth 1 -maxdepth 1 -type d | head -1)"
@@ -265,7 +266,7 @@ jobs:
             python -m backend.app.scripts.ops_backup create \
             --storage-root /app/storage \
             --destination /app/ops_backups \
-            --migration-head 0027_export_events \
+            --migration-head 0028_export_event_backfill \
             --revision "$GITHUB_SHA" \
             | tee pgs_docker_artifacts/container-backup-create.json
           docker compose --env-file .env.intranet.example exec -T app sh -ec '

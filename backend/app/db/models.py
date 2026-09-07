@@ -2398,6 +2398,11 @@ class ExportEvent(Base):
     """
 
     __tablename__ = "export_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "legacy_log_id", name="uq_export_events_legacy_log"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
@@ -2410,6 +2415,9 @@ class ExportEvent(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="generated")
     actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 由旧 SpreadsheetWriteLog 补录而来时记其行 ID。唯一约束同时提供补录
+    #: 幂等键与历史去重依据——补录后同一次导出不能显示成两条。
+    legacy_log_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
 

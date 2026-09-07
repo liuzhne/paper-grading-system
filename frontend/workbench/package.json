@@ -13,10 +13,11 @@
     "preview": "vite preview",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
-    "test:e2e": "node scripts/e2e-not-configured.mjs",
+    "test:e2e": "playwright test",
     "typecheck": "vue-tsc --noEmit -p jsconfig.json",
     "api:generate": "openapi-typescript ../../storage/openapi.json -o src/api/schema.d.ts",
-    "api:check": "npm run api:generate && git diff --exit-code -- src/api/schema.d.ts"
+    "api:check": "npm run api:generate && git diff --exit-code -- src/api/schema.d.ts",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "pinia": "2.3.1",
@@ -24,6 +25,7 @@
     "vue-router": "4.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.1",
     "@vitejs/plugin-vue": "5.2.1",
     "@vue/test-utils": "2.4.6",
     "jsdom": "25.0.1",

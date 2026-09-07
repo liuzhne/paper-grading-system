@@ -106,7 +106,12 @@ def build_export_precheck(session, batch):
     }
 
 
-def _legacy_entries(session, batch_id):
+def _legacy_entries(session, batch_id, backfilled):
+    """尚未补录的旧日志。
+
+    已补录的行由对应 ExportEvent 承担展示；两边都列会把同一次导出显示成
+    两条，读者无从判断到底导出了几次。
+    """
     rows = session.execute(
         select(SpreadsheetWriteLog)
         .join(ScoringRun, ScoringRun.id == SpreadsheetWriteLog.scoring_run_id)
@@ -119,6 +124,7 @@ def _legacy_entries(session, batch_id):
             "source": "legacy_run_log",
             "channel": LEGACY_CHANNELS.get(log.target_type, log.target_type),
             "legacy_target_type": log.target_type,
+            "legacy_log_id": None,
             "scope": "run",
             "scoring_run_id": log.scoring_run_id,
             "status": log.status,
@@ -130,6 +136,7 @@ def _legacy_entries(session, batch_id):
             "created_at": log.created_at,
         }
         for log in rows
+        if log.id not in backfilled
     ]
 
 
@@ -143,6 +150,7 @@ def _event_entries(session, batch_id):
             "source": "export_event",
             "channel": event.channel,
             "legacy_target_type": None,
+            "legacy_log_id": event.legacy_log_id,
             "scope": event.scope,
             "scoring_run_id": None,
             "status": event.status,
@@ -158,7 +166,11 @@ def _event_entries(session, batch_id):
 
 def build_export_history(session, batch, *, limit=DEFAULT_LIMIT, cursor=None):
     limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
-    entries = _event_entries(session, batch.id) + _legacy_entries(session, batch.id)
+    events = _event_entries(session, batch.id)
+    backfilled = {
+        event["legacy_log_id"] for event in events if event["legacy_log_id"]
+    }
+    entries = events + _legacy_entries(session, batch.id, backfilled)
     entries.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
 
     start = int(cursor) if cursor is not None else 0
