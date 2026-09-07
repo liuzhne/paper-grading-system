@@ -3,6 +3,8 @@ from typing import Optional
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Query
+from fastapi import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
@@ -16,6 +18,7 @@ from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.session import get_db
+from backend.app.services.scoring import document_view
 from backend.app.schemas.scoring import ReviewLogRead
 from backend.app.schemas.scoring import ReviewSubmit
 from backend.app.schemas.scoring import ScoreItemRead
@@ -123,6 +126,30 @@ def get_scoring_run(
             "policy_schema_version": run.policy_schema_version,
         }
     )
+    return payload
+
+
+@router.get("/scoring-runs/{run_id}/document-view")
+def get_document_view(
+    run_id: str,
+    limit: int = Query(default=document_view.DEFAULT_LIMIT, ge=1, le=document_view.MAX_LIMIT),
+    cursor: str | None = None,
+    anchor_id: str | None = None,
+    response: Response = None,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """评分工作区中间栏的只读正文投影（计划 §5-A）。
+
+    与评分项展示投影共用同一份快照身份。正文可能包含学生论文原文，因此
+    禁止任何共享缓存。
+    """
+    run = _visible_run(db, run_id, principal)
+    payload = document_view.build_document_view(
+        db, run, limit=limit, cursor=cursor, anchor_id=anchor_id
+    )
+    if response is not None:
+        response.headers["Cache-Control"] = "private, no-store"
     return payload
 
 
