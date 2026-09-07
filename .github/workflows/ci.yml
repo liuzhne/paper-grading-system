@@ -84,6 +84,17 @@ jobs:
             echo "$drift"
             exit 1
           fi
+      - name: Install the Playwright browser
+        working-directory: frontend/workbench
+        run: npx playwright install --with-deps chromium
+      - name: Run browser acceptance (V01-V13)
+        working-directory: frontend/workbench
+        env:
+          # webServer 起的是真实 FastAPI + 统一组装产物，不是 Vite dev server：
+          # 深链接回退、缺失资源 404、/api 不被吞掉这几条只在生产托管路径上
+          # 才会出问题。
+          PGS_PYTHON: python
+        run: npx playwright test
       - name: Upload frontend evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -92,6 +103,8 @@ jobs:
           path: |
             public/workbench/index.html
             frontend/workbench/package-lock.json
+            frontend/workbench/playwright-report/
+            frontend/workbench/test-results/
           if-no-files-found: error
           retention-days: 30
 

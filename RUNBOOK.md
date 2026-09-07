@@ -427,6 +427,44 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db AUTH_ENABLED=false .venv/bin/python 
 
 角色边界现状：`/system/ops-readiness` 与 `/system/llm-check` 限平台管理员；`/release-gates/*` 由路由级守卫限平台管理员，**只收紧角色，不替代**服务原有的候选身份、门禁条件与人工批准约束；`/system/organization-readiness` 限 org_admin 或已选组织的平台管理员，先按组织过滤再聚合，且不下发磁盘/数据库/部署安全等宿主事实。缺少组织上下文时直接拒绝，不回落为全局查询。
 
+### 11.3 阶段 6B：导出补录与默认入口切换
+
+**旧导出日志补录**（可重入，重复执行不产生重复事件）：
+
+```bash
+.venv/bin/python -m backend.app.scripts.backfill_export_events --dry-run
+```
+
+确认统计无误后去掉 `--dry-run` 正式执行。它是独立入口而非迁移的一部分，因为
+`alembic upgrade head` 不会重跑已完成的迁移：回退窗口内旧应用只写
+`spreadsheet_write_logs`，重新前进时必须能再执行一次把这段补上。
+
+遇到未登记的 `target_type` 会**整批终止**并打印该值，不写入猜测的映射。此时先
+确认该通道应映射到哪个展示通道，补进 `services/batches/exports.LEGACY_CHANNELS`
+后重新执行。
+
+**默认入口切换**由环境变量控制，不靠删页：
+
+```bash
+WORKBENCH_DEFAULT_ENTRY=true   # 切到 v2 工作台
+WORKBENCH_DEFAULT_ENTRY=false  # 退回旧 SPA（默认）
+```
+
+旧入口常驻在 `/legacy/`，切换前后都可达——不要等到切换当天才第一次验证这条
+回退路径。`/login`、`/register`、`/reset-password` 无论开关如何都继续走旧壳，
+已发出的邀请与重置链接不会因切换失效。
+
+**浏览器验收**（V01–V13）：
+
+```bash
+cd frontend/workbench && npx playwright install --with-deps chromium && npx playwright test
+```
+
+被测对象是 `scripts/build_web_static.py --with-workbench` 的统一组装产物经真实
+FastAPI 托管的结果，不是 Vite dev server——深链接回退、缺失资源必须 404、
+`/api` 不被 SPA 吞掉这几条只在生产托管路径上才会出问题。数据为合成文档与
+Mock LLM，库与存储建在临时目录，因此截图与 trace 可安全归档。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
