@@ -3,10 +3,9 @@
  * 未决定开放程度前一律使用设计默认值。
  *
  * 字体：IBM Plex Mono 用于全部数字（分数、页码、状态编码、时间戳），
- * 中文正文走系统字体栈。许可为 SIL OFL 1.1，必须自托管（离线部署要求
- * 资源可完全本地化，禁止 Google Fonts CDN）。字体文件与 OFL.txt 在
- * 阶段 0 校验许可证后落入 src/assets/fonts/ 并在此处补 @font-face；
- * 在此之前 --font-mono 回落到系统等宽栈，界面不会因缺字体而破版。
+ * 中文正文走系统字体栈。许可为 SIL OFL 1.1，经 npm @fontsource 引入并由
+ * Vite 打包成自托管资源（离线部署要求资源可完全本地化，禁止 Google Fonts
+ * CDN）。--font-mono 仍保留系统等宽栈作为回退，字体加载失败时不破版。
  */
 
 :root {

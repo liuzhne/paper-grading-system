@@ -54,3 +54,31 @@ def test_api_is_not_swallowed_by_spa_fallback(client):
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
+
+
+def test_workbench_bundles_fonts_locally_without_any_cdn(client):
+    """离线部署要求资源可完全本地化（计划 §8）。
+
+    字体一旦外链 Google Fonts，内网/离线环境下数字就会回落成系统字体——更糟
+    的是，页面会为此发起一次注定失败的外部请求。
+    """
+    from pathlib import Path
+
+    workbench = ROOT / "public" / "workbench"
+    index = (workbench / "index.html").read_text(encoding="utf-8")
+
+    assert "fonts.googleapis.com" not in index
+    assert "fonts.gstatic.com" not in index
+
+    css_files = list((workbench / "assets").glob("*.css"))
+    assert css_files, "产物中应有样式文件"
+    for path in css_files:
+        text = path.read_text(encoding="utf-8")
+        assert "fonts.googleapis.com" not in text
+        assert "fonts.gstatic.com" not in text
+        assert "http://" not in text and "https://" not in text, (
+            "%s 含外部资源引用；离线部署要求全部本地化" % path.name
+        )
+
+    fonts = list((workbench / "assets").glob("ibm-plex-mono-*.woff2"))
+    assert fonts, "IBM Plex Mono 应作为自托管资源打包进产物"
