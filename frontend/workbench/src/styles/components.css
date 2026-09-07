@@ -1,0 +1,333 @@
+/* 共享组件词汇。
+ *
+ * 设计稿没有画多组织与运维界面（计划 §2.1），补画这些页面时**只允许组合
+ * 这里已有的类**，不得每页各造一套样式——否则会做出两种风格（§10 风险
+ * 「补画界面与设计稿脱节」）。新增样式先加到本文件并复用。
+ *
+ * 全部取值来自 tokens.css，不写死颜色。
+ */
+
+/* ---------- 页头 ---------- */
+
+.page-head {
+  margin-bottom: 24px;
+}
+
+.page-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.14em;
+  color: var(--text-faint);
+  margin: 0 0 8px;
+}
+
+.page-title {
+  margin: 0 0 6px;
+  font-size: 27px;
+  font-weight: 700;
+}
+
+.page-sub {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* ---------- 卡片 ---------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 20px;
+}
+
+.card-pad {
+  padding: 22px;
+}
+
+.card-head {
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.card-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.card-note {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+.card-foot {
+  padding: 15px 22px;
+  background: var(--surface-muted);
+  border-top: 1px solid var(--border-light);
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+/* ---------- 表格 ---------- */
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.table thead tr {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+}
+
+.table th {
+  padding: 10px 22px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: var(--row-pad) 22px;
+  border-bottom: 1px solid var(--border-row);
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table .num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.table-empty {
+  padding: 28px 22px;
+  color: var(--text-faint);
+  font-size: 13.5px;
+}
+
+/* ---------- 表单 ---------- */
+
+.field {
+  display: block;
+  margin-bottom: 16px;
+}
+
+.field-label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 7px;
+}
+
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.7;
+}
+
+.input,
+.select {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border-input);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.select {
+  padding-right: 8px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0 16px;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+/* ---------- 按钮 ---------- */
+
+.btn {
+  height: 36px;
+  padding: 0 15px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-input);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--border-input-hover);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  border-color: var(--accent);
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+}
+
+.btn-sm {
+  height: 30px;
+  padding: 0 11px;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.btn-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- 状态标签 ---------- */
+
+.chip {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  background: var(--neutral-bg);
+  color: var(--neutral-ink);
+  white-space: nowrap;
+}
+
+.chip-ok {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.chip-warn {
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+}
+
+.chip-danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* ---------- 提示条 ---------- */
+
+.notice {
+  border-radius: 10px;
+  padding: 14px 18px;
+  font-size: 13px;
+  line-height: 1.75;
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.notice-warn {
+  border-color: var(--warn-border);
+  background: var(--warn-surface);
+  color: var(--warn-ink);
+}
+
+.notice-danger {
+  border-color: var(--danger-border);
+  background: var(--danger-surface);
+  color: var(--danger-ink);
+}
+
+.notice-title {
+  font-weight: 650;
+  margin: 0 0 6px;
+}
+
+/* ---------- 一次性机密 ---------- */
+
+/* 邀请链接与重置令牌只在创建响应里出现一次，之后无法再取回。
+   必须显式提示，且绝不写入 console 或任何日志。 */
+.secret {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.secret code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* ---------- 杂项 ---------- */
+
+.muted {
+  color: var(--text-muted);
+}
+
+.faint {
+  color: var(--text-faint);
+}
+
+.stack-sm > * + * {
+  margin-top: 6px;
+}

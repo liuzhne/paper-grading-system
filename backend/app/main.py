@@ -39,6 +39,25 @@ async def lifespan(app):
     yield
 
 
+def _inject_client_config(html: str) -> str:
+    """Inject the served API prefix into a browser entrypoint.
+
+    The path comes from the running service configuration; the frontend offers
+    no editable entry for it. JSON encoding keeps special characters in the
+    configuration from breaking out of the page's script context. Both the
+    legacy SPA and the v2 workbench read the same ``window.__PGS_CONFIG__``.
+    """
+
+    client_config = json.dumps(
+        {"apiBase": settings.API_PREFIX.rstrip("/")}, ensure_ascii=False
+    ).replace("</", "<\\/")
+    return html.replace(
+        "<!-- PGS_CLIENT_CONFIG -->",
+        f"<script>window.__PGS_CONFIG__ = {client_config};</script>",
+        1,
+    )
+
+
 def create_app():
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
@@ -102,7 +121,30 @@ def create_app():
     app.include_router(system.router, prefix=settings.API_PREFIX)
     app.include_router(calibration.router, prefix=settings.API_PREFIX, dependencies=guarded)
 
-    web_dir = Path(__file__).resolve().parents[2] / "frontend" / "web"
+    repo_root = Path(__file__).resolve().parents[2]
+
+    # v2 评审工作台（计划 §8.3）：新页统一挂在 /workbench/ 下，与旧 SPA 并存。
+    # 托管的是 scripts/build_web_static.py 的统一组装产物，而非 Vite 源码目录。
+    # 资源 mount 必须先于 SPA 回退注册：缺失的 JS 要 404，不能回 HTML。
+    workbench_dir = repo_root / "public" / "workbench"
+    workbench_assets = workbench_dir / "assets"
+    if (workbench_dir / "index.html").is_file() and workbench_assets.is_dir():
+        app.mount(
+            "/workbench/assets",
+            StaticFiles(directory=workbench_assets),
+            name="workbench-assets",
+        )
+
+        @app.get("/workbench", include_in_schema=False)
+        @app.get("/workbench/{path:path}", include_in_schema=False)
+        def workbench_app(path: str = ""):
+            return HTMLResponse(
+                _inject_client_config(
+                    (workbench_dir / "index.html").read_text(encoding="utf-8")
+                )
+            )
+
+    web_dir = repo_root / "frontend" / "web"
     assets_dir = web_dir / "assets"
     if web_dir.exists() and assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
@@ -112,18 +154,11 @@ def create_app():
         @app.get("/register", include_in_schema=False)
         @app.get("/reset-password", include_in_schema=False)
         def web_app():
-            # API 路径由当前服务配置注入，前端不提供可编辑入口。
-            # JSON 编码可避免配置中的特殊字符破坏页面脚本上下文。
-            client_config = json.dumps(
-                {"apiBase": settings.API_PREFIX.rstrip("/")}, ensure_ascii=False
-            ).replace("</", "<\\/")
-            html = (web_dir / "index.html").read_text(encoding="utf-8")
-            html = html.replace(
-                "<!-- PGS_CLIENT_CONFIG -->",
-                f"<script>window.__PGS_CONFIG__ = {client_config};</script>",
-                1,
+            return HTMLResponse(
+                _inject_client_config(
+                    (web_dir / "index.html").read_text(encoding="utf-8")
+                )
             )
-            return HTMLResponse(html)
 
     return app
 

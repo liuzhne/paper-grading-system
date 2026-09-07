@@ -1,0 +1,17 @@
+<script setup>
+import StageStub from "@/components/StageStub.vue";
+</script>
+
+<template>
+  <StageStub
+    title="运维与质量"
+    stage="5"
+    summary="组织质量视图与平台运行视图，设计稿未覆盖，按同一视觉语言补画。"
+    :scope="[
+      '组织视图：本组织 ranking / drift / drift-monitor / review-sample、锚点与批任务观察指标',
+      '平台视图：全局 OPS readiness、平台连接诊断与 release-gates',
+      '先按组织过滤再聚合；越界资源返回 404，不向组织管理员返回跨组织数据',
+      '只做观察与授权配置录入，不授予 GATE-03 发布权限，不预填生产阈值',
+    ]"
+  />
+</template>

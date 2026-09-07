@@ -40,6 +40,61 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  frontend-workbench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/workbench/package-lock.json
+      - name: Install the locked frontend environment
+        working-directory: frontend/workbench
+        run: npm ci
+      - name: Run component and state tests
+        working-directory: frontend/workbench
+        run: npm run test:unit
+      - name: Install uv and Python for the static assembly step
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # Vercel's build hook runs scripts/build_web_static.py without
+      # --with-workbench, so the deployed workbench is whatever public/workbench
+      # holds in the repository. Rebuild it here and fail on any drift: without
+      # this gate a source change could ship behind a stale committed bundle.
+      - name: Assemble the static artifact from source
+        run: python scripts/build_web_static.py --with-workbench
+      - name: Fail if the committed public/ artifact drifted from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --porcelain also reports untracked files; `git diff` alone would
+          # miss a rebuild that only adds newly-hashed asset names.
+          drift="$(git status --porcelain -- public/)"
+          if [[ -n "$drift" ]]
+          then
+            echo "::error::public/ is out of sync with frontend sources."
+            echo "Run: python scripts/build_web_static.py --with-workbench"
+            echo "then commit the regenerated public/ artifact."
+            echo "$drift"
+            exit 1
+          fi
+      - name: Upload frontend evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgs-frontend-workbench-evidence
+          path: |
+            public/workbench/index.html
+            frontend/workbench/package-lock.json
+          if-no-files-found: error
+          retention-days: 30
+
   postgres-migrations-constraints-and-restore:
     runs-on: ubuntu-latest
     services:
@@ -235,6 +290,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs:
       - docker-compose-smoke
+      # The deployed workbench comes from the committed public/ artifact, so a
+      # drift or test failure there must block the release like any other gate.
+      - frontend-workbench
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production

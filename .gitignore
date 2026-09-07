@@ -30,6 +30,9 @@ docs/QWK基线攻坚-对话全记录.md
 
 # 参赛材料，不入库
 docs/参赛材料/
+
+# Claude Design 导出的设计交付包，不入库
+*-handoff.zip
 .vercel
 supabase/.temp/
 .env*

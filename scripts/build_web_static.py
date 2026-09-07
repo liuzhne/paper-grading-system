@@ -3,16 +3,31 @@
 The browser app defaults to ``/api`` when the dynamic local-development
 configuration is absent, so this production copy must not contain secrets or
 environment-specific settings.
+
+Two entrypoints are assembled here (frontend v2 plan §8.2/§8.3):
+
+* the legacy SPA at ``/`` with its immutable assets under ``/assets/*``;
+* the v2 workbench at ``/workbench/`` with its own assets under
+  ``/workbench/assets/*``.
+
+The workbench is opt-in via ``--with-workbench`` until the Node build step is
+wired into CI and the Vercel build command. Enabling it requires an installed
+``frontend/workbench/node_modules``; a missing toolchain is a hard failure
+rather than a silent skip, so a release can never ship a stale workbench.
 """
 
+import argparse
 from hashlib import sha256
 from pathlib import Path
 import re
-from shutil import rmtree
+from shutil import copytree, rmtree
+import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "frontend" / "web"
+WORKBENCH = ROOT / "frontend" / "workbench"
 OUTPUT = ROOT / "public"
 AUTH_PAGES = ("login", "register", "reset-password")
 ASSET_REFERENCE = re.compile(
@@ -44,10 +59,79 @@ def _fingerprinted_assets(index: str) -> tuple[str, dict[str, bytes]]:
     return rewritten, assets
 
 
-def main() -> None:
+def _build_workbench() -> None:
+    """Run the workbench production build and copy it under ``public/workbench``.
+
+    Vite already emits content-hashed asset names, so no extra fingerprinting is
+    applied here.
+    """
+
+    if not (WORKBENCH / "node_modules").is_dir():
+        raise SystemExit(
+            "frontend/workbench/node_modules is missing.\n"
+            "Run `npm ci` in frontend/workbench before building with "
+            "--with-workbench, or omit the flag to assemble the legacy entry "
+            "only. Never publish a release with a stale workbench bundle."
+        )
+
+    npm = "npm.cmd" if sys.platform == "win32" else "npm"
+    result = subprocess.run(
+        [npm, "run", "build"],
+        cwd=WORKBENCH,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "workbench build failed:\n" + (result.stderr or result.stdout)
+        )
+
+    dist = WORKBENCH / "dist"
+    index = dist / "index.html"
+    if not index.is_file():
+        raise SystemExit("workbench build produced no dist/index.html")
+
+    # Unlike the legacy entry, this single artifact is served by *both* hosts:
+    # the CDN (where the marker stays an inert comment and the app falls back to
+    # same-origin /api) and local FastAPI/Docker, which replaces the marker to
+    # inject a non-default API_PREFIX. Stripping it here would break the latter.
+    if "<!-- PGS_CLIENT_CONFIG -->" not in index.read_text(encoding="utf-8"):
+        raise SystemExit(
+            "workbench dist/index.html lost the PGS_CLIENT_CONFIG marker; "
+            "local hosts could not inject a non-default API_PREFIX."
+        )
+
+    copytree(dist, OUTPUT / "workbench")
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--with-workbench",
+        action="store_true",
+        help=(
+            "also build and assemble the v2 workbench at /workbench/. "
+            "Requires frontend/workbench/node_modules (npm ci)."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    # A plain run regenerates only the legacy entry. Any already-assembled
+    # workbench artifact is preserved across the rebuild: wiping it here would
+    # silently ship a deployment whose /workbench routes 404. Only
+    # --with-workbench replaces it.
+    preserved: Path | None = None
+    workbench_output = OUTPUT / "workbench"
     if OUTPUT.exists():
+        if workbench_output.is_dir() and not args.with_workbench:
+            preserved = ROOT / ".build-workbench-carry"
+            if preserved.exists():
+                rmtree(preserved)
+            workbench_output.rename(preserved)
         rmtree(OUTPUT)
     (OUTPUT / "assets").mkdir(parents=True)
+    if preserved is not None:
+        preserved.rename(workbench_output)
 
     index = (SOURCE / "index.html").read_text(encoding="utf-8")
     # Local FastAPI injects this marker for non-default API prefixes. In the
@@ -62,6 +146,9 @@ def main() -> None:
         (page_dir / "index.html").write_text(index, encoding="utf-8")
     for name, payload in assets.items():
         (OUTPUT / "assets" / name).write_bytes(payload)
+
+    if args.with_workbench:
+        _build_workbench()
 
 
 if __name__ == "__main__":

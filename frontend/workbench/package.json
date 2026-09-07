@@ -1,0 +1,36 @@
+{
+  "name": "@pgs/workbench",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "有据智评 · 评审工作台 v2 前端（Vite + Vue 3 + JavaScript）",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:e2e": "node scripts/e2e-not-configured.mjs",
+    "typecheck": "vue-tsc --noEmit -p jsconfig.json",
+    "api:generate": "openapi-typescript ../../storage/openapi.json -o src/api/schema.d.ts",
+    "api:check": "npm run api:generate && git diff --exit-code -- src/api/schema.d.ts"
+  },
+  "dependencies": {
+    "pinia": "2.3.1",
+    "vue": "3.5.13",
+    "vue-router": "4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "5.2.1",
+    "@vue/test-utils": "2.4.6",
+    "jsdom": "25.0.1",
+    "openapi-typescript": "7.5.2",
+    "typescript": "5.7.3",
+    "vite": "6.0.11",
+    "vitest": "2.1.9",
+    "vue-tsc": "2.2.0"
+  }
+}

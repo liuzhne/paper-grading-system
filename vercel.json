@@ -10,11 +10,27 @@
       "excludeFiles": "{.env,.env.*,storage/**,backend/app/tests/**,docs/**,.github/**,test/**,frontend/**,**/*.docx,**/*.pdf,**/*.png,**/*.svg,**/*.mmd}"
     }
   },
+  "rewrites": [
+    {"source": "/workbench", "destination": "/workbench/index.html"},
+    {"source": "/workbench/:path((?!assets/).*)", "destination": "/workbench/index.html"}
+  ],
   "headers": [
     {
       "source": "/assets/(.*)",
       "headers": [
         {"key": "Cache-Control", "value": "public, max-age=31536000, immutable"}
+      ]
+    },
+    {
+      "source": "/workbench/assets/(.*)",
+      "headers": [
+        {"key": "Cache-Control", "value": "public, max-age=31536000, immutable"}
+      ]
+    },
+    {
+      "source": "/workbench/index.html",
+      "headers": [
+        {"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}
       ]
     },
     {

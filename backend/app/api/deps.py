@@ -96,3 +96,46 @@ def require_organization_role(
         return
     if principal.organization_role not in roles:
         raise HTTPException(status_code=403, detail="当前组织角色无权执行此操作")
+
+
+def require_platform_admin(principal: CurrentPrincipal) -> None:
+    """Restrict a platform-wide view to platform administrators.
+
+    ``AUTH_ENABLED=False`` is an explicit local development mode and is allowed
+    through; it is never evidence of production authorization (frontend v2
+    plan §2.1). Organization administrators must not reach platform-wide
+    resources through this path.
+    """
+    if not auth_active():
+        return
+    if principal.platform_role != "platform_admin":
+        raise HTTPException(status_code=403, detail="需要平台管理员权限")
+
+
+def enforce_platform_admin(
+    principal: CurrentPrincipal = Depends(current_principal),
+) -> CurrentPrincipal:
+    """Router-level guard for platform-wide surfaces."""
+    require_platform_admin(principal)
+    return principal
+
+
+def require_selected_organization(principal: CurrentPrincipal) -> str | None:
+    """Return the organization this request is scoped to, or reject.
+
+    Aggregations must filter by organization *before* counting. Under enforced
+    auth a missing organization context is rejected outright rather than
+    falling back to an unfiltered platform-wide query (frontend v2 plan §2.1).
+    Returns ``None`` only in the explicit development mode, where the caller
+    keeps its existing single-tenant behaviour.
+    """
+    if not auth_active():
+        return None
+    if not principal.organization_id:
+        raise HTTPException(status_code=400, detail="请求缺少组织上下文")
+    if (
+        principal.organization_role is None
+        and principal.platform_role != "platform_admin"
+    ):
+        raise HTTPException(status_code=403, detail="无权访问该组织")
+    return principal.organization_id

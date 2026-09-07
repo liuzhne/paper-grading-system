@@ -13,6 +13,7 @@ from sqlalchemy import text
 from backend.app.core.config import deployment_security_issues
 from backend.app.core.config import settings
 from backend.app.db.models import BatchScoringJob
+from backend.app.db.models import GradingBatch
 from backend.app.db.models import utcnow
 
 
@@ -72,11 +73,27 @@ def _database_signal(db):
     }
 
 
-def _batch_signal(db):
+def _scoped(statement, organization_id):
+    """Filter batch-scoring jobs to one organization *before* aggregating.
+
+    Counting first and filtering afterwards would leak cross-organization
+    totals into an organization-scoped view (frontend v2 plan §2.1).
+    """
+    if organization_id is None:
+        return statement
+    return statement.join(
+        GradingBatch, GradingBatch.id == BatchScoringJob.grading_batch_id
+    ).where(GradingBatch.organization_id == organization_id)
+
+
+def _batch_signal(db, organization_id=None):
     jobs = db.scalars(
-        select(BatchScoringJob)
-        .where(BatchScoringJob.status.in_(("queued", "running", "cancel_requested")))
-        .order_by(BatchScoringJob.created_at, BatchScoringJob.id)
+        _scoped(
+            select(BatchScoringJob).where(
+                BatchScoringJob.status.in_(("queued", "running", "cancel_requested"))
+            ),
+            organization_id,
+        ).order_by(BatchScoringJob.created_at, BatchScoringJob.id)
     ).all()
     cutoff = utcnow() - timedelta(minutes=settings.OPS_BATCH_STALE_MINUTES)
     stale = []
@@ -85,8 +102,12 @@ def _batch_signal(db):
         if activity < cutoff:
             stale.append(job.id)
     completed = db.scalars(
-        select(BatchScoringJob)
-        .where(BatchScoringJob.metrics_snapshot.is_not(None))
+        _scoped(
+            select(BatchScoringJob).where(
+                BatchScoringJob.metrics_snapshot.is_not(None)
+            ),
+            organization_id,
+        )
         .order_by(BatchScoringJob.finished_at.desc(), BatchScoringJob.id.desc())
         .limit(100)
     ).all()
@@ -146,5 +167,26 @@ def build_ops_readiness(db):
     }
 
 
-__all__ = ["build_ops_readiness"]
+def build_organization_readiness(db, organization_id):
+    """Batch-scoring health for one organization (frontend v2 plan §2.1).
 
+    Deliberately excludes the platform-wide signals carried by
+    :func:`build_ops_readiness` — disk, database size and deployment security
+    are host facts, not organization facts, and must not reach an organization
+    administrator. Like the platform view, this is observation only and never a
+    Core release authority.
+    """
+    batch_jobs = _batch_signal(db, organization_id=organization_id)
+    return {
+        "schema_version": "organization-readiness@1",
+        "organization_id": organization_id,
+        "thresholds": {
+            "batch_stale_minutes": settings.OPS_BATCH_STALE_MINUTES,
+            "llm_failure_rate_max": settings.OPS_LLM_FAILURE_RATE_MAX,
+        },
+        "signals": {"batch_jobs": batch_jobs},
+        "production_default_switch_authorized": False,
+    }
+
+
+__all__ = ["build_ops_readiness", "build_organization_readiness"]

@@ -1,0 +1,17 @@
+<script setup>
+import StageStub from "@/components/StageStub.vue";
+</script>
+
+<template>
+  <StageStub
+    title="结果复核"
+    stage="2"
+    summary="普通确认与阻塞任务的统一队列。"
+    :scope="[
+      '普通 need_manual_review 项与 open / claimed 阻塞任务分组，阻塞优先',
+      'Core confidence 为空时显示「未提供」，不转 0 也不排除出队列',
+      '采纳本页可采纳项：明确集合、最多 100 项、幂等回执、失败整体不写入',
+      '复核统计与审计时间线关联 ReviewLog 与人工任务，避免重复计数',
+    ]"
+  />
+</template>
