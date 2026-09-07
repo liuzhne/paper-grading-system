@@ -4,9 +4,13 @@ from fastapi import APIRouter
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
+from backend.app.api.deps import CurrentPrincipal
+from backend.app.api.deps import current_principal
 from backend.app.api.deps import enforce_auth
 from backend.app.core.config import settings
 from backend.app.db.session import get_db
+from backend.app.schemas.system import CapabilitiesRead
+from backend.app.services.auth import auth_active
 from backend.app.services.deployment.readiness import build_ops_readiness
 from backend.app.services.llm.diagnostics import check_connectivity
 from backend.app.services.llm.factory import LOCAL_PROVIDERS
@@ -21,6 +25,46 @@ router = APIRouter(prefix="/system", tags=["system"])
 @router.get("/ops-readiness", dependencies=[Depends(enforce_auth)])
 def ops_readiness(db: Session = Depends(get_db)):
     return build_ops_readiness(db)
+
+
+@router.get("/capabilities", response_model=CapabilitiesRead)
+def capabilities(principal: CurrentPrincipal = Depends(current_principal)):
+    """鉴权后的角色能力与部署能力投影（前端 v2 计划 §2.1、§6）。
+
+    前端只用它决定导航与控件可见性；**真正的权限一律由各端点服务端执行**。
+    本响应不包含任何 Key、Secret 或平台敏感配置。
+    """
+    is_platform_admin = principal.platform_role == "platform_admin"
+    is_org_admin = is_platform_admin or principal.organization_role == "org_admin"
+    sheet_provider = (settings.SHEET_WRITER_PROVIDER or "mock").lower()
+    sheets_available = (
+        not settings.OFFLINE_MODE
+        and sheet_provider in {"google_sheets", "google_apps_script"}
+        and bool(settings.GOOGLE_SHEETS_WEBAPP_URL)
+    )
+    return {
+        "user_id": principal.user_id,
+        "organization_id": principal.organization_id,
+        "organization_role": principal.organization_role,
+        "platform_role": principal.platform_role,
+        "auth_enforced": auth_active(),
+        "abilities": {
+            "view_organization_ops": is_org_admin,
+            "view_platform_ops": is_platform_admin,
+            "manage_members": is_org_admin,
+            "manage_own_ai_connections": True,
+        },
+        "upload": {
+            "provider": settings.STORAGE_PROVIDER,
+            "max_size_mb": settings.DIRECT_UPLOAD_MAX_SIZE_MB,
+            "tus_threshold_mb": settings.DIRECT_UPLOAD_TUS_THRESHOLD_MB,
+            "accepted_extensions": [".docx", ".pdf"],
+        },
+        "export": {
+            "sheets_available": sheets_available,
+            "offline_mode": settings.OFFLINE_MODE,
+        },
+    }
 
 
 @router.get("/llm-check")
