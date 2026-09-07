@@ -159,4 +159,20 @@ __all__ = [
     "apply_event",
     "guard_writable",
     "stable_stage",
+    "available_events",
 ]
+
+
+def available_events(batch):
+    """当前阶段允许的事件，供前端渲染可执行动作。
+
+    前端不自行推断转移合法性——判据只有一份，就在这里；否则界面会出现
+    「按钮可点但服务端拒绝」或反过来的错位。
+    """
+    if batch.status == "archived":
+        return ["reopen"]
+    return [
+        event
+        for event, allowed_from in _ALLOWED_FROM.items()
+        if event not in _ARCHIVE_EXEMPT and batch.status in allowed_from
+    ]

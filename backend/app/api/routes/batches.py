@@ -16,6 +16,7 @@ from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricVersion
 from backend.app.db.session import get_db
 from backend.app.schemas.batch import BatchCreate
+from backend.app.schemas.batch import BatchProgressRead
 from backend.app.schemas.batch import BatchRead
 from backend.app.schemas.batch import BatchScoreResult
 from backend.app.schemas.batch import BatchSummary
@@ -25,6 +26,8 @@ from backend.app.services.auth import auth_active
 from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.batches import state
+from backend.app.services.batches.results import current_job
+from backend.app.services.batches.results import select_current_results
 from backend.app.services.calibration.analytics import batch_ranking
 from backend.app.services.calibration.analytics import drift_monitor
 from backend.app.services.calibration.analytics import review_sample
@@ -204,6 +207,50 @@ def get_batch_summary_endpoint(batch_id: str, db: Session = Depends(get_db), pri
         return get_batch_summary(db, batch_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{batch_id}/progress", response_model=BatchProgressRead)
+def batch_progress_endpoint(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """阶段、结果计数、执行状态与可执行动作。
+
+    阶段与 job 状态**并行返回**：一次 job 失败不代表批次阶段就是失败，只看
+    阶段字段会漏掉「任务已中断、等待恢复」这类情况（计划 §5-C、§5-D）。
+    """
+    batch = _visible_batch(db, batch_id, principal)
+    selection = select_current_results(db, batch)
+    job = current_job(db, batch.id)
+    return {
+        "batch_id": batch.id,
+        "stage": batch.status,
+        "state_version": batch.state_version,
+        "counts": {
+            "total": selection.total_count,
+            "scored": selection.scored_count,
+            "reviewed": selection.reviewed_count,
+            "failed": selection.failed_count,
+            "pending": selection.pending_count,
+        },
+        "completion_ratio": selection.completion_ratio,
+        "result_revision": selection.revision,
+        "job": (
+            None
+            if job is None
+            else {
+                "id": job.id,
+                "generation": job.generation,
+                "status": job.status,
+                "total_items": job.total_items,
+                "succeeded_count": job.succeeded_count,
+                "failed_count": job.failed_count,
+                "pending_count": job.pending_count,
+            }
+        ),
+        "available_actions": state.available_events(batch),
+    }
 
 
 @router.get("/{batch_id}/ranking")

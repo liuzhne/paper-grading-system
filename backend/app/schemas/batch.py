@@ -87,3 +87,38 @@ class BatchSummary(BaseModel):
     paper_stats: dict[str, int]
     run_stats: dict[str, int]
     papers: list[BatchPaperSummary]
+
+
+class BatchProgressCounts(BaseModel):
+    """当前结果选择集合下的分阶段计数；分母是本轮目标材料，不是批次全部材料。"""
+
+    total: int
+    scored: int
+    reviewed: int
+    failed: int
+    pending: int
+
+
+class BatchProgressJob(BaseModel):
+    """执行状态，与业务阶段并行返回。"""
+
+    id: str
+    generation: int
+    status: str
+    total_items: int
+    succeeded_count: int
+    failed_count: int
+    pending_count: int
+
+
+class BatchProgressRead(BaseModel):
+    batch_id: str
+    stage: str
+    state_version: int
+    counts: BatchProgressCounts
+    #: 空批次为 None——不编造百分比。
+    completion_ratio: Optional[float] = None
+    result_revision: str
+    job: Optional[BatchProgressJob] = None
+    #: 服务端给出的可执行动作，前端不自行推断转移合法性。
+    available_actions: list[str]
