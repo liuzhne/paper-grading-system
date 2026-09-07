@@ -96,7 +96,9 @@ def _visible_batch(db: Session, batch_id: str, principal: CurrentPrincipal) -> G
 
 @router.get("", response_model=list[PaperRead])
 def list_papers(batch_id: Optional[str] = None, db: Session = Depends(get_db), principal: CurrentPrincipal = Depends(current_principal)):
-    query = select(Paper).order_by(Paper.created_at.desc())
+    # 稳定排序：同一时刻上传的材料若没有 tiebreaker，两次请求可能给出不同
+    # 顺序，评分工作区的「下一份」就会跳错行。neighbors 端点必须用同一口径。
+    query = select(Paper).order_by(Paper.created_at.desc(), Paper.id.desc())
     if principal.organization_id is not None:
         query = query.where(Paper.organization_id == principal.organization_id)
     if batch_id:
@@ -307,6 +309,42 @@ def complete_direct_upload(
     db.commit()
     db.refresh(paper)
     return paper
+
+
+@router.get("/{paper_id}/neighbors")
+def paper_neighbors(
+    paper_id: str,
+    batch_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """评分工作区的上一份 / 下一份（计划 §6）。
+
+    排序与 ``GET /papers?batch_id=`` 完全一致；paper 必须属于该 batch，
+    否则会把别的批次的材料串进导航。
+    """
+    _visible_batch(db, batch_id, principal)
+    paper = _visible_paper(db, paper_id, principal)
+    if paper.batch_id != batch_id:
+        raise HTTPException(status_code=404, detail="paper not found in batch")
+
+    query = select(Paper).where(Paper.batch_id == batch_id)
+    if principal.organization_id is not None:
+        query = query.where(Paper.organization_id == principal.organization_id)
+    ordered = db.scalars(
+        query.order_by(Paper.created_at.desc(), Paper.id.desc())
+    ).all()
+
+    ids = [item.id for item in ordered]
+    index = ids.index(paper_id)
+    return {
+        "batch_id": batch_id,
+        "paper_id": paper_id,
+        "position": index + 1,
+        "total": len(ids),
+        "previous_paper_id": ids[index - 1] if index > 0 else None,
+        "next_paper_id": ids[index + 1] if index + 1 < len(ids) else None,
+    }
 
 
 @router.get("/{paper_id}", response_model=PaperRead)
