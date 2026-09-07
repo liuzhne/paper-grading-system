@@ -191,3 +191,27 @@ def test_capabilities_matches_the_guards_for_an_org_admin(client, monkeypatch):
 
     assert abilities["view_platform_ops"] is False
     assert abilities["view_organization_ops"] is True
+
+
+def test_legacy_spa_gates_the_platform_llm_check_entry():
+    """旧 SPA 在并存期必须服从新的服务端守卫（前端 v2 计划 §8.3）。
+
+    `/system/llm-check` 已收紧为平台管理员专用。旧页面那个「测试模型连接」
+    按钮对所有登录用户可见，若不同步隐藏并处理 403，非平台管理员点击后只会
+    拿到一个无从下手的错误。
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "frontend"
+        / "web"
+        / "assets"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'document.querySelector("#llm-check-btn")' in source
+    assert 'llmCheckButton.classList.toggle("hidden", !isPlatformAdmin)' in source
+    assert "error.status === 403" in source
+    # BYOK 自测走另一条所有者校验路径，提示必须把用户指过去。
+    assert "我的 AI 连接" in source

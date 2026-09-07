@@ -950,6 +950,16 @@ function renderBatchAnalytics() {
 function renderIntegrationStatus() {
   const integrations = state.integrations;
   const container = document.querySelector("#integration-status");
+  // /system/llm-check 探测的是平台配置的 provider，已收紧为平台管理员专用。
+  // 这里同步隐藏入口，避免其他角色点击后只拿到 403。用户自带连接（BYOK）
+  // 的测试走「账户设置」里的 /ai-connections 所有者校验路径，不受影响。
+  const llmCheckButton = document.querySelector("#llm-check-btn");
+  if (llmCheckButton) {
+    const isPlatformAdmin =
+      state.identity?.auth_required === false ||
+      state.identity?.user?.platform_role === "platform_admin";
+    llmCheckButton.classList.toggle("hidden", !isPlatformAdmin);
+  }
   if (!integrations) {
     container.innerHTML = '<div class="muted">集成状态加载中</div>';
     return;
@@ -2734,8 +2744,14 @@ function bindEvents() {
         !result.ok,
       );
     } catch (error) {
-      el.innerHTML = `<div class="muted">${escapeHtml(error.message)}</div>`;
-      showToast(error.message, true);
+      // 即使入口已按角色隐藏，权限在服务端执行；403 要给出可操作的说明，
+      // 而不是把原始错误直接抛给用户。
+      const message =
+        error.status === 403
+          ? "平台模型连通测试仅限平台管理员。测试你自己的 AI 连接请到「账户设置 · 我的 AI 连接」。"
+          : error.message;
+      el.innerHTML = `<div class="muted">${escapeHtml(message)}</div>`;
+      showToast(message, true);
     }
   });
 
