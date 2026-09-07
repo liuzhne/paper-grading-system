@@ -18,6 +18,7 @@ from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricVersion
 from backend.app.db.models import ScoringRun
 from backend.app.db.session import get_db
+from backend.app.services.rubrics.coverage import build_rule_coverage
 from backend.app.schemas.rubric import RubricCreate
 from backend.app.schemas.rubric import RubricCloneRequest
 from backend.app.schemas.rubric import AtomicRuleEditRequest
@@ -347,6 +348,21 @@ def get_rubric_execution_draft(
         return read_execution_draft(session=db, rubric_id=rubric_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{rubric_id}/rule-coverage")
+def get_rule_coverage(
+    rubric_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """扣分细则完整度（计划 §6）。
+
+    没有扣分规则的评分项是阻断项——评分到该项时没有判据可用。用户原文
+    与 AI 起草分开计数：未经确认的 AI 规则不是用户认可的判据。
+    """
+    rubric = _visible_rubric(db, rubric_id, principal)
+    return build_rule_coverage(db, rubric)
 
 
 @router.post("/{rubric_id}/draft-deduction-rules")
