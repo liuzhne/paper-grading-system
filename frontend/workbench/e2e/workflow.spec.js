@@ -86,6 +86,12 @@ test.describe("V03/V04 评分工作区与证据", () => {
     await page.goto("/workbench/tasks");
     await page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }).click();
     await expect(page.getByText("材料 ·")).toBeVisible();
+    // 显式选中带证据的那份。工作区默认落在列表首项，而列表按上传时间倒序，
+    // 断言依赖那个顺序等于依赖一个与本用例无关的实现细节。
+    await page.getByRole("button", { name: /SE-2026-009/ }).click();
+    await expect(page.locator(".ident .mono")).toHaveText("SE-2026-009");
+    // 标题栏先于相邻关系更新：不等这一步，↑/↓ 会拿着上一份材料的相邻信息跑。
+    await expect(page.locator(".nav .mono")).toHaveText("2 / 2");
   }
 
   test("legacy 正文标注为当前解析结果", async ({ page }) => {
@@ -119,7 +125,7 @@ test.describe("V03/V04 评分工作区与证据", () => {
     await openWorkspace(page);
 
     const before = await page.locator(".ident .mono").textContent();
-    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowUp");
     await expect(page.locator(".ident .mono")).not.toHaveText(before);
   });
 });

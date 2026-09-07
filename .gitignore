@@ -36,3 +36,8 @@ docs/参赛材料/
 .vercel
 supabase/.temp/
 .env*
+
+# Playwright 验收产物：截图/trace 体积大且每次运行都变，只作为 CI artifact 归档
+frontend/workbench/test-results/
+frontend/workbench/playwright-report/
+frontend/workbench/blob-report/

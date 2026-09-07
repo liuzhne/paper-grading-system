@@ -23,23 +23,36 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 8_000 },
   use: {
+    // 用完整 Chromium 的新版 headless，而不是默认的 headless shell：验收要证明
+    // 的是真实浏览器里的渲染与交互，shell 砍掉了一部分浏览器行为，且它是需要
+    // 单独下载的第二份产物。`playwright install chromium` 已经包含完整构建。
+    channel: "chromium",
     baseURL: `http://127.0.0.1:${PORT}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     locale: "zh-CN",
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    // 窄屏用例只在 mobile project 跑：桌面宽度下三栏本就不该折叠，
+    // 在这里跑它是在断言一个错误的期望。
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      testIgnore: /responsive\.spec\.js/,
+    },
     // 窄屏折叠：设计三栏宽度不是唯一布局（计划 §8）。
     { name: "mobile", use: { ...devices["Pixel 5"] }, testMatch: /responsive\.spec\.js/ },
   ],
   webServer: {
     // 显式指向仓库 venv：`python` 在 PATH 上可能是系统解释器，那里没有本项目
     // 的依赖，webServer 会静默起不来、Playwright 一直等到超时。
-    command: `${process.env.PGS_PYTHON || "../../.venv/bin/python"} -m e2e_server ${PORT}`,
+    // 路径相对 `cwd`（下面已切到仓库根），不是相对本配置文件。
+    command: `${process.env.PGS_PYTHON || ".venv/bin/python"} -m e2e_server ${PORT}`,
     cwd: "../..",
     url: `http://127.0.0.1:${PORT}/api/system/integrations`,
-    reuseExistingServer: !process.env.CI,
+    // 永不复用：验收里有写操作（批量采纳），复用同一个进程意味着第二次
+    // 起跑时队列已被上一次跑空，本地重跑会假失败。重建一次库只要几秒。
+    reuseExistingServer: false,
     timeout: 120_000,
     stdout: "pipe",
     stderr: "pipe",

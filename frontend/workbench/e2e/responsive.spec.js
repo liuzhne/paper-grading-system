@@ -20,6 +20,9 @@ test.describe("V12 窄屏", () => {
   test("评分工作区在窄屏折叠为单列", async ({ page }) => {
     await page.goto("/workbench/tasks");
     await page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }).click();
+    // 先等工作区真的挂上：evaluate 不重试，抢在渲染前跑只会拿到 null，报成
+    // getComputedStyle 的类型错误，掩盖「到底有没有折叠」这个真正的问题。
+    await expect(page.locator(".cols")).toBeVisible();
 
     const columns = await page.evaluate(() => {
       const cols = document.querySelector(".cols");
@@ -32,6 +35,9 @@ test.describe("V12 窄屏", () => {
 test.describe("V12 键盘可达性", () => {
   test("导航链接可被键盘聚焦", async ({ page }) => {
     await page.goto("/workbench/");
+    // 同理：SPA 挂载前页面里没有可聚焦元素，Tab 停在 body，测出来的是加载
+    // 时序而不是可达性。
+    await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
     await page.keyboard.press("Tab");
 
     const tag = await page.evaluate(() => document.activeElement?.tagName);

@@ -401,7 +401,7 @@ git diff --check
 
 已实施：Vite + Vue 3 脚手架（`frontend/workbench/`）、`/workbench/*` 双入口托管、`GET /api/system/capabilities`、运维与门禁端点的角色收紧、CI 前端 job。
 
-**尚未实施**：Playwright 与 V01–V13 浏览器验收矩阵、IBM Plex Mono 字体落盘（当前回落系统等宽栈）。`npm run test:e2e` 会显式失败退出，不得记为通过。
+浏览器验收与 IBM Plex Mono 自托管已于阶段 6B 落地，见 §11.3。验收覆盖 §12.1 矩阵的 V03–V07、V09、V11、V12；**V01、V02、V08、V10、V13 仍无自动化用例**（需真实 Supabase、多身份会话或 `AUTH_ENABLED=true` 的多组织数据，一次性验收后端不具备），不得记为已通过。
 
 ```bash
 cd frontend/workbench && npm ci && npm run test:unit && npm run build
@@ -460,6 +460,14 @@ WORKBENCH_DEFAULT_ENTRY=false  # 退回旧 SPA（默认）
 cd frontend/workbench && npx playwright install --with-deps chromium && npx playwright test
 ```
 
+跑的是完整 Chromium 的新版 headless（配置里的 `channel: "chromium"`），不是默认的
+headless shell——验收要证明的是真实浏览器里的渲染与交互。webServer 每次都新起一个
+一次性后端，不复用已在跑的进程：验收里有写操作（批量采纳），复用会让第二次运行在
+一个已被跑空的队列上假失败。
+
+Playwright 需要与 Node 版本匹配的构建，1.49 在 Node 26 上会在 ESM loader 注册后静默
+挂起——没有任何输出，看起来像用例卡住。遇到长时间无输出先核对版本，不要去改用例。
+
 被测对象是 `scripts/build_web_static.py --with-workbench` 的统一组装产物经真实
 FastAPI 托管的结果，不是 Vite dev server——深链接回退、缺失资源必须 404、
 `/api` 不被 SPA 吞掉这几条只在生产托管路径上才会出问题。数据为合成文档与
@@ -473,4 +481,5 @@ Mock LLM，库与存储建在临时目录，因此截图与 trace 可安全归�
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-08 | 阶段 6B 与浏览器验收 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。未运行生产操作。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |

@@ -84,6 +84,11 @@ jobs:
             echo "$drift"
             exit 1
           fi
+      # 验收的 webServer 是真实 FastAPI，需要后端依赖；只装 uv 而不 sync，
+      # e2e_server 会因 ModuleNotFoundError 起不来，Playwright 只会报
+      # webServer 超时，掩盖真正的原因。
+      - name: Install the locked backend environment for the acceptance server
+        run: uv sync --locked
       - name: Install the Playwright browser
         working-directory: frontend/workbench
         run: npx playwright install --with-deps chromium
@@ -92,8 +97,8 @@ jobs:
         env:
           # webServer 起的是真实 FastAPI + 统一组装产物，不是 Vite dev server：
           # 深链接回退、缺失资源 404、/api 不被吞掉这几条只在生产托管路径上
-          # 才会出问题。
-          PGS_PYTHON: python
+          # 才会出问题。路径相对 webServer 的 cwd（仓库根）。
+          PGS_PYTHON: .venv/bin/python
         run: npx playwright test
       - name: Upload frontend evidence
         if: always()
