@@ -2353,6 +2353,40 @@ class ReviewLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
 
+class ReviewCommandReceipt(Base):
+    """批量复核命令的幂等回执（前端 v2 计划 §5-B）。
+
+    同一个幂等键重放时返回原结果而不是再写一遍；同键不同载荷是冲突，不是
+    覆盖——后者会让「重试」悄悄变成「执行了另一件事」。
+
+    回执与 ReviewLog 同事务提交：否则崩溃可能留下「已写日志但无回执」，
+    重试就会重复写入。
+    """
+
+    __tablename__ = "review_command_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "actor_id",
+            "command",
+            "idempotency_key",
+            name="uq_review_command_receipts_idempotency",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    command: Mapped[str] = mapped_column(String(100), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    #: 载荷指纹。同键不同指纹即冲突。
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+
+
 class RuleScoringTask(Base):
     """Durable audit/checkpoint for one AtomicRule execution."""
 

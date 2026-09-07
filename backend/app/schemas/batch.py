@@ -140,3 +140,25 @@ class BatchOverviewRead(BaseModel):
     active_batches: int
     stage_counts: dict[str, int]
     material_counts: BatchOverviewMaterials
+
+
+class ReviewAcceptItem(BaseModel):
+    score_item_id: str
+    review_revision: int = Field(ge=1)
+
+
+class ReviewAcceptRequest(BaseModel):
+    """明确的有限集合。服务端不做无界全批扫描（计划 §5-B）。"""
+
+    result_revision: str = Field(min_length=16)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1)
+    items: list[ReviewAcceptItem] = Field(min_length=1, max_length=100)
+
+
+class ReviewAcceptResult(BaseModel):
+    batch_id: str
+    accepted_count: int
+    result_revision: str
+    #: 幂等重放；未产生新的复核记录。
+    replayed: bool

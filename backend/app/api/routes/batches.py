@@ -22,11 +22,16 @@ from backend.app.schemas.batch import BatchRead
 from backend.app.schemas.batch import BatchScoreResult
 from backend.app.schemas.batch import BatchSummary
 from backend.app.schemas.batch import BatchUpdate
+from backend.app.schemas.batch import ReviewAcceptRequest
+from backend.app.schemas.batch import ReviewAcceptResult
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.auth import auth_active
 from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.batches import get_batch_summary
+from backend.app.services.batches import review_accept
+from backend.app.services.batches import review_queue
 from backend.app.services.batches import state
+from backend.app.services.batches import state as batch_state_module
 from backend.app.services.batches.results import current_job
 from backend.app.services.batches.results import select_current_results
 from backend.app.services.calibration.analytics import batch_ranking
@@ -295,6 +300,61 @@ def batch_progress_endpoint(
         ),
         "available_actions": state.available_events(batch),
     }
+
+
+@router.get("/{batch_id}/review-queue")
+def batch_review_queue(
+    batch_id: str,
+    limit: int = Query(default=review_queue.DEFAULT_LIMIT, ge=1, le=review_queue.MAX_LIMIT),
+    cursor: str | None = None,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """批次级复核队列（计划 §5-B）。
+
+    阻塞任务排在普通确认之前：先解决「算不算数」，再讨论「给几分」。
+    """
+    batch = _visible_batch(db, batch_id, principal)
+    return review_queue.build_review_queue(db, batch, limit=limit, cursor=cursor)
+
+
+@router.post("/{batch_id}/review-queue/accept", response_model=ReviewAcceptResult)
+def accept_review_queue_items(
+    batch_id: str,
+    payload: ReviewAcceptRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    user_id: str = Depends(current_user_id),
+):
+    """采纳本页可采纳项（计划 §5-B）。
+
+    整次要么全写、要么全不写；同键同载荷幂等重放。
+    """
+    ensure_dev_user(db)
+    batch = _visible_batch(db, batch_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        result = review_accept.accept_items(
+            db,
+            batch,
+            items=[item.model_dump() for item in payload.items],
+            result_revision=payload.result_revision,
+            idempotency_key=payload.idempotency_key,
+            reason=payload.reason,
+            actor_id=user_id,
+            organization_id=principal.organization_id,
+        )
+    except review_accept.AcceptConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except batch_state_module.BatchArchived as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except review_accept.AcceptError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.commit()
+    return result
 
 
 @router.get("/{batch_id}/ranking")
