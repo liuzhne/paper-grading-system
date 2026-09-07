@@ -7,6 +7,7 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.engine import make_url
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core.config import settings
@@ -18,6 +19,36 @@ from backend.app.schemas.rubric import RubricCriterionCreate
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.rubric_import.persist import build_criterion
 from backend.app.services.storage.local import ensure_storage_dirs
+
+
+#: Hosts a test database may legitimately live on. CI uses 127.0.0.1; local
+#: development uses SQLite files. Anything else is someone's real deployment.
+_LOCAL_DB_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+
+
+@pytest.fixture(autouse=True)
+def never_let_tests_reach_a_remote_database(tmp_path, monkeypatch):
+    """Neutralise an ambient DATABASE_URL that points at a real deployment.
+
+    `alembic/env.py` unconditionally overrides `sqlalchemy.url` with
+    `settings.DATABASE_URL`, and `settings` loads `.env.local` — which in this
+    repository holds production Supabase credentials. A migration test that
+    forgets to monkeypatch `settings.DATABASE_URL` therefore runs DDL against
+    production. Transactional DDL and the least-privilege `pgs_app` role both
+    happen to block it today, but neither is a guarantee worth relying on.
+
+    Redirecting rather than failing keeps the whole suite runnable on a
+    developer machine that has production credentials in `.env.local`. Tests
+    needing a specific database still monkeypatch it in the test body, which
+    runs after this fixture.
+    """
+
+    url = make_url(settings.DATABASE_URL)
+    if url.get_backend_name() == "sqlite" or (url.host or "") in _LOCAL_DB_HOSTS:
+        return
+    monkeypatch.setattr(
+        settings, "DATABASE_URL", "sqlite+pysqlite:///%s" % (tmp_path / "neutralised.db")
+    )
 
 
 @pytest.fixture(autouse=True)
