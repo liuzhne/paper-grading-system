@@ -217,3 +217,30 @@ test.describe("V07 首版评审方式", () => {
     await expect(page.getByText(/首版仅支持单评/)).toBeVisible();
   });
 });
+
+test.describe("V08 草稿续传", () => {
+  test("草稿批次给出继续上传入口", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    const row = page.locator("tbody tr", { hasText: "软件工程导论" });
+    await expect(row.getByRole("link", { name: "继续上传" })).toBeVisible();
+  });
+
+  test("继续上传回到新建流程并带上批次", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+    await page.locator("tbody tr", { hasText: "软件工程导论" })
+      .getByRole("link", { name: "继续上传" })
+      .click();
+
+    await expect(page).toHaveURL(/\/workbench\/tasks\/new\?batch=/);
+    await expect(page.getByRole("heading", { name: "新建评分任务" })).toBeVisible();
+  });
+
+  test("已评分批次不给续传入口", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    // 材料已经在评分/复核里，回到上传流程只会造成混淆。
+    const row = page.locator("tbody tr", { hasText: "2026 届毕业论文评分" });
+    await expect(row.getByRole("link", { name: "继续上传" })).toHaveCount(0);
+  });
+});

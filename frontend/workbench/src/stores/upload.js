@@ -24,6 +24,7 @@ export const useUploadStore = defineStore("upload", () => {
   const queue = ref([]);
   const uploadedPaperIds = ref([]);
   const busy = ref(false);
+  const canceled = ref(false);
 
   const doneCount = computed(
     () => queue.value.filter((entry) => entry.status === "done").length,
@@ -133,18 +134,56 @@ export const useUploadStore = defineStore("upload", () => {
     }
   }
 
+  /**
+   * 取消**调度**（计划 §5-E）。
+   *
+   * 停的是「还没开始的那些」。已经发出去的那一个仍会走完并记下结果——文件在
+   * 服务端已经归档，谎称它没传成功只会让用户再传一次，产生重复对象。
+   */
+  function cancel() {
+    canceled.value = true;
+  }
+
   async function uploadAll(batchId) {
     busy.value = true;
+    canceled.value = false;
     try {
       for (const entry of queue.value) {
         // 逐个串行：一个失败不阻断后面的文件，也不撤销前面的成功。
         if (entry.status === "pending" || entry.status === "failed") {
           await uploadOne(entry, batchId);
         }
+        // 取消不是失败：剩下的保持 pending，重试入口不该把它们当成错误，
+        // 再次开始时从没传的那个继续。
+        if (canceled.value) break;
       }
     } finally {
       busy.value = false;
     }
+  }
+
+  /**
+   * 按服务端文件状态恢复队列（计划 §5-E）。
+   *
+   * 刷新会丢掉内存里的队列，但材料已经在服务端归档了。不恢复就会让用户重新
+   * 选一遍并重传——「已归档的文件不重传」是这条的重点。
+   *
+   * 失败时抛出而不是静默留一个空队列：空队列看起来就是「这个批次还没有材料」，
+   * 用户会照着这个结论再传一次。
+   */
+  async function restoreFromServer(batchId) {
+    const papers = (await api.get(`/papers?batch_id=${batchId}`)) || [];
+    queue.value = papers.map((paper) => ({
+      name: paper.file_name,
+      size: null,
+      // 服务端已有即已归档，标 done。
+      status: "done",
+      error: null,
+      paperId: paper.id,
+      file: null,
+    }));
+    uploadedPaperIds.value = papers.map((paper) => paper.id);
+    return papers;
   }
 
   async function retryFailed(batchId) {
@@ -166,6 +205,7 @@ export const useUploadStore = defineStore("upload", () => {
   function reset() {
     queue.value = [];
     uploadedPaperIds.value = [];
+    canceled.value = false;
   }
 
   return {
@@ -176,12 +216,15 @@ export const useUploadStore = defineStore("upload", () => {
     queue,
     uploadedPaperIds,
     busy,
+    canceled,
     doneCount,
     failedCount,
     pendingCount,
     loadCapabilities,
     stage,
     uploadAll,
+    cancel,
+    restoreFromServer,
     retryFailed,
     clearQueue,
     reset,

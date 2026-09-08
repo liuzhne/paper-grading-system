@@ -1,11 +1,12 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { useUploadStore } from "@/stores/upload.js";
 
 const router = useRouter();
+const route = useRoute();
 const upload = useUploadStore();
 
 const form = reactive({ name: "", department: "", major: "", rubric_id: "" });
@@ -103,6 +104,20 @@ async function onStart() {
 onMounted(async () => {
   await Promise.all([loadRubrics(), upload.loadCapabilities()]);
   upload.reset();
+
+  // 从草稿继续：刷新会丢掉内存里的队列，但材料已经在服务端归档了。不恢复就会
+  // 让用户重新选一遍并重传，产生重复对象（计划 §5-E「已归档的文件不重传」）。
+  const resume = route.query.batch;
+  if (!resume) return;
+  batchId.value = String(resume);
+  try {
+    await upload.restoreFromServer(batchId.value);
+    if (upload.uploadedPaperIds.length) await runPrecheck();
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) {
+      error.value = "无法恢复该草稿的材料列表：" + (err?.message || "请刷新重试");
+    }
+  }
 });
 </script>
 
@@ -203,6 +218,11 @@ onMounted(async () => {
           <div class="btn-row upload-actions">
             <button class="btn" type="button" :disabled="busy || !canCreate || !upload.queue.length" @click="onUpload">
               上传并解析
+            </button>
+            <!-- 取消的是「还没开始的那些」；已经发出去的那一个仍会走完并记下
+                 结果——文件在服务端已经归档，谎称没传成功只会让用户再传一次。 -->
+            <button v-if="busy" class="btn" type="button" @click="upload.cancel()">
+              取消剩余上传
             </button>
             <button v-if="upload.failedCount" class="btn" type="button" :disabled="busy" @click="upload.retryFailed(batchId)">
               重试失败项（{{ upload.failedCount }}）

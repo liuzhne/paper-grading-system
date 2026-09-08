@@ -168,8 +168,17 @@ onMounted(async () => {
               <td class="num muted">{{ formatTime(batch.updated_at) }}</td>
               <!-- @click.stop：整行点击会打开工作区，动作按钮不该顺带跳走。 -->
               <td class="actions" @click.stop>
+                <!-- 草稿批次回到上传流程：刷新丢的是内存里的队列，材料已经在
+                     服务端归档，没有这个入口用户只能重新建一个批次再传一遍。 -->
+                <RouterLink
+                  v-if="batch.status === 'draft'"
+                  class="btn btn-sm"
+                  :to="{ name: 'task-new', query: { batch: batch.id } }"
+                >
+                  继续上传
+                </RouterLink>
                 <button
-                  v-if="canArchive(batch)"
+                  v-else-if="canArchive(batch)"
                   class="btn btn-sm"
                   type="button"
                   :disabled="busy === batch.id"

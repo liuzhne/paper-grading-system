@@ -253,3 +253,96 @@ describe("upload store · multipart 契约", () => {
     expect(captured.init.headers["Content-Type"]).toBeUndefined();
   });
 });
+
+describe("取消调度与刷新恢复", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+    globalThis.__PGS_CONFIG__ = undefined;
+  });
+
+  function jsonResponse(body, status = 200) {
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  function file(name) {
+    return new File(["x"], name, { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+  }
+
+  it("取消后不再调度剩余文件，已开始的那个保留结果", async () => {
+    let served = 0;
+    vi.stubGlobal("fetch", () => {
+      served += 1;
+      return jsonResponse({ id: `p${served}` });
+    });
+    const store = useUploadStore();
+    store.provider = "local";
+    store.acceptedExtensions = [".docx"];
+    store.stage([file("a.docx"), file("b.docx"), file("c.docx")]);
+
+    // 第一个文件一开始上传就取消：后面两个不该再发请求。
+    const run = store.uploadAll("b1");
+    store.cancel();
+    await run;
+
+    expect(served).toBe(1);
+    expect(store.queue[0].status).toBe("done");
+    // 取消不是失败：剩下的仍是待上传，重试入口不该把它们当成错误。
+    expect(store.queue[1].status).toBe("pending");
+    expect(store.queue[2].status).toBe("pending");
+  });
+
+  it("取消后可以再次开始，从没传的那个继续", async () => {
+    let served = 0;
+    vi.stubGlobal("fetch", () => {
+      served += 1;
+      return jsonResponse({ id: `p${served}` });
+    });
+    const store = useUploadStore();
+    store.provider = "local";
+    store.acceptedExtensions = [".docx"];
+    store.stage([file("a.docx"), file("b.docx")]);
+
+    const run = store.uploadAll("b1");
+    store.cancel();
+    await run;
+    await store.uploadAll("b1");
+
+    // 已归档的不重传：总共两份材料，两次请求。
+    expect(served).toBe(2);
+    expect(store.uploadedPaperIds).toEqual(["p1", "p2"]);
+  });
+
+  it("刷新后按服务端文件状态恢复，已归档的不重传", async () => {
+    vi.stubGlobal("fetch", (url) => {
+      if (String(url).includes("/papers?batch_id=")) {
+        return jsonResponse([
+          { id: "p1", file_name: "a.docx", status: "parsed" },
+          { id: "p2", file_name: "b.docx", status: "uploaded" },
+        ]);
+      }
+      return jsonResponse({});
+    });
+    const store = useUploadStore();
+
+    await store.restoreFromServer("b1");
+
+    expect(store.uploadedPaperIds).toEqual(["p1", "p2"]);
+    expect(store.queue.map((e) => e.name)).toEqual(["a.docx", "b.docx"]);
+    // 服务端已有的条目标为 done：它们已经归档，重传会产生重复对象。
+    expect(store.queue.every((e) => e.status === "done")).toBe(true);
+  });
+
+  it("恢复失败时不假装队列是空的", async () => {
+    vi.stubGlobal("fetch", () => jsonResponse({ detail: "boom" }, 500));
+    const store = useUploadStore();
+
+    await expect(store.restoreFromServer("b1")).rejects.toThrow();
+    expect(store.uploadedPaperIds).toEqual([]);
+  });
+});
