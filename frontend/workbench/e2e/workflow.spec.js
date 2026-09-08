@@ -203,3 +203,17 @@ test.describe("V07 归档与分布", () => {
     await expect(bars).toHaveCount(2);
   });
 });
+
+test.describe("V07 首版评审方式", () => {
+  test("双评与仲裁保持置灰，且说明为什么", async ({ page }) => {
+    await page.goto("/workbench/tasks/new");
+
+    // 决策 4：v2 首版只走单评，三选一先置灰。后端没有双评/仲裁的任何实现，
+    // 误把它改成可选就是把用户送进一条不存在的路径。
+    await expect(page.locator(".mode.active")).toHaveText("单评");
+    const disabled = page.locator(".mode.disabled");
+    await expect(disabled).toHaveCount(2);
+    await expect(disabled.first()).toHaveAttribute("title", /首版未启用/);
+    await expect(page.getByText(/首版仅支持单评/)).toBeVisible();
+  });
+});

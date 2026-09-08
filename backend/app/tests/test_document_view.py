@@ -316,3 +316,51 @@ def test_endpoint_is_scoped_to_visible_runs(client):
     assert (
         client.get("/api/scoring-runs/does-not-exist/document-view").status_code == 404
     )
+
+
+def test_item_projection_forbids_shared_caching_too(client):
+    """§5-A：document-view **与评分项展示投影**同样不得进共享缓存。
+
+    `evidence_view` 里带的是学生原文的逐字引文，和正文投影同等敏感；只给
+    document-view 设头，等于换一个端点就能把同样的内容缓存出去。
+    """
+    run_id, _ = _legacy_run_via_client(client)
+
+    response = client.get(f"/api/scoring-runs/{run_id}/items?include_view=true")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+
+
+def test_plain_item_response_is_not_cacheable_either(client):
+    """默认响应里的 `evidence` 同样是原文引文，不因为形状旧就可以缓存。"""
+    run_id, _ = _legacy_run_via_client(client)
+
+    response = client.get(f"/api/scoring-runs/{run_id}/items")
+
+    assert response.headers["cache-control"] == "private, no-store"
+
+
+def test_review_queue_is_not_cacheable(client):
+    """计划外加固：队列同样带学生姓名学号与分数。
+
+    §5-A 只点名了正文投影与评分项投影，但复核队列是同一类数据、同一批页面在
+    用。少一个头就等于换一个端点把同样的内容缓存出去。
+    """
+    from backend.app.db import models
+
+    with client.session_factory() as session:
+        rubric = models.Rubric(name="cache rubric", version="v1", total_score=100)
+        session.add(rubric)
+        session.flush()
+        batch = models.GradingBatch(
+            name="cache batch", rubric_id=rubric.id, status="scored"
+        )
+        session.add(batch)
+        session.commit()
+        batch_id = batch.id
+
+    response = client.get(f"/api/batches/{batch_id}/review-queue")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"

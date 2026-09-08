@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Query
+from fastapi import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -359,6 +360,7 @@ def batch_score_distribution(
 @router.get("/{batch_id}/review-queue")
 def batch_review_queue(
     batch_id: str,
+    response: Response,
     limit: int = Query(default=review_queue.DEFAULT_LIMIT, ge=1, le=review_queue.MAX_LIMIT),
     cursor: str | None = None,
     db: Session = Depends(get_db),
@@ -367,7 +369,12 @@ def batch_review_queue(
     """批次级复核队列（计划 §5-B）。
 
     阻塞任务排在普通确认之前：先解决「算不算数」，再讨论「给几分」。
+
+    队列带学生姓名学号与分数。§5-A 只点名了正文与评分项投影不得进共享缓存，
+    但这是同一类数据、同一批页面在用——少一个头就等于换个端点把同样的内容
+    缓存出去。
     """
+    response.headers["Cache-Control"] = "private, no-store"
     batch = _visible_batch(db, batch_id, principal)
     return review_queue.build_review_queue(db, batch, limit=limit, cursor=cursor)
 

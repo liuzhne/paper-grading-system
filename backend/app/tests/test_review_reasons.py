@@ -130,3 +130,71 @@ def test_reason_entries_have_a_closed_shape():
     for entry in reasons:
         assert set(entry) == {"source", "code", "message", "rule_code"}
         assert entry["source"] in ("deterministic", "model", "core_issue", "provider")
+
+
+def test_a_model_sourced_reason_survives_the_queue_projection(client):
+    """决策 9 的 LLM 侧尚未接入（§11 的 QWK 基线缺失），但数据形状已经预留。
+
+    这条把「预留」从文档里的一句话变成一条会失败的测试：队列若改成按确定性
+    规则重算原因，模型补充的那条会被静默丢掉——而丢掉的表现是复核者看到一条
+    「我很确定」，与它旁边的人工复核标记互相矛盾。
+    """
+    from backend.app.db import models
+    from backend.app.services.batches import review_queue
+
+    model_reason = {
+        "source": "model",
+        "code": "ambiguous_criterion",
+        "message": "该评分项的判据在原文中有两处相互冲突的表述。",
+        "rule_code": None,
+    }
+
+    with client.session_factory() as session:
+        rubric = models.Rubric(name="reason rubric", version="v1", total_score=100)
+        session.add(rubric)
+        session.flush()
+        criterion = models.RubricCriterion(
+            rubric_id=rubric.id, code="T01", name="选题", max_score=10
+        )
+        session.add(criterion)
+        batch = models.GradingBatch(
+            name="reason batch", rubric_id=rubric.id, status="scored"
+        )
+        session.add(batch)
+        session.flush()
+        paper = models.Paper(
+            batch_id=batch.id, file_name="p.docx", file_path="p.docx", status="parsed"
+        )
+        session.add(paper)
+        session.flush()
+        run = models.ScoringRun(
+            paper_id=paper.id, rubric_id=rubric.id, status="scored"
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            models.ScoreItem(
+                scoring_run_id=run.id,
+                criterion_id=criterion.id,
+                max_score=10,
+                ai_score=7,
+                final_score=7,
+                evidence_sufficient=True,
+                reason="示例",
+                deductions=[],
+                deduction_items=[],
+                evidence=[],
+                confidence=0.9,
+                need_manual_review=True,
+                review_reasons=[model_reason],
+                review_reason=model_reason["message"],
+            )
+        )
+        session.commit()
+
+        payload = review_queue.build_review_queue(session, batch)
+
+    entries = [row for row in payload["entries"] if row["queue_type"] != "blocking"]
+    assert entries, payload
+    assert entries[0]["review_reasons"] == [model_reason]
+    assert entries[0]["review_reason"] == model_reason["message"]

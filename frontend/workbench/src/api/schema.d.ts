@@ -618,6 +618,10 @@ export interface paths {
          * @description 批次级复核队列（计划 §5-B）。
          *
          *     阻塞任务排在普通确认之前：先解决「算不算数」，再讨论「给几分」。
+         *
+         *     队列带学生姓名学号与分数。§5-A 只点名了正文与评分项投影不得进共享缓存，
+         *     但这是同一类数据、同一批页面在用——少一个头就等于换个端点把同样的内容
+         *     缓存出去。
          */
         get: operations["batch_review_queue_api_batches__batch_id__review_queue_get"];
         put?: never;
@@ -1701,6 +1705,10 @@ export interface paths {
          *     ``include_view=true`` 附加 ``evidence_view`` 展示投影（计划 §5-A）。
          *     默认响应形状保持不变——原始 ``evidence`` 承载审计语义，不就地改写，
          *     旧客户端与 golden 不受影响。
+         *
+         *     两种形状都带学生原文的逐字引文（默认形状在 ``evidence`` 里，投影在
+         *     ``evidence_view`` 里），所以缓存头无条件设置：只给 document-view 设，
+         *     换一个端点就能把同样的内容缓存出去。
          */
         get: operations["list_score_items_api_scoring_runs__run_id__items_get"];
         put?: never;

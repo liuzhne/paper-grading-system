@@ -179,6 +179,7 @@ def retry_scoring_run(
 @router.get("/scoring-runs/{run_id}/items")
 def list_score_items(
     run_id: str,
+    response: Response,
     include_view: bool = False,
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
@@ -188,7 +189,12 @@ def list_score_items(
     ``include_view=true`` 附加 ``evidence_view`` 展示投影（计划 §5-A）。
     默认响应形状保持不变——原始 ``evidence`` 承载审计语义，不就地改写，
     旧客户端与 golden 不受影响。
+
+    两种形状都带学生原文的逐字引文（默认形状在 ``evidence`` 里，投影在
+    ``evidence_view`` 里），所以缓存头无条件设置：只给 document-view 设，
+    换一个端点就能把同样的内容缓存出去。
     """
+    response.headers["Cache-Control"] = "private, no-store"
     run = _visible_run(db, run_id, principal)
     items = db.scalars(
         select(ScoreItem)
