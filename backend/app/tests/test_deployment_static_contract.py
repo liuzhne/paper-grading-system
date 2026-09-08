@@ -60,3 +60,30 @@ def test_the_page_points_at_the_licence():
     )
 
     assert "LICENSE" in index or "OFL" in index
+
+
+def test_vercel_config_has_no_route_for_the_retired_legacy_assets():
+    """旧 SPA 下线后 `public/assets` 不再产出（用户决定，2026-09-08）。
+
+    留着指向它的规则不会报错，只会让下一个读配置的人以为那条路径还在用——
+    然后照着它去排查一个根本不存在的目录。
+    """
+    import json
+
+    config = json.loads((REPO_ROOT / "vercel.json").read_text(encoding="utf-8"))
+    sources = [entry["source"] for entry in config.get("headers", [])]
+
+    assert "/assets/(.*)" not in sources
+    # 工作台自己的指纹资源仍要有长缓存。
+    assert "/workbench/assets/(.*)" in sources
+
+
+def test_vercel_serves_the_workbench_at_the_public_entry_paths():
+    """`/` 与三条鉴权路由都是静态文件，不依赖 rewrite。
+
+    产物里必须真有这些文件，否则 Vercel 会 404——而这条路径不经过 FastAPI，
+    后端的路由改动救不了它。
+    """
+    for path in ("index.html", "login/index.html", "register/index.html",
+                 "reset-password/index.html"):
+        assert (REPO_ROOT / "public" / path).is_file(), path

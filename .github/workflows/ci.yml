@@ -317,6 +317,18 @@ jobs:
       - name: Verify the workbench ships inside the image
         run: |
           set -euo pipefail
+          # 旧 SPA 已下线：根路径必须是工作台，`/legacy/` 必须没有页面。
+          # 这条只在容器里才测得到——Vercel 走静态文件，本地走 uvicorn，
+          # 三种托管各自可能只对一半。
+          curl --fail --silent --show-error --insecure https://localhost/ \
+            | grep -q "/workbench/assets/"
+          legacy="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --insecure https://localhost/legacy/)"
+          if [[ "$legacy" != "404" ]]
+          then
+            echo "::error::/legacy/ 应返回 404，实际 $legacy"
+            exit 1
+          fi
           curl --fail --silent --show-error --insecure \
             https://localhost/workbench/ \
             | tee pgs_docker_artifacts/workbench-index.html \
