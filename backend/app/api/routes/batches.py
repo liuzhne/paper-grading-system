@@ -557,6 +557,8 @@ def batch_upload_precheck(
     结论。
     """
     _visible_batch(db, batch_id, principal)
+    # 返回逐份材料的解析诊断（含文件名）；与批次其它写路径同一门控。
+    require_organization_role(principal, "org_admin", "teacher")
     requested = list(dict.fromkeys(payload.paper_ids))
     papers = db.scalars(
         select(Paper).where(Paper.id.in_(requested)).order_by(Paper.created_at, Paper.id)
@@ -614,6 +616,10 @@ def create_export_event(
 ):
     ensure_dev_user(db)
     batch = _visible_batch(db, batch_id, principal)
+    # `_visible_batch` 只查组织归属，不查角色。少了这一行，任何能看到该批次的
+    # 成员都能写导出审计——包括把一次成功标记成失败并附上任意原因。审计记录
+    # 能被随手改写，它就不再是审计。
+    require_organization_role(principal, "org_admin", "teacher")
     selection = select_current_results(db, batch)
     if selection.revision != payload.result_revision:
         raise HTTPException(status_code=409, detail="批次结果已更新，请刷新后重试。")
@@ -663,6 +669,7 @@ def update_export_event(
     """
     ensure_dev_user(db)
     batch = _visible_batch(db, batch_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
     event = db.get(ExportEvent, event_id)
     if event is None or event.grading_batch_id != batch.id:
         raise HTTPException(status_code=404, detail="导出记录不存在")

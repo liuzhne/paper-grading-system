@@ -169,3 +169,53 @@ def test_history_shows_the_failure(client):
     history = client.get("/api/batches/%s/export-history" % batch_id).json()
 
     assert [row["status"] for row in history["entries"]] == ["failed"]
+
+
+def test_export_event_write_paths_are_role_gated():
+    """写导出审计必须与同文件其它写端点同一门控（§2.1 权限矩阵）。
+
+    `_visible_batch` 只查组织归属、不查角色。少了 `require_organization_role`，
+    任何能看到该批次的成员都能写入导出审计——包括把一次成功标记成失败并附上
+    任意原因。审计记录能被随手改写，它就不再是审计。
+
+    静态断言：这两条路径没有可靠的低权限运行时夹具（开发模式放行一切），而
+    「漏了一行守卫」正是这种夹具最容易漏掉的缺陷。
+    """
+    import inspect
+
+    from backend.app.api.routes import batches as routes
+
+    for name in ("create_export_event", "update_export_event"):
+        source = inspect.getsource(getattr(routes, name))
+        assert "require_organization_role" in source, name
+
+
+def test_every_batch_write_route_is_role_gated():
+    """把上一条扩到全文件：漏一行守卫不该靠人逐个记住。
+
+    只看写方法（POST/PATCH/DELETE）。读端点的边界是组织归属，不是角色。
+    """
+    import inspect
+    import re
+
+    from backend.app.api.routes import batches as routes
+
+    source = inspect.getsource(routes)
+    # 逐个函数切片：装饰器行 + 函数体，直到下一个装饰器。
+    blocks = re.split(r"\n(?=@router\.)", source)
+    missing = []
+    for block in blocks:
+        header = block.split("\n", 1)[0]
+        if not re.match(r"@router\.(post|patch|delete)\(", header):
+            continue
+        name = re.search(r"\ndef (\w+)\(", block)
+        if not name:
+            continue
+        gated = "require_organization_role" in block
+        # 委派给另一个已门控端点的薄包装（如 /start -> /score）不必重复检查；
+        # 要求它自己再写一遍只会制造两处可能失配的守卫。
+        delegates = re.search(r"return \w+_endpoint\(", block) is not None
+        if not gated and not delegates:
+            missing.append(name.group(1))
+
+    assert not missing, "写端点缺少角色门控：%s" % ", ".join(missing)
