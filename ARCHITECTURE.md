@@ -199,9 +199,9 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在
 - 0023 中的规则/人工任务是审计状态；表内有数据时 Alembic downgrade 必须 fail closed。默认采用应用向后兼容、数据库保留的回滚方式。
 - PostgreSQL 中若存在生产最小权限角色 `pgs_app`，0023 同步授予新表 DML、启用 RLS 并建立与现有生产基线一致的 policy；无该角色的通用/CI 数据库不创建部署专属角色。
 
-### 7.1 前端 v2 计划审查事实（2026-09-07，未实施）
+### 7.1 前端 v2 计划审查事实（2026-09-07 记录，阶段 0–6B 已于 2026-09-08 实施）
 
-`docs/前端v2改造计划.md` 尚未实现，以下为当前代码合同，不能用设计稿字段替代：
+以下为**审查当日**的代码合同，保留原文以便对照。落地结果见 §7.2；两节冲突时以 §7.2 为准。
 
 - 正式论文批次同样走 Core。Core `ScoreItem.evidence` 保存 `evidence_unit_id / evidence_type / locator / payload_hash`；`LegacyPaperAdapter.adapt()` 明确不使用可变 `PaperChunk` 作为快照身份。该引用不能直接按 `chunk_id` 关联正文。Core 持久化当前设置 `confidence=None`，不能用低置信度阈值代替复核状态。
 - 阻塞项持久化为 `ManualReviewTask`，接口在 `/api/v2/manual-review-tasks`；领取、释放和解决使用任务版本，解决还需冻结快照证据。普通改分/ReviewLog 不提供这套能力，批量采纳的界面方案必须保留该边界。
@@ -210,15 +210,46 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在
 - 本地 FastAPI 从 `frontend/web` 托管页面和资源，Docker 复制该目录；Vercel 经 Python 构建脚本生成 `public/`。当前尚无 Vite 构建、SPA 深链接回退或新旧页面切换实现。
 - 运维能力尚非统一的组织管理员边界：`enforce_auth` 只验证主体；`/system/ops-readiness` 的服务查询全局批任务，`/system/integrations` 与 `/system/llm-check` 保持公开。新运维页的角色和数据范围不能仅靠前端隐藏实现。
 
-本轮核对范围还包括批次状态写入口、导出历史粒度及浏览器门禁：当前批次 Create/Patch 可接收 status，七态转移守卫和新前端测试仍未实现。评分、数据流、迁移 head `0023_rule_scoring_review_tasks` 和生产发布权限均不变。
+本轮核对范围还包括批次状态写入口、导出历史粒度及浏览器门禁：**审查当日**批次 Create/Patch 可接收 status，七态转移守卫和新前端测试尚未实现。
 
 用户已确认八条审查意见，修订后的 `docs/前端v2改造计划.md` 将冻结正文/证据展示与评分计算分层，普通复核与阻塞任务共同组成队列，保留上传恢复及旧日志；状态、权限、三部署产物和浏览器验收前置。D-019 已接受为待实施设计，§13 的 R1–R8 映射到接口、迁移、阶段和验收场景；这些目标不能当作本节所述的已实现事实。
+
+### 7.2 前端 v2 落地事实（2026-09-08）
+
+阶段 0–6B 已实施。迁移 head 为 `0028_export_event_backfill`；评分语义、`SCORING_ENGINE_MODE=legacy`
+与 GATE-03 发布权限**均未改动**。
+
+- **前端产物**：`frontend/workbench/`（Vite + Vue 3 + JS）经 `scripts/build_web_static.py --with-workbench`
+  组装进 `public/`。FastAPI、Vercel、Docker 托管同一份产物；Docker 镜像 COPY `public/`（此前没有，
+  容器里 `/workbench/*` 全是 404）。自托管 IBM Plex Mono 的 SIL OFL 许可证随产物发布并可经 HTTP 取到。
+- **入口并存**：`/` 默认旧 SPA，新页在 `/workbench/*`，`WORKBENCH_DEFAULT_ENTRY` 控制切换，旧页常驻
+  `/legacy/`。`/login` `/register` `/reset-password` 始终走旧壳。
+- **状态机**：`0024` 落七态 CHECK 与 `state_version`；所有转移经 `services/batches/state`。
+  归档/重开是显式端点，目标阶段由服务端从当前结果推导。**旧写入口（`PATCH /score-items`、
+  `POST /scoring-runs/{id}/review`）与新端点共用归档守卫，改分同样 bump `review_revision`**——
+  否则归档只是标签，批量采纳的乐观并发也会被静默绕过。
+- **结果选择器**：`services/batches/results` 是 KPI、进度、复核队列、统计、分布与导出预检的唯一口径，
+  按 `BatchScoringItem.status` 判定本轮是否已有结论，不用时间戳。
+- **证据与正文**：`document_view` / `evidence_view` 只投影，不改快照身份；Core 与 legacy 分别标注来源，
+  引文与当前文本失配时只跳块不高亮。两个端点连同复核队列均为 `Cache-Control: private, no-store`。
+- **复核原因**：结构化 `review_reasons[]`（source/code/message/rule_code）+ 派生展示文本。
+  **当前只有确定性来源**（含 0025 之前历史行的显示回退）；模型侧尚未接入——它要求 bump
+  `PROMPT_VERSION` 并按 §15 重锚 QWK，而可门禁基线不存在，须走 PGS-8 两阶段批准。
+- **导出**：`ExportEvent` 三态（生成中/已生成/失败），**没有「已下载」**；旧 `SpreadsheetWriteLog`
+  保留原表原值，`0028` 幂等补录且不按路径猜合并。
+- **多组织**：切换组织时中止在途请求并清空全部组织级 store（此前只清 session，旧组织的学生姓名会
+  留在界面上）。运维页对无权角色显式说明，不留白页。
+- **门禁**：CI 前端 job 跑组件测试、`typecheck`、OpenAPI 合同差异（`api:dump && api:check`，
+  生成的 `.d.ts` 经 JSDoc 真正参与类型检查）、产物漂移与浏览器验收；deploy 依赖它。
+  浏览器验收覆盖 V01–V07、V09–V13，其中 V01/V02/V10 跑在独立的 `AUTH_ENABLED=true` 多组织后端上。
+  **V08 的 Supabase 直传与 TUS 未覆盖**：需真实对象存储，Mock 路由不冒充真实验证。
 
 ## 8. 维护记录
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
+| 2026-09-08 | 前端 v2 阶段 0–6B 落地 | 新增 §7.2 落地事实：统一组装产物与三宿主托管、批次状态机与旧写入口共用守卫、结果选择器单一口径、证据投影与 no-store、导出三态、多组织切换清场、前端类型/合同/浏览器门禁。评分语义、`SCORING_ENGINE_MODE=legacy` 与 GATE-03 发布权限不变；迁移 head `0028_export_event_backfill`。|
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 核对 LLM/Core/批任务边界；新增稳定 ProviderError 投影和 fail-open Langfuse v4/OpenTelemetry Trace。评分、缓存、证据校验与 Core 计分边界不变。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 核对 Profile/Core/LLM/持久化/API/迁移边界；新增 V4 预算化词法证据选择、规则失败隔离、0023 规则检查点与人工复核、进程内 Provider 保护。明确向量检索、进程中断续跑、DAG 并发和分布式配额仍未实现。 |
 | 2026-09-07 | 前端 v2 计划审查 | 核对 Core 证据、阻塞复核、直传、日志通道、静态部署与运维权限；补正 Excel 也写日志的事实。实现边界、迁移 head 与默认 legacy 不变，计划建议尚未实施。 |

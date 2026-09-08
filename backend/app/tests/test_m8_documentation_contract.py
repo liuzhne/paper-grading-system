@@ -1,3 +1,4 @@
+import pathlib
 from pathlib import Path
 
 from backend.app.core.config import settings
@@ -10,12 +11,30 @@ def _read(path):
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _alembic_head():
+    """真实 head，从迁移脚本目录读。
+
+    把版本号写死在断言里，等于让这条「文档与运行时一致」的门禁在每次迁移后
+    自己过期——过期的表现还是「文档错了」，而不是「测试该更新了」。
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config()
+    config.set_main_option(
+        "script_location", str(pathlib.Path(__file__).resolve().parents[3] / "alembic")
+    )
+    heads = ScriptDirectory.from_config(config).get_heads()
+    assert len(heads) == 1, heads
+    return heads[0]
+
+
 def test_operator_guides_share_current_runtime_migration_and_profile_facts():
     assert settings.SCORING_ENGINE_MODE == "legacy"
     for path in ("README.md", "AGENTS.md", "CLAUDE.md"):
         text = _read(path)
         assert "Python 3.10+" in text
-        assert "0023_rule_scoring_review_tasks" in text
+        assert _alembic_head() in text
         assert "technical_proposal / technical-proposal-profile@1" in text
         assert "SCORING_ENGINE_MODE" in text
         assert "默认" in text and "legacy" in text
@@ -42,7 +61,7 @@ def test_web_cli_matrix_and_deployment_docs_describe_m8_boundaries():
     assert "core-cutover-audit" in matrix
     assert "Rubric 严格审核/发布" in matrix
     assert "静态 Web 生命周期闭环" in matrix
-    assert "0023_rule_scoring_review_tasks" in deployment
+    assert _alembic_head() in deployment
     assert "batch_scoring_jobs" in deployment
     assert "经批准的观察策略" in deployment
     assert "GATE-03" in deployment
