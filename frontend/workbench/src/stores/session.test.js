@@ -195,3 +195,54 @@ describe("组织切换清场（计划 §2.1）", () => {
     expect(batches.batches).toEqual([]);
   });
 });
+
+describe("组织切换失败时不留半切状态", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+    globalThis.__PGS_CONFIG__ = undefined;
+  });
+
+  function jsonResponse(body, status = 200) {
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  it("服务端拒绝切换时组织上下文回到原值", async () => {
+    vi.stubGlobal("fetch", (url) => {
+      if (String(url).includes("/auth/organization-context")) {
+        return jsonResponse({ detail: "不是该组织成员" }, 403);
+      }
+      return jsonResponse({});
+    });
+    const session = useSessionStore();
+    session.organizationId = "org-a";
+
+    await expect(session.switchOrganization("org-b")).rejects.toThrow();
+
+    // 客户端认为在 B、服务端还在 A，写请求的 X-Organization-ID 就会指错组织。
+    expect(session.organizationId).toBe("org-a");
+  });
+
+  it("失败后仍然清了缓存，不留上一个组织的数据", async () => {
+    vi.stubGlobal("fetch", (url) => {
+      if (String(url).includes("/auth/organization-context")) {
+        return jsonResponse({ detail: "boom" }, 500);
+      }
+      return jsonResponse({});
+    });
+    const session = useSessionStore();
+    const batches = useBatchesStore();
+    session.organizationId = "org-a";
+    batches.batches = [{ id: "b1", name: "A 的批次", status: "scored" }];
+
+    await expect(session.switchOrganization("org-b")).rejects.toThrow();
+
+    // 在途请求已被 abort、缓存已清：重新加载即可，但不能留着可能已过期的内容。
+    expect(batches.batches).toEqual([]);
+  });
+});

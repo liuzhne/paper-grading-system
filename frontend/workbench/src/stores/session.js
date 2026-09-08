@@ -101,11 +101,19 @@ export const useSessionStore = defineStore("session", () => {
 
   async function switchOrganization(nextId) {
     if (nextId === organizationId.value) return;
+    const previousId = organizationId.value;
     resetContext();
     await clearOrganizationScopedStores();
     capabilities.value = null;
-    organizationId.value = nextId;
-    await api.post("/auth/organization-context", { organization_id: nextId });
+    try {
+      await api.post("/auth/organization-context", { organization_id: nextId });
+    } catch (err) {
+      // 切换失败时**不能**留下「客户端在 B、服务端还在 A」：写请求的
+      // X-Organization-ID 取的正是这个值，指错组织比切换失败本身严重得多。
+      // 缓存不恢复——在途请求已被 abort，重新加载即可，但不该留着可能过期的内容。
+      organizationId.value = previousId;
+      throw err;
+    }
     identity.value = await api.get("/auth/me");
     organizationId.value = identity.value?.organization?.id ?? nextId;
     await loadCapabilities();
