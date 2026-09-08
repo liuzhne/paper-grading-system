@@ -18,6 +18,7 @@ from backend.app.db.models import AtomicRule
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import ManualReviewTask
 from backend.app.db.models import Paper
+from backend.app.db.models import Base
 from backend.app.db.models import PaperChunk
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCompilation
@@ -55,6 +56,24 @@ SECTIONS = [
     ("3.2 研究方法", 12, "本文采用分层抽样方法，按服务重要度划分四层，样本量为 240 条链路。"),
     ("4.1 实验设计", 13, "实验在包含 32 个服务的测试集群上进行，对比三种基线采样器。"),
 ]
+
+
+def organization_scoped_models():
+    """所有带**可空** `organization_id` 的模型。
+
+    从映射注册表推导，不写死清单：写死的那份是按「今天有哪些查询按组织过滤」
+    选出来的，哪天有人给别的表加上过滤，它不会自己更新，验收会静默地变成空
+    数据——**而空数据往往还是「通过」**，因为断言写的是「看不到别的组织的东西」。
+
+    NOT NULL 的列排除在外：那些在建行时就必须给值，回填轮不到它们；把它们收
+    进来只会掩盖「建行时忘了给组织」这个更该暴露的问题。
+    """
+    models = []
+    for mapper in Base.registry.mappers:
+        column = mapper.columns.get("organization_id")
+        if column is not None and column.nullable:
+            models.append(mapper.class_)
+    return sorted(models, key=lambda model: model.__name__)
 
 
 def seed_all(*, with_auth=False):
@@ -139,13 +158,9 @@ def _seed_identities(session, rubric):
     # 无鉴权模式下 principal.organization_id 为 None，组织过滤不生效，所以既有
     # 种子从不设 organization_id。开鉴权之后过滤真的生效，这些行必须归属到默认
     # 组织，否则登录进来看到的是一个空系统——那会被误读成「数据没种上」。
-    from backend.app.db.models import Paper as _Paper
-    from backend.app.db.models import Rubric as _Rubric
-    from backend.app.db.models import ScoringRun as _Run
-
-    for model in (_Rubric, GradingBatch, _Paper, _Run):
+    for model in organization_scoped_models():
         for row in session.scalars(sa.select(model)).all():
-            if getattr(row, "organization_id", None) is None:
+            if row.organization_id is None:
                 row.organization_id = DEFAULT_ORGANIZATION_ID
                 session.add(row)
 
