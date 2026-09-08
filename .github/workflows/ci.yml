@@ -327,6 +327,13 @@ jobs:
             | grep -qi 'SIL OPEN FONT LICENSE'
           asset="$(grep -o '/workbench/assets/[A-Za-z0-9_.-]*\.js' \
             pgs_docker_artifacts/workbench-index.html | head -1)"
+          # 匹配不到时 curl 会退化成请求根路径并通过——一个检不出自己失效的
+          # 检查比没有检查更糟。
+          if [[ -z "$asset" ]]
+          then
+            echo "::error::workbench index.html 里没有 hash 资源引用" 
+            exit 1
+          fi
           curl --fail --silent --show-error --insecure \
             "https://localhost${asset}" > /dev/null
           # 缺失资源必须 404，不能回落成 HTML。
