@@ -29,6 +29,12 @@ COPY alembic ./alembic
 COPY alembic.ini ./
 COPY backend ./backend
 COPY frontend ./frontend
+# 统一组装产物：FastAPI 从 public/workbench 托管新页（计划 §8.2）。少了这一行，
+# 容器里 /workbench/* 全是 404，而 legacy 入口走 frontend/web 反而正常——故障
+# 看起来像「新页面没部署上」，而不是「镜像少了一层」。
+# 产物在镜像外用 scripts/build_web_static.py --with-workbench 组装好，运行镜像
+# 不安装 Node/npm。
+COPY public ./public
 
 EXPOSE 8000
 

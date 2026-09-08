@@ -279,6 +279,27 @@ jobs:
           curl --fail --silent --show-error --insecure \
             https://localhost/api/system/integrations \
             | tee pgs_docker_artifacts/https-integrations.json
+      # 冒烟此前只 curl 了 API，所以「镜像没 COPY public/」这类缺口完全看不见：
+      # legacy 入口走 frontend/web 照常工作，只有 /workbench/* 全是 404。
+      - name: Verify the workbench ships inside the image
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --insecure \
+            https://localhost/workbench/ \
+            | tee pgs_docker_artifacts/workbench-index.html \
+            | grep -q '/workbench/assets/'
+          # 字体与许可证都要在镜像里，离线运行不访问 CDN。
+          curl --fail --silent --show-error --insecure \
+            https://localhost/workbench/LICENSE-IBM-Plex-Mono.txt \
+            | grep -qi 'SIL OPEN FONT LICENSE'
+          asset="$(grep -o '/workbench/assets/[A-Za-z0-9_.-]*\.js' \
+            pgs_docker_artifacts/workbench-index.html | head -1)"
+          curl --fail --silent --show-error --insecure \
+            "https://localhost${asset}" > /dev/null
+          # 缺失资源必须 404，不能回落成 HTML。
+          code="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --insecure https://localhost/workbench/assets/does-not-exist.js)"
+          test "$code" = "404"
       - name: Exercise login upload score report and export
         run: |
           docker compose --env-file .env.intranet.example exec -T app \

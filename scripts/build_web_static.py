@@ -102,6 +102,26 @@ def _build_workbench() -> None:
         )
 
     copytree(dist, OUTPUT / "workbench")
+    _copy_font_licence(OUTPUT / "workbench")
+
+
+#: 自托管字体的许可证来源。SIL OFL 1.1 要求许可证随字体分发——字体文件进了产物、
+#: 许可证没进，是一个安静的合规缺口：没有任何东西会报错。
+FONT_LICENCE = (
+    WORKBENCH / "node_modules" / "@fontsource" / "ibm-plex-mono" / "LICENSE"
+)
+
+
+def _copy_font_licence(target: Path) -> None:
+    if not FONT_LICENCE.is_file():
+        raise SystemExit(
+            "IBM Plex Mono 的许可证文件缺失（%s）。\n"
+            "字体是自托管的，许可证必须随产物一起发布；先在 "
+            "frontend/workbench 跑 `npm ci`。" % FONT_LICENCE
+        )
+    (target / "LICENSE-IBM-Plex-Mono.txt").write_text(
+        FONT_LICENCE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
