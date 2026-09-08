@@ -115,134 +115,38 @@ describe("session store", () => {
   });
 });
 
-describe("组织切换清场（计划 §2.1）", () => {
+describe("不提供组织切换（用户决定，2026-09-08）", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.restoreAllMocks();
     globalThis.__PGS_CONFIG__ = undefined;
   });
 
-  function jsonResponse(body, status = 200) {
-    return Promise.resolve(
-      new Response(JSON.stringify(body), {
-        status,
-        headers: { "Content-Type": "application/json" },
-      }),
+  it("store 不再暴露 switchOrganization", () => {
+    const session = useSessionStore();
+
+    // 切换会话所在组织的入口一旦存在，「不允许切换」就只是界面上的约定。
+    expect(session.switchOrganization).toBeUndefined();
+  });
+
+  it("组织上下文仍然读得到，只是不可变更", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            auth_required: true,
+            user: { id: "u1", username: "t" },
+            organization: { id: "org-a", name: "计算机学院", role: "teacher" },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
     );
-  }
-
-  function stubSwitch() {
-    vi.stubGlobal("fetch", (url) => {
-      const path = String(url);
-      if (path.includes("/auth/me")) {
-        return jsonResponse({ organization: { id: "org-b" } });
-      }
-      if (path.includes("/system/capabilities")) return jsonResponse({});
-      return jsonResponse({});
-    });
-  }
-
-  it("切换后不留上一个组织的批次与队列", async () => {
-    stubSwitch();
     const session = useSessionStore();
-    const batches = useBatchesStore();
-    const review = useReviewStore();
-    session.organizationId = "org-a";
-    batches.batches = [{ id: "b1", name: "A 组织的批次", status: "scored" }];
-    review.entries = [{ score_item_id: "s1", student_name: "张三" }];
 
-    await session.switchOrganization("org-b");
+    await session.bootstrap();
 
-    // 旧组织的学生姓名留在界面上，就是一次跨组织泄露。
-    expect(batches.batches).toEqual([]);
-    expect(review.entries).toEqual([]);
-  });
-
-  it("切换前停掉旧组织的上传调度", async () => {
-    stubSwitch();
-    const session = useSessionStore();
-    const upload = useUploadStore();
-    session.organizationId = "org-a";
-    upload.uploadedPaperIds = ["p1"];
-
-    await session.switchOrganization("org-b");
-
-    // 继续上传会把文件写进旧组织的批次。
-    expect(upload.uploadedPaperIds).toEqual([]);
-    expect(upload.queue).toEqual([]);
-  });
-
-  it("切到同一个组织时不做清场", async () => {
-    stubSwitch();
-    const session = useSessionStore();
-    const batches = useBatchesStore();
-    session.organizationId = "org-a";
-    batches.batches = [{ id: "b1", name: "保留", status: "scored" }];
-
-    await session.switchOrganization("org-a");
-
-    expect(batches.batches).toHaveLength(1);
-  });
-
-  it("登出同样清场", async () => {
-    stubSwitch();
-    const session = useSessionStore();
-    const batches = useBatchesStore();
-    batches.batches = [{ id: "b1", name: "登出前", status: "scored" }];
-
-    await session.logout();
-
-    expect(batches.batches).toEqual([]);
-  });
-});
-
-describe("组织切换失败时不留半切状态", () => {
-  beforeEach(() => {
-    setActivePinia(createPinia());
-    vi.restoreAllMocks();
-    globalThis.__PGS_CONFIG__ = undefined;
-  });
-
-  function jsonResponse(body, status = 200) {
-    return Promise.resolve(
-      new Response(JSON.stringify(body), {
-        status,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-  }
-
-  it("服务端拒绝切换时组织上下文回到原值", async () => {
-    vi.stubGlobal("fetch", (url) => {
-      if (String(url).includes("/auth/organization-context")) {
-        return jsonResponse({ detail: "不是该组织成员" }, 403);
-      }
-      return jsonResponse({});
-    });
-    const session = useSessionStore();
-    session.organizationId = "org-a";
-
-    await expect(session.switchOrganization("org-b")).rejects.toThrow();
-
-    // 客户端认为在 B、服务端还在 A，写请求的 X-Organization-ID 就会指错组织。
     expect(session.organizationId).toBe("org-a");
-  });
-
-  it("失败后仍然清了缓存，不留上一个组织的数据", async () => {
-    vi.stubGlobal("fetch", (url) => {
-      if (String(url).includes("/auth/organization-context")) {
-        return jsonResponse({ detail: "boom" }, 500);
-      }
-      return jsonResponse({});
-    });
-    const session = useSessionStore();
-    const batches = useBatchesStore();
-    session.organizationId = "org-a";
-    batches.batches = [{ id: "b1", name: "A 的批次", status: "scored" }];
-
-    await expect(session.switchOrganization("org-b")).rejects.toThrow();
-
-    // 在途请求已被 abort、缓存已清：重新加载即可，但不能留着可能已过期的内容。
-    expect(batches.batches).toEqual([]);
+    expect(session.organizationRole).toBe("teacher");
   });
 });

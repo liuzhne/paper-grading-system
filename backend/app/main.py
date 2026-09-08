@@ -167,41 +167,24 @@ def create_app():
                 )
             )
 
-    web_dir = repo_root / "frontend" / "web"
-    assets_dir = web_dir / "assets"
-    if web_dir.exists() and assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
-
-        def _legacy_shell():
-            return HTMLResponse(
-                _inject_client_config(
-                    (web_dir / "index.html").read_text(encoding="utf-8")
-                )
-            )
+    # 旧 SPA 已下线（用户决定，2026-09-08）：根路径直接给工作台，不再保留
+    # `/legacy/` 与 WORKBENCH_DEFAULT_ENTRY 开关。
+    #
+    # `/login` `/register` `/reset-password` 交给工作台的同一份 index.html：
+    # 邮件里已经发出去的邀请与重置链接指向这两条路由，收件人不会重新拿到新
+    # 链接，不接就等于把所有在途邀请作废，而他们只会看到 404。
+    if (workbench_dir / "index.html").is_file():
 
         @app.get("/", include_in_schema=False)
-        def root_entry():
-            """默认入口。
-
-            切换由 WORKBENCH_DEFAULT_ENTRY 控制而不是靠删掉旧页：出问题时改
-            一个环境变量就退回去，不必重新发版（计划 §8.3 的回退窗口）。
-            """
-            index = workbench_dir / "index.html"
-            if settings.WORKBENCH_DEFAULT_ENTRY and index.is_file():
-                return HTMLResponse(
-                    _inject_client_config(index.read_text(encoding="utf-8"))
-                )
-            return _legacy_shell()
-
-        # 旧入口始终可达，不只在切换之后——否则这条回退路径要等到切换当天
-        # 才第一次被验证。
-        @app.get("/legacy", include_in_schema=False)
-        @app.get("/legacy/", include_in_schema=False)
         @app.get("/login", include_in_schema=False)
         @app.get("/register", include_in_schema=False)
         @app.get("/reset-password", include_in_schema=False)
-        def web_app():
-            return _legacy_shell()
+        def workbench_entry():
+            return HTMLResponse(
+                _inject_client_config(
+                    (workbench_dir / "index.html").read_text(encoding="utf-8")
+                )
+            )
 
     return app
 

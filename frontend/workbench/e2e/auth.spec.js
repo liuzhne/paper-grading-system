@@ -67,37 +67,26 @@ test.describe("V01 登录与会话", () => {
   });
 });
 
-test.describe("V02 多组织切换", () => {
-  test("平台管理员能看到自己所属的两个组织", async ({ page }) => {
+test.describe("V02 组织隔离（不提供切换）", () => {
+  test("侧边栏没有组织切换器", async ({ page }) => {
     await login(page, "platform");
 
-    // 切换器在侧边栏，成员多于一个组织时才出现。
-    const switcher = page.locator(".org-switch select");
-    await expect(switcher).toBeVisible();
-    await expect(switcher.locator("option")).toHaveCount(2);
-    await expect(switcher).toContainText("外国语学院");
+    // 用户决定（2026-09-08）：不允许在应用内切换组织。
+    await expect(page.locator(".org-switch")).toHaveCount(0);
+    await expect(page.getByLabel("当前组织")).toHaveCount(0);
   });
 
-  test("切换组织后看不到上一个组织的批次", async ({ page }) => {
+  test("会话组织之外的批次看不到", async ({ page }) => {
     await login(page, "platform");
     await page.goto("/workbench/tasks");
+
+    // 取消切换器不等于取消隔离：列表仍只给会话所属组织的数据。
     await expect(
       page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }),
     ).toBeVisible();
-
-    const target = await page
-      .locator(".org-switch option", { hasText: "外国语学院" })
-      .getAttribute("value");
-    await page.locator(".org-switch select").selectOption(target);
-    await page.goto("/workbench/tasks");
-
-    // 旧组织的批次留在界面上就是一次跨组织泄露。
-    await expect(
-      page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }),
-    ).toHaveCount(0);
     await expect(
       page.locator("tbody tr", { hasText: "翻译实践报告" }),
-    ).toBeVisible();
+    ).toHaveCount(0);
   });
 
   test("越界访问另一个组织的批次被服务端拒绝", async ({ page }) => {

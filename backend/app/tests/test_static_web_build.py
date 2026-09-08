@@ -27,16 +27,19 @@ def test_vercel_static_web_build_is_self_contained(tmp_path):
     ):
         assert (public / path).is_file()
     index = (public / "index.html").read_text(encoding="utf-8")
+    # CDN 产物不带注入的全局配置：前端回落同源 /api，不必经 Python 渲染页面。
     assert "__PGS_CONFIG__" not in index
-    asset_names = sorted(path.name for path in (public / "assets").iterdir())
-    assert len(asset_names) == 2
-    assert any(re.fullmatch(r"app\.[0-9a-f]{12}\.js", name) for name in asset_names)
-    assert any(re.fullmatch(r"styles\.[0-9a-f]{12}\.css", name) for name in asset_names)
-    for name in asset_names:
-        assert f"/assets/{name}" in index
-    assert "/assets/app.js?" not in index
-    assert "/assets/styles.css?" not in index
-    assert (public / "login" / "index.html").read_text(encoding="utf-8") == index
+
+    # 入口引用的是工作台的指纹资源，且这些文件真的在产物里——引用存在而文件
+    # 缺失，浏览器拿到的是 404 被当成 JS 执行的语法错误。
+    referenced = set(re.findall(r"/workbench/assets/[A-Za-z0-9_.-]+", index))
+    assert referenced
+    for href in referenced:
+        assert (public / href.lstrip("/")).is_file(), href
+
+    # 四条公开路由必须是同一份外壳，否则邀请链接打开的会是另一个版本。
+    for page in ("login", "register", "reset-password"):
+        assert (public / page / "index.html").read_text(encoding="utf-8") == index
 
 
 def test_plain_build_preserves_assembled_workbench(tmp_path):
@@ -68,3 +71,28 @@ def test_plain_build_preserves_assembled_workbench(tmp_path):
             rmtree(workbench, ignore_errors=True)
         else:
             sentinel.unlink(missing_ok=True)
+
+
+def test_assembled_index_is_the_workbench_not_the_legacy_shell():
+    """静态产物的入口必须是工作台（用户决定，2026-09-08）。
+
+    Vercel 直接静态托管 `public/`，`/` 命中的是 `public/index.html`——它不经过
+    FastAPI 的路由。后端把根路径改成工作台、而这份文件还是旧壳，本地与 Docker
+    都对，**唯独生产还是旧页面**。
+    """
+    index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+
+    assert "/workbench/assets/" in index
+    assert "衡鉴" not in index
+
+
+def test_sent_link_paths_are_assembled_as_the_workbench_too():
+    """`/register` `/reset-password` 的静态页同样要是工作台。
+
+    邮件里已经发出去的链接指向它们；产物里留着旧壳，收件人打开的就还是旧页面。
+    """
+    for page in ("login", "register", "reset-password"):
+        path = ROOT / "public" / page / "index.html"
+
+        assert path.is_file(), page
+        assert "/workbench/assets/" in path.read_text(encoding="utf-8"), page

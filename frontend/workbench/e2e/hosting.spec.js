@@ -30,12 +30,12 @@ test.describe("V12 托管与路由", () => {
     expect(response.headers()["content-type"]).toContain("application/json");
   });
 
-  test("旧 SPA 入口仍在 /", async ({ page }) => {
+  test("根路径直接是工作台", async ({ page }) => {
     const response = await page.goto("/");
 
+    // 旧 SPA 已下线（用户决定，2026-09-08）。
     expect(response.status()).toBe(200);
-    // 新旧并存期：默认入口未切换。
-    expect(page.url()).not.toContain("/workbench");
+    await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
   });
 
   test("未知路径显示 404 页而不是空白", async ({ page }) => {

@@ -59,21 +59,17 @@ test.describe("V13 离线运行", () => {
   });
 });
 
-test.describe("V13 新旧并存", () => {
-  test("旧入口与新页同时可达", async ({ page }) => {
+test.describe("V13 旧页下线", () => {
+  test("旧壳不再提供页面", async ({ page }) => {
     const legacy = await page.goto("/legacy/");
-    expect(legacy.status()).toBe(200);
 
-    const workbench = await page.goto("/workbench/");
-    expect(workbench.status()).toBe(200);
+    // 留着它等于留下两套并存的界面，各自的守卫迟早失配。
+    expect(legacy.status()).toBe(404);
   });
 
   test("两套产物的资源不互相冲突", async ({ request }) => {
-    // 旧资源在 /assets/*，新资源在 /workbench/assets/*；任何一边被另一边的
-    // 回退吞掉，都会表现成难以定位的语法错误。
-    const stray = await request.get("/assets/does-not-exist.js");
-    expect(stray.status()).toBe(404);
-
+    // 缺失资源被 SPA 回退吞掉会返回 HTML，浏览器把它当 JS 执行，故障表现成
+    // 难以定位的语法错误。
     const strayWorkbench = await request.get("/workbench/assets/nope.js");
     expect(strayWorkbench.status()).toBe(404);
   });

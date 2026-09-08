@@ -26,37 +26,12 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "frontend" / "web"
 WORKBENCH = ROOT / "frontend" / "workbench"
 OUTPUT = ROOT / "public"
 AUTH_PAGES = ("login", "register", "reset-password")
 ASSET_REFERENCE = re.compile(
     r'(?P<prefix>["\'])/assets/(?P<name>app\.js|styles\.css)(?:\?[^"\']*)?(?P=prefix)'
 )
-
-
-def _fingerprinted_assets(index: str) -> tuple[str, dict[str, bytes]]:
-    """Return HTML and immutable assets whose URLs change with their content."""
-
-    assets: dict[str, bytes] = {}
-    names: dict[str, str] = {}
-    for source_name in ("app.js", "styles.css"):
-        payload = (SOURCE / "assets" / source_name).read_bytes()
-        stem, suffix = source_name.rsplit(".", 1)
-        output_name = f"{stem}.{sha256(payload).hexdigest()[:12]}.{suffix}"
-        assets[output_name] = payload
-        names[source_name] = output_name
-
-    def replace_reference(match: re.Match[str]) -> str:
-        quote = match.group("prefix")
-        return f"{quote}/assets/{names[match.group('name')]}{quote}"
-
-    rewritten, count = ASSET_REFERENCE.subn(replace_reference, index)
-    if count != len(names):
-        raise RuntimeError(
-            f"expected {len(names)} static asset references, replaced {count}"
-        )
-    return rewritten, assets
 
 
 def _build_workbench() -> None:
@@ -149,26 +124,33 @@ def main(argv: list[str] | None = None) -> None:
                 rmtree(preserved)
             workbench_output.rename(preserved)
         rmtree(OUTPUT)
-    (OUTPUT / "assets").mkdir(parents=True)
+    OUTPUT.mkdir(parents=True, exist_ok=True)
     if preserved is not None:
         preserved.rename(workbench_output)
 
-    index = (SOURCE / "index.html").read_text(encoding="utf-8")
-    # Local FastAPI injects this marker for non-default API prefixes. In the
-    # production CDN artifact the frontend safely falls back to same-origin
-    # /api, which avoids rendering the page through the Python function.
-    index = index.replace("    <!-- PGS_CLIENT_CONFIG -->\n", "", 1)
-    index, assets = _fingerprinted_assets(index)
+    if args.with_workbench:
+        _build_workbench()
+
+    # 旧 SPA 已下线（用户决定，2026-09-08）：入口页与三条公开路由都用工作台。
+    #
+    # 这一步不能只改 FastAPI 的路由：Vercel 直接静态托管 `public/`，`/` 命中的
+    # 是这里写出的 `index.html`，根本不经过 Python。后端改了而产物没改，本地与
+    # Docker 都对，**唯独生产还是旧页面**。
+    #
+    # `/register` `/reset-password` 同样要写：邮件里已经发出去的链接指向它们，
+    # 收件人不会重新拿到新链接。
+    workbench_index = workbench_output / "index.html"
+    if not workbench_index.is_file():
+        raise SystemExit(
+            "public/workbench/index.html 缺失，无法组装入口页。\n"
+            "带 --with-workbench 重新构建，或确认仓库里已提交工作台产物。"
+        )
+    index = workbench_index.read_text(encoding="utf-8")
     (OUTPUT / "index.html").write_text(index, encoding="utf-8")
     for page in AUTH_PAGES:
         page_dir = OUTPUT / page
-        page_dir.mkdir()
+        page_dir.mkdir(parents=True, exist_ok=True)
         (page_dir / "index.html").write_text(index, encoding="utf-8")
-    for name, payload in assets.items():
-        (OUTPUT / "assets" / name).write_bytes(payload)
-
-    if args.with_workbench:
-        _build_workbench()
 
 
 if __name__ == "__main__":

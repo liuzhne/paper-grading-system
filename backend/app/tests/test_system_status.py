@@ -34,11 +34,9 @@ def test_web_page_injects_api_path_from_service_configuration(client, monkeypatc
     response = client.get("/")
 
     assert response.status_code == 200
+    # 非默认 API_PREFIX 下前端也要打到正确的地址（计划 §12.1 V12）。
     assert 'window.__PGS_CONFIG__ = {"apiBase": "/review-api"};' in response.text
-    assert 'id="api-base"' not in response.text
-    assert 'id="account-menu-trigger"' in response.text
-    assert 'id="account-menu"' in response.text
-    assert '<details class="sidebar-account">' not in response.text
+    assert "/workbench/assets/" in response.text
 
 
 def test_llm_check_reports_mock_without_real_call(client):

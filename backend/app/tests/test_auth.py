@@ -11,10 +11,15 @@ def test_auth_off_by_default(client, monkeypatch):
 
 
 def test_public_auth_routes_render_the_same_web_entrypoint(client):
+    """四条公开路由必须是同一份外壳。
+
+    旧 SPA 下线后它们都由工作台承接（用户决定，2026-09-08）。邀请与重置链接
+    已经发出去了，收件人不会重新拿到新链接，这两条路由不能只剩 404。
+    """
     for path in ("/", "/login", "/register", "/reset-password"):
         response = client.get(path)
-        assert response.status_code == 200
-        assert "衡鉴" in response.text
+        assert response.status_code == 200, path
+        assert "/workbench/assets/" in response.text, path
 
 
 def test_api_responses_expose_request_timings(client, monkeypatch):

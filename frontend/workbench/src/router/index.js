@@ -14,6 +14,20 @@ const routes = [
     component: () => import("@/views/LoginView.vue"),
     meta: { public: true, title: "登录" },
   },
+  // 邮件里已经发出去的链接指向这两条路由。旧壳下线后由工作台承接，不接就等于
+  // 把所有在途邀请与重置作废，而收件人只会看到 404。
+  {
+    path: "/register",
+    name: "register",
+    component: () => import("@/views/RegisterView.vue"),
+    meta: { public: true, title: "接受邀请" },
+  },
+  {
+    path: "/reset-password",
+    name: "reset-password",
+    component: () => import("@/views/ResetPasswordView.vue"),
+    meta: { public: true, title: "重置密码" },
+  },
   {
     path: "/",
     component: () => import("@/layouts/AppShell.vue"),

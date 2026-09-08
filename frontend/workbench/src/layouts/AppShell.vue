@@ -9,8 +9,6 @@ const route = useRoute();
 const router = useRouter();
 
 const menuOpen = ref(false);
-const switching = ref(false);
-const switchError = ref(null);
 
 const activeNav = computed(() => route.meta.nav || "");
 // 评分工作区是整屏三栏布局，不套用常规内容边距。
@@ -31,23 +29,6 @@ const contextLine = computed(() => {
   return [org, role].filter(Boolean).join(" · ") || "无组织上下文";
 });
 
-async function onSwitchOrganization(event) {
-  const nextId = event.target.value;
-  if (nextId === session.organizationId) return;
-  switching.value = true;
-  switchError.value = null;
-  try {
-    await session.switchOrganization(nextId);
-    // 切换后回到工作台：旧组织的选中资源一律不保留。
-    if (route.name !== "dashboard") await router.push({ name: "dashboard" });
-  } catch (error) {
-    switchError.value = error?.message || "切换组织失败";
-    event.target.value = session.organizationId || "";
-  } finally {
-    switching.value = false;
-    menuOpen.value = false;
-  }
-}
 
 async function onLogout() {
   await session.logout();
@@ -107,20 +88,6 @@ async function onLogout() {
       </nav>
 
       <div class="sidebar-footer">
-        <p v-if="switchError" class="switch-error" role="alert">{{ switchError }}</p>
-
-        <label v-if="session.organizations.length > 1" class="org-switch">
-          <span class="org-switch-label">当前组织</span>
-          <select
-            :value="session.organizationId || ''"
-            :disabled="switching"
-            @change="onSwitchOrganization"
-          >
-            <option v-for="org in session.organizations" :key="org.id" :value="org.id">
-              {{ org.name }}
-            </option>
-          </select>
-        </label>
 
         <button class="account" type="button" :aria-expanded="menuOpen" @click="menuOpen = !menuOpen">
           <span class="avatar" aria-hidden="true">{{ avatarText }}</span>
@@ -241,33 +208,9 @@ async function onLogout() {
   border-top: 1px solid var(--sidebar-divider);
 }
 
-.switch-error {
-  margin: 0 0 10px;
-  font-size: 12px;
-  color: #f0b7ae;
-}
 
-.org-switch {
-  display: block;
-  margin-bottom: 12px;
-}
 
-.org-switch-label {
-  display: block;
-  font-size: 11px;
-  color: var(--sidebar-text-faint);
-  margin-bottom: 5px;
-}
 
-.org-switch select {
-  width: 100%;
-  height: 32px;
-  padding: 0 8px;
-  border-radius: 7px;
-  border: 1px solid var(--sidebar-divider);
-  background: var(--sidebar-avatar-bg);
-  color: var(--sidebar-text);
-}
 
 .account {
   display: flex;

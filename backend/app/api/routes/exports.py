@@ -52,6 +52,9 @@ def list_export_logs(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
+    # 导出是成绩数据离开系统的地方。组织归属只回答「是不是本组织的数据」，
+    # 不回答「这个人该不该把它导出去」。
+    require_organization_role(principal, "org_admin", "teacher")
     query = (
         select(SpreadsheetWriteLog)
         .join(ScoringRun)
@@ -78,6 +81,9 @@ def export_batch(
         and batch.organization_id != principal.organization_id
     ):
         raise HTTPException(status_code=404, detail="batch not found")
+    # 导出是成绩数据离开系统的地方。组织归属只回答「是不是本组织的数据」，
+    # 不回答「这个人该不该把它导出去」。
+    require_organization_role(principal, "org_admin", "teacher")
     try:
         path = export_batch_excel(db, batch_id)
     except ValueError as exc:
@@ -114,6 +120,9 @@ def report(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     _legacy_thesis_run(db, run_id, principal)
+    # 导出是成绩数据离开系统的地方。组织归属只回答「是不是本组织的数据」，
+    # 不回答「这个人该不该把它导出去」。
+    require_organization_role(principal, "org_admin", "teacher")
     try:
         path = generate_report(db, run_id)
     except ValueError as exc:
@@ -129,6 +138,9 @@ def export_run_json(
 ):
     """结构化 JSON 导出（运行/论文/逐项/扣分/证据/篇章·格式发现/复核），供下游二次处理。"""
     _legacy_thesis_run(db, run_id, principal)
+    # 导出是成绩数据离开系统的地方。组织归属只回答「是不是本组织的数据」，
+    # 不回答「这个人该不该把它导出去」。
+    require_organization_role(principal, "org_admin", "teacher")
     try:
         return build_run_export(db, run_id)
     except ValueError as exc:

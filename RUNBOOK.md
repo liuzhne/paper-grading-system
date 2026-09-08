@@ -461,16 +461,11 @@ DATABASE_URL='<目标库>' .venv/bin/python -m backend.app.scripts.backfill_expo
 确认该通道应映射到哪个展示通道，补进 `services/batches/exports.LEGACY_CHANNELS`
 后重新执行。
 
-**默认入口切换**由环境变量控制，不靠删页：
+**默认入口**：根路径直接是 v2 工作台，旧 SPA 已下线（用户决定，2026-09-08）。
+`WORKBENCH_DEFAULT_ENTRY` 开关与常驻 `/legacy/` 一并取消。
 
-```bash
-WORKBENCH_DEFAULT_ENTRY=true   # 切到 v2 工作台
-WORKBENCH_DEFAULT_ENTRY=false  # 退回旧 SPA（默认）
-```
-
-旧入口常驻在 `/legacy/`，切换前后都可达——不要等到切换当天才第一次验证这条
-回退路径。`/login`、`/register`、`/reset-password` 无论开关如何都继续走旧壳，
-已发出的邀请与重置链接不会因切换失效。
+`/login`、`/register`、`/reset-password` 由工作台承接。**这三条不能只剩 404**：
+邮件里已经发出去的邀请与重置链接指向后两条，收件人不会重新拿到新链接。
 
 **浏览器验收**（V01–V13）：
 
