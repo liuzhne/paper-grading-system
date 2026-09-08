@@ -486,6 +486,34 @@ FastAPI 托管的结果，不是 Vite dev server——深链接回退、缺失�
 `/api` 不被 SPA 吞掉这几条只在生产托管路径上才会出问题。数据为合成文档与
 Mock LLM，库与存储建在临时目录，因此截图与 trace 可安全归档。
 
+### 11.4 新增迁移时必须同步的两处清单
+
+`backend/app/services/deployment/postgres_verifier.MIGRATION_SEQUENCE` 的**末项被
+当作预期 head**。加了迁移不更新它，PostgreSQL 门禁会在建 fixture **之前**抛
+「unexpected alembic head」，于是后面那条「有数据时拒绝 lossy downgrade」拿到一个
+空库、守卫没数据可拒，最终报成「lossy downgrade unexpectedly succeeded」——
+**报错点离真正的缺陷隔了两步**，照着报错去查降级逻辑只会白费时间。
+
+同步两处，缺一不可：
+
+```
+backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
+.github/workflows/ci.yml                               # 逐版本升级的 revision 列表
+```
+
+`test_migration_sequence_is_current.py` 对着 Alembic 本身验，本地 pytest 就会拦下。
+另有一条冻结契约测试（`test_m8_ops_readiness.py`）让改动必须是有意的，但它拿自己的
+硬编码副本比对，**两边同时过期时不会报警**——这正是 0024–0028 漏登被放过去的原因。
+
+### 11.5 一次性环境不得继承 `.env.local`
+
+`Settings` 的 `env_file` 含 `.env.local`，开发机上那份带的是**生产**数据库地址、
+口令与 `AUTH_SECRET`。任何一次性进程（浏览器验收、离线脚本）都必须先置
+`PGS_DISABLE_ENV_FILE=1` 再导入 backend，并自带一次性凭据。
+
+不这么做时**本地一直是绿的**——因为它悄悄用上了生产密钥，只有在没有这个文件的
+机器（CI）上才暴露。这与「测试打到生产库」是同一个根。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
@@ -494,6 +522,7 @@ Mock LLM，库与存储建在临时目录，因此截图与 trace 可安全归�
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-08 | 入口切换上线与门禁修复 | 导出出口全量角色门控；取消应用内组织切换；旧 SPA 下线、`/register` `/reset-password` 由工作台承接；修 `MIGRATION_SEQUENCE` 过期与验收进程继承 `.env.local`。生产部署经 main 门禁执行。 |
 | 2026-09-08 | 运维脚本目标库守卫 | `backfill_export_events` 对非本地目标默认拒绝并要求显式确认；RUNBOOK 命令补 `DATABASE_URL`。`seed_dev` / `build_anchors` **未加同款守卫**：前者在 Docker 冒烟里于容器内执行，那里的库主机本就不是 localhost，照搬会打断一条正当流程。未运行生产变更。 |
 | 2026-09-08 | 阶段 6B、浏览器验收与合同门禁 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。补齐 §12.2 的类型与 OpenAPI 合同门禁（`api:dump` / `api:check` + 前端调用路径静态契约）。未运行生产操作。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |
