@@ -1263,6 +1263,22 @@ def export(
     render.info("✓ Excel：%s" % path)
 
 
+def guard_review_write(operation, what: str):
+    """执行一次复核写操作，把服务层的拒绝翻译成可读退出。
+
+    归档守卫抛的是 `BatchArchived`（非 `ValueError`）。只捕 `ValueError` 会让它
+    漏成一串 traceback——运维看到的是崩溃，而不是「这个批次已归档」。崩溃与
+    「按规则拒绝」是两件事，输出必须能区分。
+    """
+    from backend.app.services.batches.state import BatchStateError
+
+    try:
+        return operation()
+    except (ValueError, BatchStateError) as exc:
+        render.error("%s 失败：%s" % (what, exc))
+        raise typer.Exit(2)
+
+
 @app.command()
 def review(
     run_id: str = typer.Argument(..., help="评分任务 id"),
@@ -1315,13 +1331,19 @@ def review(
             changes.append((item.id, code, score))
 
         for item_id, code, score in changes:
-            try:
-                update_score_item(session, item_id, score, reason, settings.DEFAULT_DEV_USER_ID)
-            except ValueError as exc:
-                render.error("覆盖 %s 失败：%s" % (code, exc))
-                raise typer.Exit(2)
+            guard_review_write(
+                lambda item_id=item_id, score=score: update_score_item(
+                    session, item_id, score, reason, settings.DEFAULT_DEV_USER_ID
+                ),
+                "覆盖 %s" % code,
+            )
         if submit:
-            submit_review(session, run_id, reason, settings.DEFAULT_DEV_USER_ID)
+            guard_review_write(
+                lambda: submit_review(
+                    session, run_id, reason, settings.DEFAULT_DEV_USER_ID
+                ),
+                "提交复核",
+            )
 
         final = session.get(ScoringRun, run_id)
         final_total = float(final.final_total_score or 0)

@@ -152,3 +152,43 @@ def test_run_review_still_works_on_a_live_batch(client):
     )
 
     assert response.status_code == 200, response.text
+
+
+def test_cli_translates_the_archived_guard_into_a_clean_exit():
+    """CLI 也走同一条服务（§2.1「保留 API/CLI」）。
+
+    归档守卫加在服务层之后，CLI 原先只捕 `ValueError`，`BatchArchived` 会直接漏成
+    一串 traceback——运维看到的是崩溃，而不是「这个批次已归档」。崩溃与「按规则
+    拒绝」是两件事，输出必须能区分。
+    """
+    import typer
+
+    from backend.app.cli.main import guard_review_write
+    from backend.app.services.batches.state import BatchArchived
+
+    def _raises():
+        raise BatchArchived("批次已归档，需先显式重新打开才能修改")
+
+    with pytest.raises(typer.Exit) as excinfo:
+        guard_review_write(_raises, "覆盖 T01")
+
+    assert excinfo.value.exit_code == 2
+
+
+def test_cli_still_translates_value_errors():
+    """收紧不能把既有的分值校验错误一并吞掉。"""
+    import typer
+
+    from backend.app.cli.main import guard_review_write
+
+    def _raises():
+        raise ValueError("final_score out of range")
+
+    with pytest.raises(typer.Exit):
+        guard_review_write(_raises, "覆盖 T01")
+
+
+def test_cli_passes_through_a_successful_write():
+    from backend.app.cli.main import guard_review_write
+
+    assert guard_review_write(lambda: "ok", "覆盖 T01") == "ok"
