@@ -1,8 +1,16 @@
+// @ts-check
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
 import { STAGE_ORDER } from "@/stores/stages.js";
+
+/**
+ * 从生成的 OpenAPI 类型引入（§8）。手抄一份形状出来，后端改了字段它不会动。
+ * @typedef {import("@/api/types.js").Batch} Batch
+ * @typedef {import("@/api/types.js").BatchProgress} BatchProgress
+ * @typedef {import("@/api/types.js").ScoreDistribution} ScoreDistribution
+ */
 
 /**
  * 批次列表与进度。
@@ -12,13 +20,16 @@ import { STAGE_ORDER } from "@/stores/stages.js";
  * 评分任务页必须显示同一组数字（计划 §5-B）。
  */
 export const useBatchesStore = defineStore("batches", () => {
+  /** @type {import('vue').Ref<Batch[]>} */
   const batches = ref([]);
   const loading = ref(false);
+  /** @type {import('vue').Ref<string|null>} */
   const error = ref(null);
+  /** @type {import('vue').Ref<string|null>} */
   const stageFilter = ref(null);
-  /** batch_id -> progress payload */
+  /** @type {import('vue').Ref<Record<string, BatchProgress>>} batch_id -> progress payload */
   const progress = ref({});
-  /** batch_id -> score-distribution payload */
+  /** @type {import('vue').Ref<Record<string, ScoreDistribution>>} batch_id -> score-distribution payload */
   const distribution = ref({});
 
   const total = computed(() => batches.value.length);
@@ -29,6 +40,7 @@ export const useBatchesStore = defineStore("batches", () => {
    * 过滤改由服务端执行后，`batches` 里只剩被选中的阶段；用它算图例会让其它
    * 阶段全变成 0——看上去像「这些阶段没有批次」，而不是「你正在筛」。
    */
+  /** @type {import('vue').Ref<Batch[]>} */
   const allStages = ref([]);
 
   const stageCounts = computed(() => {
@@ -43,6 +55,7 @@ export const useBatchesStore = defineStore("batches", () => {
   // 服务端已经筛过，这里不再筛第二遍——两处口径一旦分叉就会互相打架。
   const visible = computed(() => batches.value);
 
+  /** @param {string|null} stage */
   async function setStageFilter(stage) {
     stageFilter.value = stage || null;
     await load();
@@ -67,12 +80,14 @@ export const useBatchesStore = defineStore("batches", () => {
       // 不留半截列表：失败时清空并报错，避免用户对着过期数据操作。
       batches.value = [];
       allStages.value = [];
-      error.value = err?.message || "加载评分任务失败";
+      error.value =
+        (err instanceof Error ? err.message : null) || "加载评分任务失败";
     } finally {
       loading.value = false;
     }
   }
 
+  /** @param {string} batchId */
   async function loadProgress(batchId) {
     try {
       const payload = await api.get(`/batches/${batchId}/progress`);
@@ -84,10 +99,12 @@ export const useBatchesStore = defineStore("batches", () => {
     }
   }
 
+  /** @param {string} batchId */
   function progressFor(batchId) {
     return progress.value[batchId] ?? null;
   }
 
+  /** @param {string} batchId */
   async function loadDistribution(batchId) {
     try {
       const payload = await api.get(`/batches/${batchId}/score-distribution`);
@@ -99,6 +116,7 @@ export const useBatchesStore = defineStore("batches", () => {
     }
   }
 
+  /** @param {string} batchId */
   function distributionFor(batchId) {
     return distribution.value[batchId] ?? null;
   }
@@ -110,6 +128,7 @@ export const useBatchesStore = defineStore("batches", () => {
    * 写，凭一个过期的页面状态执行等于让并发的两个人互相覆盖。目标阶段由服务端
    * 推导——重开不一定回 reviewed，空批次会落回 draft。
    */
+  /** @param {string} batchId */
   function stageActionBody(batchId) {
     const batch = batches.value.find((item) => item.id === batchId);
     if (!batch) {
@@ -118,6 +137,10 @@ export const useBatchesStore = defineStore("batches", () => {
     return { state_version: batch.state_version };
   }
 
+  /**
+   * @param {string} batchId
+   * @param {Partial<Batch>} updated
+   */
   function applyStageResult(batchId, updated) {
     batches.value = batches.value.map((item) =>
       item.id === batchId ? { ...item, ...updated } : item,
@@ -127,11 +150,13 @@ export const useBatchesStore = defineStore("batches", () => {
 
   // 路径写死两条，不拼 `${action}`：拼出来的路径静态查不出来，
   // `test_frontend_api_contract` 这道门禁就漏过去了。
+  /** @param {string} batchId */
   async function archive(batchId) {
     const body = stageActionBody(batchId);
     return applyStageResult(batchId, await api.post(`/batches/${batchId}/archive`, body));
   }
 
+  /** @param {string} batchId */
   async function reopen(batchId) {
     const body = stageActionBody(batchId);
     return applyStageResult(batchId, await api.post(`/batches/${batchId}/reopen`, body));
