@@ -1,0 +1,152 @@
+name: pgs-production-migrate
+
+# 生产数据库迁移。**手动触发 + production Environment 审批**，不随 push 自动执行。
+#
+# 存在的理由：生产运行角色 `pgs_app` 按设计没有 DDL，迁移必须用 owner 连接串。
+# 把那串东西放进 GitHub Secrets 并由本工作流使用，好过在某台笔记本上手工执行——
+# 凭据不进任何人的命令行与 shell 历史，每次执行有审批与日志，换人也照样能跑。
+#
+# 不导出数据库快照作为 artifact：生产库含学生 PII，仓库的既有约定是真实论文、
+# Secret 与 PII 不得进入 CI artifact。回滚依赖 PostgreSQL 的事务化 DDL（任一迁移
+# 失败整体回滚）与 Supabase 自身的备份。
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head:
+        description: "预期迁移到的 head（照抄仓库当前 head，防止误点）"
+        required: true
+        type: string
+      dry_run:
+        description: "只打印当前版本与待执行迁移，不写入"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-database
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install the locked environment
+        run: uv sync --locked
+
+      # 输入的 head 必须与仓库当前 head 一致。误点一次工作流不该把数据库带到
+      # 一个谁也没打算去的版本。
+      - name: Refuse to run unless the requested head matches this commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(uv run python - <<'PY'
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          config = Config()
+          config.set_main_option("script_location", "alembic")
+          print(ScriptDirectory.from_config(config).get_current_head())
+          PY
+          )"
+          if [[ "$actual" != "${{ inputs.expected_head }}" ]]
+          then
+            echo "::error::输入的 head 与本 commit 不一致：仓库为 $actual，输入为 ${{ inputs.expected_head }}"
+            exit 1
+          fi
+          echo "head 校验通过：$actual"
+
+      - name: Validate the migration credential is configured
+        shell: bash
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MIGRATION_DATABASE_URL:-}" ]]
+          then
+            echo "::error::缺少 secret MIGRATION_DATABASE_URL（需要具备 DDL 权限的 owner 连接串，不是运行角色 pgs_app）"
+            exit 1
+          fi
+          echo "credential present"
+
+      # 只读普查：当前版本与各表行数。不打印任何行内容，因此日志里不会出现 PII。
+      - name: Survey the database before migrating
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect, text
+
+          url = os.environ["DATABASE_URL"].replace(
+              "postgresql://", "postgresql+psycopg://", 1
+          )
+          engine = create_engine(url)
+          with engine.connect() as connection:
+              head = connection.execute(
+                  text("SELECT version_num FROM alembic_version")
+              ).scalar_one()
+              print("current alembic head:", head)
+              print("current_user:", connection.execute(text("SELECT current_user")).scalar_one())
+              for table in sorted(inspect(engine).get_table_names(schema="public")):
+                  count = connection.execute(
+                      text('SELECT count(*) FROM "%s"' % table)
+                  ).scalar_one()
+                  if count:
+                      print("  %-34s %s" % (table, count))
+          PY
+
+      - name: Show pending migrations
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: uv run alembic history --indicate-current | tail -40
+
+      - name: Upgrade to head
+        if: ${{ inputs.dry_run == false }}
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: uv run alembic upgrade head
+
+      # 用**运行角色**验证，而不是 owner：owner 什么都读得到，证明不了应用能不能
+      # 工作。0026/0027 的新表就是靠这一步才会暴露缺授权（见 0029）。
+      - name: Verify with the runtime role
+        if: ${{ inputs.dry_run == false }}
+        env:
+          DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${DATABASE_URL:-}" ]]
+          then
+            echo "::error::缺少 secret RUNTIME_DATABASE_URL（应用运行角色 pgs_app 的连接串）"
+            exit 1
+          fi
+          uv run python -m backend.app.scripts.verify_postgres_ops
+          uv run python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          url = os.environ["DATABASE_URL"].replace(
+              "postgresql://", "postgresql+psycopg://", 1
+          )
+          engine = create_engine(url)
+          # 运行角色真的能读这两张新表——迁移成功不等于应用可用。
+          with engine.connect() as connection:
+              for table in ("review_command_receipts", "export_events"):
+                  connection.execute(text('SELECT count(*) FROM "%s"' % table)).scalar_one()
+                  print("runtime role can read:", table)
+          PY
