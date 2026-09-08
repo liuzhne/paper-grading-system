@@ -35,6 +35,7 @@ _PRIORITY = {
     "evidence_insufficient": 2,
     "confidence_unavailable": 3,
     "low_confidence": 4,
+    "reason_not_recorded": 90,
 }
 
 
@@ -89,6 +90,50 @@ def derive(output, *, criterion=None, notes=()):
 
     reasons.sort(key=lambda entry: _PRIORITY.get(entry["code"], 99))
     return reasons
+
+
+def recover_for_legacy_item(item):
+    """历史评分项的原因显示回退（前端 v2 计划 §5-B）。
+
+    `review_reasons` 是 0025 才加的列。在它之前完成的评分这一列为空，队列会
+    显示一行标着「需要确认」却不给任何原因。这里只用**评分项上已有的数据**
+    推导，不重新调用模型、不改写历史行——§5-B 明写「不为补文案重评历史」。
+
+    推不出来时返回 ``reason_not_recorded``，而不是挑一条看起来合理的凑上去：
+    编一个原因比不给原因更糟，复核者会照着那个不存在的线索去核对原文。
+
+    返回空列表表示该项本就不需要复核。
+    """
+    if not getattr(item, "need_manual_review", False):
+        return []
+
+    # 旧管线把 validator 的确定性文案追加进了 deduction_items，那就是 §5-B 说的
+    # 「已有 issue 数据」。按原文匹配，匹配不上的不猜。
+    notes = []
+    for entry in getattr(item, "deduction_items", None) or ():
+        text = entry.get("reason") if isinstance(entry, dict) else None
+        if text in _NOTE_CODES:
+            notes.append(text)
+
+    reasons = derive(
+        {
+            "evidence_sufficient": bool(
+                getattr(item, "evidence_sufficient", True)
+            ),
+            "confidence": getattr(item, "confidence", None),
+            "need_manual_review": True,
+        },
+        notes=notes,
+    )
+    if reasons:
+        return reasons
+
+    return [
+        _entry(
+            "reason_not_recorded",
+            "该项在系统开始记录复核原因之前完成评分，具体原因未记录。",
+        )
+    ]
 
 
 def to_display_text(reasons):

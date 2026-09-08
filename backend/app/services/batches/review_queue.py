@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.app.db.models import ManualReviewTask
+from backend.app.services.scoring import review_reasons
 from backend.app.db.models import Paper
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
@@ -54,6 +55,7 @@ def _ordinary_entries(session, run_ids, papers_by_run):
     entries = []
     for item in items:
         paper = papers_by_run.get(item.scoring_run_id)
+        reasons = item.review_reasons or review_reasons.recover_for_legacy_item(item)
         entries.append(
             {
                 "queue_type": "ordinary",
@@ -73,8 +75,11 @@ def _ordinary_entries(session, run_ids, papers_by_run):
                 # Core 持久化不写 confidence。保持 None——显示成 0 会让人
                 # 以为模型毫无把握，那是完全不同的结论。
                 "confidence": _as_float(item.confidence),
-                "review_reasons": item.review_reasons or [],
-                "review_reason": item.review_reason,
+                # 历史项这两列为空：按已有数据推导显示回退，不重评历史。
+                "review_reasons": reasons,
+                "review_reason": (
+                    item.review_reason or review_reasons.to_display_text(reasons)
+                ),
                 "review_revision": item.review_revision or 1,
                 # 有有效 AI 分才谈得上「采纳系统给分」。
                 "acceptable": item.ai_score is not None,
