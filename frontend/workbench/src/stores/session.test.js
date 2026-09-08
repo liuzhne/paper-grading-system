@@ -2,6 +2,9 @@ import { setActivePinia, createPinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useSessionStore } from "./session.js";
+import { useBatchesStore } from "./batches.js";
+import { useReviewStore } from "./review.js";
+import { useUploadStore } from "./upload.js";
 
 /**
  * `/auth/me` 返回的是嵌套结构 `{auth_required, user, organization}`，
@@ -109,5 +112,86 @@ describe("session store", () => {
 
     expect(session.status).toBe("authenticated");
     expect(session.organizations).toEqual([]);
+  });
+});
+
+describe("组织切换清场（计划 §2.1）", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+    globalThis.__PGS_CONFIG__ = undefined;
+  });
+
+  function jsonResponse(body, status = 200) {
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  function stubSwitch() {
+    vi.stubGlobal("fetch", (url) => {
+      const path = String(url);
+      if (path.includes("/auth/me")) {
+        return jsonResponse({ organization: { id: "org-b" } });
+      }
+      if (path.includes("/system/capabilities")) return jsonResponse({});
+      return jsonResponse({});
+    });
+  }
+
+  it("切换后不留上一个组织的批次与队列", async () => {
+    stubSwitch();
+    const session = useSessionStore();
+    const batches = useBatchesStore();
+    const review = useReviewStore();
+    session.organizationId = "org-a";
+    batches.batches = [{ id: "b1", name: "A 组织的批次", status: "scored" }];
+    review.entries = [{ score_item_id: "s1", student_name: "张三" }];
+
+    await session.switchOrganization("org-b");
+
+    // 旧组织的学生姓名留在界面上，就是一次跨组织泄露。
+    expect(batches.batches).toEqual([]);
+    expect(review.entries).toEqual([]);
+  });
+
+  it("切换前停掉旧组织的上传调度", async () => {
+    stubSwitch();
+    const session = useSessionStore();
+    const upload = useUploadStore();
+    session.organizationId = "org-a";
+    upload.uploadedPaperIds = ["p1"];
+
+    await session.switchOrganization("org-b");
+
+    // 继续上传会把文件写进旧组织的批次。
+    expect(upload.uploadedPaperIds).toEqual([]);
+    expect(upload.queue).toEqual([]);
+  });
+
+  it("切到同一个组织时不做清场", async () => {
+    stubSwitch();
+    const session = useSessionStore();
+    const batches = useBatchesStore();
+    session.organizationId = "org-a";
+    batches.batches = [{ id: "b1", name: "保留", status: "scored" }];
+
+    await session.switchOrganization("org-a");
+
+    expect(batches.batches).toHaveLength(1);
+  });
+
+  it("登出同样清场", async () => {
+    stubSwitch();
+    const session = useSessionStore();
+    const batches = useBatchesStore();
+    batches.batches = [{ id: "b1", name: "登出前", status: "scored" }];
+
+    await session.logout();
+
+    expect(batches.batches).toEqual([]);
   });
 });

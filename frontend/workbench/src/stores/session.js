@@ -75,9 +75,34 @@ export const useSessionStore = defineStore("session", () => {
   }
 
   /** 切换组织：作废在途请求 → 服务端切上下文 → 重载身份与能力。 */
+  /**
+   * 清空所有装着组织级数据的 store（计划 §2.1）。
+   *
+   * `resetContext()` 只中止在途请求；已经渲染出来的批次、复核队列、材料列表
+   * 还留在内存里。切换组织后它们会继续显示——上一个组织的学生姓名留在界面上
+   * 就是一次跨组织泄露，而且下一次写请求可能落到错误的批次上。
+   *
+   * 动态 import 避开循环依赖：那几个 store 反过来会用到 session。
+   */
+  async function clearOrganizationScopedStores() {
+    const [batches, grading, review, upload] = await Promise.all([
+      import("@/stores/batches.js"),
+      import("@/stores/grading.js"),
+      import("@/stores/review.js"),
+      import("@/stores/upload.js"),
+    ]);
+    // 先停上传调度再清：继续上传会把文件写进旧组织的批次。
+    upload.useUploadStore().cancel();
+    batches.useBatchesStore().reset();
+    grading.useGradingStore().reset();
+    review.useReviewStore().reset();
+    upload.useUploadStore().reset();
+  }
+
   async function switchOrganization(nextId) {
     if (nextId === organizationId.value) return;
     resetContext();
+    await clearOrganizationScopedStores();
     capabilities.value = null;
     organizationId.value = nextId;
     await api.post("/auth/organization-context", { organization_id: nextId });
@@ -89,6 +114,7 @@ export const useSessionStore = defineStore("session", () => {
   async function logout() {
     await api.post("/auth/logout");
     resetContext();
+    await clearOrganizationScopedStores();
     identity.value = null;
     organizations.value = [];
     organizationId.value = null;

@@ -23,6 +23,16 @@ const drafts = computed(() => rubrics.value.filter((r) => r.status !== "publishe
 const canCreate = computed(() => form.name.trim() && form.rubric_id);
 const canStart = computed(() => precheck.value?.can_start === true);
 
+/** 区间而不是精确值：一个精确数字会被当成承诺。 */
+const etaText = computed(() => {
+  const estimate = precheck.value?.duration_estimate;
+  if (!estimate?.available) return "";
+  const minutes = (seconds) => Math.max(1, Math.round(seconds / 60));
+  const low = minutes(estimate.low_seconds);
+  const high = minutes(estimate.high_seconds);
+  return low === high ? `${low} 分钟` : `${low}–${high} 分钟`;
+});
+
 async function loadRubrics() {
   try {
     rubrics.value = (await api.get("/rubrics")) || [];
@@ -238,6 +248,17 @@ onMounted(async () => {
               {{ precheck.warning_count }} 份材料有提示项，可以开始评分。
             </p>
             <p v-else class="notice">全部 {{ precheck.ready_count }} 份材料解析正常。</p>
+
+            <!-- 预计耗时（决策 12）。样本不足时如实说「暂无估计」——编一个分钟数
+                 会被当成承诺，而 §5-D 明写它不参与租约与超时判定。 -->
+            <p v-if="precheck.duration_estimate" class="faint eta">
+              <template v-if="precheck.duration_estimate.available">
+                预计耗时约 {{ etaText }}（按最近
+                {{ precheck.duration_estimate.sample_count }} 次任务估算，仅供参考，
+                不作为超时判定依据）
+              </template>
+              <template v-else>{{ precheck.duration_estimate.message }}</template>
+            </p>
 
             <ul v-if="precheck.findings.length" class="findings">
               <li v-for="finding in precheck.findings" :key="finding.paper_id + finding.code">

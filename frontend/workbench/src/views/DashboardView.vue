@@ -186,6 +186,10 @@ onMounted(async () => {
         <p v-if="distribution.without_results" class="faint dist-note">
           另有 {{ distribution.without_results }} 份材料没有有效结果，未计入分布。
         </p>
+        <!-- 阻塞项的总分尚不成立：不说出来，这条曲线会被当成这批的最终形态。 -->
+        <p v-if="distribution.blocking_open" class="faint dist-note">
+          还有 {{ distribution.blocking_open }} 个阻塞任务未解决，分布仍会变化。
+        </p>
         <p v-if="distribution.bucketing === null" class="faint dist-note">
           分档口径与跨批次比较尚未确定，此处显示原始终分。
         </p>

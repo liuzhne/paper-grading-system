@@ -37,6 +37,7 @@ from backend.app.services.auth import auth_active
 from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.batch_scoring import jobs as batch_jobs
 from backend.app.services.batches import distribution
+from backend.app.services.batches import duration
 from backend.app.services.batches import results as batch_results
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.batches import review_accept
@@ -563,7 +564,16 @@ def batch_upload_precheck(
     found = {paper.id for paper in papers}
     if set(requested) - found or any(paper.batch_id != batch_id for paper in papers):
         raise HTTPException(status_code=404, detail="paper not found in batch")
-    return precheck.build_precheck(papers)
+
+    result = precheck.build_precheck(papers)
+    # 预计耗时（决策 12）。样本不足时返回「暂无估计」而不是编一个分钟数；
+    # §5-D 明写它只进展示，不能用于评分租约或超时判定。
+    result["duration_estimate"] = duration.estimate_scoring_duration(
+        db,
+        organization_id=principal.organization_id,
+        item_count=len(papers),
+    )
+    return result
 
 
 @router.get("/{batch_id}/export-precheck")

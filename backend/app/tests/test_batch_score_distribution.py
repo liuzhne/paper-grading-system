@@ -15,6 +15,8 @@ Profile 的量纲也不同，固定档位会把两个不可比的批次画在同
 
 import pytest
 
+from sqlalchemy import select
+
 from backend.app.db import models
 
 
@@ -125,3 +127,41 @@ def test_average_is_over_scored_materials_only(client):
 
 def test_unknown_batch_is_not_found(client):
     assert client.get("/api/batches/nope/score-distribution").status_code == 404
+
+
+def test_blocking_count_is_reported_alongside_the_scores(client):
+    """§5-D：分布「只包含有效且非空终分，另报未评/**阻塞**数量」。
+
+    阻塞项的总分尚不成立。不单独报出来，读者会把一条完整的分布曲线当成这批
+    的最终形态，而它其实还会变。
+    """
+    batch = _batch_with_scores(client, [70.0, 80.0])
+
+    with client.session_factory() as session:
+        run = session.scalars(select(models.ScoringRun)).first()
+        session.add(
+            models.ManualReviewTask(
+                organization_id="00000000-0000-0000-0000-000000000002",
+                scoring_run_id=run.id,
+                criterion_code="T01",
+                trigger_message="Provider 调用失败。",
+                trigger_code="provider_error",
+                status="open",
+                priority=0,
+            )
+        )
+        session.commit()
+
+    body = client.get("/api/batches/%s/score-distribution" % batch["id"]).json()
+
+    assert body["blocking_open"] == 1
+    # 阻塞不改变已产出的终分，只是提示这张图还会变。
+    assert body["scored_count"] == 2
+
+
+def test_blocking_count_is_zero_when_nothing_is_blocked(client):
+    batch = _batch_with_scores(client, [70.0])
+
+    body = client.get("/api/batches/%s/score-distribution" % batch["id"]).json()
+
+    assert body["blocking_open"] == 0

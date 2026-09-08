@@ -16,6 +16,7 @@ from sqlalchemy import select
 from backend.app.db.models import ScoringRun
 from backend.app.services.batches.results import SCORED_STATUSES
 from backend.app.services.batches.results import select_current_results
+from backend.app.services.batches.review_stats import build_review_stats
 
 
 def _total(run):
@@ -33,6 +34,7 @@ def _total(run):
 
 def build_score_distribution(session, batch):
     selection = select_current_results(session, batch)
+    stats = build_review_stats(session, batch)
 
     run_ids = [
         run_id
@@ -58,6 +60,9 @@ def build_score_distribution(session, batch):
         "scored_count": len(scores),
         # 缺结果单独计数：并进分布会把平均分拉低成一个假数字。
         "without_results": selection.total_count - len(scores),
+        # 阻塞项的总分尚不成立。不单独报出来，读者会把一条完整的曲线当成这批
+        # 的最终形态，而它其实还会变。
+        "blocking_open": stats["blocking_open"],
         "average": (sum(scores) / len(scores)) if scores else None,
         # 分桶策略未定（§11）。给 None 而不是省略，前端才能把「未定」如实显示，
         # 而不是当成一次失败的请求。
