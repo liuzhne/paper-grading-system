@@ -180,3 +180,52 @@ def test_writing_to_an_archived_batch_is_a_conflict_not_a_crash(client):
 
     assert response.status_code == 409
     assert "归档" in response.json()["detail"]
+
+
+def _job(client, batch_id, status):
+    from backend.app.services.batch_scoring import jobs as job_module
+
+    with client.session_factory() as session:
+        session.add(
+            models.BatchScoringJob(
+                grading_batch_id=batch_id,
+                generation=1,
+                status=status,
+                total_items=0,
+                observation_policy={},
+                observation_policy_hash="0" * 64,
+            )
+        )
+        session.commit()
+    return job_module.ACTIVE_JOB_STATUSES
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "cancel_requested"])
+def test_archive_refuses_while_a_job_is_still_active(client, status):
+    """§5-C：仅 reviewed **且无活动任务**可归档。
+
+    阶段判断挡不住这一格：`reviewed` 与一个仍在跑的任务可以并存（任务刚被拉起、
+    阶段投影还没跟上）。归档会把批次转成只读，而那个任务还会继续写。
+    """
+    batch = _batch(client)
+    _job(client, batch["id"], status)
+    version = _force_stage(client, batch["id"], "reviewed")
+
+    response = client.post(
+        "/api/batches/%s/archive" % batch["id"], json={"state_version": version}
+    )
+
+    assert response.status_code == 409
+    assert "任务" in response.json()["detail"]
+
+
+def test_archive_allows_a_finished_job(client):
+    batch = _batch(client)
+    _job(client, batch["id"], "completed")
+    version = _force_stage(client, batch["id"], "reviewed")
+
+    response = client.post(
+        "/api/batches/%s/archive" % batch["id"], json={"state_version": version}
+    )
+
+    assert response.status_code == 200

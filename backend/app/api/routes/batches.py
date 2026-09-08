@@ -33,7 +33,9 @@ from backend.app.schemas.batch import ReviewAcceptResult
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.auth import auth_active
 from backend.app.services.ai_connections import connection_snapshot_for_owner
+from backend.app.services.batch_scoring import jobs as batch_jobs
 from backend.app.services.batches import distribution
+from backend.app.services.batches import results as batch_results
 from backend.app.services.batches import get_batch_summary
 from backend.app.services.batches import review_accept
 from backend.app.services.batches import exports
@@ -499,6 +501,18 @@ def archive_batch(
     ensure_dev_user(db)
     batch = _visible_batch(db, batch_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
+
+    # §5-C：仅 reviewed **且无活动任务**可归档。阶段判断挡不住这一格——任务刚被
+    # 拉起、阶段投影还没跟上时，reviewed 与一个仍在跑的任务可以并存。归档会把
+    # 批次转成只读，而那个任务还会继续往里写。
+    job = batch_results.current_job(db, batch.id)
+    if job is not None and job.status in batch_jobs.ACTIVE_JOB_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="该批次仍有进行中的评分任务（%s），请先等待结束或取消后再归档。"
+            % job.status,
+        )
+
     return _apply_stage_action(db, batch, "archive", payload.state_version)
 
 
