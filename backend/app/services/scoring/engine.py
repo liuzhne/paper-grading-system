@@ -1357,9 +1357,19 @@ def update_score_item(db: Session, item_id: str, final_score: float, reason: str
     _require_recalculable_run(item.scoring_run)
     ThesisProfile().assert_ordinary_item_override_allowed(item=item)
 
+    # 归档批次拒绝改分（前端 v2 计划 §5-C）。这条守卫此前只在新端点上，旧 SPA
+    # 的改分入口能绕过去——那样归档就只是一个标签，而不是写保护，一份已经发出去
+    # 的成绩仍可能被改动。
+    batch = getattr(getattr(item.scoring_run, "paper", None), "batch", None)
+    if batch is not None:
+        batch_state.guard_writable(batch)
+
     before = item.final_score if item.final_score is not None else item.ai_score
     item.final_score = final_score
     item.need_manual_review = False
+    # 批量采纳靠 review_revision 做乐观并发。旧入口改了分却不 bump，新端点就以为
+    # 这一项没变过，会把人工刚改的结果按「采纳 AI 分」静默覆盖掉。
+    item.review_revision = (item.review_revision or 1) + 1
     item.scoring_run.status = "reviewing"
     db.add(
         ReviewLog(
@@ -1395,6 +1405,12 @@ def submit_review(db: Session, run_id: str, reason: str, reviewer_id: str):
     )
     if run is None:
         raise ValueError("scoring run not found")
+    # 与旧改分入口同一条守卫（§5-C、§8.3）：归档批次上仍能把 run 与 paper 置为
+    # reviewed 的话，一次误操作就能改动已封存批次里的材料，而归档的意义正是不再
+    # 变动。
+    batch = getattr(getattr(run, "paper", None), "batch", None)
+    if batch is not None:
+        batch_state.guard_writable(batch)
     _require_recalculable_run(run)
     _recalculate_run(run, run.items, run.paper.parse_quality, run.rubric.total_score)
     ThesisProfile().assert_review_submission_allowed(run=run)
