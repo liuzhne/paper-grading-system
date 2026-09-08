@@ -151,6 +151,16 @@ def create_app():
         @app.get("/workbench", include_in_schema=False)
         @app.get("/workbench/{path:path}", include_in_schema=False)
         def workbench_app(path: str = ""):
+            # 产物根目录下的真实文件先按文件返回（字体许可证就在这里）。SIL OFL
+            # 1.1 要求许可证随字体分发；把它交给 SPA 回退，取到的会是一份 HTML，
+            # 合规上等于没发布。
+            #
+            # 只认一层文件名：带分隔符的路径一律走回退，避免拼出 ../ 读到产物
+            # 之外的文件。
+            if path and "/" not in path and path != "index.html":
+                candidate = workbench_dir / path
+                if candidate.is_file():
+                    return FileResponse(candidate)
             return HTMLResponse(
                 _inject_client_config(
                     (workbench_dir / "index.html").read_text(encoding="utf-8")

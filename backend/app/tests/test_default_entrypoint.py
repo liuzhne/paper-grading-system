@@ -68,3 +68,35 @@ def test_api_is_never_swallowed_regardless_of_the_flag(client, monkeypatch):
         response = client.get("/api/system/integrations")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/json")
+
+
+def test_font_licence_is_served_as_a_file_not_the_spa_shell(client):
+    """SIL OFL 1.1 要求许可证随字体分发（计划 §8）。
+
+    产物里有这份文件，但静态 mount 只挂了 `assets/`——交给 SPA 回退取到的是一份
+    HTML，合规上等于没发布，而入口页的 `<link rel="license">` 也指向了一个假 URL。
+    """
+    response = client.get("/workbench/LICENSE-IBM-Plex-Mono.txt")
+
+    assert response.status_code == 200
+    assert "SIL OPEN FONT LICENSE" in response.text.upper()
+    assert not response.text.lstrip().startswith("<!doctype")
+
+
+def test_unknown_root_file_still_falls_back_to_the_spa(client):
+    """真实文件走文件，其它一律回退——深链接不能因为这条捷径失效。"""
+    response = client.get("/workbench/review")
+
+    assert response.status_code == 200
+    assert "/workbench/assets/" in response.text
+
+
+def test_the_file_shortcut_cannot_escape_the_artifact(client):
+    """只认一层文件名：带分隔符的路径一律走回退，拼不出 ../ 读到产物之外。"""
+    for path in ("../../pyproject.toml", "assets/../../../etc/hosts"):
+        response = client.get("/workbench/%s" % path)
+
+        assert response.status_code in (200, 404)
+        if response.status_code == 200:
+            assert "[project]" not in response.text
+            assert "localhost" not in response.text.split("\n")[0]
