@@ -261,6 +261,13 @@ def test_restore_verifies_confirmation_empty_target_and_hashes_before_commands(t
 
 
 def test_postgres_verifier_freezes_complete_migration_and_stable_order_contract():
+    """冻结这份清单，让任何改动都必须是有意的。
+
+    它**不**保证清单跟得上真实迁移链：两边都停在 0023 时它照样通过，而这正是
+    0024–0028 的漏登被放过去的原因（CI 里表现为 PostgreSQL 门禁报
+    「unexpected alembic head」）。跟不跟得上由
+    `test_migration_sequence_is_current.py` 对着 Alembic 本身验。
+    """
     from backend.app.services.deployment.postgres_verifier import MIGRATION_SEQUENCE
     from backend.app.services.deployment.postgres_verifier import stable_ordering_clause
 
@@ -278,6 +285,11 @@ def test_postgres_verifier_freezes_complete_migration_and_stable_order_contract(
         "0021_private_ai_connections",
         "0022_legacy_tenant_backfill",
         "0023_rule_scoring_review_tasks",
+        "0024_batch_status_machine",
+        "0025_review_contract",
+        "0026_review_command_receipts",
+        "0027_export_events",
+        "0028_export_event_backfill",
     )
     assert stable_ordering_clause() == ("created_at", "id")
     script = (ROOT / "backend/app/scripts/verify_postgres_ops.py").read_text(

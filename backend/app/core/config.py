@@ -6,6 +6,21 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def env_files_for_settings():
+    """配置要读的 env 文件。
+
+    `PGS_DISABLE_ENV_FILE` 置位时一个都不读。一次性环境（浏览器验收、离线脚本）
+    需要这个开关：开发机上的 `.env.local` 带的是**生产**数据库地址与口令，隐式
+    继承它意味着一个本该完全隔离的进程在拿生产密钥跑——而且本地会一直是绿的，
+    只有在没有这个文件的机器上才暴露。
+    """
+    import os
+
+    if os.getenv("PGS_DISABLE_ENV_FILE"):
+        return ()
+    return (".env", ".env.local")
+
+
 def deployment_security_issues(config):
     """Return stable, non-secret issue codes for protected deployments."""
 
@@ -187,7 +202,7 @@ class Settings(BaseSettings):
     # `.env.local` is an ignored developer override.  Process environment
     # variables still take precedence, so container/platform deployments keep
     # using their injected configuration rather than any checked-out files.
-    model_config = SettingsConfigDict(env_file=(".env", ".env.local"), extra="ignore")
+    model_config = SettingsConfigDict(env_file=env_files_for_settings(), extra="ignore")
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

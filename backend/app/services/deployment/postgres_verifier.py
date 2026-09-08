@@ -26,6 +26,11 @@ MIGRATION_SEQUENCE = (
     "0021_private_ai_connections",
     "0022_legacy_tenant_backfill",
     "0023_rule_scoring_review_tasks",
+    "0024_batch_status_machine",
+    "0025_review_contract",
+    "0026_review_command_receipts",
+    "0027_export_events",
+    "0028_export_event_backfill",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"

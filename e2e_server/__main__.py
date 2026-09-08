@@ -14,6 +14,13 @@ import sys
 import tempfile
 
 
+#: 一次性验收环境的凭据。库建在 tmp 下、进程退出即弃，里面没有任何真实论文或
+#: 学生信息；生产凭据不出现在仓库里，也不从 `.env.local` 继承。
+E2E_USERNAME = "e2e-operator"
+E2E_AUTH_PASSWORD = "e2e-Acceptance-Local-1"
+E2E_AUTH_SECRET = "e2e-acceptance-secret-not-for-production-0123456789"
+
+
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8099
     # 第二个参数打开鉴权模式：V01/V02/V10 要的是真实登录与多组织，开发模式的
@@ -24,6 +31,10 @@ def main() -> None:
     # 必须在导入 backend 之前设置：settings 在导入期即固化。
     os.environ.update(
         {
+            # 不继承 `.env` / `.env.local`。开发机上那份文件带的是**生产**数据库
+            # 地址与口令；隐式继承意味着一个本该完全隔离的进程在拿生产密钥跑，
+            # 而且本地一直是绿的——只有在没有这个文件的机器上才暴露。
+            "PGS_DISABLE_ENV_FILE": "1",
             "DATABASE_URL": "sqlite+pysqlite:///%s/e2e.db" % workdir,
             "STORAGE_ROOT": "%s/storage" % workdir,
             "STORAGE_PROVIDER": "local",
@@ -31,6 +42,12 @@ def main() -> None:
             # 验收跑在明文 http 上，Secure cookie 在这里发不出去。**只在这个
             # 一次性环境里关**：生产默认仍是 True，配置本身没有被改动。
             "AUTH_COOKIE_SECURE": "false",
+            # 一次性凭据，写死在这里而不是从任何外部文件继承。开鉴权时
+            # `Settings` 会强制校验强度，弱口令直接起不来——这条守卫要靠真的
+            # 合格来满足，不是靠关掉它。
+            "AUTH_USERNAME": E2E_USERNAME,
+            "AUTH_PASSWORD": E2E_AUTH_PASSWORD,
+            "AUTH_SECRET": E2E_AUTH_SECRET,
             "LLM_PROVIDER": "mock",
             "SHEET_WRITER_PROVIDER": "mock",
             "LLM_DEBUG_LOG_ENABLED": "false",
