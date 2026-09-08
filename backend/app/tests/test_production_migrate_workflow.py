@@ -102,3 +102,21 @@ def test_no_database_dump_is_uploaded_as_an_artifact():
 def test_concurrency_prevents_two_migrations_at_once():
     assert _workflow()["concurrency"]["group"] == "production-database"
     assert _workflow()["concurrency"]["cancel-in-progress"] is False
+
+
+def test_an_ipv6_only_host_is_refused_before_touching_the_database():
+    """GitHub runner 没有 IPv6 出口。
+
+    Supabase 的 Direct connection 只解析出 IPv6，在 runner 上必然
+    「Network is unreachable」——那段 traceback 看起来像数据库挂了，实际只是
+    选错了连接串。这条预检要排在任何数据库操作之前，并说清该换成 Session pooler。
+    """
+    steps = [step.get("name", "") for step in _job()["steps"]]
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert steps.index("Refuse an IPv6-only host early") < steps.index(
+        "Survey the database before migrating"
+    )
+    assert "Session pooler" in text
+    # Transaction pooler（6543）不支持迁移需要的会话级特性，要明确排除。
+    assert "6543" in text
