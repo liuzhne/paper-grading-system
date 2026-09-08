@@ -12,6 +12,10 @@ import { defineConfig, devices } from "@playwright/test";
  * 学生 PII 不得进入截图或 trace。
  */
 const PORT = Number(process.env.PGS_E2E_PORT || 8099);
+// 第二个后端跑在 AUTH_ENABLED=true 下，带两个组织与三种角色。V01/V02/V10 测的
+// 就是边界本身，开发模式「放行一切」时它们全都会假通过。
+const AUTH_PORT = PORT + 1;
+const PYTHON = process.env.PGS_PYTHON || ".venv/bin/python";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -38,16 +42,29 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
-      testIgnore: /responsive\.spec\.js/,
+      // auth.spec 要跑在鉴权后端上：对着开发模式的「放行一切」跑权限断言，
+      // 通过与否都说明不了任何事。
+      testIgnore: /(responsive|auth)\.spec\.js/,
     },
     // 窄屏折叠：设计三栏宽度不是唯一布局（计划 §8）。
     { name: "mobile", use: { ...devices["Pixel 5"] }, testMatch: /responsive\.spec\.js/ },
+    // 鉴权与多组织（V01/V02/V10）。指向另一个后端，baseURL 不同。
+    {
+      name: "auth",
+      use: {
+        ...devices["Desktop Chrome"],
+        channel: "chromium",
+        baseURL: `http://127.0.0.1:${AUTH_PORT}`,
+      },
+      testMatch: /auth\.spec\.js/,
+    },
   ],
-  webServer: {
+  webServer: [
+    {
     // 显式指向仓库 venv：`python` 在 PATH 上可能是系统解释器，那里没有本项目
     // 的依赖，webServer 会静默起不来、Playwright 一直等到超时。
     // 路径相对 `cwd`（下面已切到仓库根），不是相对本配置文件。
-    command: `${process.env.PGS_PYTHON || ".venv/bin/python"} -m e2e_server ${PORT}`,
+    command: `${PYTHON} -m e2e_server ${PORT}`,
     cwd: "../..",
     url: `http://127.0.0.1:${PORT}/api/system/integrations`,
     // 永不复用：验收里有写操作（批量采纳），复用同一个进程意味着第二次
@@ -56,5 +73,15 @@ export default defineConfig({
     timeout: 120_000,
     stdout: "pipe",
     stderr: "pipe",
-  },
+    },
+    {
+      command: `${PYTHON} -m e2e_server ${AUTH_PORT} --auth`,
+      cwd: "../..",
+      url: `http://127.0.0.1:${AUTH_PORT}/api/system/integrations`,
+      reuseExistingServer: false,
+      timeout: 120_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  ],
 });

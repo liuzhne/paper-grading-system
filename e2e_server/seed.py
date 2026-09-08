@@ -10,6 +10,10 @@ trace 可以安全归档。
 - 一份没有扣分细则的评分项（评分标准页的阻断项）
 """
 
+from datetime import datetime
+
+import sqlalchemy as sa
+
 from backend.app.db.models import AtomicRule
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import ManualReviewTask
@@ -53,7 +57,7 @@ SECTIONS = [
 ]
 
 
-def seed_all():
+def seed_all(*, with_auth=False):
     with SessionLocal() as session:
         user = User(
             username="e2e-seed",
@@ -67,7 +71,92 @@ def seed_all():
         rubric = _seed_rubric(session, user)
         _seed_batch_with_review_work(session, rubric)
         _seed_empty_draft_batch(session, rubric)
+        if with_auth:
+            _seed_identities(session, rubric)
         session.commit()
+
+
+#: 验收账号的口令。**只用于一次性验收环境**：库建在 tmp 下、进程退出即弃，
+#: 里面没有任何真实论文或学生信息。生产口令不出现在仓库里。
+E2E_PASSWORD = "e2e-Acceptance-1"
+
+SECOND_ORGANIZATION_ID = "00000000-0000-0000-0000-0000000000b2"
+
+
+def _seed_identities(session, rubric):
+    """两个组织、三种角色，供 V01/V02/V10 使用。
+
+    组织隔离要能被证伪，就必须有**第二个组织**和一份只属于它的数据：只有一个
+    组织时，「没串数据」和「根本没有别的数据可串」看起来完全一样。
+    """
+    from backend.app.db.models import Organization
+    from backend.app.db.models import OrganizationMember
+    from backend.app.services.auth import hash_password
+
+    first = session.get(Organization, DEFAULT_ORGANIZATION_ID)
+    if first is None:
+        first = Organization(id=DEFAULT_ORGANIZATION_ID, name="示例大学 计算机学院")
+        session.add(first)
+    second = Organization(id=SECOND_ORGANIZATION_ID, name="示例大学 外国语学院")
+    session.add(second)
+    session.flush()
+
+    people = [
+        ("teacher@example.invalid", "王教师", "user", [(first.id, "teacher")]),
+        (
+            "orgadmin@example.invalid",
+            "李管理员",
+            "user",
+            [(first.id, "org_admin")],
+        ),
+        (
+            "platform@example.invalid",
+            "平台管理员",
+            "platform_admin",
+            [(first.id, "org_admin"), (second.id, "org_admin")],
+        ),
+    ]
+    for email, display_name, platform_role, memberships in people:
+        account = User(
+            username=email.split("@")[0],
+            email=email,
+            display_name=display_name,
+            password_hash=hash_password(E2E_PASSWORD),
+            platform_role=platform_role,
+            email_verified_at=datetime.utcnow(),
+        )
+        session.add(account)
+        session.flush()
+        for organization_id, role in memberships:
+            session.add(
+                OrganizationMember(
+                    organization_id=organization_id,
+                    user_id=account.id,
+                    role=role,
+                )
+            )
+
+    # 无鉴权模式下 principal.organization_id 为 None，组织过滤不生效，所以既有
+    # 种子从不设 organization_id。开鉴权之后过滤真的生效，这些行必须归属到默认
+    # 组织，否则登录进来看到的是一个空系统——那会被误读成「数据没种上」。
+    from backend.app.db.models import Paper as _Paper
+    from backend.app.db.models import Rubric as _Rubric
+    from backend.app.db.models import ScoringRun as _Run
+
+    for model in (_Rubric, GradingBatch, _Paper, _Run):
+        for row in session.scalars(sa.select(model)).all():
+            if getattr(row, "organization_id", None) is None:
+                row.organization_id = DEFAULT_ORGANIZATION_ID
+                session.add(row)
+
+    # 只属于第二个组织的批次：切换组织后它必须出现，切回来必须消失。
+    other = GradingBatch(
+        name="外国语学院 翻译实践报告",
+        rubric_id=rubric.id,
+        status="draft",
+        organization_id=SECOND_ORGANIZATION_ID,
+    )
+    session.add(other)
 
 
 def _seed_rubric(session, user):

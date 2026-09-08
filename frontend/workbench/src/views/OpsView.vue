@@ -25,6 +25,13 @@ const errors = ref({});
 
 const canOrg = computed(() => session.can("view_organization_ops"));
 const canPlatform = computed(() => session.can("view_platform_ops"));
+/**
+ * 两个区块都无权时，页面会是一片空白。
+ *
+ * 导航已按能力隐藏这个入口，但深链接与书签仍然到得了这里——白页读起来像「加载
+ * 失败」或「系统坏了」，而不是「这不归你看」。
+ */
+const canSeeAnything = computed(() => canOrg.value || canPlatform.value);
 
 async function load(key, path, target) {
   try {
@@ -112,6 +119,11 @@ onMounted(async () => {
       </div>
       <p v-else class="card-pad faint">加载中…</p>
     </section>
+
+    <p v-if="!canSeeAnything" class="notice card-pad">
+      当前角色无权查看运维与质量视图。该页面限组织管理员与平台管理员；
+      日常评分与复核入口不受影响。
+    </p>
 
     <!-- 平台视图 -->
     <section v-if="canPlatform" class="card">
