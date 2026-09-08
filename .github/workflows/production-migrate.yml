@@ -115,8 +115,11 @@ jobs:
           DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
         run: uv run alembic history --indicate-current | tail -40
 
+      # 同时比较布尔与字符串：UI 触发给的是真布尔，`gh workflow run -f` 走 API
+      # 时可能是字符串。只写 `== false` 的话，命令行触发会让这一步被静默跳过，
+      # 而整个 run 显示成功——「什么都没做但看起来做了」比失败更难发现。
       - name: Upgrade to head
-        if: ${{ inputs.dry_run == false }}
+        if: ${{ inputs.dry_run == false || inputs.dry_run == 'false' }}
         env:
           DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
         run: uv run alembic upgrade head
@@ -124,7 +127,7 @@ jobs:
       # 用**运行角色**验证，而不是 owner：owner 什么都读得到，证明不了应用能不能
       # 工作。0026/0027 的新表就是靠这一步才会暴露缺授权（见 0029）。
       - name: Verify with the runtime role
-        if: ${{ inputs.dry_run == false }}
+        if: ${{ inputs.dry_run == false || inputs.dry_run == 'false' }}
         env:
           DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
         shell: bash

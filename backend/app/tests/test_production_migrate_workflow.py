@@ -58,6 +58,20 @@ def test_the_write_step_is_gated_on_dry_run_being_off():
     assert "false" in steps["Upgrade to head"]["if"]
 
 
+def test_the_gate_accepts_both_the_boolean_and_the_string_form():
+    """UI 触发给的是真布尔，`gh workflow run -f` 走 API 时可能是字符串。
+
+    只写 `== false` 的话，命令行触发会让写入步骤被**静默跳过**，而整个 run 显示
+    成功——「什么都没做但看起来做了」比失败更难发现。
+    """
+    steps = {step["name"]: step for step in _job()["steps"] if "name" in step}
+
+    for name in ("Upgrade to head", "Verify with the runtime role"):
+        condition = steps[name]["if"]
+        assert "inputs.dry_run == false" in condition, name
+        assert "inputs.dry_run == 'false'" in condition, name
+
+
 def test_head_is_checked_against_the_commit():
     """输入的 head 要与本 commit 一致，误点不该把库带到没人打算去的版本。"""
     steps = [step.get("name", "") for step in _job()["steps"]]
