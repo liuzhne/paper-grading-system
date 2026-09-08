@@ -444,8 +444,14 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db AUTH_ENABLED=false .venv/bin/python 
 **旧导出日志补录**（可重入，重复执行不产生重复事件）：
 
 ```bash
-.venv/bin/python -m backend.app.scripts.backfill_export_events --dry-run
+DATABASE_URL='<目标库>' .venv/bin/python -m backend.app.scripts.backfill_export_events --dry-run
 ```
+
+**必须显式给出 `DATABASE_URL`。** `settings` 会加载 `.env.local`，开发机上它通常指向
+生产库——不带 URL 直接跑，等于按文档执行一次就连上生产。脚本对非本地目标默认拒绝，
+需要 `--i-know-this-is-not-local` 显式确认（与 `ops_backup restore` 的 `--confirm-database`
+同一条约定）。`--dry-run` 同样被拦：它一样建立连接、一样按 `.env.local` 解析目标，
+「只读所以没关系」正是让人在生产上养成随手执行习惯的那句话。
 
 确认统计无误后去掉 `--dry-run` 正式执行。它是独立入口而非迁移的一部分，因为
 `alembic upgrade head` 不会重跑已完成的迁移：回退窗口内旧应用只写
@@ -493,5 +499,6 @@ Mock LLM，库与存储建在临时目录，因此截图与 trace 可安全归�
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-08 | 运维脚本目标库守卫 | `backfill_export_events` 对非本地目标默认拒绝并要求显式确认；RUNBOOK 命令补 `DATABASE_URL`。`seed_dev` / `build_anchors` **未加同款守卫**：前者在 Docker 冒烟里于容器内执行，那里的库主机本就不是 localhost，照搬会打断一条正当流程。未运行生产变更。 |
 | 2026-09-08 | 阶段 6B、浏览器验收与合同门禁 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。补齐 §12.2 的类型与 OpenAPI 合同门禁（`api:dump` / `api:check` + 前端调用路径静态契约）。未运行生产操作。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |
