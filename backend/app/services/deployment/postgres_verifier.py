@@ -31,6 +31,7 @@ MIGRATION_SEQUENCE = (
     "0026_review_command_receipts",
     "0027_export_events",
     "0028_export_event_backfill",
+    "0029_runtime_access_for_v2_tables",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
