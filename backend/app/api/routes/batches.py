@@ -28,6 +28,7 @@ from backend.app.schemas.batch import BatchSummary
 from backend.app.schemas.batch import BatchUpdate
 from backend.app.schemas.batch import CompleteReviewRequest
 from backend.app.schemas.batch import ExportEventCreate
+from backend.app.schemas.batch import ExportEventUpdate
 from backend.app.schemas.batch import ReviewAcceptRequest
 from backend.app.schemas.batch import UploadPrecheckRequest
 from backend.app.schemas.batch import ReviewAcceptResult
@@ -613,22 +614,60 @@ def create_export_event(
         channel=payload.channel,
         scope=payload.scope,
         result_revision=selection.revision,
-        # 只记录到「已生成」。
-        status="generated",
+        # 三种状态之一，**没有「已下载」**：客户端断开证明不了文件已落地。
+        status=payload.status,
+        error_message=payload.error_message,
         actor_id=user_id,
     )
     db.add(event)
     db.commit()
     db.refresh(event)
+    return _export_event_payload(event)
+
+
+def _export_event_payload(event):
     return {
         "id": event.id,
         "channel": event.channel,
         "scope": event.scope,
         "status": event.status,
+        "error_message": event.error_message,
         "actor_id": event.actor_id,
         "result_revision": event.result_revision,
         "created_at": event.created_at,
     }
+
+
+@router.patch("/{batch_id}/export-events/{event_id}")
+def update_export_event(
+    batch_id: str,
+    event_id: str,
+    payload: ExportEventUpdate,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """把「生成中」的事件定案（计划 §5-F）。
+
+    只允许 generating → generated / failed。已定案的不能回到生成中，也不能改判
+    成另一个结果——审计记录不倒着走，改写它等于让历史配合当下的说法。
+    """
+    ensure_dev_user(db)
+    batch = _visible_batch(db, batch_id, principal)
+    event = db.get(ExportEvent, event_id)
+    if event is None or event.grading_batch_id != batch.id:
+        raise HTTPException(status_code=404, detail="导出记录不存在")
+    if event.status != "generating":
+        raise HTTPException(
+            status_code=409,
+            detail="该导出记录已定案为 %s，不能再改。" % event.status,
+        )
+
+    event.status = payload.status
+    event.error_message = payload.error_message
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return _export_event_payload(event)
 
 
 @router.get("/{batch_id}/ranking")

@@ -5,6 +5,7 @@ from typing import Optional
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import model_validator
 
 
 class BatchCreate(BaseModel):
@@ -19,6 +20,15 @@ class BatchCreate(BaseModel):
     # 创建只允许 draft（前端 v2 计划 §5-C）。旧客户端显式传 "draft" 仍可用；
     # 任何其它阶段必须走动作服务，不能由客户端在创建时直接指定。
     status: Literal["draft"] = "draft"
+    # 首版只做单评（§5-G，决策 4）。**只校验，不持久化**——存一个不影响任何行为
+    # 的值，会让人以为这批是按那个模式评的。
+    #
+    # 静默忽略这个字段是最糟的选择：调用方发 "dual" 拿到 200，据此认为系统在做
+    # 双评，而实际上每份材料只评了一次，错误结论会一直被当成双评结果用。
+    review_mode: Literal["single"] | None = Field(
+        default=None,
+        description="首版仅支持 single；双评与仲裁是独立里程碑，尚未实现。",
+    )
 
 
 class BatchUpdate(BaseModel):
@@ -186,9 +196,42 @@ class UploadPrecheckRequest(BaseModel):
     paper_ids: list[str] = Field(min_length=1, max_length=500)
 
 
+#: 三种状态（计划 §5-F）。**没有「已下载」**——客户端断开证明不了文件已落地，
+#: 把「已生成」写成「已下载」是拿一个查不到的事实充数。
+EXPORT_EVENT_STATUSES = ("generating", "generated", "failed")
+
+
 class ExportEventCreate(BaseModel):
-    """记录一次导出请求。状态只到「已生成」——客户端断开证明不了文件已落地。"""
+    """记录一次导出请求。"""
 
     channel: Literal["html_report", "xlsx", "json", "sheets", "mock_sheet"]
     scope: str = Field(min_length=1, max_length=50)
     result_revision: str = Field(min_length=16)
+    #: 默认 generated，旧客户端不传也照常工作。
+    status: Literal["generating", "generated", "failed"] = "generated"
+    error_message: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _reason_matches_status(self):
+        # 「失败了但不知道为什么」对对账毫无用处；而挂着错误信息的成功记录会让
+        # 人去追一个不存在的故障。
+        if self.status == "failed" and not (self.error_message or "").strip():
+            raise ValueError("status=failed 必须给出 error_message")
+        if self.status != "failed" and self.error_message is not None:
+            raise ValueError("只有 status=failed 才能带 error_message")
+        return self
+
+
+class ExportEventUpdate(BaseModel):
+    """把「生成中」的事件定案。"""
+
+    status: Literal["generated", "failed"]
+    error_message: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _reason_matches_status(self):
+        if self.status == "failed" and not (self.error_message or "").strip():
+            raise ValueError("status=failed 必须给出 error_message")
+        if self.status != "failed" and self.error_message is not None:
+            raise ValueError("只有 status=failed 才能带 error_message")
+        return self

@@ -483,6 +483,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/{batch_id}/export-events/{event_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Export Event
+         * @description 把「生成中」的事件定案（计划 §5-F）。
+         *
+         *     只允许 generating → generated / failed。已定案的不能回到生成中，也不能改判
+         *     成另一个结果——审计记录不倒着走，改写它等于让历史配合当下的说法。
+         */
+        patch: operations["update_export_event_api_batches__batch_id__export_events__event_id__patch"];
+        trace?: never;
+    };
     "/api/batches/{batch_id}/export-history": {
         parameters: {
             query?: never;
@@ -2381,6 +2404,11 @@ export interface components {
             name: string;
             /** Paper Type */
             paper_type?: string | null;
+            /**
+             * Review Mode
+             * @description 首版仅支持 single；双评与仲裁是独立里程碑，尚未实现。
+             */
+            review_mode?: "single" | null;
             /** Rubric Id */
             rubric_id: string;
             /** Rubric Version Id */
@@ -3078,7 +3106,7 @@ export interface components {
         };
         /**
          * ExportEventCreate
-         * @description 记录一次导出请求。状态只到「已生成」——客户端断开证明不了文件已落地。
+         * @description 记录一次导出请求。
          */
         ExportEventCreate: {
             /**
@@ -3086,10 +3114,31 @@ export interface components {
              * @enum {string}
              */
             channel: "html_report" | "xlsx" | "json" | "sheets" | "mock_sheet";
+            /** Error Message */
+            error_message?: string | null;
             /** Result Revision */
             result_revision: string;
             /** Scope */
             scope: string;
+            /**
+             * Status
+             * @default generated
+             * @enum {string}
+             */
+            status: "generating" | "generated" | "failed";
+        };
+        /**
+         * ExportEventUpdate
+         * @description 把「生成中」的事件定案。
+         */
+        ExportEventUpdate: {
+            /** Error Message */
+            error_message?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "generated" | "failed";
         };
         /** ExportLogRead */
         ExportLogRead: {
@@ -5251,6 +5300,46 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_export_event_api_batches__batch_id__export_events__event_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                batch_id: string;
+                event_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExportEventUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

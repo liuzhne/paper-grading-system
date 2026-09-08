@@ -75,7 +75,13 @@ function channelReason(channel) {
   return "";
 }
 
-const STATUS_LABEL = { generated: "已生成", succeeded: "成功", failed: "失败" };
+// generating 也要有标签：没有它，一条「生成中」的记录会退化成裸的英文状态码。
+const STATUS_LABEL = {
+  generating: "生成中",
+  generated: "已生成",
+  succeeded: "成功",
+  failed: "失败",
+};
 
 function formatTime(value) {
   if (!value) return "—";
@@ -201,7 +207,14 @@ onMounted(async () => {
                   <td class="muted">{{ entry.scope }}</td>
                   <td :class="{ faint: !entry.actor_id }">{{ entry.actor_display }}</td>
                   <td>
-                    <span class="chip" :class="entry.status === 'failed' ? 'chip-danger' : 'chip-ok'">
+                    <span
+                      class="chip"
+                      :class="{
+                        'chip-danger': entry.status === 'failed',
+                        'chip-warn': entry.status === 'generating',
+                        'chip-ok': entry.status !== 'failed' && entry.status !== 'generating',
+                      }"
+                    >
                       {{ STATUS_LABEL[entry.status] || entry.status }}
                     </span>
                   </td>
