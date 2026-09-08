@@ -175,7 +175,9 @@ onMounted(async () => {
             <div><span class="faint">已出结果</span><b class="mono">{{ distribution.scored_count }}</b></div>
             <div>
               <span class="faint">平均</span>
-              <b class="mono">{{ distribution.average === null ? "—" : distribution.average.toFixed(1) }}</b>
+              <!-- 只判 null 会让 undefined 走进 toFixed 并抛异常，整块卡片连同
+                   页面一起白屏——白屏读起来像「系统坏了」，不像「这个数还没有」。 -->
+              <b class="mono">{{ distribution.average == null ? "—" : distribution.average.toFixed(1) }}</b>
             </div>
             <div><span class="faint">满分</span><b class="mono">{{ distribution.max_score ?? "—" }}</b></div>
           </div>
@@ -190,7 +192,7 @@ onMounted(async () => {
         <p v-if="distribution.blocking_open" class="faint dist-note">
           还有 {{ distribution.blocking_open }} 个阻塞任务未解决，分布仍会变化。
         </p>
-        <p v-if="distribution.bucketing === null" class="faint dist-note">
+        <p v-if="distribution.bucketing == null" class="faint dist-note">
           分档口径与跨批次比较尚未确定，此处显示原始终分。
         </p>
       </section>

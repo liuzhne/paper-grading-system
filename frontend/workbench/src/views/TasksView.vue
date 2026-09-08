@@ -88,7 +88,7 @@ onMounted(async () => {
     <div v-if="filters.length" class="filters" role="group" aria-label="按阶段筛选">
       <button
         class="filter"
-        :class="{ active: store.stageFilter === null }"
+        :class="{ active: store.stageFilter == null }"
         type="button"
         @click="store.setStageFilter(null)"
       >

@@ -143,7 +143,7 @@ async function onComplete() {
                 <div class="faint mono code">{{ entry.criterion_code }}</div>
               </td>
               <td class="num">{{ formatScore(entry) }}</td>
-              <td class="num" :class="{ faint: entry.confidence === null }">
+              <td class="num" :class="{ faint: entry.confidence == null }">
                 {{ formatConfidence(entry.confidence) }}
               </td>
               <td class="muted reason">{{ entry.review_reason || "—" }}</td>

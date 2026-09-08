@@ -183,7 +183,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <div class="conf">
             <span class="faint">置信度</span>
             <!-- 缺失显示「未提供」：Core 不写该字段，0% 是另一回事。 -->
-            <span class="mono" :class="{ faint: item.confidence === null }">
+            <span class="mono" :class="{ faint: item.confidence == null }">
               {{ item.confidence === null || item.confidence === undefined ? "未提供" : Math.round(item.confidence * 100) + "%" }}
             </span>
           </div>
