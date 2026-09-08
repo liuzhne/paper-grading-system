@@ -43,7 +43,27 @@ def upgrade() -> None:
         )
 
 
+def _refuse_if_rows(query, what, restore):
+    """有数据时拒绝有损降级（前端 v2 计划 §7）。
+
+    这些不是缓存，删掉重建不回来。空库降级仍然允许——回滚一个刚上线还没产生
+    数据的版本是正常操作，把它一并堵死会逼人去手工删表。
+    """
+    count = op.get_bind().execute(sa.text(query)).scalar() or 0
+    if count:
+        raise RuntimeError(
+            "拒绝有损降级：%s 仍有 %d 条记录，降级会永久删除它们。\n"
+            "%s" % (what, count, restore)
+        )
+
 def downgrade() -> None:
+    _refuse_if_rows(
+        "SELECT COUNT(*) FROM score_items "
+        "WHERE review_reason IS NOT NULL OR review_reasons IS NOT NULL",
+        "score_items 的复核原因",
+        "这是复核者当时看到的理由，删掉之后无法从任何地方重建；"
+        "确需降级请先导出这些行并由维护者确认。",
+    )
     with op.batch_alter_table("score_items") as batch_op:
         batch_op.drop_constraint(
             "ck_score_items_review_revision_positive", type_="check"

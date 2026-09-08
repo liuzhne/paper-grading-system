@@ -197,6 +197,39 @@ jobs:
           echo "expected lossy downgrade refusal observed" | tee -a pgs_ops_artifacts/postgres-migrations.log
           uv run python -m backend.app.scripts.verify_postgres_ops \
             | tee pgs_ops_artifacts/postgres-post-downgrade-refusal.json
+      # §7：每个迁移都要验证「有数据时拒绝 lossy downgrade」。0025–0028 的降级
+      # 会删掉复核原因、幂等回执与导出审计——这些不是缓存，重建不回来。SQLite
+      # 上已有单测，这一步在真实 PostgreSQL 上再证一次，并确认 DDL 未被破坏。
+      - name: Prove the v2 audit migrations refuse a lossy downgrade
+        run: |
+          set -euo pipefail
+          uv run python - <<'PY'
+          import sqlalchemy as sa
+          from backend.app.core.config import settings
+
+          engine = sa.create_engine(settings.DATABASE_URL)
+          with engine.begin() as conn:
+              conn.execute(
+                  sa.text(
+                      "INSERT INTO export_events "
+                      "(id, channel, scope, status, legacy_log_id, created_at) "
+                      "VALUES ('ci-lossy', 'xlsx', 'batch', 'generated', "
+                      "'ci-legacy', NOW())"
+                  )
+              )
+          PY
+          for target in 0027_export_events 0026_review_command_receipts
+          do
+            if uv run alembic downgrade "$target" >> pgs_ops_artifacts/postgres-migrations.log 2>&1
+            then
+              echo "ERROR: lossy downgrade to $target unexpectedly succeeded" \
+                | tee -a pgs_ops_artifacts/postgres-migrations.log
+              exit 1
+            fi
+            echo "expected refusal for $target" | tee -a pgs_ops_artifacts/postgres-migrations.log
+          done
+          uv run python -m backend.app.scripts.verify_postgres_ops \
+            | tee pgs_ops_artifacts/postgres-v2-downgrade-refusal.json
       - name: Execute isolated database and storage backup restore drill
         run: |
           set -euo pipefail
