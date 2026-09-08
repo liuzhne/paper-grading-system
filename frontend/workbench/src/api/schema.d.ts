@@ -325,7 +325,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Batches */
+        /**
+         * List Batches
+         * @description 批次列表（计划 §6）。
+         *
+         *     响应保持**裸数组**：旧 SPA 与 CLI 直接把它当数组用，换成信封会让它们静默
+         *     拿到空列表。过滤是可选参数，不改变默认形状。
+         *
+         *     未知阶段返回 422 而不是空数组——拼错阶段名的空数组读起来就是「该阶段没有
+         *     批次」，两者必须能区分。
+         */
         get: operations["list_batches_api_batches_get"];
         put?: never;
         /** Create Batch */
@@ -1922,7 +1931,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read Manual Review Tasks */
+        /**
+         * Read Manual Review Tasks
+         * @description 按批次 / run 范围过滤并分页（计划 §6）。
+         *
+         *     复核队列按批次工作；只能按 status 过滤时，取一个批次的阻塞任务要把全组织的
+         *     任务都拉回来再在客户端筛——加上分页之后，那种做法会把「这一页里没有该批次」
+         *     显示成「该批次没有阻塞任务」。
+         */
         get: operations["read_manual_review_tasks_api_v2_manual_review_tasks_get"];
         put?: never;
         post?: never;
@@ -4880,7 +4896,10 @@ export interface operations {
     };
     list_batches_api_batches_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 按业务阶段过滤，可重复。省略时返回全部。 */
+                status?: string[] | null;
+            };
             header?: {
                 "X-Organization-ID"?: string | null;
             };
@@ -8304,6 +8323,10 @@ export interface operations {
         parameters: {
             query?: {
                 status?: string | null;
+                batch_id?: string | null;
+                scoring_run_id?: string | null;
+                limit?: number | null;
+                offset?: number;
             };
             header?: {
                 "X-Organization-ID"?: string | null;

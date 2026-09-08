@@ -186,10 +186,36 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
 
 
 @router.get("", response_model=list[BatchRead])
-def list_batches(db: Session = Depends(get_db), principal: CurrentPrincipal = Depends(current_principal)):
+def list_batches(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+    status: list[str] | None = Query(
+        None,
+        description="按业务阶段过滤，可重复。省略时返回全部。",
+    ),
+):
+    """批次列表（计划 §6）。
+
+    响应保持**裸数组**：旧 SPA 与 CLI 直接把它当数组用，换成信封会让它们静默
+    拿到空列表。过滤是可选参数，不改变默认形状。
+
+    未知阶段返回 422 而不是空数组——拼错阶段名的空数组读起来就是「该阶段没有
+    批次」，两者必须能区分。
+    """
+    if status:
+        unknown = sorted(set(status) - set(state.BATCH_STAGES))
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail="未知的批次阶段：%s（可用：%s）"
+                % (" / ".join(unknown), " / ".join(state.BATCH_STAGES)),
+            )
+
     query = select(GradingBatch).order_by(GradingBatch.created_at.desc())
     if principal.organization_id is not None:
         query = query.where(GradingBatch.organization_id == principal.organization_id)
+    if status:
+        query = query.where(GradingBatch.status.in_(status))
     return db.scalars(query).all()
 
 

@@ -86,12 +86,29 @@ def list_rule_tasks(db, *, run_id: str, organization_id: str | None):
     return db.scalars(query).all()
 
 
+#: 一页最多返回多少条。上限存在是为了让「忘了传 limit」有一个有界的后果。
+MAX_TASK_PAGE = 200
+
+
 def list_manual_tasks(
     db,
     *,
     organization_id: str | None,
     status: str | None = None,
+    batch_id: str | None = None,
+    scoring_run_id: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ):
+    """人工复核任务列表（前端 v2 计划 §6）。
+
+    `batch_id` / `scoring_run_id` 是**过滤器，不是提权入口**：组织隔离在它们
+    之前生效，指名道姓一个别的组织的批次只会得到空结果。批次过滤经 run→paper
+    连接实现，找不到的批次自然落成空集，而不是回落成「不过滤」把全组织的任务
+    倒出去。
+
+    排序在分页前已经固定（priority / created_at / id），否则两页之间会重、会漏。
+    """
     query = select(models.ManualReviewTask).order_by(
         models.ManualReviewTask.priority.desc(),
         models.ManualReviewTask.created_at,
@@ -103,6 +120,27 @@ def list_manual_tasks(
         )
     if status is not None:
         query = query.where(models.ManualReviewTask.status == status)
+    if scoring_run_id is not None:
+        query = query.where(
+            models.ManualReviewTask.scoring_run_id == scoring_run_id
+        )
+    if batch_id is not None:
+        run_ids = select(models.ScoringRun.id).join(
+            models.Paper, models.Paper.id == models.ScoringRun.paper_id
+        ).where(models.Paper.batch_id == batch_id)
+        if organization_id is not None:
+            # 组织隔离不能靠任务行自己那一列兜底：批次换了归属时，旧任务行上的
+            # organization_id 仍是旧值。这里直接按批次的归属再过滤一次。
+            run_ids = run_ids.join(
+                models.GradingBatch,
+                models.GradingBatch.id == models.Paper.batch_id,
+            ).where(models.GradingBatch.organization_id == organization_id)
+        query = query.where(models.ManualReviewTask.scoring_run_id.in_(run_ids))
+
+    if limit is not None:
+        query = query.limit(min(int(limit), MAX_TASK_PAGE))
+    if offset:
+        query = query.offset(int(offset))
     return db.scalars(query).all()
 
 

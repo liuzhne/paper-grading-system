@@ -2,6 +2,7 @@ import json
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import Query
 from fastapi import File
 from fastapi import Form
 from fastapi import HTTPException
@@ -307,9 +308,19 @@ def read_rule_tasks(
 )
 def read_manual_review_tasks(
     status: str | None = None,
+    batch_id: str | None = None,
+    scoring_run_id: str | None = None,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
+    """按批次 / run 范围过滤并分页（计划 §6）。
+
+    复核队列按批次工作；只能按 status 过滤时，取一个批次的阻塞任务要把全组织的
+    任务都拉回来再在客户端筛——加上分页之后，那种做法会把「这一页里没有该批次」
+    显示成「该批次没有阻塞任务」。
+    """
     require_organization_role(principal, "org_admin", "teacher")
     return [
         manual_task_projection(task)
@@ -317,6 +328,10 @@ def read_manual_review_tasks(
             db,
             organization_id=principal.organization_id,
             status=status,
+            batch_id=batch_id,
+            scoring_run_id=scoring_run_id,
+            limit=limit,
+            offset=offset,
         )
     ]
 

@@ -84,16 +84,35 @@ describe("batches store", () => {
     expect(store.total).toBe(3);
   });
 
-  it("按阶段筛选，未选时返回全部", async () => {
-    stub({ "/batches": BATCHES });
+  it("按阶段筛选交给服务端，不在客户端筛第二遍", async () => {
+    stub({
+      "/batches": BATCHES,
+      "/batches?status=scoring": [BATCHES[1]],
+    });
     const store = useBatchesStore();
     await store.load();
 
     expect(store.visible).toHaveLength(3);
-    store.setStageFilter("scoring");
+    await store.setStageFilter("scoring");
     expect(store.visible.map((b) => b.id)).toEqual(["b2"]);
-    store.setStageFilter(null);
+    await store.setStageFilter(null);
     expect(store.visible).toHaveLength(3);
+  });
+
+  it("筛选期间阶段计数仍来自未过滤的那次加载", async () => {
+    stub({
+      "/batches": BATCHES,
+      "/batches?status=scoring": [BATCHES[1]],
+    });
+    const store = useBatchesStore();
+    await store.load();
+
+    await store.setStageFilter("scoring");
+
+    // 用过滤后的列表算图例，其它阶段会全变成 0——看上去像「这些阶段没有批次」，
+    // 而不是「你正在筛」。
+    expect(store.stageCounts.archived).toBe(1);
+    expect(store.stageCounts.scored_with_errors).toBe(1);
   });
 
   it("进度来自服务端，前端不自行按阶段猜百分比", async () => {

@@ -23,34 +23,50 @@ export const useBatchesStore = defineStore("batches", () => {
 
   const total = computed(() => batches.value.length);
 
+  /**
+   * 阶段计数固定来自**未过滤**的那一次加载。
+   *
+   * 过滤改由服务端执行后，`batches` 里只剩被选中的阶段；用它算图例会让其它
+   * 阶段全变成 0——看上去像「这些阶段没有批次」，而不是「你正在筛」。
+   */
+  const allStages = ref([]);
+
   const stageCounts = computed(() => {
     const counts = Object.fromEntries(STAGE_ORDER.map((code) => [code, 0]));
-    for (const batch of batches.value) {
+    for (const batch of allStages.value) {
       // 后端新增阶段时不丢计数。
       counts[batch.status] = (counts[batch.status] ?? 0) + 1;
     }
     return counts;
   });
 
-  const visible = computed(() =>
-    stageFilter.value
-      ? batches.value.filter((batch) => batch.status === stageFilter.value)
-      : batches.value,
-  );
+  // 服务端已经筛过，这里不再筛第二遍——两处口径一旦分叉就会互相打架。
+  const visible = computed(() => batches.value);
 
-  function setStageFilter(stage) {
+  async function setStageFilter(stage) {
     stageFilter.value = stage || null;
+    await load();
   }
 
   async function load() {
     loading.value = true;
     error.value = null;
     try {
-      batches.value = (await api.get("/batches")) || [];
+      // 过滤走服务端。客户端筛在批次多起来之后要为了看一个阶段下载全部，
+      // 且分页一旦加上，会把「这一页里没有该阶段」显示成「没有该阶段的批次」。
+      //
+      // 两条路径都写成字面量：把整个查询串插进去（`/batches${query}`）会让基
+      // 路径静态不可见，`test_frontend_api_contract` 那道门禁就查不到它。
+      batches.value =
+        (await (stageFilter.value
+          ? api.get(`/batches?status=${stageFilter.value}`)
+          : api.get("/batches"))) || [];
+      if (!stageFilter.value) allStages.value = batches.value;
     } catch (err) {
       if (err instanceof StaleContextError) return;
       // 不留半截列表：失败时清空并报错，避免用户对着过期数据操作。
       batches.value = [];
+      allStages.value = [];
       error.value = err?.message || "加载评分任务失败";
     } finally {
       loading.value = false;
@@ -123,6 +139,7 @@ export const useBatchesStore = defineStore("batches", () => {
 
   function reset() {
     batches.value = [];
+    allStages.value = [];
     progress.value = {};
     distribution.value = {};
     stageFilter.value = null;
