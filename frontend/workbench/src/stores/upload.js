@@ -16,6 +16,23 @@ import { api, request, ApiError, StaleContextError } from "@/api/client.js";
  *
  * 限制值一律读服务端能力表，不写死在前端——同一份代码要能跑在不同部署上。
  */
+/**
+ * 建任务时是否必须选自己的 AI 连接（D-027、D-028）。
+ *
+ * 平台配了默认模型就不强制——那正是「平台配好后所有用户可正常使用」的含义。
+ * 平台没配时必须选：不绑连接就评分，评出来的是 Mock 假分，而假结果会被当成
+ * 真结论沿用下去。
+ *
+ * 能力表未知时**不下结论**：首屏未加载就强制，会把正常用户挡在一个还没算完的
+ * 判断上。
+ *
+ * @param {{platform_model_available?: boolean}|null|undefined} llm
+ */
+export function requiresOwnConnection(llm) {
+  if (!llm) return false;
+  return !llm.platform_model_available;
+}
+
 export const useUploadStore = defineStore("upload", () => {
   const provider = ref(null);
   const maxSizeMb = ref(null);

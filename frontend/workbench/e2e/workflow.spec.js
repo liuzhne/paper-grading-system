@@ -273,3 +273,29 @@ test.describe("V3-1 评分标准导入", () => {
     await expect(template).not.toHaveAttribute("required", "");
   });
 });
+
+
+test.describe("V3-4 新建任务入口", () => {
+  test("评分任务页有新建入口", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    // 页面与路由一直都在，此前全站没有任何链接指向它。
+    await page.getByRole("link", { name: "新建评分任务" }).click();
+
+    await expect(page).toHaveURL(/\/workbench\/tasks\/new$/);
+    await expect(page.getByRole("heading", { name: "新建评分任务" })).toBeVisible();
+  });
+
+  test("工作台也有新建入口", async ({ page }) => {
+    await page.goto("/workbench/");
+
+    await expect(page.getByRole("link", { name: "新建评分任务" })).toBeVisible();
+  });
+
+  test("平台已配模型时不强制选连接", async ({ page }) => {
+    await page.goto("/workbench/tasks/new");
+
+    // 非鉴权后端走环境变量，等同「平台有模型」，不该出现连接必选区。
+    await expect(page.getByRole("heading", { name: "AI 连接" })).toHaveCount(0);
+  });
+});

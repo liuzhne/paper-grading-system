@@ -1,15 +1,16 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
-import { useUploadStore } from "@/stores/upload.js";
+import { requiresOwnConnection, useUploadStore } from "@/stores/upload.js";
+import { useSessionStore } from "@/stores/session.js";
 
 const router = useRouter();
 const route = useRoute();
 const upload = useUploadStore();
 
-const form = reactive({ name: "", department: "", major: "", rubric_id: "" });
+const form = reactive({ name: "", department: "", major: "", rubric_id: "", ai_connection_id: "" });
 const rubrics = ref([]);
 const batchId = ref(null);
 const precheck = ref(null);
@@ -21,7 +22,10 @@ const publishable = computed(() => rubrics.value.filter((r) => r.status === "pub
 const drafts = computed(() => rubrics.value.filter((r) => r.status !== "published"));
 
 const canCreate = computed(() => form.name.trim() && form.rubric_id);
-const canStart = computed(() => precheck.value?.can_start === true);
+// `connectionMissing` 定义在下方（与连接加载放在一起），这里只做组合。
+const canStart = computed(
+  () => precheck.value?.can_start === true && !connectionMissing.value,
+);
 
 /** 区间而不是精确值：一个精确数字会被当成承诺。 */
 const etaText = computed(() => {
@@ -41,6 +45,27 @@ async function loadRubrics() {
   }
 }
 
+// --- AI 连接（D-027）-------------------------------------------------------
+//
+// 平台没配默认模型时**必选**：不绑连接就评分，评出来的是 Mock 假分，而假结果会
+// 被当成真结论沿用下去。平台配好后不强制——那正是「所有用户可正常使用」的含义。
+const session = useSessionStore();
+const connections = ref([]);
+const connectionRequired = computed(() =>
+  requiresOwnConnection(session.capabilities?.llm),
+);
+const connectionMissing = computed(
+  () => connectionRequired.value && !form.ai_connection_id,
+);
+
+async function loadConnections() {
+  try {
+    connections.value = (await api.get("/ai-connections")) || [];
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) connections.value = [];
+  }
+}
+
 async function ensureBatch() {
   if (batchId.value) return batchId.value;
   const batch = await api.post("/batches", {
@@ -48,6 +73,9 @@ async function ensureBatch() {
     rubric_id: form.rubric_id,
     department: form.department || null,
     major: form.major || null,
+    // 建批次时冻结连接：之后轮换密钥或改配置，旧批次会拒绝继续跑，而不是
+    // 悄悄换一个模型接着评。
+    ai_connection_id: form.ai_connection_id || null,
   });
   batchId.value = batch.id;
   return batch.id;
@@ -115,7 +143,7 @@ onMounted(async () => {
   // 先清干净再加载。反过来的话，用户在这两个请求返回之前选的文件会被这次
   // reset 静默清掉——界面上文件凭空消失，没有任何解释。
   upload.reset();
-  await Promise.all([loadRubrics(), upload.loadCapabilities()]);
+  await Promise.all([loadRubrics(), upload.loadCapabilities(), loadConnections()]);
 
   // 从草稿继续：刷新会丢掉内存里的队列，但材料已经在服务端归档了。不恢复就会
   // 让用户重新选一遍并重传，产生重复对象（计划 §5-E「已归档的文件不重传」）。
@@ -199,6 +227,31 @@ onMounted(async () => {
             <span class="chip chip-warn rubric-chip">{{ rubric.version }} {{ rubric.status }}</span>
             <span class="faint rubric-note">未发布，不可用于评分</span>
           </div>
+        </section>
+
+        <!-- 2.5 AI 连接 -->
+        <section v-if="connectionRequired" class="card card-pad">
+          <div class="step">
+            <span class="step-num mono">·</span>
+            <h2 class="card-title">AI 连接</h2>
+            <span class="faint step-note">本部署未配置平台默认模型，必须选择</span>
+          </div>
+          <label for="task-connection">用哪个连接评分</label>
+          <select id="task-connection" v-model="form.ai_connection_id">
+            <option value="">请选择</option>
+            <option v-for="item in connections" :key="item.id" :value="item.id">
+              {{ item.name }} · {{ item.provider_type }} · {{ item.model_name }}
+            </option>
+          </select>
+          <p v-if="!connections.length" class="notice notice-warn">
+            你还没有可用的 AI 连接。请先在
+            <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink>
+            绑定一个，否则无法开始评分。
+          </p>
+          <p class="faint">
+            建任务时会冻结这个连接：之后轮换密钥或改配置，本任务会拒绝继续跑，
+            而不是悄悄换一个模型接着评。
+          </p>
         </section>
 
         <!-- 3 上传材料 -->

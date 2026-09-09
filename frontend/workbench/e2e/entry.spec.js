@@ -30,10 +30,16 @@ test.describe("根路径进入后的应用内导航", () => {
     // 路由的 history base 是 /workbench/，而入口页同时挂在 /。两个地址空间
     // 并存时最容易出问题的是「进得去、走不动」：首屏渲染正常，一点导航就
     // 匹配不上路由。
-    await page.getByRole("link", { name: "评分任务" }).click();
+    // 限定在侧栏导航里：页头的「新建评分任务」也含「评分任务」四个字。
+    await page
+      .getByRole("navigation", { name: "主导航" })
+      .getByRole("link", { name: "评分任务" })
+      .click();
 
     await expect(page).toHaveURL(/\/workbench\/tasks$/);
-    await expect(page.getByRole("heading", { name: "评分任务" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "评分任务", exact: true }),
+    ).toBeVisible();
   });
 
   test("从 / 直接刷新仍在工作台", async ({ page }) => {

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
+import { RouterLink } from "vue-router";
 import { useRouter } from "vue-router";
 
 import { useBatchesStore } from "@/stores/batches.js";
@@ -77,10 +78,15 @@ onMounted(async () => {
 
 <template>
   <div>
-    <header class="page-head">
-      <p class="page-eyebrow">评审</p>
-      <h1 class="page-title">评分任务</h1>
-      <p class="page-sub">一个批次固定绑定一个已发布的评分标准版本。</p>
+    <header class="page-head page-head-row">
+      <div>
+        <p class="page-eyebrow">评审</p>
+        <h1 class="page-title">评分任务</h1>
+        <p class="page-sub">一个批次固定绑定一个已发布的评分标准版本。</p>
+      </div>
+      <RouterLink class="btn btn-primary" :to="{ name: 'task-new' }">
+        新建评分任务
+      </RouterLink>
     </header>
 
     <p v-if="store.error" class="notice notice-danger" role="alert">{{ store.error }}</p>

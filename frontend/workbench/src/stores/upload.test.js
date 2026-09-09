@@ -1,7 +1,7 @@
 import { setActivePinia, createPinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useUploadStore } from "./upload.js";
+import { requiresOwnConnection, useUploadStore } from "./upload.js";
 
 /**
  * 上传编排（前端 v2 计划 §5-E）。
@@ -454,5 +454,37 @@ describe("挂载顺序：清理不能发生在加载之后", () => {
 
     expect(store.queue).toHaveLength(1);
     expect(store.queue[0].status).toBe("rejected");
+  });
+});
+
+describe("新建任务必须绑定模型来源", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  it("有平台模型时不强制选连接", () => {
+    const llm = {
+      platform_model_available: true,
+      has_own_connection: false,
+      can_use_llm: true,
+    };
+
+    expect(requiresOwnConnection(llm)).toBe(false);
+  });
+
+  it("没有平台模型时必须选自己的连接", () => {
+    const llm = {
+      platform_model_available: false,
+      has_own_connection: true,
+      can_use_llm: true,
+    };
+
+    // 平台没配模型时，不绑连接就评分等于评 Mock 假分（D-027）。
+    expect(requiresOwnConnection(llm)).toBe(true);
+  });
+
+  it("能力表未知时不下结论", () => {
+    expect(requiresOwnConnection(null)).toBe(false);
   });
 });

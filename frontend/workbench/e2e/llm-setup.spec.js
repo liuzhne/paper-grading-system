@@ -51,3 +51,15 @@ test.describe("未配置模型时的引导", () => {
     await expect(page.getByRole("status")).toContainText("运维与质量");
   });
 });
+
+
+test.describe("未配置模型时的新建任务", () => {
+  test("守卫先拦下：根本走不到新建页", async ({ page }) => {
+    await login(page, "teacher");
+    await page.goto("/workbench/tasks/new");
+
+    // 「没有可用模型就引导去配置」比「让人建完任务再发现不能评」更早一步。
+    // 新建页里的连接必选是第二道，只在**有平台模型但用户想用自己的**时才起作用。
+    await expect(page).toHaveURL(/\/account\?setup=model/);
+  });
+});
