@@ -209,6 +209,48 @@ class AIConnection(Base):
     deleted_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
 
+class PlatformLLMConfig(Base):
+    """平台默认模型的**单例**配置（D-028）。
+
+    独立于 `ai_connections`：那张表的 `organization_id`/`owner_id` 都是 NOT NULL
+    且有 `scope='private'` 约束，为一个单例记录削弱一张多租户表的完整性约束代价
+    太大。密钥沿用同一套信封加密，但**用不同的 AAD 域**——否则一份 BYOK 密文可以
+    被搬进平台配置行并解出来，加密就只剩「存了密文」这一个作用。
+
+    `status` 为 `disabled` 时保留配置但不再提供服务：出问题时管理员一键停用，
+    不必先删再重配。
+    """
+
+    __tablename__ = "platform_llm_config"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider_options: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+    api_key_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_nonce: Mapped[str] = mapped_column(String(128), nullable=False)
+    api_key_tag: Mapped[str] = mapped_column(String(128), nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    key_last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    # 「谁在什么时候把平台模型换了」必须可追溯。
+    configured_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    configured_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+    last_verified_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    last_error_code: Mapped[str] = mapped_column(String(100), nullable=True)
+    disabled_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    disabled_by: Mapped[str] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
 class AIUsageLedger(Base):
     __tablename__ = "ai_usage_ledger"
 

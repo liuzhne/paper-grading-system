@@ -394,7 +394,7 @@ def draft_rubric_deduction_rules(
             )
             scorer = get_llm_scorer(runtime)
         else:
-            scorer = get_llm_scorer()
+            scorer = get_llm_scorer(session=db)
 
         items = []
         for criterion in payload.criteria:

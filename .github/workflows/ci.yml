@@ -179,7 +179,8 @@ jobs:
             0026_review_command_receipts \
             0027_export_events \
             0028_export_event_backfill \
-            0029_runtime_access_for_v2_tables
+            0029_runtime_access_for_v2_tables \
+            0030_platform_llm_config
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done

@@ -77,20 +77,24 @@ def test_private_connection_encrypts_key_and_api_never_returns_secret(client, mo
     assert _connection_payload()["api_key"] not in client.get("/api/ai-connections").text
 
 
-def test_authenticated_deployment_requires_explicit_authorization_for_platform_llm(monkeypatch):
+def test_environment_variables_no_longer_grant_a_platform_model(monkeypatch):
+    """受保护部署的平台模型只来自管理员配置（D-028）。
+
+    此前 `PLATFORM_MANAGED_LLM_ENABLED=True` 就能让环境变量里的模型生效。留着这条
+    路等于把刚堵上的洞用一个 env 重新打开：谁设的、什么时候设的、设了什么，一概
+    没有记录。现在无论这个开关是什么值，受保护部署都必须走配置表。
+    """
     from backend.app.services.llm.factory import get_llm_scorer
 
     monkeypatch.setattr(settings, "AUTH_ENABLED", True)
     monkeypatch.setattr(settings, "AUTH_PASSWORD", "protected deployment password")
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "platform-only-key")
-    monkeypatch.setattr(settings, "PLATFORM_MANAGED_LLM_ENABLED", False)
 
-    with pytest.raises(RuntimeError, match="platform-managed LLM is disabled"):
-        get_llm_scorer()
-
-    monkeypatch.setattr(settings, "PLATFORM_MANAGED_LLM_ENABLED", True)
-    assert get_llm_scorer().provider == "openai"
+    for granted in (False, True):
+        monkeypatch.setattr(settings, "PLATFORM_MANAGED_LLM_ENABLED", granted)
+        with pytest.raises(RuntimeError, match="平台模型"):
+            get_llm_scorer()
 
 
 def test_private_connections_are_not_visible_or_mutable_by_another_user(client, monkeypatch):

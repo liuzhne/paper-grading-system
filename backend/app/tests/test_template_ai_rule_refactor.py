@@ -281,7 +281,7 @@ def test_draft_endpoint_returns_structured_suggestions_without_mutating_rubric(
             ]
         }
     )
-    monkeypatch.setattr(rubric_routes, "get_llm_scorer", lambda *_: scorer)
+    monkeypatch.setattr(rubric_routes, "get_llm_scorer", lambda *a, **k: scorer)
 
     response = client.post(
         f"/api/rubrics/{rubric_id}/draft-deduction-rules",
@@ -333,7 +333,7 @@ def test_draft_endpoint_maps_provider_rejection_to_safe_non_retryable_problem(
     )
     assert created.status_code == 200, created.text
     monkeypatch.setattr(
-        rubric_routes, "get_llm_scorer", lambda *_: _RejectedDraftScorer()
+        rubric_routes, "get_llm_scorer", lambda *a, **k: _RejectedDraftScorer()
     )
 
     response = client.post(

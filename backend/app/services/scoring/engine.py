@@ -145,7 +145,8 @@ def _scorer_for_batch(db: Session, batch: GradingBatch):
     """Use a batch-pinned private connection or the legacy platform runtime."""
 
     if batch.ai_connection_id is None:
-        return get_llm_scorer()
+        # 用调用方的事务读平台配置，别另开会话。
+        return get_llm_scorer(session=db)
     if not batch.owner_id or not batch.organization_id:
         raise ValueError("BYOK batch has no owner or organization identity")
     runtime = resolve_connection_runtime(

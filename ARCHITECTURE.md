@@ -252,11 +252,30 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在
   浏览器验收覆盖 V01–V07、V09–V13，其中 V01/V02/V10 跑在独立的 `AUTH_ENABLED=true` 多组织后端上。
   **V08 的 Supabase 直传与 TUS 未覆盖**：需真实对象存储，Mock 路由不冒充真实验证。
 
+### 7.3 平台默认模型（2026-09-09，V3-0a）
+
+- **来源改变**：受保护部署（`AUTH_ENABLED` 且设了口令）的模型解析顺序为
+  **绑定的 BYOK runtime → `platform_llm_config` 单例 → 抛错**。环境变量退化为
+  开发与 CI 专用（`AUTH_ENABLED=false` 仍走 env，否则本地与浏览器验收会立刻断）。
+- **这道判断排在 `provider == "mock"` 分支之前**。排在之后就是修复前的行为：
+  `LLM_PROVIDER=mock`（默认值）直接返回 `MockLLMScorer`，于是没绑连接的评分
+  悄悄产出假分数，界面无任何提示。
+- **`PLATFORM_MANAGED_LLM_ENABLED` 不再授予任何权限**。留着它等于把刚堵上的洞用
+  一个 env 重新打开：谁设的、设了什么，一概没有记录。
+- **加密域隔离**：平台密钥用 `platform-llm|<config_id>|<version>` 作 AAD，BYOK 用
+  `ai-connection|<org>|<owner>|<version>`。任一方的密文搬到另一方都解不开——否则
+  加密只剩「存了密文」这一个作用，绑不住它属于谁。
+- **会话由调用方传入**：`get_llm_scorer(session=...)`。工厂自己开会话会脱离调用方
+  事务，在测试里还会指向另一个数据库。评分引擎与起草端点都已接线。
+- **表**：`platform_llm_config` 单例，`0030` 建表并给 `pgs_app` 授权 + RLS；
+  有配置时拒绝降级（那一行含密钥材料与「谁配的」，删掉要人重新找回 API key）。
+
 ## 8. 维护记录
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
+| 2026-09-09 | 平台默认模型改为管理员配置 | 新增 §7.3：模型解析顺序改为「BYOK → 平台配置表 → 抛错」，判断排到 mock 分支之前；`PLATFORM_MANAGED_LLM_ENABLED` 不再授权；加密用独立 AAD 域；会话由调用方传入。新增 `platform_llm_config` 表与迁移 0030，head 更新到 `0030_platform_llm_config`。评分语义与 GATE-03 边界不变。 |
 | 2026-09-09 | 三文档同步规则入库 | 把「每次方案落地同步 ARCHITECTURE/DECISIONS/RUNBOOK」写入 CLAUDE.md 并说明各自回答什么；核对 §7.2 与生产实际一致（head `0029`、旧 SPA 已下线、导出出口全量门控、新表运行角色授权）。架构边界不变。 |
 | 2026-09-08 | 前端 v2 阶段 0–6B 落地 | 新增 §7.2 落地事实：统一组装产物与三宿主托管、批次状态机与旧写入口共用守卫、结果选择器单一口径、证据投影与 no-store、导出三态、多组织切换清场、前端类型/合同/浏览器门禁。评分语义、`SCORING_ENGINE_MODE=legacy` 与 GATE-03 发布权限不变；迁移 head `0028_export_event_backfill`。|
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 核对 LLM/Core/批任务边界；新增稳定 ProviderError 投影和 fail-open Langfuse v4/OpenTelemetry Trace。评分、缓存、证据校验与 Core 计分边界不变。 |

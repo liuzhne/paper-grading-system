@@ -905,3 +905,71 @@ def test_0009_provenance_migration_downgrades_to_0008_and_replays(monkeypatch, t
         )
     finally:
         engine.dispose()
+
+
+def test_0030_creates_the_platform_llm_config_table(monkeypatch, tmp_path):
+    """平台模型配置表随迁移建出来（D-028）。"""
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "platform.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "head")
+
+    engine = create_engine(url)
+    try:
+        assert "platform_llm_config" in set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+
+def test_0030_refuses_to_downgrade_with_a_configured_platform_model(
+    monkeypatch, tmp_path
+):
+    """有配置时拒绝降级。
+
+    这一行里有密钥材料和「谁配的」记录；删掉之后即便重建表，管理员也得重新找回
+    API key 再录一次——降级把一次运维动作变成一次事故。空表照常允许回滚。
+    """
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "platform-downgrade.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0030_platform_llm_config")
+
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO platform_llm_config (id, provider_type, base_url,"
+                    " model_name, provider_options, api_key_ciphertext,"
+                    " api_key_nonce, api_key_tag, key_version, key_last4, status,"
+                    " configured_by, configured_at, created_at, updated_at) VALUES"
+                    " ('c1','openai_compatible','https://a/v1','m','{}','x','y','z',"
+                    " 1,'abcd','active','admin',CURRENT_TIMESTAMP,"
+                    " CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(Exception) as excinfo:
+        command.downgrade(config, "0029_runtime_access_for_v2_tables")
+
+    assert "platform LLM configuration" in str(excinfo.value)
+
+
+def test_0030_downgrades_cleanly_when_nothing_is_configured(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "platform-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0030_platform_llm_config")
+
+    command.downgrade(config, "0029_runtime_access_for_v2_tables")
+
+    engine = create_engine(url)
+    try:
+        assert "platform_llm_config" not in set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()

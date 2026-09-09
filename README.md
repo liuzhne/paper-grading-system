@@ -12,7 +12,7 @@
 - DB: PostgreSQL
 - Document parsing: python-docx, PyMuPDF
 - Export: openpyxl
-- Current verification: Alembic head `0029_runtime_access_for_v2_tables`; Python 3.12 lock run（Python 3.10+ supported；准确用例数以当前 CI 为准）
+- Current verification: Alembic head `0030_platform_llm_config`; Python 3.12 lock run（Python 3.10+ supported；准确用例数以当前 CI 为准）
 
 ## 本地启动
 
@@ -221,7 +221,7 @@ M1/M5/M8 真实发布门禁必须使用 `run_qwk_eval --release-gate` 的仓库�
 
 - **Vercel 生产发布方式（已切换）**：生产部署的唯一入口是向 `main` 推送可追溯提交；Vercel Git 集成的直接部署已在 `vercel.json` 中关闭，不再手工把本地工作区或功能分支直接提升为 Production。`pgs-production-gates` 先执行锁文件全量测试、Postgres 16 迁移/约束/恢复演练和 Docker 冒烟，全部通过后 `deploy-vercel-production` 才使用 GitHub `production` Environment 中的 `VERCEL_TOKEN`、`VERCEL_ORG_ID`、`VERCEL_PROJECT_ID` 执行 `vercel pull`、`vercel build --prod` 和 `vercel deploy --prebuilt --prod`。当前因 Vercel CLI `58.4.4+` 的 prebuilt/filePathMap 回归临时固定 `vercel@58.4.0`，升级前须先复验 [vercel/vercel#17386](https://github.com/vercel/vercel/issues/17386)。完整配置、发布、回滚与排障见 [部署指南](docs/部署.md)。
 - **内网试点 Docker 栈**：复制 `.env.intranet.example` 为 `.env.intranet`，改强密码与站点名后运行 `docker compose --env-file .env.intranet up -d --build`。详见 [docs/部署.md](docs/部署.md)。
-- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0029_runtime_access_for_v2_tables`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。0022 会把升级前的单租户资源回填到默认组织，并把旧默认开发用户提升为 Bootstrap Admin；0023 新增规则检查点与人工复核队列；0024–0028 补齐批次状态机、结构化复核原因、命令幂等回执与导出事件，**含数据时一律拒绝有损降级**；0029 为 0026/0027 的新表补生产运行角色授权与 RLS；迁移不会复制任何 `.env` LLM Key。
+- **每次部署先迁移**：`uv run alembic upgrade head`（当前到 `0030_platform_llm_config`；测试用 `create_all`，生产必须走迁移；Docker app 容器启动时会自动迁移）。0022 会把升级前的单租户资源回填到默认组织，并把旧默认开发用户提升为 Bootstrap Admin；0023 新增规则检查点与人工复核队列；0024–0028 补齐批次状态机、结构化复核原因、命令幂等回执与导出事件，**含数据时一律拒绝有损降级**；0029 为 0026/0027 的新表补生产运行角色授权与 RLS；迁移不会复制任何 `.env` LLM Key。
 - **可恢复批量评分**：Web 或 `/api/batches/{id}/score-jobs` 创建任务时必须提交经批准的观察策略 JSON；策略、策略哈希、并发上限、论文级检查点、尝试历史和门禁信号均写入数据库。任务支持运行/租约恢复、取消和仅重试失败项，但其报告固定 `production_default_switch_authorized=false`，最终授权仍属于 GATE-03。
 - **GATE-03 证据与演练**：正式 GATE-03 CLI 必须提供 `--gate03-evidence`，绑定通过的观测快照、获批基线/M5 parity 比较和仓库外逐样本报告 hash；缺项 fail closed。`POST /api/release-gates/profiles/{id}/rehearsals` 只保存合成 test-only 记录，直接终态 `ineligible` 且不可审批。示例归档见 `docs/baselines/gate-03-test-only-rehearsal.json`。
 - **生产门禁与灾备**：`.github/workflows/ci.yml` 分别执行锁文件全量测试及 Postgres 16 的 0011→0022、约束/排序、lossy downgrade 拒绝和隔离备份恢复演练。`python -m backend.app.scripts.ops_backup create|verify|restore` 生成带 SHA-256 manifest 的数据库+storage 包；上线前按 [生产上线与灾备验收清单](docs/上线清单.md) 填写责任人、阈值、RTO/RPO 与证据链接。

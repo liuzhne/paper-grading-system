@@ -10,7 +10,36 @@ COMPATIBLE_PROVIDERS = {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashs
 LOCAL_PROVIDERS = {"local", "llama", "llamacpp", "llama_cpp", "vllm", "ollama"}
 
 
-def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None):
+def _platform_runtime(session=None):
+    """读取管理员配置的平台模型；未配置或已停用返回 None。
+
+    **优先用调用方的会话**：评分引擎、起草端点手里都有事务，自己另开一个会脱离
+    它们的事务边界，在测试里还会指向另一个数据库。只有确实拿不到会话的入口
+    （CLI 诊断等）才回落到自建会话。
+    """
+
+    from backend.app.services import platform_llm
+
+    def _resolve(active_session):
+        config = platform_llm.get_active_config(active_session)
+        if config is None:
+            return None
+        return platform_llm.runtime_for(config)
+
+    try:
+        if session is not None:
+            return _resolve(session)
+        from backend.app.db.session import SessionLocal
+
+        with SessionLocal() as owned:
+            return _resolve(owned)
+    except Exception:
+        # 配置表读不出来（迁移未跑、库不可达）时**不回落**：宁可报「没有模型」，
+        # 也不能悄悄用 Mock 顶上。
+        return None
+
+
+def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None, *, session=None):
     """Return a scorer for either deployment config or one bound BYOK runtime.
 
     A supplied runtime is intentionally fail-closed: it never consults global
@@ -51,14 +80,22 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None):
         scorer._ai_connection_organization_id = connection_runtime.organization_id
         return scorer
 
+    # 受保护部署：环境变量**不是**模型来源，平台模型来自管理员配置的单例
+    # （D-028）。这道判断必须排在 mock 分支**之前**——排在之后的话，
+    # `LLM_PROVIDER=mock`（默认值）会直接返回 MockLLMScorer，于是没绑连接的评分
+    # 悄悄产出假分数，而假结果会被当成真结论沿用下去。
+    if settings.AUTH_ENABLED and settings.AUTH_PASSWORD:
+        runtime = _platform_runtime(session)
+        if runtime is not None:
+            return get_llm_scorer(runtime)
+        raise RuntimeError(
+            "本部署尚未配置平台模型。请绑定你自己的 AI 连接，"
+            "或联系平台管理员在运维页配置平台默认模型。"
+        )
+
     provider = (settings.LLM_PROVIDER or "mock").lower()
     if provider == "mock":
         return MockLLMScorer()
-    if settings.AUTH_ENABLED and settings.AUTH_PASSWORD and not settings.PLATFORM_MANAGED_LLM_ENABLED:
-        raise RuntimeError(
-            "platform-managed LLM is disabled for authenticated deployments; "
-            "bind a private AI connection or explicitly authorize the platform model"
-        )
     if provider == "openai":
         try:
             return OpenAIResponsesScorer()

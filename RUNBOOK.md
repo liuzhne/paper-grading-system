@@ -1,6 +1,6 @@
 # 开发、排错与发布 Runbook
 
-> 当前操作基线：2026-09-09；Python 3.10+，推荐/CI 为 3.12；Alembic head `0029_runtime_access_for_v2_tables`；默认 `SCORING_ENGINE_MODE=legacy`。以下命令默认在仓库根目录执行，不要把真实 Secret、论文原文或学生 PII 写入终端记录、Git、CI artifact 或工单。
+> 当前操作基线：2026-09-09；Python 3.10+，推荐/CI 为 3.12；Alembic head `0030_platform_llm_config`；默认 `SCORING_ENGINE_MODE=legacy`。以下命令默认在仓库根目录执行，不要把真实 Secret、论文原文或学生 PII 写入终端记录、Git、CI artifact 或工单。
 
 ## 1. 先判断运行形态
 
@@ -514,6 +514,25 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 不这么做时**本地一直是绿的**——因为它悄悄用上了生产密钥，只有在没有这个文件的
 机器（CI）上才暴露。这与「测试打到生产库」是同一个根。
 
+### 11.6 「本部署尚未配置平台模型」
+
+受保护部署下调用 LLM 而既没绑 BYOK 连接、平台也没配模型时，服务端抛：
+
+```
+本部署尚未配置平台模型。请绑定你自己的 AI 连接，或联系平台管理员在运维页配置平台默认模型。
+```
+
+**这是期望行为，不是故障**（D-027/D-028）。修复前的行为才是问题：`LLM_PROVIDER`
+默认 `mock`，于是没绑连接的评分**悄悄返回 Mock 假分**，界面上没有任何提示。
+
+两条出路，任选其一：
+
+- 用户自己在「账户与连接」配一个 BYOK 连接；
+- 平台管理员在运维页配置平台默认模型（`platform_llm_config` 单例）。
+
+**改 `LLM_PROVIDER` 或 `PLATFORM_MANAGED_LLM_ENABLED` 都没有用**——受保护部署不再从
+环境变量取模型。`AUTH_ENABLED=false` 的本地开发仍走 env，所以本机跑不出这个错。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
@@ -522,6 +541,7 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-09 | 平台默认模型（V3-0a） | 新增 §11.6 排错条目：「尚未配置平台模型」是期望行为，改环境变量无效。操作基线 head 更新到 `0030_platform_llm_config`。未运行生产操作。 |
 | 2026-09-09 | v3 决策与三文档同步规则 | 三文档同步写入 CLAUDE.md 并加可机检门禁（`test_three_doc_contract.py`）；操作基线 head 更新到 `0029`。未运行生产操作。 |
 | 2026-09-08 | 入口切换上线与门禁修复 | 导出出口全量角色门控；取消应用内组织切换；旧 SPA 下线、`/register` `/reset-password` 由工作台承接；修 `MIGRATION_SEQUENCE` 过期与验收进程继承 `.env.local`。生产部署经 main 门禁执行。 |
 | 2026-09-08 | 运维脚本目标库守卫 | `backfill_export_events` 对非本地目标默认拒绝并要求显式确认；RUNBOOK 命令补 `DATABASE_URL`。`seed_dev` / `build_anchors` **未加同款守卫**：前者在 Docker 冒烟里于容器内执行，那里的库主机本就不是 localhost，照搬会打断一条正当流程。未运行生产变更。 |
