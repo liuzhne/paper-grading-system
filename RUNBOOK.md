@@ -549,6 +549,19 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 改完前端后**必须重建产物再跑验收**（`build_web_static.py --with-workbench`）：验收托管的
 是 `public/`，不是 Vite dev server。忘了重建同样表现为「代码明明改了却不生效」。
 
+### 11.8 验收失败的三种常见误判
+
+同一条用例单跑通过、全跑失败时，先按这个顺序排查，**不要直接当成不稳定**：
+
+1. **产物没重建**。改完前端必须跑 `build_web_static.py --with-workbench` 再跑验收——
+   验收托管的是 `public/`，不是 Vite dev server。症状是「代码明明改了却不生效」。
+2. **spec 被错误的 project 捡走**。新增 spec 要同时加进默认 project 的 `testIgnore`
+   （见 §11.7），否则它会跑在没有鉴权或没有平台模型的后端上。
+3. **选择器命中多个元素**。新加的文案与既有文案重复时，`getByText` 会报
+   strict mode violation——报错说的是「找不到」，实际是「找到太多」。
+
+排除这三条之后仍然只在全跑时失败，才考虑用例间的状态串扰。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
@@ -557,6 +570,7 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-09 | V3-3 发布区与验收排错 | 新增 §11.8：验收失败的三种常见误判（产物未重建、spec 被错误 project 捡走、选择器命中多个）。未运行生产操作。 |
 | 2026-09-09 | 平台模型前端接入 | 新增 §11.7：三套验收后端与 spec 的对应关系，以及「新 spec 要加进 testIgnore」「改前端要重建产物」两个会被误读成不稳定的坑。未运行生产操作。 |
 | 2026-09-09 | 平台默认模型（V3-0a） | 新增 §11.6 排错条目：「尚未配置平台模型」是期望行为，改环境变量无效。操作基线 head 更新到 `0030_platform_llm_config`。未运行生产操作。 |
 | 2026-09-09 | v3 决策与三文档同步规则 | 三文档同步写入 CLAUDE.md 并加可机检门禁（`test_three_doc_contract.py`）；操作基线 head 更新到 `0029`。未运行生产操作。 |

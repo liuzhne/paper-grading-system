@@ -87,5 +87,45 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return api.post(`/rubrics/${rubricId}/clone`, { name, version });
   }
 
-  return { rubrics, error, loading, lastImport, reset, load, importFiles, clone };
+  /**
+   * 发布：一次选定编译产物与分享范围（D-029）。
+   *
+   * **不提供「用最新的」快捷方式**：用户必须看到自己发布的是哪一份编译产物。
+   * 范围不选时不发送该字段，由服务端沿用当前值——扩大范围是显式动作。
+   *
+   * @param {string} rubricId
+   * @param {{compilationId: string|null, visibility: string|null, reason?: string}} input
+   */
+  async function publish(rubricId, input) {
+    if (!input.compilationId) {
+      throw new Error("请先选择要发布的编译产物。");
+    }
+    /** @type {Record<string, unknown>} */
+    const body = { compilation_id: input.compilationId };
+    if (input.reason) body.reason = input.reason;
+    if (input.visibility) body.visibility = input.visibility;
+    return api.post(`/rubrics/${rubricId}/publish`, body);
+  }
+
+  /**
+   * 执行草稿：编译产物、阻断项与歧义。三步详情的第 2、3 步都读它。
+   *
+   * @param {string} rubricId
+   */
+  async function loadExecutionDraft(rubricId) {
+    return api.get(`/rubrics/${rubricId}/execution-draft`);
+  }
+
+  return {
+    rubrics,
+    error,
+    loading,
+    lastImport,
+    reset,
+    load,
+    importFiles,
+    clone,
+    publish,
+    loadExecutionDraft,
+  };
 });

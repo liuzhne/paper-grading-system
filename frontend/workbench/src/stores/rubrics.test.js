@@ -115,3 +115,58 @@ describe("评分标准导入", () => {
     expect(sent.get("template_file")).toBeNull();
   });
 });
+
+describe("发布：编译产物 + 分享范围", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  it("必须显式指定编译产物，不提供「用最新的」", async () => {
+    const store = useRubricsStore();
+
+    await expect(
+      store.publish("r1", { compilationId: null, visibility: "private" }),
+    ).rejects.toThrow(/编译产物/);
+  });
+
+  it("范围与编译产物在同一个请求里发出", async () => {
+    let sent = null;
+    vi.stubGlobal("fetch", (url, init) => {
+      sent = JSON.parse(init.body);
+      return jsonResponse({ id: "r1", status: "published" });
+    });
+    const store = useRubricsStore();
+
+    await store.publish("r1", { compilationId: "c9", visibility: "organization" });
+
+    // 分两个请求会留下「已发布但范围还是旧的」这个没有补救入口的中间态。
+    expect(sent.compilation_id).toBe("c9");
+    expect(sent.visibility).toBe("organization");
+  });
+
+  it("不选范围时不发送该字段，由服务端沿用当前值", async () => {
+    let sent = null;
+    vi.stubGlobal("fetch", (url, init) => {
+      sent = JSON.parse(init.body);
+      return jsonResponse({ id: "r1", status: "published" });
+    });
+    const store = useRubricsStore();
+
+    await store.publish("r1", { compilationId: "c9", visibility: null });
+
+    expect(sent.compilation_id).toBe("c9");
+    expect("visibility" in sent).toBe(false);
+  });
+
+  it("发布失败时把服务端说明留给用户", async () => {
+    vi.stubGlobal("fetch", () =>
+      jsonResponse({ detail: "只有平台管理员可以把评分标准分享给所有组织。" }, 403),
+    );
+    const store = useRubricsStore();
+
+    await expect(
+      store.publish("r1", { compilationId: "c9", visibility: "system" }),
+    ).rejects.toThrow(/平台管理员/);
+  });
+});

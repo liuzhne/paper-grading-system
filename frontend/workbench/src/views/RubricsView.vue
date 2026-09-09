@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
+import { useSessionStore } from "@/stores/session.js";
 
 /**
  * 评分标准（前端 v2 计划 §2、§6）。
@@ -17,6 +18,7 @@ const rubrics = ref([]);
 
 // --- 导入（D-026：标准只能由导入产生，不提供空白新建）---------------------
 const store = useRubricsStore();
+const session = useSessionStore();
 const importOpen = ref(false);
 const importBusy = ref(false);
 const importError = ref(null);
@@ -56,6 +58,48 @@ async function submitImport() {
     importError.value = err instanceof Error ? err.message : "导入失败";
   } finally {
     importBusy.value = false;
+  }
+}
+
+// --- 校验与发布（D-029：编译产物 + 分享范围一次选定）---------------------
+const draft = ref(null);
+const publishBusy = ref(false);
+const publishError = ref(null);
+const chosenCompilation = ref(null);
+const chosenVisibility = ref(null);
+
+const canPublish = computed(
+  () => Boolean(chosenCompilation.value) && !blocking.value.length,
+);
+
+async function loadDraft() {
+  if (!selected.value) return;
+  draft.value = null;
+  chosenCompilation.value = null;
+  try {
+    draft.value = await store.loadExecutionDraft(selected.value);
+    // 默认选中当前活跃的那份，但**仍要用户确认**——不提供「用最新的」快捷方式。
+    chosenCompilation.value = draft.value?.active_compilation?.id || null;
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) draft.value = null;
+  }
+}
+
+async function submitPublish() {
+  publishBusy.value = true;
+  publishError.value = null;
+  try {
+    await store.publish(selected.value, {
+      compilationId: chosenCompilation.value,
+      visibility: chosenVisibility.value,
+      reason: "发布已确认模板",
+    });
+    await loadRubrics();
+    await loadDraft();
+  } catch (err) {
+    publishError.value = err instanceof Error ? err.message : "发布失败";
+  } finally {
+    publishBusy.value = false;
   }
 }
 
@@ -125,10 +169,15 @@ async function loadCoverage(id) {
   }
 }
 
-watch(selected, (id) => loadCoverage(id));
+watch(selected, async (id) => {
+  await loadCoverage(id);
+  // 执行草稿要跟着切：发布区列的是「这份标准」的编译产物，串了就会发布错东西。
+  await loadDraft();
+});
 onMounted(async () => {
   await loadRubrics();
   await loadCoverage(selected.value);
+  await loadDraft();
 });
 </script>
 
@@ -235,6 +284,55 @@ onMounted(async () => {
               </li>
             </ul>
           </div>
+
+          <!-- 校验与发布 -->
+          <section v-if="current.status !== 'published'" class="card card-pad">
+            <h2 class="card-title">校验与发布</h2>
+            <p class="card-note">
+              发布后版本与分享范围一起冻结；扩大范围需克隆为新版本。
+            </p>
+
+            <label for="pub-compilation">发布哪一份执行草稿</label>
+            <select id="pub-compilation" v-model="chosenCompilation">
+              <option :value="null">请选择</option>
+              <option
+                v-for="item in draft?.compilations || []"
+                :key="item.id"
+                :value="item.id"
+              >
+                {{ item.status }} · {{ item.blocker_count }} 个阻断 · {{ item.created_at }}
+              </option>
+            </select>
+
+            <label for="pub-visibility">分享给谁</label>
+            <select id="pub-visibility" v-model="chosenVisibility">
+              <option :value="null">保持当前（{{ visibilityLabel(current.visibility) }}）</option>
+              <option value="organization">本组织</option>
+              <option
+                value="system"
+                :disabled="!session.isPlatformAdmin"
+              >
+                所有人{{ session.isPlatformAdmin ? "" : "（需平台管理员）" }}
+              </option>
+            </select>
+
+            <div class="row-actions">
+              <button
+                class="btn btn-primary"
+                type="button"
+                :disabled="publishBusy || !canPublish"
+                @click="submitPublish"
+              >
+                {{ publishBusy ? "发布中…" : "发布" }}
+              </button>
+            </div>
+            <p v-if="blocking.length" class="faint">
+              有阻断项时不能发布，请先在第 2 步补齐扣分细则。
+            </p>
+            <p v-if="publishError" class="notice notice-danger" role="alert">
+              {{ publishError }}
+            </p>
+          </section>
 
           <!-- 完整度 -->
           <section class="card card-pad">
