@@ -280,11 +280,21 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在
 - **表**：`platform_llm_config` 单例，`0030` 建表并给 `pgs_app` 授权 + RLS；
   有配置时拒绝降级（那一行含密钥材料与「谁配的」，删掉要人重新找回 API key）。
 
+### 7.4 评分标准的写边界（2026-09-09，V3-0b）
+
+- **写端点一律过角色门控**：`rubrics.py` 的 13 个写端点补上 `require_organization_role`。
+  `_visible_rubric` 只查组织归属，不查角色；而发布一个评分标准决定了全组织的论文怎么被
+  打分。它们此前难以触及只是因为旧 SPA 下线了 UI。
+- **并发保护在编译层，不在 rubric 行**：`recompile` 要求显式 `supersedes_compilation_id`，
+  基于非活跃草稿提交被整体拒绝。`PATCH /rubrics/{id}` 在创建即产生编译产物的前提下基本
+  不可达（见 D-031）。
+
 ## 8. 维护记录
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
+| 2026-09-09 | V3-0b 写端点门控 | 新增 §7.4：13 个评分标准写端点补角色门控；并发保护经核实已由编译层承担，不加 rubric 级版本号（D-031）。无新迁移。 |
 | 2026-09-09 | 平台默认模型改为管理员配置 | 新增 §7.3：模型解析顺序改为「BYOK → 平台配置表 → 抛错」，判断排到 mock 分支之前；`PLATFORM_MANAGED_LLM_ENABLED` 不再授权；加密用独立 AAD 域；会话由调用方传入。新增 `platform_llm_config` 表与迁移 0030，head 更新到 `0030_platform_llm_config`。评分语义与 GATE-03 边界不变。 |
 | 2026-09-09 | 三文档同步规则入库 | 把「每次方案落地同步 ARCHITECTURE/DECISIONS/RUNBOOK」写入 CLAUDE.md 并说明各自回答什么；核对 §7.2 与生产实际一致（head `0029`、旧 SPA 已下线、导出出口全量门控、新表运行角色授权）。架构边界不变。 |
 | 2026-09-08 | 前端 v2 阶段 0–6B 落地 | 新增 §7.2 落地事实：统一组装产物与三宿主托管、批次状态机与旧写入口共用守卫、结果选择器单一口径、证据投影与 no-store、导出三态、多组织切换清场、前端类型/合同/浏览器门禁。评分语义、`SCORING_ENGINE_MODE=legacy` 与 GATE-03 发布权限不变；迁移 head `0028_export_event_backfill`。|

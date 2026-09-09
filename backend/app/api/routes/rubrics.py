@@ -296,6 +296,9 @@ def clone_rubric(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
+    # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+    # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+    require_organization_role(principal, "org_admin", "teacher")
     original = _visible_rubric(db, rubric_id, principal)
 
     new_name = payload.name or original.name
@@ -375,6 +378,9 @@ def draft_rubric_deduction_rules(
     """Return non-persistent, human-confirmable AI rule suggestions."""
 
     _visible_rubric(db, rubric_id, principal)
+    # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+    # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+    require_organization_role(principal, "org_admin", "teacher")
     execution = read_execution_draft(session=db, rubric_id=rubric_id)
     active = execution.get("active_compilation") or {}
     version = active.get("version") or {}
@@ -472,6 +478,9 @@ def submit_rubric_review(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         execution = read_execution_draft(session=db, rubric_id=rubric_id)
         active = execution.get("active_compilation")
         blocker_count = len((active or {}).get("blockers") or [])
@@ -514,6 +523,9 @@ def return_rubric_to_draft(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         rubric_lifecycle.return_to_draft(db, rubric_id)
         db.commit()
     except rubric_lifecycle.RubricLifecycleError as exc:
@@ -534,6 +546,9 @@ def recompile_rubric_draft(
 
     ensure_dev_user(db)
     rubric = _visible_rubric(db, rubric_id, principal)
+    # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+    # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+    require_organization_role(principal, "org_admin", "teacher")
     if rubric.status != "draft":
         raise HTTPException(
             status_code=409,
@@ -639,6 +654,9 @@ def submit_atomic_rule_review(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         rule = rubric_lifecycle.submit_atomic_rule_for_review(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -661,6 +679,9 @@ def patch_atomic_rule(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         rule = rubric_lifecycle.edit_atomic_rule(
             db,
             rubric_id,
@@ -688,6 +709,9 @@ def approve_atomic_rule_review(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         rule = rubric_lifecycle.approve_atomic_rule(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -710,6 +734,9 @@ def reject_atomic_rule_review(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         rule = rubric_lifecycle.reject_atomic_rule(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -732,6 +759,9 @@ def reopen_atomic_rule_review(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         rule = rubric_lifecycle.reopen_atomic_rule(
             db, rubric_id, rule_code, user_id, payload.reason
         )
@@ -754,6 +784,9 @@ def review_atomic_rule_template_link(
     ensure_dev_user(db)
     try:
         _visible_rubric(db, rubric_id, principal)
+        # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+        # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+        require_organization_role(principal, "org_admin", "teacher")
         link = rubric_lifecycle.review_template_link(
             db,
             rubric_id,
@@ -784,6 +817,9 @@ def update_rubric(
 ):
     ensure_dev_user(db)
     rubric = _visible_rubric(db, rubric_id, principal)
+    # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+    # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+    require_organization_role(principal, "org_admin", "teacher")
     if rubric.status != "draft":
         raise HTTPException(
             status_code=409,
@@ -866,6 +902,9 @@ def publish_rubric(
 ):
     ensure_dev_user(db)
     _visible_rubric(db, rubric_id, principal)
+    # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
+    # 怎么被打分，写它必须过角色门控（v3 §4.2）。
+    require_organization_role(principal, "org_admin", "teacher")
     compilation_id = payload.compilation_id if payload else None
     if not compilation_id:
         has_provenance = db.scalar(
