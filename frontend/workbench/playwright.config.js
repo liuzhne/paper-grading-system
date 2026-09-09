@@ -14,6 +14,7 @@ import { defineConfig, devices } from "@playwright/test";
 const PORT = Number(process.env.PGS_E2E_PORT || 8099);
 // 第二个后端跑在 AUTH_ENABLED=true 下，带两个组织与三种角色。V01/V02/V10 测的
 // 就是边界本身，开发模式「放行一切」时它们全都会假通过。
+const SETUP_PORT = Number(process.env.PGS_E2E_SETUP_PORT || 8101);
 const AUTH_PORT = PORT + 1;
 const PYTHON = process.env.PGS_PYTHON || ".venv/bin/python";
 
@@ -44,7 +45,9 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
       // auth.spec 要跑在鉴权后端上：对着开发模式的「放行一切」跑权限断言，
       // 通过与否都说明不了任何事。
-      testIgnore: /(responsive|auth)\.spec\.js/,
+      // 这几个 spec 各自要专门的后端：窄屏走 mobile、鉴权走 auth、
+      // 未配模型走 llm-setup。默认 project 捡走它们就会跑在错误的后端上。
+      testIgnore: /(responsive|auth|llm-setup)\.spec\.js/,
     },
     // 窄屏折叠：设计三栏宽度不是唯一布局（计划 §8）。
     { name: "mobile", use: { ...devices["Pixel 5"] }, testMatch: /responsive\.spec\.js/ },
@@ -57,6 +60,17 @@ export default defineConfig({
         baseURL: `http://127.0.0.1:${AUTH_PORT}`,
       },
       testMatch: /auth\.spec\.js/,
+    },
+    // 「平台没配模型」是 D-028 的初始状态，需要独立后端：主鉴权后端配了模型，
+    // 否则 V01/V02/V10 会全挂在登录后的第一步。
+    {
+      name: "llm-setup",
+      use: {
+        ...devices["Desktop Chrome"],
+        channel: "chromium",
+        baseURL: `http://127.0.0.1:${SETUP_PORT}`,
+      },
+      testMatch: /llm-setup\.spec\.js/,
     },
   ],
   webServer: [
@@ -73,6 +87,15 @@ export default defineConfig({
     timeout: 120_000,
     stdout: "pipe",
     stderr: "pipe",
+    },
+    {
+      command: `${PYTHON} -m e2e_server ${SETUP_PORT} --auth --no-platform-model`,
+      cwd: "../..",
+      url: `http://127.0.0.1:${SETUP_PORT}/api/system/integrations`,
+      reuseExistingServer: false,
+      timeout: 120_000,
+      stdout: "pipe",
+      stderr: "pipe",
     },
     {
       command: `${PYTHON} -m e2e_server ${AUTH_PORT} --auth`,

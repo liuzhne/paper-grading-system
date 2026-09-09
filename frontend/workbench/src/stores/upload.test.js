@@ -346,3 +346,113 @@ describe("取消调度与刷新恢复", () => {
     expect(store.uploadedPaperIds).toEqual([]);
   });
 });
+
+describe("能力表迟到时的浏览器侧预检", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  it("能力表未到时先入队，到了之后补判并拒掉不合规的文件", async () => {
+    const store = useUploadStore();
+
+    // 用户手快：能力表还在路上就选了文件。此前这种情况下**所有文件一律放行**，
+    // 浏览器侧预检等于没有——一个 .txt 或一个超限大文件会一路走到上传。
+    store.stage([
+      { name: "good.docx", size: 2048 },
+      { name: "bad.txt", size: 16 },
+    ]);
+    expect(store.queue.map((e) => e.status)).toEqual(["pending", "pending"]);
+
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            upload: {
+              provider: "local",
+              max_size_mb: 50,
+              tus_threshold_mb: 6,
+              accepted_extensions: [".docx", ".pdf"],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    await store.loadCapabilities();
+
+    const byName = Object.fromEntries(store.queue.map((e) => [e.name, e]));
+    expect(byName["good.docx"].status).toBe("pending");
+    expect(byName["bad.txt"].status).toBe("rejected");
+    expect(byName["bad.txt"].error).toContain(".docx");
+  });
+
+  it("补判只碰仍在等待的条目，不改已上传或失败的", async () => {
+    const store = useUploadStore();
+    store.stage([{ name: "done.txt", size: 16 }]);
+    store.queue[0].status = "uploaded";
+
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            upload: {
+              provider: "local",
+              max_size_mb: 50,
+              tus_threshold_mb: 6,
+              accepted_extensions: [".docx"],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    await store.loadCapabilities();
+
+    // 已经传上去的东西不能因为一次迟到的能力表被标成 rejected。
+    expect(store.queue[0].status).toBe("uploaded");
+  });
+});
+
+describe("挂载顺序：清理不能发生在加载之后", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  it("能力表加载期间入队的文件不会被随后的 reset 清掉", async () => {
+    const store = useUploadStore();
+    let resolveCaps;
+    vi.stubGlobal(
+      "fetch",
+      () =>
+        new Promise((resolve) => {
+          resolveCaps = () =>
+            resolve(
+              new Response(
+                JSON.stringify({
+                  upload: {
+                    provider: "local",
+                    max_size_mb: 50,
+                    tus_threshold_mb: 6,
+                    accepted_extensions: [".docx"],
+                  },
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+              ),
+            );
+        }),
+    );
+
+    // 页面正确的做法是先清干净再加载。反过来的话，用户在等待期间选的文件
+    // 会被这次 reset 静默清掉——界面上文件凭空消失，没有任何解释。
+    store.reset();
+    const loading = store.loadCapabilities();
+    store.stage([{ name: "bad.txt", size: 16 }]);
+    resolveCaps();
+    await loading;
+
+    expect(store.queue).toHaveLength(1);
+    expect(store.queue[0].status).toBe("rejected");
+  });
+});

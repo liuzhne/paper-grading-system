@@ -76,7 +76,7 @@ def organization_scoped_models():
     return sorted(models, key=lambda model: model.__name__)
 
 
-def seed_all(*, with_auth=False):
+def seed_all(*, with_auth=False, with_platform_model=True):
     with SessionLocal() as session:
         user = User(
             username="e2e-seed",
@@ -92,6 +92,8 @@ def seed_all(*, with_auth=False):
         _seed_empty_draft_batch(session, rubric)
         if with_auth:
             _seed_identities(session, rubric)
+            if with_platform_model:
+                _seed_platform_llm(session)
         session.commit()
 
 
@@ -100,6 +102,27 @@ def seed_all(*, with_auth=False):
 E2E_PASSWORD = "e2e-Acceptance-1"
 
 SECOND_ORGANIZATION_ID = "00000000-0000-0000-0000-0000000000b2"
+
+
+def _seed_platform_llm(session):
+    """给验收环境配一个平台默认模型（D-028）。
+
+    不配的话，模型守卫会把每个登录用户直接送到「账户与连接」——那是**正确行为**，
+    但它会让 V01/V02/V10 全部挂在第一步。这里配上，等于模拟「管理员已经配好了」
+    这个正常状态；「未配置时确实被引导」由 `llm-setup.spec.js` 单独验证。
+
+    这个 key 是假的，验收里不会真的外呼：所有评分结果都是种子直接写进去的。
+    """
+    from backend.app.services import platform_llm
+
+    platform_llm.set_config(
+        session,
+        provider_type="openai_compatible",
+        base_url="https://acceptance.invalid/v1",
+        model_name="acceptance-model",
+        api_key="sk-acceptance-not-a-real-key",
+        configured_by="e2e-platform-admin",
+    )
 
 
 def _seed_identities(session, rubric):

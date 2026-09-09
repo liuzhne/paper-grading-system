@@ -533,6 +533,22 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 **改 `LLM_PROVIDER` 或 `PLATFORM_MANAGED_LLM_ENABLED` 都没有用**——受保护部署不再从
 环境变量取模型。`AUTH_ENABLED=false` 的本地开发仍走 env，所以本机跑不出这个错。
 
+### 11.7 浏览器验收：spec 与后端要对上
+
+验收现在有**三个后端**，各自的 spec 由 project 的 `testMatch` / `testIgnore` 决定：
+
+| project | 后端 | 覆盖 |
+|---|---|---|
+| `chromium` / `mobile` | `AUTH_ENABLED=false` | 主流程、窄屏 |
+| `auth` | `--auth`（已配平台模型） | V01/V02/V10 |
+| `llm-setup` | `--auth --no-platform-model` | 未配模型时的引导 |
+
+**新增 spec 必须同时加进默认 project 的 `testIgnore`**，否则它会被 `chromium` 也捡走、
+跑在错误的后端上——症状是同一个用例单跑通过、全跑失败，很容易被误读成不稳定。
+
+改完前端后**必须重建产物再跑验收**（`build_web_static.py --with-workbench`）：验收托管的
+是 `public/`，不是 Vite dev server。忘了重建同样表现为「代码明明改了却不生效」。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
@@ -541,6 +557,7 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-09 | 平台模型前端接入 | 新增 §11.7：三套验收后端与 spec 的对应关系，以及「新 spec 要加进 testIgnore」「改前端要重建产物」两个会被误读成不稳定的坑。未运行生产操作。 |
 | 2026-09-09 | 平台默认模型（V3-0a） | 新增 §11.6 排错条目：「尚未配置平台模型」是期望行为，改环境变量无效。操作基线 head 更新到 `0030_platform_llm_config`。未运行生产操作。 |
 | 2026-09-09 | v3 决策与三文档同步规则 | 三文档同步写入 CLAUDE.md 并加可机检门禁（`test_three_doc_contract.py`）；操作基线 head 更新到 `0029`。未运行生产操作。 |
 | 2026-09-08 | 入口切换上线与门禁修复 | 导出出口全量角色门控；取消应用内组织切换；旧 SPA 下线、`/register` `/reset-password` 由工作台承接；修 `MIGRATION_SEQUENCE` 过期与验收进程继承 `.env.local`。生产部署经 main 门禁执行。 |

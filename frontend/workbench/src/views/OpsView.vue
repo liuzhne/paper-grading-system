@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { useSessionStore } from "@/stores/session.js";
@@ -25,6 +25,56 @@ const errors = ref({});
 
 const canOrg = computed(() => session.can("view_organization_ops"));
 const canPlatform = computed(() => session.can("view_platform_ops"));
+
+// --- 平台默认模型（D-028）---------------------------------------------------
+//
+// 配置它等于决定「所有没绑 BYOK 的用户用哪个模型、花谁的钱」，所以只在平台
+// 管理员视图里出现。表单里的 key 只进不出：读接口从不回显它。
+const platformLlm = ref(null);
+const llmForm = reactive({
+  provider_type: "openai_compatible",
+  base_url: "",
+  model_name: "",
+  api_key: "",
+});
+const llmBusy = ref(false);
+const llmError = ref(null);
+const llmNotice = ref(null);
+
+async function loadPlatformLlm() {
+  if (!canPlatform.value) return;
+  try {
+    platformLlm.value = await api.get("/system/platform-llm");
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) platformLlm.value = null;
+  }
+}
+
+async function runLlmAction(action) {
+  llmBusy.value = true;
+  llmError.value = null;
+  llmNotice.value = null;
+  try {
+    if (action === "save") {
+      platformLlm.value = await api.post("/system/platform-llm", llmForm);
+      // 保存后立刻清掉表单里的明文 key，别让它留在内存与 DOM 里。
+      llmForm.api_key = "";
+      llmNotice.value = "已保存。所有未绑定自有连接的用户将使用该模型。";
+    } else if (action === "test") {
+      await api.post("/system/platform-llm/test", {});
+      llmNotice.value = "连接测试通过。";
+      await loadPlatformLlm();
+    } else if (action === "disable") {
+      platformLlm.value = await api.post("/system/platform-llm/disable", {});
+      llmNotice.value = "已停用。配置仍保留，可随时重新启用。";
+    }
+    await session.loadCapabilities();
+  } catch (err) {
+    llmError.value = err?.message || "操作失败，请稍后重试。";
+  } finally {
+    llmBusy.value = false;
+  }
+}
 /**
  * 两个区块都无权时，页面会是一片空白。
  *
@@ -60,6 +110,7 @@ onMounted(async () => {
     jobs.push(load("org", "/system/organization-readiness", orgReadiness));
   }
   if (canPlatform.value) {
+    jobs.push(loadPlatformLlm());
     jobs.push(load("platform", "/system/ops-readiness", platformReadiness));
   }
   await Promise.all(jobs);
@@ -124,6 +175,68 @@ onMounted(async () => {
       当前角色无权查看运维与质量视图。该页面限组织管理员与平台管理员；
       日常评分与复核入口不受影响。
     </p>
+
+    <!-- 平台默认模型 -->
+    <section v-if="canPlatform" class="card card-pad">
+      <h2 class="card-title">平台默认模型</h2>
+      <p class="card-note">
+        未绑定自有 AI 连接的用户会使用它。未配置时全站无法评分——这是刻意的：
+        没有模型时给出明确失败，好过悄悄产出假分数。
+      </p>
+
+      <p class="status-line">
+        <span v-if="!platformLlm || !platformLlm.configured" class="chip chip-warn">未配置</span>
+        <span v-else-if="platformLlm.status === 'disabled'" class="chip chip-warn">已停用</span>
+        <span v-else class="chip chip-ok">已启用</span>
+        <span v-if="platformLlm?.configured" class="faint mono">
+          {{ platformLlm.provider_type }} · {{ platformLlm.model_name }} · {{ platformLlm.key_masked }}
+        </span>
+      </p>
+      <p v-if="platformLlm?.configured" class="faint">
+        由 {{ platformLlm.configured_by }} 于 {{ platformLlm.configured_at }} 配置。
+      </p>
+
+      <form class="llm-form" @submit.prevent="runLlmAction('save')">
+        <label for="llm-provider">供应商类型</label>
+        <select id="llm-provider" v-model="llmForm.provider_type">
+          <option value="openai_compatible">OpenAI 兼容</option>
+          <option value="openai_responses">OpenAI Responses</option>
+        </select>
+
+        <label for="llm-base">Base URL</label>
+        <input id="llm-base" v-model="llmForm.base_url" type="url" required />
+
+        <label for="llm-model">模型名</label>
+        <input id="llm-model" v-model="llmForm.model_name" type="text" required />
+
+        <label for="llm-key">API Key</label>
+        <input id="llm-key" v-model="llmForm.api_key" type="password" autocomplete="off" required />
+        <p class="faint">保存后不再回显，只显示末四位。</p>
+
+        <div class="row-actions">
+          <button class="btn btn-primary" type="submit" :disabled="llmBusy">保存并启用</button>
+          <button
+            class="btn"
+            type="button"
+            :disabled="llmBusy || !platformLlm?.configured || platformLlm?.status === 'disabled'"
+            @click="runLlmAction('test')"
+          >
+            测试连接
+          </button>
+          <button
+            class="btn"
+            type="button"
+            :disabled="llmBusy || !platformLlm?.configured || platformLlm?.status === 'disabled'"
+            @click="runLlmAction('disable')"
+          >
+            停用
+          </button>
+        </div>
+      </form>
+
+      <p v-if="llmError" class="notice notice-danger" role="alert">{{ llmError }}</p>
+      <p v-else-if="llmNotice" class="notice" role="status">{{ llmNotice }}</p>
+    </section>
 
     <!-- 平台视图 -->
     <section v-if="canPlatform" class="card">

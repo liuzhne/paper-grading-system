@@ -72,6 +72,16 @@ def _llm_availability(db: Session, principal: CurrentPrincipal) -> dict:
 
     from backend.app.db.models import AIConnection
 
+    # 开发模式（`AUTH_ENABLED=false`）的模型来自环境变量——解析顺序里就是这么定的
+    # （D-028）。能力表漏算这条，本地开发与非鉴权验收会被前端守卫全数拦下，而那些
+    # 环境本来就能正常调用。
+    if not auth_active():
+        return {
+            "platform_model_available": True,
+            "has_own_connection": False,
+            "can_use_llm": True,
+        }
+
     platform_available = platform_llm.get_active_config(db) is not None
 
     has_own = False
@@ -284,7 +294,9 @@ def read_platform_llm(
     return platform_llm.masked_view(platform_llm.get_active_or_disabled(db))
 
 
-@router.put("/platform-llm")
+# 用 POST 而不是 PUT：语义是「写入或替换」，且前端 api 客户端只暴露
+# get/post/patch/del——为一个端点新增一种客户端方法，不如让端点用已有的动词。
+@router.post("/platform-llm")
 def write_platform_llm(
     payload: PlatformLLMConfigWrite,
     db: Session = Depends(get_db),

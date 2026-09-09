@@ -6,6 +6,8 @@
 
 import pytest
 
+from backend.app.core.config import settings
+
 from backend.app.tests.test_ops_permissions import _login_org_admin
 from backend.app.tests.test_ops_permissions import _login_platform_admin
 
@@ -48,14 +50,14 @@ def test_org_admin_cannot_read_the_platform_model(client, monkeypatch):
 def test_org_admin_cannot_configure_the_platform_model(client, monkeypatch):
     _login_org_admin(client, monkeypatch, "platform-llm-writer")
 
-    assert client.put(ENDPOINT, json=_payload()).status_code == 403
+    assert client.post(ENDPOINT, json=_payload()).status_code == 403
     assert client.post("%s/disable" % ENDPOINT).status_code == 403
 
 
 def test_configuring_stores_the_key_and_never_returns_it(client, monkeypatch):
     _login_platform_admin(client, monkeypatch)
 
-    response = client.put(ENDPOINT, json=_payload())
+    response = client.post(ENDPOINT, json=_payload())
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -71,9 +73,9 @@ def test_configuring_stores_the_key_and_never_returns_it(client, monkeypatch):
 
 def test_reconfiguring_replaces_instead_of_adding(client, monkeypatch):
     _login_platform_admin(client, monkeypatch)
-    client.put(ENDPOINT, json=_payload())
+    client.post(ENDPOINT, json=_payload())
 
-    client.put(ENDPOINT, json=_payload(model_name="second-model", api_key="sk-second-key-9999"))
+    client.post(ENDPOINT, json=_payload(model_name="second-model", api_key="sk-second-key-9999"))
 
     body = client.get(ENDPOINT).json()
     assert body["model_name"] == "second-model"
@@ -87,7 +89,7 @@ def test_reconfiguring_replaces_instead_of_adding(client, monkeypatch):
 
 def test_disabling_stops_serving_but_keeps_the_record(client, monkeypatch):
     _login_platform_admin(client, monkeypatch)
-    client.put(ENDPOINT, json=_payload())
+    client.post(ENDPOINT, json=_payload())
 
     disabled = client.post("%s/disable" % ENDPOINT)
 
@@ -103,7 +105,7 @@ def test_who_configured_it_is_recorded(client, monkeypatch):
     """「谁把平台模型换了」必须可追溯——这正是从环境变量搬过来的理由之一。"""
     _login_platform_admin(client, monkeypatch)
 
-    client.put(ENDPOINT, json=_payload())
+    client.post(ENDPOINT, json=_payload())
 
     body = client.get(ENDPOINT).json()
     assert body["configured_by"]
@@ -113,7 +115,7 @@ def test_who_configured_it_is_recorded(client, monkeypatch):
 def test_an_unsupported_provider_is_rejected(client, monkeypatch):
     _login_platform_admin(client, monkeypatch)
 
-    response = client.put(ENDPOINT, json=_payload(provider_type="anthropic_messages"))
+    response = client.post(ENDPOINT, json=_payload(provider_type="anthropic_messages"))
 
     assert response.status_code == 422
 
@@ -122,7 +124,7 @@ def test_a_private_base_url_is_rejected(client, monkeypatch):
     """与 BYOK 同一条 SSRF 边界，不能因为是平台配置就放行。"""
     _login_platform_admin(client, monkeypatch)
 
-    response = client.put(ENDPOINT, json=_payload(base_url="http://169.254.169.254/latest"))
+    response = client.post(ENDPOINT, json=_payload(base_url="http://169.254.169.254/latest"))
 
     assert response.status_code == 422
 
@@ -148,7 +150,7 @@ def test_capabilities_report_no_model_on_a_fresh_deployment(client, monkeypatch)
 def test_configuring_the_platform_model_unblocks_everyone(client, monkeypatch):
     """平台配好后，没绑 BYOK 的用户也能正常使用（用户决定，2026-09-09）。"""
     _login_platform_admin(client, monkeypatch)
-    client.put(ENDPOINT, json=_payload())
+    client.post(ENDPOINT, json=_payload())
 
     body = client.get("/api/system/capabilities").json()
 
@@ -158,7 +160,7 @@ def test_configuring_the_platform_model_unblocks_everyone(client, monkeypatch):
 
 def test_disabling_the_platform_model_blocks_again(client, monkeypatch):
     _login_platform_admin(client, monkeypatch)
-    client.put(ENDPOINT, json=_payload())
+    client.post(ENDPOINT, json=_payload())
     client.post("%s/disable" % ENDPOINT)
 
     body = client.get("/api/system/capabilities").json()
@@ -212,3 +214,20 @@ def test_a_disabled_connection_does_not_count(client, monkeypatch):
 
     assert body["llm"]["has_own_connection"] is False
     assert body["llm"]["can_use_llm"] is False
+
+
+def test_development_mode_reports_the_environment_model_as_available(
+    client, monkeypatch
+):
+    """`AUTH_ENABLED=false` 时模型来自环境变量，能力表必须承认这一点。
+
+    否则本地开发与非鉴权验收会被前端的模型守卫全数拦下——而那些环境本来就能
+    正常调 Mock。解析顺序里开发模式走 env 是既定行为（D-028），能力表漏算它
+    就与实际能力对不上。
+    """
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "mock")
+
+    body = client.get("/api/system/capabilities").json()
+
+    assert body["llm"]["can_use_llm"] is True

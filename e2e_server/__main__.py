@@ -19,13 +19,20 @@ import tempfile
 E2E_USERNAME = "e2e-operator"
 E2E_AUTH_PASSWORD = "e2e-Acceptance-Local-1"
 E2E_AUTH_SECRET = "e2e-acceptance-secret-not-for-production-0123456789"
+#: 验收种子要写一条平台模型配置，加密需要它。一次性环境专用，库建在 tmp 下、
+#: 进程退出即弃；生产密钥不出现在仓库里。
+E2E_BYOK_MASTER_KEY = "e2e-acceptance-byok-master-key-not-for-production"
 
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8099
     # 第二个参数打开鉴权模式：V01/V02/V10 要的是真实登录与多组织，开发模式的
     # 「放行一切」测不出任何边界。
-    with_auth = len(sys.argv) > 2 and sys.argv[2] == "--auth"
+    flags = set(sys.argv[2:])
+    with_auth = "--auth" in flags
+    # 「平台没配模型」是 D-028 的初始状态，需要单独一个后端来验证引导行为：
+    # 主鉴权后端配了模型（否则 V01/V02/V10 全挂在第一步），验不了这一条。
+    without_platform_model = "--no-platform-model" in flags
     workdir = tempfile.mkdtemp(prefix="pgs-e2e-")
 
     # 必须在导入 backend 之前设置：settings 在导入期即固化。
@@ -48,6 +55,7 @@ def main() -> None:
             "AUTH_USERNAME": E2E_USERNAME,
             "AUTH_PASSWORD": E2E_AUTH_PASSWORD,
             "AUTH_SECRET": E2E_AUTH_SECRET,
+            "BYOK_MASTER_KEY": E2E_BYOK_MASTER_KEY,
             "LLM_PROVIDER": "mock",
             "SHEET_WRITER_PROVIDER": "mock",
             "LLM_DEBUG_LOG_ENABLED": "false",
@@ -64,7 +72,7 @@ def main() -> None:
 
     from e2e_server.seed import seed_all
 
-    seed_all(with_auth=with_auth)
+    seed_all(with_auth=with_auth, with_platform_model=not without_platform_model)
 
     from backend.app.main import app
 

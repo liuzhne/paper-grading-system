@@ -112,8 +112,10 @@ async function onStart() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadRubrics(), upload.loadCapabilities()]);
+  // 先清干净再加载。反过来的话，用户在这两个请求返回之前选的文件会被这次
+  // reset 静默清掉——界面上文件凭空消失，没有任何解释。
   upload.reset();
+  await Promise.all([loadRubrics(), upload.loadCapabilities()]);
 
   // 从草稿继续：刷新会丢掉内存里的队列，但材料已经在服务端归档了。不恢复就会
   // 让用户重新选一遍并重传，产生重复对象（计划 §5-E「已归档的文件不重传」）。

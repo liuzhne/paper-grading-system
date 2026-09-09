@@ -43,6 +43,9 @@ export const useUploadStore = defineStore("upload", () => {
       maxSizeMb.value = caps.upload.max_size_mb;
       tusThresholdMb.value = caps.upload.tus_threshold_mb;
       acceptedExtensions.value = caps.upload.accepted_extensions;
+      // 能力表可能晚于用户选文件到达。不补判的话，那一批文件等于**没过浏览器侧
+      // 预检**——一个 .txt 或一个超限大文件会一路走到上传才被服务端拒绝。
+      recheckPending();
     } catch (err) {
       if (!(err instanceof StaleContextError)) provider.value = null;
     }
@@ -51,6 +54,33 @@ export const useUploadStore = defineStore("upload", () => {
   function extensionOf(name) {
     const at = name.lastIndexOf(".");
     return at === -1 ? "" : name.slice(at).toLowerCase();
+  }
+
+  /** 按当前已知的上传能力判定一个条目。能力未知时不下结论。 */
+  function applyPrecheck(entry) {
+    const extension = extensionOf(entry.name);
+    if (
+      acceptedExtensions.value.length &&
+      !acceptedExtensions.value.includes(extension)
+    ) {
+      entry.status = "rejected";
+      entry.error = `不支持的文件类型 ${extension || "（无扩展名）"}；仅接受 ${acceptedExtensions.value.join("、")}。`;
+      return;
+    }
+    if (maxSizeMb.value && entry.size > maxSizeMb.value * 1024 * 1024) {
+      entry.status = "rejected";
+      entry.error = `文件超过 ${maxSizeMb.value} MB 上限。`;
+    }
+  }
+
+  /** 能力表到达后补判**仍在等待**的条目。
+
+   * 只碰 `pending`：已上传或已失败的条目不能因为一次迟到的能力表被改写。
+   */
+  function recheckPending() {
+    for (const entry of queue.value) {
+      if (entry.status === "pending") applyPrecheck(entry);
+    }
   }
 
   /** 浏览器侧预检；服务端仍会按配置复核，这里只是尽早给出反馈。 */
@@ -66,14 +96,7 @@ export const useUploadStore = defineStore("upload", () => {
         error: null,
         paperId: null,
       };
-      const extension = extensionOf(file.name);
-      if (acceptedExtensions.value.length && !acceptedExtensions.value.includes(extension)) {
-        entry.status = "rejected";
-        entry.error = `不支持的文件类型 ${extension || "（无扩展名）"}；仅接受 ${acceptedExtensions.value.join("、")}。`;
-      } else if (maxSizeMb.value && size > maxSizeMb.value * 1024 * 1024) {
-        entry.status = "rejected";
-        entry.error = `文件超过 ${maxSizeMb.value} MB 上限。`;
-      }
+      applyPrecheck(entry);
       return entry;
     });
     queue.value = [...queue.value, ...staged];

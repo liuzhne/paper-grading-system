@@ -1,10 +1,18 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
+import { useRoute } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
+import { modelSetupNotice } from "@/router/llm-gate.js";
 import { useSessionStore } from "@/stores/session.js";
 
 const session = useSessionStore();
+const route = useRoute();
+
+// 被模型守卫送过来的：说清为什么在这里，以及两条出路分别在哪。
+const modelSetupPrompt = computed(() =>
+  route.query.setup === "model" ? modelSetupNotice(session) : null,
+);
 
 const ROLES = [
   { value: "member", label: "成员" },
@@ -286,6 +294,10 @@ onMounted(async () => {
         在当前组织内管理成员与私有 AI 连接。密钥仅通过 HTTPS 发往本系统后端，浏览器不会直接请求模型厂商。
       </p>
     </header>
+
+    <p v-if="modelSetupPrompt" class="notice notice-warn" role="status">
+      {{ modelSetupPrompt }}
+    </p>
 
     <!-- 当前身份 -->
     <section class="card card-pad">
