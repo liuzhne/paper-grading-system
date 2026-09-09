@@ -389,3 +389,54 @@ test.describe("V3-5 工作区布局", () => {
     await page.getByRole("button", { name: "保存" }).click({ timeout: 5000 });
   });
 });
+
+test.describe("全页视觉契约", () => {
+  const PAGES = [
+    ["/workbench/", "工作台"],
+    ["/workbench/tasks", "评分任务"],
+    ["/workbench/tasks/new", "新建评分任务"],
+    ["/workbench/review", "结果复核"],
+    ["/workbench/rubrics", "评分标准"],
+    ["/workbench/exports", "输出中心"],
+    ["/workbench/account", "账户与连接"],
+    ["/workbench/ops", "运维与质量"],
+  ];
+
+  for (const [path, title] of PAGES) {
+    test(`${title}：表单控件都带设计系统的类`, async ({ page }) => {
+      await page.goto(path);
+      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+
+      /*
+       * 源码契约查的是模板文本，查不到运行时才出现的控件（v-if 展开的面板、
+       * 条件渲染的区块）。这里在真实 DOM 上再查一遍。
+       */
+      const bare = await page.evaluate(() => {
+        const offenders = [];
+        for (const el of document.querySelectorAll("input, select, textarea")) {
+          if (["radio", "checkbox", "file"].includes(el.type)) continue;
+          if (!/\b(input|select)\b/.test(el.className || "")) {
+            offenders.push(`${el.tagName}#${el.id || "(no id)"}`);
+          }
+        }
+        return offenders;
+      });
+
+      expect(bare).toEqual([]);
+    });
+
+    test(`${title}：没有横向溢出`, async ({ page }) => {
+      await page.goto(path);
+      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+
+      // 控件宽度失控最典型的表现就是把页面撑出横向滚动条。
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      );
+
+      expect(overflow).toBeLessThanOrEqual(1);
+    });
+  }
+});
