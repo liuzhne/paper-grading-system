@@ -1938,6 +1938,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system/platform-llm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Platform Llm
+         * @description 脱敏读。**永远不回显密钥**，连密文字段也不出现。
+         */
+        get: operations["read_platform_llm_api_system_platform_llm_get"];
+        /**
+         * Write Platform Llm
+         * @description 写入或替换。单例——再配一次是替换，不是新增。
+         */
+        put: operations["write_platform_llm_api_system_platform_llm_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system/platform-llm/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable Platform Llm
+         * @description 停用但保留配置——出问题时不必先删再重配。
+         */
+        post: operations["disable_platform_llm_api_system_platform_llm_disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system/platform-llm/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Platform Llm
+         * @description 对已保存的配置试连。失败要记下来，别让页面只显示一个红字。
+         */
+        post: operations["test_platform_llm_api_system_platform_llm_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/evaluation-batches": {
         parameters: {
             query?: never;
@@ -2850,6 +2914,7 @@ export interface components {
             /** Auth Enforced */
             auth_enforced: boolean;
             export: components["schemas"]["CapabilityExport"];
+            llm: components["schemas"]["CapabilityLLM"];
             /** Organization Id */
             organization_id?: string | null;
             /** Organization Role */
@@ -2883,6 +2948,20 @@ export interface components {
             offline_mode: boolean;
             /** Sheets Available */
             sheets_available: boolean;
+        };
+        /**
+         * CapabilityLLM
+         * @description 这个用户现在能不能调模型（D-027、D-028）。
+         *
+         *     前端据此决定是否把用户引导去配置 BYOK。两条来源任一可用即可，**停用的都不算**。
+         */
+        CapabilityLLM: {
+            /** Can Use Llm */
+            can_use_llm: boolean;
+            /** Has Own Connection */
+            has_own_connection: boolean;
+            /** Platform Model Available */
+            platform_model_available: boolean;
         };
         /**
          * CapabilityUpload
@@ -3384,6 +3463,26 @@ export interface components {
             password_confirmation: string;
             /** Token */
             token: string;
+        };
+        /**
+         * PlatformLLMConfigWrite
+         * @description 平台默认模型的写入请求（D-028）。
+         *
+         *     `api_key` 只进不出：读接口返回脱敏视图，永远不回显它。
+         */
+        PlatformLLMConfigWrite: {
+            /** Api Key */
+            api_key: string;
+            /** Base Url */
+            base_url: string;
+            /** Model Name */
+            model_name: string;
+            /** Provider Options */
+            provider_options?: {
+                [key: string]: unknown;
+            } | null;
+            /** Provider Type */
+            provider_type: string;
         };
         /** RegistrationRequest */
         RegistrationRequest: {
@@ -8347,6 +8446,142 @@ export interface operations {
         };
     };
     organization_readiness_api_system_organization_readiness_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_platform_llm_api_system_platform_llm_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    write_platform_llm_api_system_platform_llm_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformLLMConfigWrite"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disable_platform_llm_api_system_platform_llm_disable_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_platform_llm_api_system_platform_llm_test_post: {
         parameters: {
             query?: never;
             header?: {

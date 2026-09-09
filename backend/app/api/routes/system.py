@@ -12,12 +12,18 @@ from backend.app.api.deps import require_selected_organization
 from backend.app.core.config import settings
 from backend.app.db.session import get_db
 from backend.app.schemas.system import CapabilitiesRead
+from backend.app.schemas.system import PlatformLLMConfigWrite
 from backend.app.services.auth import auth_active
 from backend.app.services.deployment.readiness import build_ops_readiness
 from backend.app.services.deployment.readiness import build_organization_readiness
 from backend.app.services.llm.diagnostics import check_connectivity
 from backend.app.services.llm.factory import LOCAL_PROVIDERS
 from backend.app.services.llm.factory import provider_network_scope
+from backend.app.services import platform_llm
+from backend.app.services.ai_connections import verify_connection_runtime
+from backend.app.services.auth import audit
+from backend.app.db.models import utcnow
+from fastapi import HTTPException
 from backend.app.services.offline import network_touchpoints
 from backend.app.services.offline import offline_ready
 from backend.app.services.llm_observability import observability_status
@@ -55,8 +61,40 @@ def organization_readiness(
     return build_organization_readiness(db, organization_id)
 
 
+def _llm_availability(db: Session, principal: CurrentPrincipal) -> dict:
+    """这个用户现在到底能不能调模型（D-027、D-028）。
+
+    两条来源任一可用即可：平台管理员配了平台默认模型，或用户自己绑了 BYOK 连接。
+    **停用的都不算**——放行到一个必然失败的流程比直接挡住更糟。
+    """
+
+    from sqlalchemy import select
+
+    from backend.app.db.models import AIConnection
+
+    platform_available = platform_llm.get_active_config(db) is not None
+
+    has_own = False
+    if principal.user_id:
+        query = select(AIConnection.id).where(
+            AIConnection.owner_id == principal.user_id,
+            AIConnection.status == "active",
+            AIConnection.deleted_at.is_(None),
+        )
+        has_own = db.scalar(query) is not None
+
+    return {
+        "platform_model_available": platform_available,
+        "has_own_connection": has_own,
+        "can_use_llm": platform_available or has_own,
+    }
+
+
 @router.get("/capabilities", response_model=CapabilitiesRead)
-def capabilities(principal: CurrentPrincipal = Depends(current_principal)):
+def capabilities(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
     """鉴权后的角色能力与部署能力投影（前端 v2 计划 §2.1、§6）。
 
     前端只用它决定导航与控件可见性；**真正的权限一律由各端点服务端执行**。
@@ -82,6 +120,9 @@ def capabilities(principal: CurrentPrincipal = Depends(current_principal)):
         "organization_role": principal.organization_role,
         "platform_role": principal.platform_role,
         "auth_enforced": auth_active(),
+        # 前端据此决定是否把用户引导去配置 BYOK。没有这个字段，前端只能等某次
+        # 调用炸了才知道用不了——那时用户已经上传完材料了。
+        "llm": _llm_availability(db, principal),
         "abilities": {
             # 组织视图需要已选定组织；缺上下文时端点会拒绝，导航也不应出现。
             "view_organization_ops": is_org_admin and has_org_context,
@@ -225,3 +266,98 @@ def _llm_status(provider):
         "retry_429_delay_seconds": settings.LLM_429_RETRY_DELAY_SECONDS,
         "api_key_configured": False,
     }
+
+
+# --- 平台默认模型（D-028） -------------------------------------------------
+#
+# 配置它等于决定「所有没绑 BYOK 的用户用哪个模型、花谁的钱」，因此限平台管理员。
+# 组织管理员走不到这里：这条配置跨组织生效。
+
+
+@router.get("/platform-llm")
+def read_platform_llm(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """脱敏读。**永远不回显密钥**，连密文字段也不出现。"""
+    require_platform_admin(principal)
+    return platform_llm.masked_view(platform_llm.get_active_or_disabled(db))
+
+
+@router.put("/platform-llm")
+def write_platform_llm(
+    payload: PlatformLLMConfigWrite,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """写入或替换。单例——再配一次是替换，不是新增。"""
+    require_platform_admin(principal)
+    try:
+        config = platform_llm.set_config(
+            db,
+            provider_type=payload.provider_type,
+            base_url=payload.base_url,
+            model_name=payload.model_name,
+            api_key=payload.api_key,
+            configured_by=principal.user_id or "unknown",
+            provider_options=payload.provider_options,
+        )
+    except ValueError as exc:
+        # 供应商不受支持、key 缺失或过短、base_url 越界都算入参问题。
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit(
+        db,
+        "platform_llm.configured",
+        actor_id=principal.user_id,
+        metadata={
+            "provider_type": config.provider_type,
+            "model_name": config.model_name,
+            "key_version": config.key_version,
+        },
+    )
+    db.commit()
+    return platform_llm.masked_view(platform_llm.get_active_or_disabled(db))
+
+
+@router.post("/platform-llm/test")
+def test_platform_llm(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """对已保存的配置试连。失败要记下来，别让页面只显示一个红字。"""
+    require_platform_admin(principal)
+    config = platform_llm.get_active_config(db)
+    if config is None:
+        raise HTTPException(status_code=404, detail="尚未配置平台默认模型。")
+    try:
+        verified = verify_connection_runtime(platform_llm.runtime_for(config))
+    except ValueError as exc:
+        config.last_error_code = "PLATFORM_LLM_TEST_FAILED"
+        audit(
+            db,
+            "platform_llm.verification_failed",
+            actor_id=principal.user_id,
+            metadata={"error_code": config.last_error_code},
+        )
+        db.commit()
+        raise HTTPException(status_code=400, detail="平台模型连接测试失败。") from exc
+    config.last_verified_at = utcnow()
+    config.last_error_code = None
+    audit(db, "platform_llm.verified", actor_id=principal.user_id, metadata={})
+    db.commit()
+    return {**verified, "status": "verified"}
+
+
+@router.post("/platform-llm/disable")
+def disable_platform_llm(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """停用但保留配置——出问题时不必先删再重配。"""
+    require_platform_admin(principal)
+    config = platform_llm.disable_config(db, actor_id=principal.user_id or "unknown")
+    if config is None:
+        raise HTTPException(status_code=404, detail="尚未配置平台默认模型。")
+    audit(db, "platform_llm.disabled", actor_id=principal.user_id, metadata={})
+    db.commit()
+    return platform_llm.masked_view(config)

@@ -79,6 +79,15 @@ def get_active_config(session) -> PlatformLLMConfig | None:
     return config
 
 
+def get_active_or_disabled(session) -> PlatformLLMConfig | None:
+    """管理页要看到的那一行：包括已停用的。
+
+    与 `get_active_config` 分开——服务解析必须只认 active，而管理页需要看到
+    「配过但停用了」这个状态，否则停用后页面看起来像从没配过。
+    """
+    return _existing(session)
+
+
 def set_config(
     session,
     *,
@@ -193,6 +202,7 @@ __all__ = [
     "disable_config",
     "encrypt_api_key",
     "get_active_config",
+    "get_active_or_disabled",
     "masked_view",
     "runtime_for",
     "set_config",

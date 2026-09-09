@@ -7,6 +7,7 @@ webapp URL 或平台敏感配置都不得进入这些模型。
 from typing import Optional
 
 from pydantic import BaseModel
+from pydantic import Field
 
 
 class CapabilityAbilities(BaseModel):
@@ -34,12 +35,37 @@ class CapabilityExport(BaseModel):
     offline_mode: bool
 
 
+class CapabilityLLM(BaseModel):
+    """这个用户现在能不能调模型（D-027、D-028）。
+
+    前端据此决定是否把用户引导去配置 BYOK。两条来源任一可用即可，**停用的都不算**。
+    """
+
+    platform_model_available: bool
+    has_own_connection: bool
+    can_use_llm: bool
+
+
 class CapabilitiesRead(BaseModel):
     user_id: str
     organization_id: Optional[str] = None
     organization_role: Optional[str] = None
     platform_role: str
     auth_enforced: bool
+    llm: CapabilityLLM
     abilities: CapabilityAbilities
     upload: CapabilityUpload
     export: CapabilityExport
+
+
+class PlatformLLMConfigWrite(BaseModel):
+    """平台默认模型的写入请求（D-028）。
+
+    `api_key` 只进不出：读接口返回脱敏视图，永远不回显它。
+    """
+
+    provider_type: str
+    base_url: str
+    model_name: str = Field(min_length=1)
+    api_key: str = Field(min_length=1)
+    provider_options: dict | None = None
