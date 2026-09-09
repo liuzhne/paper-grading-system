@@ -214,7 +214,12 @@ onMounted(async () => {
             class="rubric"
             :class="{ selected: form.rubric_id === rubric.id }"
           >
-            <input v-model="form.rubric_id" type="radio" :value="rubric.id" />
+            <input
+              v-model="form.rubric_id"
+              class="rubric-radio"
+              type="radio"
+              :value="rubric.id"
+            />
             <span>
               <span class="rubric-name">{{ rubric.name }}</span>
               <span class="chip chip-ok rubric-chip">{{ rubric.version }} 已发布</span>
@@ -438,6 +443,23 @@ onMounted(async () => {
 .rubric.selected {
   border-color: var(--accent);
   background: var(--accent-surface);
+}
+
+/* 设计稿用卡片表达可选项：选中靠边框与底色，没有系统圆点。卡片外面一圈边框、
+   里面再留一个原生 radio，两种选中语义叠在一起，看起来突兀。
+   控件仍然存在（键盘与读屏要靠它），只是从视觉上移除。 */
+.rubric-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 焦点要看得见：视觉上藏掉控件之后，键盘用户需要卡片自己给出焦点态。 */
+.rubric:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-surface);
 }
 
 .muted-rubric {

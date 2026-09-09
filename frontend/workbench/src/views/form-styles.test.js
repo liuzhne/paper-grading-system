@@ -142,3 +142,42 @@ describe("模板里引用的类必须真实存在", () => {
     expect([...new Set(offenders)]).toEqual([]);
   });
 });
+
+describe("原生单选/复选控件", () => {
+  /*
+   * 设计稿里没有原生 radio / checkbox：可选项用卡片表达，选中靠边框与底色。
+   * 卡片外面套一圈边框、里面又留一个系统圆点，两种选中语义叠在一起，看起来突兀。
+   *
+   * 真要用原生控件时，必须自己给出样式——设计系统里没有它们的规则，裸用就会
+   * 跟着操作系统走，和周围的圆角、配色都对不上。
+   */
+  function stylesheetAndScoped(source) {
+    const dir = path.resolve(import.meta.dirname, "..", "styles");
+    const global = fs
+      .readdirSync(dir)
+      .filter((name) => name.endsWith(".css"))
+      .map((name) => fs.readFileSync(path.join(dir, name), "utf8"))
+      .join("\n");
+    const styleAt = source.indexOf("<style");
+    return global + (styleAt === -1 ? "" : source.slice(styleAt));
+  }
+
+  it("用到原生 radio/checkbox 的地方必须自己给样式", () => {
+    const offenders = [];
+    for (const [name, source] of vueFiles()) {
+      if (AUTH_PAGES.has(name)) continue;
+      const template = templateOf(source);
+      if (!/type="(radio|checkbox)"/.test(template)) continue;
+      const styles = stylesheetAndScoped(source);
+      // 至少要有一条针对它们的规则，而不是完全交给浏览器默认外观。
+      // 属性选择器或专门的类都算——重点是「有人管过它的样子」。
+      const attributeRule = /input\[type=["']?(radio|checkbox)/.test(styles);
+      const classRule = [...template.matchAll(/type="(radio|checkbox)"/g)].every(
+        () => /\.[\w-]*(radio|checkbox)[\w-]*\s*\{/.test(styles),
+      );
+      if (!attributeRule && !classRule) offenders.push(name);
+    }
+
+    expect(offenders).toEqual([]);
+  });
+});

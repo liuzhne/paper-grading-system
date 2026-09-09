@@ -346,6 +346,11 @@ V3 新增的表单区块用了裸 `<input>` / `<select>` / `<textarea>` 与 `<la
 规范：`.field` 包裹 + `.field-label` 作标签 + `.input` / `.select` 作控件；
 并排字段用 `.form-grid`，按钮行用 `.form-actions`；页头带主操作用 `.page-head-row`。
 
+**设计稿里没有原生 radio / checkbox**：可选项用卡片表达，选中靠边框与底色。评分标准
+选择原先是「卡片外一圈边框 + 卡片内一个系统圆点」，两种选中语义叠在一起。控件保留
+（键盘与读屏要靠它），只从视觉上移除，并给卡片补 `:focus-within` 焦点态——藏掉控件
+之后，键盘用户需要卡片自己指示焦点。
+
 **构建与 typecheck 都不会报这类问题**，`form-styles.test.js` 用源码契约兜住：
 裸控件、裸 `<label for>`、以及引用了不存在的布局类（这次的 `.page-head-row` 就是
 凭空写的，按钮因此脱离页头跑到内容区上方）。
