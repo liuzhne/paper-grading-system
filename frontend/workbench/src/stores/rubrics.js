@@ -107,6 +107,30 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return api.post(`/rubrics/${rubricId}/publish`, body);
   }
 
+  /** 最近一次 AI 起草的结果。起草只是建议，确认之前不改变任何已发布内容。 */
+  const lastDraft = ref({ items: [] });
+
+  /**
+   * AI 起草缺失的扣分细则（D-027）。
+   *
+   * **必须带上用户自己的连接**：留空会走平台默认，而平台是 mock 时得到的是编出来
+   * 的规则，却以「AI 起草 · 待确认」呈现——确认之后它们进入正式发布的评分标准。
+   *
+   * @param {string} rubricId
+   * @param {{criteria: any[], connectionId: string|null}} input
+   */
+  async function draftRules(rubricId, input) {
+    if (!input.connectionId) {
+      throw new Error("请先选择用于起草的 AI 连接。");
+    }
+    const result = await api.post(`/rubrics/${rubricId}/draft-deduction-rules`, {
+      criteria: input.criteria,
+      ai_connection_id: input.connectionId,
+    });
+    lastDraft.value = { items: result.items || [] };
+    return result;
+  }
+
   /**
    * 执行草稿：编译产物、阻断项与歧义。三步详情的第 2、3 步都读它。
    *
@@ -127,5 +151,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
     clone,
     publish,
     loadExecutionDraft,
+    lastDraft,
+    draftRules,
   };
 });

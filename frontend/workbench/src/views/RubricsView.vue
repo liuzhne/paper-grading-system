@@ -4,6 +4,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { api, StaleContextError } from "@/api/client.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
+import { RouterLink } from "vue-router";
 
 /**
  * 评分标准（前端 v2 计划 §2、§6）。
@@ -58,6 +59,43 @@ async function submitImport() {
     importError.value = err instanceof Error ? err.message : "导入失败";
   } finally {
     importBusy.value = false;
+  }
+}
+
+// --- AI 起草缺失细则（D-027：必须绑自己的连接）--------------------------
+const connections = ref([]);
+const draftConnection = ref("");
+const draftBusy = ref(false);
+const draftError = ref(null);
+
+async function loadConnections() {
+  try {
+    connections.value = (await api.get("/ai-connections")) || [];
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) connections.value = [];
+  }
+}
+
+async function generateMissingRules() {
+  draftBusy.value = true;
+  draftError.value = null;
+  try {
+    await store.draftRules(selected.value, {
+      // 只给缺规则的那些评分项：AI 补缺失部分，用户原文表述保留。
+      criteria: (coverage.value?.criteria || [])
+        .filter((item) => item.status === "missing")
+        .map((item) => ({
+          code: item.code,
+          name: item.name,
+          max_score: item.max_score,
+        })),
+      connectionId: draftConnection.value || null,
+    });
+    await loadCoverage(selected.value);
+  } catch (err) {
+    draftError.value = err instanceof Error ? err.message : "起草失败";
+  } finally {
+    draftBusy.value = false;
   }
 }
 
@@ -178,6 +216,7 @@ onMounted(async () => {
   await loadRubrics();
   await loadCoverage(selected.value);
   await loadDraft();
+  await loadConnections();
 });
 </script>
 
@@ -348,6 +387,35 @@ onMounted(async () => {
               <div><dt>待确认</dt><dd class="mono warn">{{ coverage.pending_review_count }}</dd></div>
               <div><dt>阻断</dt><dd class="mono danger">{{ coverage.blocking_count }}</dd></div>
             </dl>
+            <div v-if="blocking.length" class="draft-box">
+              <label for="draft-conn">用哪个 AI 连接起草</label>
+              <select id="draft-conn" v-model="draftConnection">
+                <option value="">请选择</option>
+                <option v-for="item in connections" :key="item.id" :value="item.id">
+                  {{ item.name }} · {{ item.model_name }}
+                </option>
+              </select>
+              <p v-if="!connections.length" class="notice notice-warn">
+                你还没有可用的 AI 连接。请先在
+                <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink>
+                绑定一个。
+              </p>
+              <button
+                class="btn btn-primary"
+                type="button"
+                :disabled="draftBusy || !draftConnection"
+                @click="generateMissingRules"
+              >
+                {{ draftBusy ? "起草中…" : `生成全部缺失细则（${blocking.length}）` }}
+              </button>
+              <p class="faint">
+                AI 只补缺失部分，你已写明的表述会保留。起草结果默认待确认。
+              </p>
+              <p v-if="draftError" class="notice notice-danger" role="alert">
+                {{ draftError }}
+              </p>
+            </div>
+
             <p v-if="pending.length" class="faint field-hint">
               未确认的 AI 规则不会进入可执行评分版本；确认信息会记录确认人、时间与生成来源。
             </p>

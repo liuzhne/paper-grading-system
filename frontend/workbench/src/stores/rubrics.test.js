@@ -170,3 +170,56 @@ describe("发布：编译产物 + 分享范围", () => {
     ).rejects.toThrow(/平台管理员/);
   });
 });
+
+describe("AI 起草缺失扣分细则", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  it("必须带上用户自己的连接，不允许留空回落", async () => {
+    const store = useRubricsStore();
+
+    // 不带连接调用会走平台默认；平台是 mock 时得到的是编出来的扣分规则，
+    // 却以「AI 起草 · 待确认」呈现，确认后进入正式标准（D-027）。
+    await expect(
+      store.draftRules("r1", { criteria: [{ code: "T01" }], connectionId: null }),
+    ).rejects.toThrow(/连接/);
+  });
+
+  it("带连接时把 id 发给服务端", async () => {
+    let sent = null;
+    vi.stubGlobal("fetch", (url, init) => {
+      sent = JSON.parse(init.body);
+      return jsonResponse({ items: [] });
+    });
+    const store = useRubricsStore();
+
+    await store.draftRules("r1", {
+      criteria: [{ code: "T01" }],
+      connectionId: "conn-1",
+    });
+
+    expect(sent.ai_connection_id).toBe("conn-1");
+  });
+
+  it("起草结果标记为待确认，不直接进入可执行版本", async () => {
+    vi.stubGlobal("fetch", () =>
+      jsonResponse({
+        items: [
+          { criterion_code: "T01", rules: [{ issue: "缺少方法说明", deduct: 3 }] },
+        ],
+      }),
+    );
+    const store = useRubricsStore();
+
+    const result = await store.draftRules("r1", {
+      criteria: [{ code: "T01" }],
+      connectionId: "conn-1",
+    });
+
+    // 起草只是建议：确认之前不能改变任何已发布内容。
+    expect(result.items[0].criterion_code).toBe("T01");
+    expect(store.lastDraft.items).toHaveLength(1);
+  });
+});

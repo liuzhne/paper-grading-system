@@ -299,3 +299,22 @@ test.describe("V3-4 新建任务入口", () => {
     await expect(page.getByRole("heading", { name: "AI 连接" })).toHaveCount(0);
   });
 });
+
+
+test.describe("V3-2 AI 起草缺失细则", () => {
+  test("有阻断项时给出起草入口，且必须先选连接", async ({ page }) => {
+    await page.goto("/workbench/rubrics");
+
+    const button = page.getByRole("button", { name: /生成全部缺失细则/ });
+    await expect(button).toBeVisible();
+    // 不选连接就起草会走平台默认；平台是 mock 时得到的是编出来的规则，
+    // 却以「AI 起草 · 待确认」呈现，确认后进入正式标准（D-027）。
+    await expect(button).toBeDisabled();
+  });
+
+  test("说明 AI 只补缺失部分，用户原文保留", async ({ page }) => {
+    await page.goto("/workbench/rubrics");
+
+    await expect(page.getByText(/AI 只补缺失部分/)).toBeVisible();
+  });
+});
