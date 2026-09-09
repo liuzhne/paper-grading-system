@@ -27,6 +27,22 @@ _LOCAL_DB_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
 
 
 @pytest.fixture(autouse=True)
+def tests_bring_their_own_byok_master_key(monkeypatch):
+    """测试自带 BYOK 主密钥，不借用环境里的那把。
+
+    `.env.local` 在开发机上有 `BYOK_MASTER_KEY`，于是加密相关的用例在本地一路绿，
+    **只有在没有那个文件的机器（CI）上才暴露**。这与「测试打到生产库」是同一个根：
+    本地通过是因为悄悄用上了环境里的东西。
+
+    这里给一把固定的测试密钥，让本地与 CI 跑在同一条件下。需要验证「没有密钥时
+    应当失败」的用例自己 monkeypatch 成空值。
+    """
+    from backend.app.core.config import settings
+
+    monkeypatch.setattr(settings, "BYOK_MASTER_KEY", "test-only-master-key")
+
+
+@pytest.fixture(autouse=True)
 def never_let_tests_reach_a_remote_database(tmp_path, monkeypatch):
     """Neutralise an ambient DATABASE_URL that points at a real deployment.
 

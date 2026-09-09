@@ -562,7 +562,31 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 
 排除这三条之后仍然只在全跑时失败，才考虑用例间的状态串扰。
 
-### 11.9 含迁移的发布：顺序不能反
+### 11.9 「本地绿是因为用了环境里的东西」
+
+这个根出过两次，两次都只在 CI 暴露：
+
+| 症状 | 真因 |
+|---|---|
+| 鉴权验收本地通过、CI 报口令强度不足 | 验收进程继承了 `.env.local` 的**生产** `AUTH_SECRET` |
+| 加密相关用例本地通过、CI 报 `BYOK master key is not configured` | 同一份 `.env.local` 里有 `BYOK_MASTER_KEY` |
+
+`Settings` 的 `env_file` 含 `.env.local`，而开发机上那份带的是生产凭据。**测试与一次性
+进程都必须自带凭据**，不能借用环境里的那把。
+
+- 测试：`conftest.py` 的 `tests_bring_their_own_byok_master_key` 固定注入测试密钥；
+  要验证「没有密钥时应当失败」的用例自己 monkeypatch 成空值。
+- 一次性进程（验收、离线脚本）：先置 `PGS_DISABLE_ENV_FILE=1` 再导入 backend。
+
+自查命令（**在提交前跑一次，比等 CI 快**）：
+
+```bash
+PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/python -m pytest -q
+```
+
+`test_config_loading.py` 会因为这个开关失败——它验证的正是 env 文件加载，属于预期。
+
+### 11.10 含迁移的发布：顺序不能反
 
 新代码启动即读新表时，**先部署代码后迁移**会让应用在那段时间里报「配置读不出来」。
 本仓库的 `platform_llm_config` 就是这种：`_platform_runtime()` 按设计不回落 Mock，
@@ -586,7 +610,7 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
-| 2026-09-09 | V3-4 与含迁移发布 | 新增 §11.9：含迁移的发布顺序（迁移 → 运行角色验证 → 部署代码）。上线记录见 `docs/上线清单.md` §14。未运行生产操作。 |
+| 2026-09-09 | V3-4 与含迁移发布 | 新增 §11.9（本地绿是因为用了环境里的东西）与 §11.10（含迁移的发布顺序）。上线记录见 `docs/上线清单.md` §14。未运行生产操作。 |
 | 2026-09-09 | V3-3 发布区与验收排错 | 新增 §11.8：验收失败的三种常见误判（产物未重建、spec 被错误 project 捡走、选择器命中多个）。未运行生产操作。 |
 | 2026-09-09 | 平台模型前端接入 | 新增 §11.7：三套验收后端与 spec 的对应关系，以及「新 spec 要加进 testIgnore」「改前端要重建产物」两个会被误读成不稳定的坑。未运行生产操作。 |
 | 2026-09-09 | 平台默认模型（V3-0a） | 新增 §11.6 排错条目：「尚未配置平台模型」是期望行为，改环境变量无效。操作基线 head 更新到 `0030_platform_llm_config`。未运行生产操作。 |
