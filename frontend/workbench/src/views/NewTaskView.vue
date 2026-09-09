@@ -236,13 +236,15 @@ onMounted(async () => {
             <h2 class="card-title">AI 连接</h2>
             <span class="faint step-note">本部署未配置平台默认模型，必须选择</span>
           </div>
-          <label for="task-connection">用哪个连接评分</label>
-          <select id="task-connection" v-model="form.ai_connection_id">
-            <option value="">请选择</option>
-            <option v-for="item in connections" :key="item.id" :value="item.id">
-              {{ item.name }} · {{ item.provider_type }} · {{ item.model_name }}
-            </option>
-          </select>
+          <label class="field">
+            <span class="field-label">用哪个连接评分</span>
+            <select v-model="form.ai_connection_id" class="select">
+              <option value="">请选择</option>
+              <option v-for="item in connections" :key="item.id" :value="item.id">
+                {{ item.name }} · {{ item.provider_type }} · {{ item.model_name }}
+              </option>
+            </select>
+          </label>
           <p v-if="!connections.length" class="notice notice-warn">
             你还没有可用的 AI 连接。请先在
             <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink>

@@ -238,19 +238,29 @@ onMounted(async () => {
       </p>
 
       <form @submit.prevent="submitImport">
-        <label for="imp-name">标准名称</label>
-        <input id="imp-name" v-model="importForm.name" type="text" required />
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">标准名称</span>
+            <input v-model="importForm.name" class="input" type="text" required />
+          </label>
+          <label class="field">
+            <span class="field-label">版本</span>
+            <input v-model="importForm.version" class="input" type="text" required />
+          </label>
+        </div>
 
-        <label for="imp-version">版本</label>
-        <input id="imp-version" v-model="importForm.version" type="text" required />
+        <label class="field">
+          <span class="field-label">规则 Excel（.xlsx / .xlsm）</span>
+          <input type="file" accept=".xlsx,.xlsm" required @change="pickRules" />
+        </label>
 
-        <label for="imp-rules">规则 Excel（.xlsx / .xlsm）</label>
-        <input id="imp-rules" type="file" accept=".xlsx,.xlsm" required @change="pickRules" />
+        <label class="field">
+          <span class="field-label">Word 模板（可选，用于解析批注）</span>
+          <input type="file" accept=".docx" @change="pickTemplate" />
+          <span class="field-hint">带批注的模板可以把评语映射到评分项。</span>
+        </label>
 
-        <label for="imp-template">Word 模板（可选，用于解析批注）</label>
-        <input id="imp-template" type="file" accept=".docx" @change="pickTemplate" />
-
-        <div class="row-actions">
+        <div class="form-actions">
           <button class="btn btn-primary" type="submit" :disabled="importBusy">
             {{ importBusy ? "导入中…" : "导入" }}
           </button>
@@ -331,31 +341,33 @@ onMounted(async () => {
               发布后版本与分享范围一起冻结；扩大范围需克隆为新版本。
             </p>
 
-            <label for="pub-compilation">发布哪一份执行草稿</label>
-            <select id="pub-compilation" v-model="chosenCompilation">
-              <option :value="null">请选择</option>
-              <option
-                v-for="item in draft?.compilations || []"
-                :key="item.id"
-                :value="item.id"
-              >
-                {{ item.status }} · {{ item.blocker_count }} 个阻断 · {{ item.created_at }}
-              </option>
-            </select>
+            <label class="field">
+              <span class="field-label">发布哪一份执行草稿</span>
+              <select v-model="chosenCompilation" class="select">
+                <option :value="null">请选择</option>
+                <option
+                  v-for="item in draft?.compilations || []"
+                  :key="item.id"
+                  :value="item.id"
+                >
+                  {{ item.status }} · {{ item.blocker_count }} 个阻断
+                </option>
+              </select>
+              <span class="field-hint">不提供「用最新的」：发布哪一份决定了之后按什么规则判分。</span>
+            </label>
 
-            <label for="pub-visibility">分享给谁</label>
-            <select id="pub-visibility" v-model="chosenVisibility">
-              <option :value="null">保持当前（{{ visibilityLabel(current.visibility) }}）</option>
-              <option value="organization">本组织</option>
-              <option
-                value="system"
-                :disabled="!session.isPlatformAdmin"
-              >
-                所有人{{ session.isPlatformAdmin ? "" : "（需平台管理员）" }}
-              </option>
-            </select>
+            <label class="field">
+              <span class="field-label">分享给谁</span>
+              <select v-model="chosenVisibility" class="select">
+                <option :value="null">保持当前（{{ visibilityLabel(current.visibility) }}）</option>
+                <option value="organization">本组织</option>
+                <option value="system" :disabled="!session.isPlatformAdmin">
+                  所有人{{ session.isPlatformAdmin ? "" : "（需平台管理员）" }}
+                </option>
+              </select>
+            </label>
 
-            <div class="row-actions">
+            <div class="form-actions">
               <button
                 class="btn btn-primary"
                 type="button"
@@ -388,13 +400,15 @@ onMounted(async () => {
               <div><dt>阻断</dt><dd class="mono danger">{{ coverage.blocking_count }}</dd></div>
             </dl>
             <div v-if="blocking.length" class="draft-box">
-              <label for="draft-conn">用哪个 AI 连接起草</label>
-              <select id="draft-conn" v-model="draftConnection">
-                <option value="">请选择</option>
-                <option v-for="item in connections" :key="item.id" :value="item.id">
-                  {{ item.name }} · {{ item.model_name }}
-                </option>
-              </select>
+              <label class="field">
+                <span class="field-label">用哪个 AI 连接起草</span>
+                <select v-model="draftConnection" class="select">
+                  <option value="">请选择</option>
+                  <option v-for="item in connections" :key="item.id" :value="item.id">
+                    {{ item.name }} · {{ item.model_name }}
+                  </option>
+                </select>
+              </label>
               <p v-if="!connections.length" class="notice notice-warn">
                 你还没有可用的 AI 连接。请先在
                 <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink>

@@ -197,23 +197,38 @@ onMounted(async () => {
       </p>
 
       <form class="llm-form" @submit.prevent="runLlmAction('save')">
-        <label for="llm-provider">供应商类型</label>
-        <select id="llm-provider" v-model="llmForm.provider_type">
-          <option value="openai_compatible">OpenAI 兼容</option>
-          <option value="openai_responses">OpenAI Responses</option>
-        </select>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">供应商类型</span>
+            <select v-model="llmForm.provider_type" class="select">
+              <option value="openai_compatible">OpenAI 兼容</option>
+              <option value="openai_responses">OpenAI Responses</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">模型名</span>
+            <input v-model="llmForm.model_name" class="input" type="text" required />
+          </label>
+        </div>
 
-        <label for="llm-base">Base URL</label>
-        <input id="llm-base" v-model="llmForm.base_url" type="url" required />
+        <label class="field">
+          <span class="field-label">Base URL</span>
+          <input v-model="llmForm.base_url" class="input" type="url" required />
+        </label>
 
-        <label for="llm-model">模型名</label>
-        <input id="llm-model" v-model="llmForm.model_name" type="text" required />
+        <label class="field">
+          <span class="field-label">API Key</span>
+          <input
+            v-model="llmForm.api_key"
+            class="input"
+            type="password"
+            autocomplete="off"
+            required
+          />
+          <span class="field-hint">保存后不再回显，只显示末四位。</span>
+        </label>
 
-        <label for="llm-key">API Key</label>
-        <input id="llm-key" v-model="llmForm.api_key" type="password" autocomplete="off" required />
-        <p class="faint">保存后不再回显，只显示末四位。</p>
-
-        <div class="row-actions">
+        <div class="form-actions">
           <button class="btn btn-primary" type="submit" :disabled="llmBusy">保存并启用</button>
           <button
             class="btn"

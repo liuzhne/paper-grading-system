@@ -92,10 +92,12 @@ onMounted(async () => {
 
 <template>
   <div>
-    <header class="page-head">
+    <header class="page-head page-head-row">
+      <div>
       <p class="page-eyebrow">评审中心</p>
       <h1 class="page-title">工作台</h1>
       <p class="page-sub">从进行中的批次继续，或处理需要人工确认的给分。</p>
+      </div>
       <RouterLink class="btn btn-primary" :to="{ name: 'task-new' }">
         新建评分任务
       </RouterLink>

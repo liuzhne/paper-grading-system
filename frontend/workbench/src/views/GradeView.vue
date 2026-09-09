@@ -239,19 +239,28 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <p v-if="item.review_reason" class="faint item-reason">{{ item.review_reason }}</p>
 
           <div v-if="editing === item.id" class="edit-box">
-            <label :for="`score-${item.id}`">改为</label>
-            <input
-              :id="`score-${item.id}`"
-              v-model="draftScore"
-              type="number"
-              :max="item.max_score"
-              min="0"
-              step="0.5"
-            />
-            <label :for="`reason-${item.id}`">理由（必填）</label>
-            <textarea :id="`reason-${item.id}`" v-model="draftReason" rows="2"></textarea>
-            <div class="row-actions">
-              <button class="btn btn-sm btn-primary" type="button" :disabled="writeBusy" @click="saveEdit(item)">
+            <label class="field">
+              <span class="field-label">改为</span>
+              <input
+                v-model="draftScore"
+                class="input"
+                type="number"
+                :max="item.max_score"
+                min="0"
+                step="0.5"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">理由（必填）</span>
+              <textarea v-model="draftReason" class="input" rows="2"></textarea>
+            </label>
+            <div class="form-actions">
+              <button
+                class="btn btn-sm btn-primary"
+                type="button"
+                :disabled="writeBusy"
+                @click="saveEdit(item)"
+              >
                 保存
               </button>
               <button class="btn btn-sm" type="button" @click="editing = null">取消</button>
@@ -284,10 +293,12 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <span><span class="mono total-value">{{ store.totalScore }}</span><span class="faint mono"> / {{ store.maxTotal }}</span></span>
           </div>
 
-          <label for="run-note">评语（可选）</label>
-          <textarea id="run-note" v-model="runNote" rows="2"></textarea>
+          <label class="field">
+            <span class="field-label">评语（可选）</span>
+            <textarea v-model="runNote" class="input" rows="2"></textarea>
+          </label>
 
-          <div class="row-actions">
+          <div class="form-actions">
             <button
               class="btn btn-primary"
               type="button"

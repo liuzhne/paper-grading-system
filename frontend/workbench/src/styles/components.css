@@ -13,6 +13,15 @@
   margin-bottom: 24px;
 }
 
+/* 页头带主操作时：标题左、按钮右，按钮与标题基线对齐而不是贴顶。 */
+.page-head-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
 .page-eyebrow {
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -161,6 +170,25 @@
 
 .select {
   padding-right: 8px;
+}
+
+/* 多行输入复用 `.input` 的边框与配色，但不能吃它的固定高度——40px 会把
+   textarea 压成一行，行数属性形同虚设。 */
+textarea.input {
+  height: auto;
+  min-height: 72px;
+  padding: 9px 12px;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+/* 文件选择框走原生控件，但要和相邻的 `.input` 对齐留白，否则它会贴着上一行。 */
+.field input[type="file"] {
+  display: block;
+  width: 100%;
+  padding: 8px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 .form-grid {
