@@ -181,7 +181,15 @@ jobs:
           engine = create_engine(url)
           # 运行角色真的能读这两张新表——迁移成功不等于应用可用。
           with engine.connect() as connection:
-              for table in ("review_command_receipts", "export_events"):
+              # 新建表要加进来，否则这道验证会随时间失效：它验的是「运行角色能不能
+              # 读」，而每次新建表都是一次可能漏授权的机会（0026/0027 就漏过）。
+              for table in (
+                  "rule_scoring_tasks",
+                  "manual_review_tasks",
+                  "review_command_receipts",
+                  "export_events",
+                  "platform_llm_config",
+              ):
                   connection.execute(text('SELECT count(*) FROM "%s"' % table)).scalar_one()
                   print("runtime role can read:", table)
           PY

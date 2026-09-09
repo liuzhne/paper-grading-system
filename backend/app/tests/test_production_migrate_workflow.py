@@ -120,3 +120,35 @@ def test_an_ipv6_only_host_is_refused_before_touching_the_database():
     assert "Session pooler" in text
     # Transaction pooler（6543）不支持迁移需要的会话级特性，要明确排除。
     assert "6543" in text
+
+
+def test_the_runtime_check_covers_every_table_that_needed_a_grant():
+    """运行角色验证要覆盖所有新建表，否则这道防线会随时间失效。
+
+    每次新建表都是一次可能漏授权的机会（0026/0027 就漏过，由 0029 补）。验证清单
+    停在旧表上，等于只证明了「以前那两张还能读」。
+    """
+    import re
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    versions = (
+        pathlib.Path(__file__).resolve().parents[3] / "alembic" / "versions"
+    )
+
+    granted = set()
+    for path in versions.glob("0*.py"):
+        source = path.read_text(encoding="utf-8")
+        if "TO pgs_app" not in source:
+            continue
+        granted |= set(re.findall(r"ON TABLE (\w+) TO pgs_app", source))
+        for match in re.findall(r'^TABLE\s*=\s*"([^"]+)"', source, re.M):
+            granted.add(match)
+        for match in re.findall(r'^TABLES\s*=\s*\(([^)]*)\)', source, re.M):
+            granted |= set(re.findall(r'"([^"]+)"', match))
+        for match in re.findall(r'for table in \(([^)]*)\)', source):
+            granted |= set(re.findall(r'"([^"]+)"', match))
+
+    missing = sorted(table for table in granted if table not in text)
+    assert not missing, "迁移给这些表授了权，但工作流没验证运行角色能读：%s" % (
+        ", ".join(missing)
+    )
