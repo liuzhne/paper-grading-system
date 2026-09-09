@@ -495,6 +495,10 @@ onMounted(async () => {
 .drop input {
   display: block;
   margin: 0 auto 10px;
+  /* 原生文件选择框有固有宽度（约 333px），在窄屏上比 `.drop` 的可用空间还宽，
+     会把整页撑出横向滚动条。约束它，别让控件自己决定页面宽度。 */
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .drop-note {

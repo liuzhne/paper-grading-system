@@ -182,10 +182,13 @@ textarea.input {
   resize: vertical;
 }
 
-/* 文件选择框走原生控件，但要和相邻的 `.input` 对齐留白，否则它会贴着上一行。 */
+/* 文件选择框走原生控件，但要和相邻的 `.input` 对齐留白，否则它会贴着上一行。
+   `max-width` 而不是 `width: 100%`：这条规则会波及嵌在有内边距的容器里的文件框
+   （如上传区的 `.drop`），100% 加上父级 padding 就把窄屏撑出横向滚动条。 */
 .field input[type="file"] {
   display: block;
-  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 8px 0;
   font-size: 13px;
   color: var(--text-secondary);

@@ -44,3 +44,46 @@ test.describe("V12 键盘可达性", () => {
     expect(["A", "BUTTON", "SELECT", "INPUT"]).toContain(tag);
   });
 });
+
+test.describe("V12 窄屏表单", () => {
+  const FORM_PAGES = [
+    ["/workbench/rubrics", "评分标准"],
+    ["/workbench/ops", "运维与质量"],
+    ["/workbench/account", "账户与连接"],
+    ["/workbench/tasks/new", "新建评分任务"],
+  ];
+
+  for (const [path, title] of FORM_PAGES) {
+    test(`${title}：窄屏下表单不撑破页面`, async ({ page }) => {
+      await page.goto(path);
+      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+
+      /*
+       * `.input` / `.select` 是 `width: 100%`，父容器一旦有固定宽度或并排布局
+       * 没折叠，就会把页面撑出横向滚动条——窄屏上表现为整页能左右拖动，输入框
+       * 一半在屏幕外。
+       */
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      );
+
+      expect(overflow).toBeLessThanOrEqual(1);
+    });
+
+    test(`${title}：窄屏下并排字段折叠为单列`, async ({ page }) => {
+      await page.goto(path);
+      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+
+      // `.form-grid` 用的是 auto-fit + minmax(210px)，窄屏应当自然落到一列。
+      const columns = await page.evaluate(() => {
+        const grid = document.querySelector(".form-grid");
+        if (!grid) return 1;
+        return getComputedStyle(grid).gridTemplateColumns.split(" ").length;
+      });
+
+      expect(columns).toBe(1);
+    });
+  }
+});
