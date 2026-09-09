@@ -568,7 +568,12 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 本仓库的 `platform_llm_config` 就是这种：`_platform_runtime()` 按设计不回落 Mock，
 读表失败等于全站 LLM 动作不可用。
 
-顺序固定为：**迁移 → 验证运行角色 → 再部署代码**。
+顺序仍应为：**迁移 → 验证运行角色 → 再部署代码**。
+
+不过顺序反了也不会整站崩：读 `platform_llm_config` 的两处（`/system/capabilities`
+与 `/system/platform-llm`）都对「表不存在」做了容错，读不到就当作「没有平台模型」。
+**这是防线，不是许可**——`capabilities` 是前端启动就要读的，它 500 会让整个工作台
+起不来，故障面远大于「平台模型读不到」。
 
 `pgs-production-migrate` 的最后一步用 `pgs_app` 复验，不是用 owner——owner 什么都读
 得到，证明不了应用能不能工作。0026/0027 的新表缺授权正是靠这一步才暴露（见 0029）。

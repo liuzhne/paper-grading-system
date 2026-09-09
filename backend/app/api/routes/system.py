@@ -82,7 +82,16 @@ def _llm_availability(db: Session, principal: CurrentPrincipal) -> dict:
             "can_use_llm": True,
         }
 
-    platform_available = platform_llm.get_active_config(db) is not None
+    # 含迁移的发布里总有一个窗口：代码已上、迁移未到（或反过来）。此时查
+    # `platform_llm_config` 会抛异常。`/system/capabilities` 是前端启动就要读的
+    # ——它 500，整个工作台起不来，**故障面远大于「平台模型读不到」**。
+    #
+    # 读不到就当作「没有平台模型」：与真实的未配置状态一致，且不回落 Mock。
+    try:
+        platform_available = platform_llm.get_active_config(db) is not None
+    except Exception:
+        db.rollback()
+        platform_available = False
 
     has_own = False
     if principal.user_id:
@@ -291,7 +300,13 @@ def read_platform_llm(
 ):
     """脱敏读。**永远不回显密钥**，连密文字段也不出现。"""
     require_platform_admin(principal)
-    return platform_llm.masked_view(platform_llm.get_active_or_disabled(db))
+    try:
+        config = platform_llm.get_active_or_disabled(db)
+    except Exception:
+        # 迁移未到时如实说「读不到」，而不是 500——管理员来这一页正是为了配置它。
+        db.rollback()
+        return {"configured": False, "status": "unavailable"}
+    return platform_llm.masked_view(config)
 
 
 # 用 POST 而不是 PUT：语义是「写入或替换」，且前端 api 客户端只暴露

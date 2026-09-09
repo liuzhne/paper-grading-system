@@ -231,3 +231,26 @@ def test_development_mode_reports_the_environment_model_as_available(
     body = client.get("/api/system/capabilities").json()
 
     assert body["llm"]["can_use_llm"] is True
+
+
+def test_capabilities_survive_a_missing_platform_table(client, monkeypatch):
+    """迁移还没跑到时，能力表不能 500。
+
+    含迁移的发布里总有一个窗口：代码已上、迁移未到（或反过来）。此时查
+    `platform_llm_config` 会抛 ProgrammingError。`/system/capabilities` 是前端
+    启动就要读的——它 500，整个工作台起不来，**故障面远大于「平台模型读不到」**。
+
+    读不到就当作「没有平台模型」：这与真实的未配置状态一致，且不回落 Mock。
+    """
+    from backend.app.services import platform_llm
+
+    def _boom(_session):
+        raise RuntimeError("relation \"platform_llm_config\" does not exist")
+
+    _login_platform_admin(client, monkeypatch)
+    monkeypatch.setattr(platform_llm, "get_active_config", _boom)
+
+    response = client.get("/api/system/capabilities")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["llm"]["platform_model_available"] is False
