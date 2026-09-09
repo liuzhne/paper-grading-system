@@ -1,17 +1,17 @@
 import { setActivePinia, createPinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { requiresModelSetup } from "@/router/llm-gate.js";
 import { useSessionStore } from "@/stores/session.js";
 
 /**
- * 没有可用模型时把用户引导去配置 BYOK（用户决定，2026-09-09）。
+ * 「有没有可用模型」的判定（用户决定，2026-09-09 改为弹窗呈现）。
  *
- * 不配 BYOK 就用不了系统——但**引导不等于把人锁死**：账户与连接页本身、登出、
- * 以及平台管理员去配置平台模型的运维页，都必须仍然可达，否则用户被挡在一个
- * 自己无法解开的门外。
+ * 判定本身仍在这里，但**不再触发路由跳转**：跳转会把用户送到一个他没主动去的
+ * 页面，还得自己猜发生了什么。改由 `ModelSetupDialog` 阻断式弹窗说清楚，再由
+ * 用户点进配置页。
  */
-describe("模型可用性守卫", () => {
+describe("模型可用性判定", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
   });
@@ -22,63 +22,41 @@ describe("模型可用性守卫", () => {
     return session;
   }
 
-  it("有平台模型时不拦截", () => {
+  it("有平台模型时不需要配置", () => {
     const session = withCapabilities({
       platform_model_available: true,
       has_own_connection: false,
       can_use_llm: true,
     });
 
-    expect(requiresModelSetup(session, { name: "tasks" })).toBe(false);
+    expect(requiresModelSetup(session)).toBe(false);
   });
 
-  it("自带连接时不拦截", () => {
+  it("自带连接时不需要配置", () => {
     const session = withCapabilities({
       platform_model_available: false,
       has_own_connection: true,
       can_use_llm: true,
     });
 
-    expect(requiresModelSetup(session, { name: "tasks" })).toBe(false);
+    expect(requiresModelSetup(session)).toBe(false);
   });
 
-  it("两者都没有时拦截", () => {
+  it("两者都没有时需要配置", () => {
     const session = withCapabilities({
       platform_model_available: false,
       has_own_connection: false,
       can_use_llm: false,
     });
 
-    expect(requiresModelSetup(session, { name: "tasks" })).toBe(true);
+    expect(requiresModelSetup(session)).toBe(true);
   });
 
-  it("账户与连接页本身永远放行", () => {
-    const session = withCapabilities({
-      platform_model_available: false,
-      has_own_connection: false,
-      can_use_llm: false,
-    });
-
-    // 拦到这里就是把人锁死在门外——他要配连接正是要去这一页。
-    expect(requiresModelSetup(session, { name: "account" })).toBe(false);
-  });
-
-  it("平台管理员的运维页放行", () => {
-    const session = withCapabilities({
-      platform_model_available: false,
-      has_own_connection: false,
-      can_use_llm: false,
-    });
-
-    // 平台模型正是在这一页配置的。
-    expect(requiresModelSetup(session, { name: "ops" })).toBe(false);
-  });
-
-  it("能力表还没加载时不拦截", () => {
+  it("能力表还没加载时不下结论", () => {
     const session = useSessionStore();
     session.capabilities = null;
 
-    // 首屏能力表未到就跳转，会把正常用户闪到配置页。
-    expect(requiresModelSetup(session, { name: "tasks" })).toBe(false);
+    // 首屏能力表未到就判定，会让正常用户先看到一次误报。
+    expect(requiresModelSetup(session)).toBe(false);
   });
 });

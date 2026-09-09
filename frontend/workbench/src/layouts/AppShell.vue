@@ -1,4 +1,5 @@
 <script setup>
+import ModelSetupDialog from "@/components/ModelSetupDialog.vue";
 import { computed, ref } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 
@@ -116,7 +117,10 @@ async function onLogout() {
       <RouterView />
     </main>
   </div>
-</template>
+
+    <!-- 没有可用模型时阻断：整套评分能力都用不了，先说清楚再让用户去配置。 -->
+    <ModelSetupDialog />
+  </template>
 
 <style scoped>
 .shell {

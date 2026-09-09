@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 import { useSessionStore } from "@/stores/session.js";
-import { requiresModelSetup } from "@/router/llm-gate.js";
 
 /**
  * 新页面统一挂在 /workbench/ 下（计划 §8.3）。
@@ -112,11 +111,6 @@ router.beforeEach(async (to) => {
   if (to.meta.public) return true;
   if (session.status !== "authenticated") {
     return { name: "login", query: { redirect: to.fullPath } };
-  }
-  // 没有任何可用模型时先去配置，别让人上传完材料再撞上失败（D-027、D-028）。
-  // 账户与连接页、运维页不拦——那正是解开这件事的地方。
-  if (requiresModelSetup(session, to)) {
-    return { name: "account", query: { setup: "model" } };
   }
   return true;
 });

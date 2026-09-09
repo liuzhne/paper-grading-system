@@ -20,46 +20,58 @@ async function login(page, username) {
 }
 
 test.describe("未配置模型时的引导", () => {
-  test("登录后被送到账户与连接页并说明原因", async ({ page }) => {
+  test("登录后弹窗说清原因，而不是把人默默送走", async ({ page }) => {
     await login(page, "teacher");
 
-    // 与其让人上传完材料再撞上失败，不如进门就说清该去哪。
-    await expect(page).toHaveURL(/\/account\?setup=model/);
-    await expect(page.getByRole("status")).toContainText("尚未配置可用模型");
+    // 此前是直接跳到账户页 + 一条横幅：横幅容易被忽略，而且用户已经被送到一个
+    // 自己没主动去的页面，不知道发生了什么。
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("尚未配置可用模型");
   });
 
-  test("账户与连接页本身可达，不会把人锁在门外", async ({ page }) => {
+  test("弹窗不可关闭：没有模型时整套能力都用不了", async ({ page }) => {
     await login(page, "teacher");
-    await page.goto("/workbench/account");
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+
+    // 给一个「关闭」等于放人进去撞一连串失败。
+    await expect(dialog.getByRole("button", { name: /关闭|稍后|知道了/ })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+  });
+
+  test("普通用户被指向账户与连接", async ({ page }) => {
+    await login(page, "teacher");
+
+    const link = page.getByRole("alertdialog").getByRole("link", {
+      name: /账户与连接/,
+    });
+    await expect(link).toBeVisible();
+    await link.click();
+
+    await expect(page).toHaveURL(/\/workbench\/account$/);
     await expect(page.getByRole("heading", { name: "账户与连接" })).toBeVisible();
   });
 
-  test("平台管理员仍能进运维页配置平台模型", async ({ page }) => {
+  test("平台管理员两条出路都给，且能进运维页配置", async ({ page }) => {
     await login(page, "platform");
-    await page.goto("/workbench/ops");
 
-    // 平台模型正是在这一页配的，拦住它等于没有出路。
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog.getByRole("link", { name: /运维与质量/ })).toBeVisible();
+    await expect(dialog.getByRole("link", { name: /账户与连接/ })).toBeVisible();
+
+    await dialog.getByRole("link", { name: /运维与质量/ }).click();
+
+    await expect(page).toHaveURL(/\/workbench\/ops$/);
     await expect(page.getByRole("heading", { name: "平台默认模型" })).toBeVisible();
-    await expect(page.getByText("未配置", { exact: true })).toBeVisible();
   });
 
-  test("给平台管理员的提示要指出两条出路", async ({ page }) => {
+  test("配置页本身可达，弹窗不挡住配置动作", async ({ page }) => {
     await login(page, "platform");
-    await page.goto("/workbench/?setup=model");
+    await page.getByRole("alertdialog").getByRole("link", { name: /运维与质量/ }).click();
 
-    await page.goto("/workbench/account?setup=model");
-    await expect(page.getByRole("status")).toContainText("运维与质量");
-  });
-});
-
-
-test.describe("未配置模型时的新建任务", () => {
-  test("守卫先拦下：根本走不到新建页", async ({ page }) => {
-    await login(page, "teacher");
-    await page.goto("/workbench/tasks/new");
-
-    // 「没有可用模型就引导去配置」比「让人建完任务再发现不能评」更早一步。
-    // 新建页里的连接必选是第二道，只在**有平台模型但用户想用自己的**时才起作用。
-    await expect(page).toHaveURL(/\/account\?setup=model/);
+    // 弹窗仍在（还没配好），但不能盖住表单——否则用户点得到链接却填不了表。
+    await expect(page.getByLabel("Base URL")).toBeVisible();
   });
 });
