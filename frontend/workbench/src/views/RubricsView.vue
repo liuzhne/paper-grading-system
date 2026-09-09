@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
+import { useRubricsStore } from "@/stores/rubrics.js";
 
 /**
  * 评分标准（前端 v2 计划 §2、§6）。
@@ -13,6 +14,63 @@ import { api, StaleContextError } from "@/api/client.js";
  * 并且直接点得到对应的评分项。
  */
 const rubrics = ref([]);
+
+// --- 导入（D-026：标准只能由导入产生，不提供空白新建）---------------------
+const store = useRubricsStore();
+const importOpen = ref(false);
+const importBusy = ref(false);
+const importError = ref(null);
+const importForm = ref({ name: "", version: "v1.0", description: "" });
+const rulesFile = ref(null);
+const templateFile = ref(null);
+
+function pickRules(event) {
+  rulesFile.value = event.target.files?.[0] || null;
+}
+
+function pickTemplate(event) {
+  templateFile.value = event.target.files?.[0] || null;
+}
+
+async function submitImport() {
+  if (!rulesFile.value) {
+    importError.value = "请先选择规则 Excel。";
+    return;
+  }
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    const result = await store.importFiles({
+      name: importForm.value.name,
+      version: importForm.value.version,
+      description: importForm.value.description,
+      rulesFile: rulesFile.value,
+      templateFile: templateFile.value,
+    });
+    importOpen.value = false;
+    await loadRubrics();
+    // 直接选中刚导入的那份，省去用户在列表里再找一次。
+    if (result.rubric?.id) selected.value = result.rubric.id;
+  } catch (err) {
+    // 服务端的说明比「导入失败」有用得多：它会指出是文件类型不对还是解析不了。
+    importError.value = err instanceof Error ? err.message : "导入失败";
+  } finally {
+    importBusy.value = false;
+  }
+}
+
+async function cloneRubric(rubric) {
+  try {
+    const created = await store.clone(rubric.id, {
+      name: `${rubric.name}（副本）`,
+      version: "v1.0",
+    });
+    await loadRubrics();
+    selected.value = created.id;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : "克隆失败";
+  }
+}
 const selected = ref(null);
 const coverage = ref(null);
 const error = ref(null);
@@ -84,12 +142,61 @@ onMounted(async () => {
 
     <p v-if="error" class="notice notice-danger" role="alert">{{ error }}</p>
 
+    <section v-if="importOpen" class="card card-pad import-panel">
+      <h2 class="card-title">导入评分模板</h2>
+      <p class="card-note">
+        上传规则 Excel；可选附带一份带批注的 Word 模板。导入后默认仅自己可见，
+        发布时再选择分享范围。
+      </p>
+
+      <form @submit.prevent="submitImport">
+        <label for="imp-name">标准名称</label>
+        <input id="imp-name" v-model="importForm.name" type="text" required />
+
+        <label for="imp-version">版本</label>
+        <input id="imp-version" v-model="importForm.version" type="text" required />
+
+        <label for="imp-rules">规则 Excel（.xlsx / .xlsm）</label>
+        <input id="imp-rules" type="file" accept=".xlsx,.xlsm" required @change="pickRules" />
+
+        <label for="imp-template">Word 模板（可选，用于解析批注）</label>
+        <input id="imp-template" type="file" accept=".docx" @change="pickTemplate" />
+
+        <div class="row-actions">
+          <button class="btn btn-primary" type="submit" :disabled="importBusy">
+            {{ importBusy ? "导入中…" : "导入" }}
+          </button>
+          <button class="btn" type="button" @click="importOpen = false">取消</button>
+        </div>
+      </form>
+
+      <p v-if="importError" class="notice notice-danger" role="alert">{{ importError }}</p>
+    </section>
+
+    <!-- 导入结果如实展示：warnings 是「你的 Excel 里哪几条没被识别」的唯一出口，
+         吞掉它用户会以为全都导进去了，直到评分时才发现某项没有判据。 -->
+    <section v-if="store.lastImport.rubricId" class="card card-pad">
+      <h2 class="card-title">上次导入结果</h2>
+      <p v-if="!store.lastImport.warnings.length" class="faint">没有警告。</p>
+      <ul v-else class="warnings">
+        <li v-for="(warning, index) in store.lastImport.warnings" :key="index">{{ warning }}</li>
+      </ul>
+      <dl v-if="store.lastImport.templateSummary" class="summary">
+        <div v-for="(value, key) in store.lastImport.templateSummary" :key="key">
+          <dt>{{ key }}</dt>
+          <dd class="mono">{{ value }}</dd>
+        </div>
+      </dl>
+    </section>
+
     <div class="layout">
       <!-- 模板库 -->
       <aside class="card library">
         <div class="card-head">
           <h2 class="card-title">模板库</h2>
-          <span class="chip">{{ rubrics.length }} 个</span>
+          <button class="btn btn-sm btn-primary" type="button" @click="importOpen = !importOpen">
+            导入评分模板
+          </button>
         </div>
         <button
           v-for="rubric in rubrics"
@@ -107,7 +214,9 @@ onMounted(async () => {
             <span class="faint">{{ visibilityLabel(rubric.visibility) }}</span>
           </div>
         </button>
-        <p v-if="!rubrics.length" class="card-pad faint">还没有评分标准。</p>
+        <p v-if="!rubrics.length" class="card-pad faint">
+          还没有评分标准。评分标准由导入规则 Excel 产生。
+        </p>
       </aside>
 
       <div class="detail">

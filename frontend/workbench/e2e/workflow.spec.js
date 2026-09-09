@@ -244,3 +244,32 @@ test.describe("V08 草稿续传", () => {
     await expect(row.getByRole("link", { name: "继续上传" })).toHaveCount(0);
   });
 });
+
+
+test.describe("V3-1 评分标准导入", () => {
+  test("列表页有导入入口，且没有空白新建", async ({ page }) => {
+    await page.goto("/workbench/rubrics");
+
+    await expect(page.getByRole("button", { name: "导入评分模板" })).toBeVisible();
+    // D-026：标准只能由导入产生。留一个「新建」按钮会让人建出没有模板溯源的标准。
+    await expect(page.getByRole("button", { name: /新建评分标准/ })).toHaveCount(0);
+  });
+
+  test("导入面板要求规则 Excel，并说明可见范围", async ({ page }) => {
+    await page.goto("/workbench/rubrics");
+    await page.getByRole("button", { name: "导入评分模板" }).click();
+
+    await expect(page.getByLabel(/规则 Excel/)).toBeVisible();
+    // 用户要知道导进来之后谁能看见。
+    await expect(page.getByText(/默认仅自己可见/)).toBeVisible();
+  });
+
+  test("Word 模板是可选的，不选也能提交", async ({ page }) => {
+    await page.goto("/workbench/rubrics");
+    await page.getByRole("button", { name: "导入评分模板" }).click();
+
+    const template = page.getByLabel(/Word 模板/);
+    await expect(template).toBeVisible();
+    await expect(template).not.toHaveAttribute("required", "");
+  });
+});
