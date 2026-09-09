@@ -216,14 +216,16 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在
 
 ### 7.2 前端 v2 落地事实（2026-09-08）
 
-阶段 0–6B 已实施。迁移 head 为 `0028_export_event_backfill`；评分语义、`SCORING_ENGINE_MODE=legacy`
-与 GATE-03 发布权限**均未改动**。
+阶段 0–6B 已实施并于 2026-09-08 部署到生产。迁移 head 为 `0029_runtime_access_for_v2_tables`；
+评分语义、`SCORING_ENGINE_MODE=legacy` 与 GATE-03 发布权限**均未改动**。
 
 - **前端产物**：`frontend/workbench/`（Vite + Vue 3 + JS）经 `scripts/build_web_static.py --with-workbench`
   组装进 `public/`。FastAPI、Vercel、Docker 托管同一份产物；Docker 镜像 COPY `public/`（此前没有，
   容器里 `/workbench/*` 全是 404）。自托管 IBM Plex Mono 的 SIL OFL 许可证随产物发布并可经 HTTP 取到。
-- **入口并存**：`/` 默认旧 SPA，新页在 `/workbench/*`，`WORKBENCH_DEFAULT_ENTRY` 控制切换，旧页常驻
-  `/legacy/`。`/login` `/register` `/reset-password` 始终走旧壳。
+- **入口（2026-09-08 起）**：`/` 直接是工作台，**旧 SPA 已下线**，`/legacy/` 返回 404，
+  `WORKBENCH_DEFAULT_ENTRY` 开关取消。`/login` `/register` `/reset-password` 由工作台承接——
+  邮件里已发出的邀请与重置链接指向后两条。**入口在两处生效**：FastAPI 的路由，以及
+  `build_web_static.py` 写出的 `public/index.html`；Vercel 直接静态托管后者，只改前者在生产上无效。
 - **状态机**：`0024` 落七态 CHECK 与 `state_version`；所有转移经 `services/batches/state`。
   归档/重开是显式端点，目标阶段由服务端从当前结果推导。**旧写入口（`PATCH /score-items`、
   `POST /scoring-runs/{id}/review`）与新端点共用归档守卫，改分同样 bump `review_revision`**——
@@ -236,7 +238,13 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在
   **当前只有确定性来源**（含 0025 之前历史行的显示回退）；模型侧尚未接入——它要求 bump
   `PROMPT_VERSION` 并按 §15 重锚 QWK，而可门禁基线不存在，须走 PGS-8 两阶段批准。
 - **导出**：`ExportEvent` 三态（生成中/已生成/失败），**没有「已下载」**；旧 `SpreadsheetWriteLog`
-  保留原表原值，`0028` 幂等补录且不按路径猜合并。
+  保留原表原值，`0028` 幂等补录且不按路径猜合并。**四个 GET 数据出口**（批次 xlsx、HTML 报告、
+  JSON、导出日志）与两个事件写端点均受 `require_organization_role` 门控——组织归属只回答
+  「是不是本组织的数据」，不回答「这个人该不该把它导出去」。
+- **运行角色授权**：生产运行角色 `pgs_app` 无 DDL，也不会自动获得新表权限。建表的迁移必须自己
+  `GRANT` + `ENABLE ROW LEVEL SECURITY` + 建 `pgs_app_dml` 策略（照 0023）。`0026/0027` 漏了，
+  由 `0029` 补齐。**漏掉不会让迁移失败，而是让迁移成功之后应用 permission denied**；本地与 CI
+  不建这个角色，两边都测不出来。
 - **多组织**：切换组织时中止在途请求并清空全部组织级 store（此前只清 session，旧组织的学生姓名会
   留在界面上）。运维页对无权角色显式说明，不留白页。
 - **门禁**：CI 前端 job 跑组件测试、`typecheck`、OpenAPI 合同差异（`api:dump && api:check`，
@@ -249,6 +257,7 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
+| 2026-09-09 | 三文档同步规则入库 | 把「每次方案落地同步 ARCHITECTURE/DECISIONS/RUNBOOK」写入 CLAUDE.md 并说明各自回答什么；核对 §7.2 与生产实际一致（head `0029`、旧 SPA 已下线、导出出口全量门控、新表运行角色授权）。架构边界不变。 |
 | 2026-09-08 | 前端 v2 阶段 0–6B 落地 | 新增 §7.2 落地事实：统一组装产物与三宿主托管、批次状态机与旧写入口共用守卫、结果选择器单一口径、证据投影与 no-store、导出三态、多组织切换清场、前端类型/合同/浏览器门禁。评分语义、`SCORING_ENGINE_MODE=legacy` 与 GATE-03 发布权限不变；迁移 head `0028_export_event_backfill`。|
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 核对 LLM/Core/批任务边界；新增稳定 ProviderError 投影和 fail-open Langfuse v4/OpenTelemetry Trace。评分、缓存、证据校验与 Core 计分边界不变。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 核对 Profile/Core/LLM/持久化/API/迁移边界；新增 V4 预算化词法证据选择、规则失败隔离、0023 规则检查点与人工复核、进程内 Provider 保护。明确向量检索、进程中断续跑、DAG 并发和分布式配额仍未实现。 |

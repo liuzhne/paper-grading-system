@@ -48,12 +48,35 @@
 ## 前端（v2 评审工作台 · 有据智评）
 - 源码 `frontend/workbench/`（Vite + Vue 3 + JS，JSDoc 引类型）；旧 SPA 在 `frontend/web/`。
 - 统一组装：`python scripts/build_web_static.py --with-workbench` → `public/`。FastAPI、Vercel、Docker 托管**同一份产物**；`public/` 已提交，CI 有漂移门禁。
-- 入口并存：`/` 默认旧 SPA，新页在 `/workbench/*`；`WORKBENCH_DEFAULT_ENTRY=true` 切换，旧页常驻 `/legacy/`。`/login` `/register` `/reset-password` 始终走旧壳（已发出的邀请与重置链接不能失效）。
+- 入口：`/` 直接是 v2 工作台，**旧 SPA 已下线**（`/legacy/` 返回 404）。`/login` `/register` `/reset-password` 由工作台承接——邮件里已发出的邀请与重置链接指向后两条，收件人不会重新拿到新链接，这三条不能只剩 404。
+- 静态入口页由 `build_web_static.py` 写出，**改后端路由不够**：Vercel 直接静态托管 `public/`，`/` 命中的是 `public/index.html`，不经过 Python。
 - 门禁：`npm run test:unit`（组件/状态）、`typecheck`、`api:dump && api:check`（OpenAPI 合同差异）、`playwright test`（浏览器验收，含一个 `AUTH_ENABLED=true` 的多组织后端）。
 - 旧写入口与新端点**共用守卫**：归档批次拒绝改分/复核，改分同样 bump `review_revision`。不能只有新端点防冲突。
 
 ## 设计原则（详见 论文打分系统设计方案.md）
 确定性优先(代码做判定题、LLM 做判断题)、原子评分项、每个扣分/选档强制带证据(抗幻觉)、结构化优先、无状态可缓存可复现、人在回路。**扣哪项/扣几分来自用户授权的模板/Excel 编译，不写死。**
+
+## 三文档同步（MUST）
+
+**每一次改动方案落地，都要同步这三份文档**——不是发布时补，是改完就补：
+
+| 文档 | 回答什么 | 什么时候必须动 |
+|---|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 模块边界、核心调用链、数据流 | 新增/删除模块、调用链改向、数据流或持久化边界变化 |
+| [DECISIONS.md](DECISIONS.md) | 为什么这样选，**放弃了什么** | 任何有取舍的方案：选了 A 没选 B、放宽或收紧了一条规则、明知有代价仍然这么做 |
+| [RUNBOOK.md](RUNBOOK.md) | 怎么启动、测试、排错、发布 | 新增命令/环境变量/门禁步骤，或踩到一个下次还会踩的坑 |
+
+写法要求：
+
+- **DECISIONS 必须写「放弃了什么」**。只写选择等于没写——读的人无法判断当初是没想到，
+  还是想到了并且有理由不选。
+- **RUNBOOK 的排错条目要写「报错指向哪里、真正的原因在哪里」**。两者一致的坑不值得记；
+  值得记的正是不一致的那种。
+- 三份文档各自的「维护记录」表追加同一日期/主题的条目。
+- 文档与实现冲突时，**先修文档再交付**。
+
+`backend/app/tests/test_m8_documentation_contract.py` 会校验其中可机检的部分
+（迁移 head、命令、边界事实）；机器检不出来的部分靠这条约定。
 
 ## 约定
 - 新增端点/字段要配 Alembic 迁移（当前 head 为 `0029_runtime_access_for_v2_tables`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
