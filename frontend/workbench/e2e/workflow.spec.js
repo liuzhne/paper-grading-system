@@ -318,3 +318,40 @@ test.describe("V3-2 AI 起草缺失细则", () => {
     await expect(page.getByText(/AI 只补缺失部分/)).toBeVisible();
   });
 });
+
+
+test.describe("V3-5 工作区写能力", () => {
+  async function open(page) {
+    await page.goto("/workbench/tasks");
+    await page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }).click();
+    await expect(page.getByText("材料 ·")).toBeVisible();
+  }
+
+  test("每个评分项都能改分", async ({ page }) => {
+    await open(page);
+
+    await expect(page.getByRole("button", { name: "改分" }).first()).toBeVisible();
+  });
+
+  test("改分理由必填，空理由被拦下", async ({ page }) => {
+    await open(page);
+    await page.getByRole("button", { name: "改分" }).first().click();
+    await page.getByRole("button", { name: "保存" }).click();
+
+    // 改分会写进复核记录；没有理由的记录事后无法判断当初为什么改。
+    await expect(page.getByRole("alert")).toContainText("理由");
+  });
+
+  test("有确认此份与确认并进入下一份两个动作", async ({ page }) => {
+    await open(page);
+
+    await expect(page.getByRole("button", { name: "确认并进入下一份" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "确认此份评分" })).toBeVisible();
+  });
+
+  test("可以写评语", async ({ page }) => {
+    await open(page);
+
+    await expect(page.getByLabel(/评语/)).toBeVisible();
+  });
+});

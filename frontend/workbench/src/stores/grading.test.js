@@ -208,3 +208,74 @@ describe("grading store", () => {
     expect(store.activeQuote).toBeNull();
   });
 });
+
+describe("工作区写能力（V3-5）", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  function jsonOk(body) {
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  it("改分必须带理由，空理由当场拦下", async () => {
+    const store = useGradingStore();
+
+    // 改分会写进复核记录；没有理由的记录事后无法判断当初为什么改。
+    await expect(store.overrideScore("i1", { score: 18, reason: "  " })).rejects.toThrow(
+      /理由/,
+    );
+  });
+
+  it("改分把分数与理由一起发出", async () => {
+    let sent = null;
+    vi.stubGlobal("fetch", (url, init) => {
+      sent = JSON.parse(init.body);
+      return jsonOk({ id: "i1", final_score: 18, review_revision: 2 });
+    });
+    const store = useGradingStore();
+
+    await store.overrideScore("i1", { score: 18, reason: "论证不足，扣 2 分" });
+
+    expect(sent.final_score).toBe(18);
+    expect(sent.reason).toBe("论证不足，扣 2 分");
+  });
+
+  it("提交单份复核同样要理由", async () => {
+    const store = useGradingStore();
+
+    await expect(store.submitRunReview("r1", "")).rejects.toThrow(/理由/);
+  });
+
+  it("提交单份复核后返回服务端结果", async () => {
+    vi.stubGlobal("fetch", () => jsonOk({ id: "r1", status: "reviewed" }));
+    const store = useGradingStore();
+
+    const result = await store.submitRunReview("r1", "已逐项核对");
+
+    expect(result.status).toBe("reviewed");
+  });
+
+  it("并发冲突原样抛出，不静默覆盖", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ detail: "该给分已被其他人修改，请刷新" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const store = useGradingStore();
+
+    // 冲突要让用户看到并重新决定，而不是把别人的改动盖掉。
+    await expect(
+      store.overrideScore("i1", { score: 18, reason: "改一下" }),
+    ).rejects.toThrow(/刷新/);
+  });
+});

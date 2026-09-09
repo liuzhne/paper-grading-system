@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { useGradingStore } from "@/stores/grading.js";
@@ -65,6 +65,54 @@ function highlight(block) {
     { text: quote, mark: true },
     { text: text.slice(at + quote.length), mark: false },
   ].filter((part) => part.text);
+}
+
+// --- 改分与确认（V3-5）-----------------------------------------------------
+//
+// 理由必填：改分会写进复核记录，没有理由的记录事后无法判断当初为什么改。
+const editing = ref(null);
+const draftScore = ref(null);
+const draftReason = ref("");
+const writeBusy = ref(false);
+const writeError = ref(null);
+const runNote = ref("");
+
+function startEdit(item) {
+  editing.value = item.id;
+  draftScore.value = item.final_score ?? item.ai_score ?? 0;
+  draftReason.value = "";
+  writeError.value = null;
+}
+
+async function saveEdit(item) {
+  writeBusy.value = true;
+  writeError.value = null;
+  try {
+    await store.overrideScore(item.id, {
+      score: Number(draftScore.value),
+      reason: draftReason.value,
+    });
+    editing.value = null;
+  } catch (err) {
+    // 并发冲突要让用户看到并重新决定，不静默覆盖别人的改动。
+    writeError.value = err instanceof Error ? err.message : "改分失败";
+  } finally {
+    writeBusy.value = false;
+  }
+}
+
+async function confirmRun({ advance }) {
+  writeBusy.value = true;
+  writeError.value = null;
+  try {
+    await store.submitRunReview(store.currentRunId, runNote.value || "已逐项核对");
+    runNote.value = "";
+    if (advance) await goNeighbour("next");
+  } catch (err) {
+    writeError.value = err instanceof Error ? err.message : "提交复核失败";
+  } finally {
+    writeBusy.value = false;
+  }
 }
 
 async function goNeighbour(direction) {
@@ -190,6 +238,29 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
           <p v-if="item.review_reason" class="faint item-reason">{{ item.review_reason }}</p>
 
+          <div v-if="editing === item.id" class="edit-box">
+            <label :for="`score-${item.id}`">改为</label>
+            <input
+              :id="`score-${item.id}`"
+              v-model="draftScore"
+              type="number"
+              :max="item.max_score"
+              min="0"
+              step="0.5"
+            />
+            <label :for="`reason-${item.id}`">理由（必填）</label>
+            <textarea :id="`reason-${item.id}`" v-model="draftReason" rows="2"></textarea>
+            <div class="row-actions">
+              <button class="btn btn-sm btn-primary" type="button" :disabled="writeBusy" @click="saveEdit(item)">
+                保存
+              </button>
+              <button class="btn btn-sm" type="button" @click="editing = null">取消</button>
+            </div>
+          </div>
+          <button v-else class="btn btn-sm edit-trigger" type="button" @click="startEdit(item)">
+            改分
+          </button>
+
           <div v-if="item.evidence_view?.length" class="evidence">
             <button
               v-for="(view, index) in item.evidence_view"
@@ -212,6 +283,29 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <span class="faint">总分</span>
             <span><span class="mono total-value">{{ store.totalScore }}</span><span class="faint mono"> / {{ store.maxTotal }}</span></span>
           </div>
+
+          <label for="run-note">评语（可选）</label>
+          <textarea id="run-note" v-model="runNote" rows="2"></textarea>
+
+          <div class="row-actions">
+            <button
+              class="btn btn-primary"
+              type="button"
+              :disabled="writeBusy || !store.currentRunId"
+              @click="confirmRun({ advance: true })"
+            >
+              确认并进入下一份
+            </button>
+            <button
+              class="btn"
+              type="button"
+              :disabled="writeBusy || !store.currentRunId"
+              @click="confirmRun({ advance: false })"
+            >
+              确认此份评分
+            </button>
+          </div>
+          <p v-if="writeError" class="notice notice-danger" role="alert">{{ writeError }}</p>
         </div>
       </aside>
     </div>

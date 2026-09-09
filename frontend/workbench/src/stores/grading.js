@@ -129,7 +129,47 @@ export const useGradingStore = defineStore("grading", () => {
     );
   }
 
+  /**
+   * 改单项分（V3-5）。
+   *
+   * **理由必填**：改分会写进复核记录，没有理由的记录事后无法判断当初为什么改。
+   * 并发冲突（409）原样抛出——要让用户看到并重新决定，而不是把别人的改动盖掉。
+   *
+   * @param {string} itemId
+   * @param {{score: number, reason: string}} input
+   */
+  async function overrideScore(itemId, input) {
+    const reason = (input.reason || "").trim();
+    if (!reason) {
+      throw new Error("请填写改分理由。");
+    }
+    const updated = await api.patch(`/score-items/${itemId}`, {
+      final_score: input.score,
+      reason,
+    });
+    // 就地更新，避免整页重载把用户的滚动位置和当前锚点丢掉。
+    const index = items.value.findIndex((item) => item.id === itemId);
+    if (index >= 0) items.value[index] = { ...items.value[index], ...updated };
+    return updated;
+  }
+
+  /**
+   * 提交这一份的复核（V3-5）。
+   *
+   * @param {string} runId
+   * @param {string} reason
+   */
+  async function submitRunReview(runId, reason) {
+    const trimmed = (reason || "").trim();
+    if (!trimmed) {
+      throw new Error("请填写复核理由。");
+    }
+    return api.post(`/scoring-runs/${runId}/review`, { reason: trimmed });
+  }
+
   return {
+    overrideScore,
+    submitRunReview,
     batchId,
     papers,
     currentPaperId,

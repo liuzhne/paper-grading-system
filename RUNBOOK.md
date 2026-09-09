@@ -586,7 +586,15 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 
 `test_config_loading.py` 会因为这个开关失败——它验证的正是 env 文件加载，属于预期。
 
-### 11.10 含迁移的发布：顺序不能反
+### 11.10 `.vue` 里漏导入 `ref`：构建与 typecheck 都拦不住
+
+`<script setup>` 里用了没导入的 `ref`，`vite build` 与 `vue-tsc` 都**不报错**——
+它在运行时才抛，表现为整个页面空白。浏览器验收会失败，但报错说的是「找不到某个
+元素」，指向的是页面结构，不是缺失的导入。
+
+判断方法：某个页面的**全部**用例同时失败（而不是零星几条），先看它的 `import`。
+
+### 11.11 含迁移的发布：顺序不能反
 
 新代码启动即读新表时，**先部署代码后迁移**会让应用在那段时间里报「配置读不出来」。
 本仓库的 `platform_llm_config` 就是这种：`_platform_runtime()` 按设计不回落 Mock，
