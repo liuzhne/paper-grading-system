@@ -355,3 +355,37 @@ test.describe("V3-5 工作区写能力", () => {
     await expect(page.getByLabel(/评语/)).toBeVisible();
   });
 });
+
+test.describe("V3-5 工作区布局", () => {
+  test("展开改分框时不被底部总分区盖住", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+    await page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }).click();
+    await expect(page.getByText("材料 ·")).toBeVisible();
+
+    await page.getByRole("button", { name: "改分" }).first().click();
+
+    // 底部总分区是 sticky 的；往里加评语与两个按钮后它变高，会盖住上方展开的
+    // 改分框——「保存」按钮点不到，而页面看起来一切正常。
+    const overlap = await page.evaluate(() => {
+      const box = document.querySelector(".edit-box");
+      const total = document.querySelector(".total");
+      if (!box || !total) return null;
+      const b = box.getBoundingClientRect();
+      const t = total.getBoundingClientRect();
+      return b.bottom > t.top;
+    });
+
+    expect(overlap).toBe(false);
+  });
+
+  test("保存按钮可点，没有被遮挡", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+    await page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }).click();
+    await expect(page.getByText("材料 ·")).toBeVisible();
+    await page.getByRole("button", { name: "改分" }).first().click();
+
+    // Playwright 的可操作性检查会拒绝点被遮挡的元素——这条比看截图可靠。
+    await expect(page.getByRole("button", { name: "保存" })).toBeEnabled();
+    await page.getByRole("button", { name: "保存" }).click({ timeout: 5000 });
+  });
+});

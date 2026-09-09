@@ -287,12 +287,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <p v-else class="faint item-reason">该项没有记录证据。</p>
         </div>
 
-        <div v-if="store.items.length" class="total">
-          <div class="total-row">
-            <span class="faint">总分</span>
-            <span><span class="mono total-value">{{ store.totalScore }}</span><span class="faint mono"> / {{ store.maxTotal }}</span></span>
-          </div>
-
+        <!-- 评语与确认动作跟着内容流走，不放进 sticky 区：sticky 区一旦变高就会
+             盖住上方展开的改分框，「保存」按钮点不到而页面看起来一切正常。 -->
+        <div v-if="store.items.length" class="run-actions">
           <label class="field">
             <span class="field-label">评语（可选）</span>
             <textarea v-model="runNote" class="input" rows="2"></textarea>
@@ -317,6 +314,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             </button>
           </div>
           <p v-if="writeError" class="notice notice-danger" role="alert">{{ writeError }}</p>
+        </div>
+
+        <!-- 只有总分保持粘底：它是一行，高度固定，盖不住东西。 -->
+        <div v-if="store.items.length" class="total">
+          <div class="total-row">
+            <span class="faint">总分</span>
+            <span><span class="mono total-value">{{ store.totalScore }}</span><span class="faint mono"> / {{ store.maxTotal }}</span></span>
+          </div>
         </div>
       </aside>
     </div>
@@ -564,6 +569,11 @@ mark {
 .ev.dim {
   color: var(--text-faint);
   cursor: not-allowed;
+}
+
+.run-actions {
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-row);
 }
 
 .total {
