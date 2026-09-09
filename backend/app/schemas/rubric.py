@@ -55,6 +55,9 @@ class RubricLifecycleReason(BaseModel):
 
 class RubricPublishRequest(RubricLifecycleReason):
     compilation_id: Optional[str] = None
+    #: 分享范围（D-029）。不传就沿用当前范围——扩大范围必须是显式动作。
+    #: 与编译产物在同一次发布里原子生效，之后与版本一起冻结。
+    visibility: Optional[Literal["private", "organization", "system"]] = None
 
 
 class AtomicRuleEditRequest(RubricLifecycleReason):

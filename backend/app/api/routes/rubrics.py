@@ -905,6 +905,19 @@ def publish_rubric(
     # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
     # 怎么被打分，写它必须过角色门控（v3 §4.2）。
     require_organization_role(principal, "org_admin", "teacher")
+
+    # 分享范围（D-029）。不传就沿用当前范围——扩大范围必须是显式动作。
+    #
+    # 「本组织」此前需要 `org_admin`，这里放宽为创建者本人即可：导入默认仅自己
+    # 可见，若共享仍需审批，每份标准都要走一次管理员才能给同事用。
+    # 「所有人」跨组织生效，影响面不同，维持 `platform_admin`。
+    requested_visibility = payload.visibility if payload else None
+    if requested_visibility == "system":
+        if principal.platform_role != "platform_admin":
+            raise HTTPException(
+                status_code=403,
+                detail="只有平台管理员可以把评分标准分享给所有组织。",
+            )
     compilation_id = payload.compilation_id if payload else None
     if not compilation_id:
         has_provenance = db.scalar(
@@ -925,6 +938,15 @@ def publish_rubric(
             detail="compilation_id is required for provenance publication",
         )
     try:
+        # 范围必须**先于** publish 写入：有 ORM 守卫拦住「已发布评分标准不可修改」，
+        # 发布后再改会直接抛错。两者仍在同一个事务里，要么一起生效要么一起回滚
+        # （D-029）——分两次提交会留下「已发布但范围还是旧的」这个没有补救入口的
+        # 中间态，因为发布后范围就冻结了。
+        if requested_visibility is not None:
+            target = db.get(Rubric, rubric_id)
+            if target is not None:
+                target.visibility = requested_visibility
+                db.flush()
         rubric_lifecycle.publish_rubric(
             db,
             rubric_id,

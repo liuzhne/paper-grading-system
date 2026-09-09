@@ -1950,12 +1950,12 @@ export interface paths {
          * @description 脱敏读。**永远不回显密钥**，连密文字段也不出现。
          */
         get: operations["read_platform_llm_api_system_platform_llm_get"];
+        put?: never;
         /**
          * Write Platform Llm
          * @description 写入或替换。单例——再配一次是替换，不是新增。
          */
-        put: operations["write_platform_llm_api_system_platform_llm_put"];
-        post?: never;
+        post: operations["write_platform_llm_api_system_platform_llm_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3893,6 +3893,8 @@ export interface components {
              * @default 人工生命周期操作
              */
             reason: string;
+            /** Visibility */
+            visibility?: ("private" | "organization" | "system") | null;
         };
         /** RubricRead */
         RubricRead: {
@@ -8511,7 +8513,7 @@ export interface operations {
             };
         };
     };
-    write_platform_llm_api_system_platform_llm_put: {
+    write_platform_llm_api_system_platform_llm_post: {
         parameters: {
             query?: never;
             header?: {
