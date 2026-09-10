@@ -549,7 +549,16 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 改完前端后**必须重建产物再跑验收**（`build_web_static.py --with-workbench`）：验收托管的
 是 `public/`，不是 Vite dev server。忘了重建同样表现为「代码明明改了却不生效」。
 
-### 11.8 验收失败的三种常见误判
+### 11.8 「验可见」不等于「验可用」
+
+覆盖层之下的元素照样 `visible`，`toBeVisible()` 会通过而用户点不到。模型配置弹窗
+的遮罩 `inset: 0` 铺满视口，配置表单一直是可见的——那条验收因此一路绿灯，直到线上
+才发现表单点不了。
+
+**要验的是能不能用**：直接 `click()` / `fill()` 一次，Playwright 的可操作性检查会
+因遮挡失败。同理，「按钮存在」不等于「按钮可点」。
+
+### 11.9 验收失败的三种常见误判
 
 同一条用例单跑通过、全跑失败时，先按这个顺序排查，**不要直接当成不稳定**：
 
@@ -562,7 +571,7 @@ backend/app/services/deployment/postgres_verifier.py   # MIGRATION_SEQUENCE
 
 排除这三条之后仍然只在全跑时失败，才考虑用例间的状态串扰。
 
-### 11.9 「本地绿是因为用了环境里的东西」
+### 11.10 「本地绿是因为用了环境里的东西」
 
 这个根出过两次，两次都只在 CI 暴露：
 
@@ -586,7 +595,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 
 `test_config_loading.py` 会因为这个开关失败——它验证的正是 env 文件加载，属于预期。
 
-### 11.10 `.vue` 里漏导入 `ref`：构建与 typecheck 都拦不住
+### 11.11 `.vue` 里漏导入 `ref`：构建与 typecheck 都拦不住
 
 `<script setup>` 里用了没导入的 `ref`，`vite build` 与 `vue-tsc` 都**不报错**——
 它在运行时才抛，表现为整个页面空白。浏览器验收会失败，但报错说的是「找不到某个
@@ -594,7 +603,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 
 判断方法：某个页面的**全部**用例同时失败（而不是零星几条），先看它的 `import`。
 
-### 11.11 含迁移的发布：顺序不能反
+### 11.12 含迁移的发布：顺序不能反
 
 新代码启动即读新表时，**先部署代码后迁移**会让应用在那段时间里报「配置读不出来」。
 本仓库的 `platform_llm_config` 就是这种：`_platform_runtime()` 按设计不回落 Mock，
@@ -618,6 +627,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
 | 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
 | 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
+| 2026-09-10 | 弹窗可关闭与「验可见≠验可用」 | 新增 §11.8：覆盖层之下元素照样 visible，要用 click/fill 验可操作性。后续小节顺延编号。未运行生产操作。 |
 | 2026-09-09 | V3-4 与含迁移发布 | 新增 §11.9（本地绿是因为用了环境里的东西）与 §11.10（含迁移的发布顺序）。上线记录见 `docs/上线清单.md` §14。未运行生产操作。 |
 | 2026-09-09 | V3-3 发布区与验收排错 | 新增 §11.8：验收失败的三种常见误判（产物未重建、spec 被错误 project 捡走、选择器命中多个）。未运行生产操作。 |
 | 2026-09-09 | 平台模型前端接入 | 新增 §11.7：三套验收后端与 spec 的对应关系，以及「新 spec 要加进 testIgnore」「改前端要重建产物」两个会被误读成不稳定的坑。未运行生产操作。 |
