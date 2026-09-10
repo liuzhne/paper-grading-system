@@ -159,15 +159,6 @@ function dismiss() {
   gap: 10px;
 }
 
-/* `.btn` 用在 `<a>` 上时文字不会居中：原生 `<button>` 自己居中，行内元素不会，
-   而 `.btn` 没有设 display。这里显式补上。 */
-.dialog-actions .btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  text-decoration: none;
-}
-
 /* 窄屏上按钮本来就是一列；宽一点时并排更省空间，但仍保持等宽。 */
 @media (min-width: 520px) {
   .dialog-actions {

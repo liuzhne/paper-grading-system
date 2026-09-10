@@ -194,6 +194,29 @@ textarea.input {
   color: var(--text-secondary);
 }
 
+/* 原生文件框在 Chromium 上是一个灰色系统按钮加一句「未选择任何文件」，和同一张
+   表单里的 `.btn` 并排时格外突兀：不同的圆角、字重与灰度。
+   用 `::file-selector-button` 直接改这个按钮，**不藏输入框再用 label 冒充**——
+   那样会丢掉原生的键盘可达性与「已选文件名」的无障碍播报，得另外补一整套。
+   文案「未选择任何文件」是浏览器画的，改不掉；但字号与颜色跟着上面的规则走。 */
+.field input[type="file"]::file-selector-button {
+  height: 30px;
+  padding: 0 11px;
+  margin-right: 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-input);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.field input[type="file"]::file-selector-button:hover {
+  border-color: var(--border-input-hover);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -212,6 +235,15 @@ textarea.input {
 /* ---------- 按钮 ---------- */
 
 .btn {
+  /* `RouterLink` 渲染成 `<a>`，是行内元素：`height` 对它不生效，盒子高度由
+     line-height 决定，文字于是贴在里面某个位置——看起来就是「没居中」。原生
+     `<button>` 由 UA 样式自己居中内容，所以同一个类在两种标签上表现不一样。
+     这三行让两者一致。已经因为漏了它返工三次（弹窗按钮、复核行内动作、
+     「新建评分任务」），所以修在这里而不是各个视图里。 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
   height: 36px;
   padding: 0 15px;
   border-radius: var(--radius);

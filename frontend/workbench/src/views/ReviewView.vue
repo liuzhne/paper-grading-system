@@ -304,13 +304,6 @@ async function onComplete() {
   margin-left: 8px;
 }
 
-/* `.btn` 用在 `<a>` 上不会自己居中——原生 `<button>` 会，行内元素不会。 */
-.actions .btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  text-decoration: none;
-}
 
 .progress-line {
   margin: 14px 0 8px;
