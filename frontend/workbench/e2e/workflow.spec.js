@@ -70,8 +70,10 @@ test.describe("V05/V06 复核队列", () => {
     await page.goto("/workbench/review");
 
     const rows = page.locator("tbody tr");
+    // 先等队列真的渲染出来再数：加载完成之前表里只有空态占位行（或者一行都没有），
+    // 那时候 `count()` 拿到的是一个与本用例无关的瞬时值。
+    await expect(rows.first().getByRole("link", { name: "查看原文" })).toBeVisible();
     const count = await rows.count();
-    expect(count).toBeGreaterThan(0);
     for (let i = 0; i < count; i += 1) {
       await expect(rows.nth(i).getByRole("link", { name: "查看原文" })).toBeVisible();
     }

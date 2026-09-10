@@ -223,3 +223,134 @@ describe("AI 起草缺失扣分细则", () => {
     expect(store.lastDraft.items).toHaveLength(1);
   });
 });
+
+describe("确认后的 AI 规则落库（V3-2 闭环）", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  const DRAFT = {
+    criterion_code: "T02",
+    rule_groups: [
+      {
+        group_code: "G1",
+        issue: "覆盖不足",
+        mutex_group: "T02-c",
+        cap_points: 6,
+        rules: [
+          { severity: "minor", trigger: "少于 15 篇", points: 2, reason: "偏窄", source: "ai_inferred", source_refs: ["/x"] },
+        ],
+      },
+    ],
+    generation_metadata: { fingerprint: "f".repeat(64) },
+  };
+
+  const RUBRIC = {
+    id: "r1",
+    name: "课程报告",
+    version: "v1.0",
+    total_score: 100,
+    criteria: [
+      { code: "T01", name: "选题", max_score: 85, scoring_mode: "llm_direct", deduction_rules_structured: [] },
+      { code: "T02", name: "文献综述", max_score: 15, scoring_mode: "review_only", deduction_rules_structured: [] },
+    ],
+  };
+
+  it("走 recompile 落库：起草端点本身不写任何东西", async () => {
+    let captured = null;
+    let calledPath = null;
+    vi.stubGlobal("fetch", (url, init) => {
+      const path = String(url);
+      if (init?.method === "POST") {
+        calledPath = path;
+        captured = JSON.parse(init.body);
+        return jsonResponse(RUBRIC);
+      }
+      return jsonResponse(RUBRIC);
+    });
+    const store = useRubricsStore();
+
+    await store.applyDraftRules("r1", {
+      criteria: RUBRIC.criteria,
+      items: [{ criterion_code: "T02", draft: DRAFT }],
+      excluded: new Set(),
+      supersedesCompilationId: "c1",
+      version: "v1.0",
+    });
+
+    expect(calledPath).toContain("/rubrics/r1/recompile");
+    expect(captured.supersedes_compilation_id).toBe("c1");
+    expect(captured.criteria[1].scoring_mode).toBe("deductive");
+    expect(captured.criteria[1].deduction_rules_structured).toHaveLength(1);
+  });
+
+  it("没有编译产物 id 时不发请求——recompile 缺它必然 409", async () => {
+    const fetchMock = vi.fn(() => jsonResponse(RUBRIC));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useRubricsStore();
+
+    await expect(
+      store.applyDraftRules("r1", {
+        criteria: RUBRIC.criteria,
+        items: [{ criterion_code: "T02", draft: DRAFT }],
+        excluded: new Set(),
+        supersedesCompilationId: null,
+        version: "v1.0",
+      }),
+    ).rejects.toThrow(/执行草稿/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("一条都没确认时不发请求——那只会生成一份内容相同的新草稿", async () => {
+    const fetchMock = vi.fn(() => jsonResponse(RUBRIC));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useRubricsStore();
+
+    await expect(
+      store.applyDraftRules("r1", {
+        criteria: RUBRIC.criteria,
+        items: [{ criterion_code: "T02", draft: DRAFT }],
+        excluded: new Set(["T02::G1::0"]),
+        supersedesCompilationId: "c1",
+        version: "v1.0",
+      }),
+    ).rejects.toThrow(/没有可应用/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("应用成功后清空起草结果，避免同一批建议被重复应用", async () => {
+    vi.stubGlobal("fetch", () => jsonResponse(RUBRIC));
+    const store = useRubricsStore();
+    store.lastDraft = { items: [{ criterion_code: "T02", draft: DRAFT }] };
+
+    await store.applyDraftRules("r1", {
+      criteria: RUBRIC.criteria,
+      items: [{ criterion_code: "T02", draft: DRAFT }],
+      excluded: new Set(),
+      supersedesCompilationId: "c1",
+      version: "v1.0",
+    });
+
+    expect(store.lastDraft.items).toEqual([]);
+  });
+
+  it("带上 reason：recompile 会把它写进变更记录", async () => {
+    let captured = null;
+    vi.stubGlobal("fetch", (url, init) => {
+      if (init?.method === "POST") captured = JSON.parse(init.body);
+      return jsonResponse(RUBRIC);
+    });
+    const store = useRubricsStore();
+
+    await store.applyDraftRules("r1", {
+      criteria: RUBRIC.criteria,
+      items: [{ criterion_code: "T02", draft: DRAFT }],
+      excluded: new Set(),
+      supersedesCompilationId: "c1",
+      version: "v1.0",
+    });
+
+    expect(captured.reason).toBeTruthy();
+  });
+});

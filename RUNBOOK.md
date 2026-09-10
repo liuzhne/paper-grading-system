@@ -646,10 +646,41 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 本轮把第二份材料的一项改成待确认（`need_manual_review=True`），刻意选了**翻转已有项
 的标记**而不是新增一项：新增会改变 run 总分、分布图柱数与工作台 KPI，牵连面大得多。
 
+### 11.15 「点了 AI 起草，什么都没发生」
+
+**报错指向**：没有报错。按钮转完圈、恢复原状，阻断项数字一个没变，用户以为起草失败了。
+
+**真正的原因**：`POST /rubrics/{id}/draft-deduction-rules` 是 **non-persistent** 的
+（后端 docstring 写明）。它返回建议，不写库。上一版前端拿到结果后还去重新加载完整度
+——读回来的当然是同一批旧数字。
+
+**现在的行为**：建议由确认面板呈现，点「确认并应用」才经 `recompile` 落库，之后完整度
+才会变。如果面板没出现，看这几处：
+
+- 起草是否真的成功（`draftError` 会显示）。Mock 模型会被显式拒绝：`draft_deduction_rules`
+  对 `provider == "mock"` 直接抛 `AI_DRAFT_CONNECTION_MISSING`。
+- `store.lastDraft.items` 是否为空。应用成功后会被主动清空，避免同一批建议叠加两次。
+- 「确认并应用」灰着，通常是这批建议被全部排除了。
+
+**验收测不到这一段**：Mock LLM 起不了草，所以浏览器验收只能覆盖到「起草入口要先选
+连接」。面板与合并逻辑靠单测（`lib/ai-draft.test.js`、`components/AiRuleDraftPanel.test.js`）。
+
+### 11.16 界面把用户指向已经下线的入口
+
+**报错指向**：没有报错。链接合法，页面渲染正常。
+
+**真正的原因**：文案写在旧 SPA 下线之前。`retired-entry.test.js` 用源码契约扫
+`<template>` 里的「旧版模板中心」「旧版界面」「旧 SPA」「/legacy/」。只扫模板不扫
+`<script>`——注释里解释历史是正当的。
+
+删页面时顺手 `grep` 一遍引用：`components/StageStub.vue` 已经没人 import，却还在模板里
+挂着一个指向旧版工作台的链接，谁都没发现。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-09-10 | AI 起草闭环与旧入口清理 | 新增 §11.15（起草端点不落库，「什么都没发生」的排查顺序）与 §11.16（已下线入口的源码契约）。未运行生产操作。 |
 | 2026-09-10 | 复核表行内动作与验收数据竞争 | 新增 §11.13（用例抢同一行种子数据；「少一行」要先等目标行出现再数）与 §11.14（改种子要查数字断言）。未运行生产操作。 |
 | 2026-09-01 | 初始化三文档 | 汇总 SQLite/PostgreSQL/CLI/Compose/Vercel 启动、测试、诊断、批任务、备份恢复、发布和回滚步骤；未执行生产变更。 |
 | 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
+import AiRuleDraftPanel from "@/components/AiRuleDraftPanel.vue";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
 import { RouterLink } from "vue-router";
@@ -91,12 +92,49 @@ async function generateMissingRules() {
         })),
       connectionId: draftConnection.value || null,
     });
-    await loadCoverage(selected.value);
+    // 这里**不重新加载完整度**：起草端点 non-persistent，库里什么都没变，刷一次
+    // 只会把用户刚拿到的建议换成一模一样的旧数字，看起来像什么都没发生。
+    // 建议由下面的确认面板呈现，应用之后才刷新。
   } catch (err) {
     draftError.value = err instanceof Error ? err.message : "起草失败";
   } finally {
     draftBusy.value = false;
   }
+}
+
+// --- 确认并应用起草结果（V3-2 闭环）---------------------------------------
+const applyBusy = ref(false);
+const applyError = ref(null);
+const applyNotice = ref(null);
+
+async function applyDraft(excluded) {
+  applyBusy.value = true;
+  applyError.value = null;
+  applyNotice.value = null;
+  try {
+    const full = await store.loadRubric(selected.value);
+    await store.applyDraftRules(selected.value, {
+      criteria: full.criteria || [],
+      items: store.lastDraft.items,
+      excluded,
+      // recompile 要继承当前执行草稿；版本重名时服务端自己加 `-draft.N` 后缀。
+      supersedesCompilationId: draft.value?.active_compilation?.id || null,
+      version: full.version,
+      name: full.name,
+      totalScore: full.total_score,
+    });
+    applyNotice.value = "已生成新的执行草稿，扣分细则已进入待发布内容。";
+    await Promise.all([loadCoverage(selected.value), loadDraft()]);
+  } catch (err) {
+    applyError.value = err instanceof Error ? err.message : "应用失败";
+  } finally {
+    applyBusy.value = false;
+  }
+}
+
+function discardDraft() {
+  store.lastDraft = { items: [] };
+  applyNotice.value = null;
 }
 
 // --- 校验与发布（D-029：编译产物 + 分享范围一次选定）---------------------
@@ -433,7 +471,17 @@ onMounted(async () => {
             <p v-if="pending.length" class="faint field-hint">
               未确认的 AI 规则不会进入可执行评分版本；确认信息会记录确认人、时间与生成来源。
             </p>
+            <p v-if="applyError" class="notice notice-danger" role="alert">{{ applyError }}</p>
+            <p v-else-if="applyNotice" class="notice" role="status">{{ applyNotice }}</p>
           </section>
+
+          <!-- 起草结果的确认面板。起草端点不落库，确认之后由 recompile 写入。 -->
+          <AiRuleDraftPanel
+            :items="store.lastDraft.items"
+            :busy="applyBusy"
+            @apply="applyDraft"
+            @discard="discardDraft"
+          />
 
           <!-- 评分项 -->
           <section class="card">
@@ -480,14 +528,13 @@ onMounted(async () => {
               </table>
             </div>
             <div class="card-foot">
-              本页只展示标准结构与规则来源。导入、AI 起草与逐条审核仍在
-              <a href="/">旧版模板中心</a> 完成——那部分生命周期端点未改动，
-              尚未迁移到新界面。
+              规则来源分「原文」与「AI」：原文来自你导入的 Excel 与 Word 批注，
+              AI 是起草补的缺失部分，确认后才会进入可执行版本。
             </div>
           </section>
         </template>
         <p v-else-if="!rubrics.length" class="notice">
-          还没有评分标准。请先在旧版模板中心导入。
+          还没有评分标准。点右上角「导入评分模板」上传规则 Excel 开始。
         </p>
       </div>
     </div>

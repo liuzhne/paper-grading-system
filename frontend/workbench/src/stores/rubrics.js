@@ -3,6 +3,7 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
+import { mergeConfirmedDrafts } from "@/lib/ai-draft.js";
 
 /**
  * 评分标准：列表、导入、克隆（v3 §3.1、§5.1）。
@@ -140,6 +141,57 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return api.get(`/rubrics/${rubricId}/execution-draft`);
   }
 
+  /**
+   * 单个评分标准的完整内容，含每个评分项的扣分规则。
+   *
+   * 执行草稿是一份**安全读模型**，按设计不带规则正文；要把确认后的规则提交回去
+   * 就必须从这里拿到完整的 criteria。
+   *
+   * @param {string} rubricId
+   */
+  async function loadRubric(rubricId) {
+    return api.get(`/rubrics/${rubricId}`);
+  }
+
+  /**
+   * 把确认后的 AI 起草规则写进可执行版本（V3-2 闭环）。
+   *
+   * 起草端点 non-persistent，落库唯一的路径是 `recompile`——它接收完整 criteria
+   * 并生成新的执行草稿。`PATCH /rubrics/{id}` 在已有编译产物时会直接 409
+   * （`RUBRIC_RECOMPILE_REQUIRED`），走不通。
+   *
+   * @param {string} rubricId
+   * @param {{criteria: any[], items: any[], excluded: Set<string>,
+   *          supersedesCompilationId: string|null, version: string,
+   *          name?: string|null, totalScore?: number|null}} input
+   */
+  async function applyDraftRules(rubricId, input) {
+    if (!input.supersedesCompilationId) {
+      // 缺它 recompile 必然 409（RUBRIC_RECOMPILE_STALE）。在这里失败，错误信息
+      // 才说得清是「页面上的执行草稿没选中」，而不是后端抛来的并发冲突。
+      throw new Error("当前没有可继承的执行草稿，请刷新后重试。");
+    }
+    const criteria = mergeConfirmedDrafts(input.criteria, input.items, input.excluded);
+    const changed = criteria.some(
+      (criterion, index) => criterion !== input.criteria[index],
+    );
+    if (!changed) {
+      throw new Error("没有可应用的规则：这批建议已被全部排除。");
+    }
+
+    const result = await api.post(`/rubrics/${rubricId}/recompile`, {
+      supersedes_compilation_id: input.supersedesCompilationId,
+      version: input.version,
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.totalScore ? { total_score: input.totalScore } : {}),
+      criteria,
+      reason: "确认并应用 AI 起草的扣分细则",
+    });
+    // 同一批建议不该被应用两次：第二次会在新草稿上再叠一遍同样的规则。
+    lastDraft.value = { items: [] };
+    return result;
+  }
+
   return {
     rubrics,
     error,
@@ -151,7 +203,9 @@ export const useRubricsStore = defineStore("rubrics", () => {
     clone,
     publish,
     loadExecutionDraft,
+    loadRubric,
     lastDraft,
     draftRules,
+    applyDraftRules,
   };
 });

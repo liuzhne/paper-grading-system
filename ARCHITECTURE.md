@@ -434,10 +434,43 @@ ReviewView 行内「确认」
   该 id 确实在本批次的材料列表里，否则回落到首项——选中一个列表里没有的 id 会让
   **一行都不高亮**，界面看起来正常，用户却不知道自己在看什么。
 
+### 7.15 AI 起草的落库闭环（2026-09-10，V3-2）
+
+`POST /rubrics/{id}/draft-deduction-rules` 的 docstring 写明 **non-persistent**：它只
+返回待确认的建议，一条也不落库。上一版前端把结果存进 `lastDraft` 就再没用过，并且
+起草成功后**重新加载了完整度**——库里什么都没变，于是阻断项一个没少。用户点了按钮、
+等了一次真实模型调用、页面纹丝不动。
+
+补齐后的链路：
+
+```
+生成全部缺失细则
+  → POST /rubrics/{id}/draft-deduction-rules   ← 不落库，返回 rule_groups
+  → AiRuleDraftPanel 逐行呈现，用户排除不要的
+  → mergeConfirmedDrafts(criteria, items, excluded)   （lib/ai-draft.js，纯函数）
+  → GET /rubrics/{id}                          ← 取完整 criteria（含规则正文）
+  → POST /rubrics/{id}/recompile               ← 唯一的落库路径
+  → 重新加载完整度与执行草稿
+```
+
+边界与理由：
+
+- **落库只能走 `recompile`**。`PATCH /rubrics/{id}` 在已有编译产物时直接 409
+  （`RUBRIC_RECOMPILE_REQUIRED`），而工作台里的标准在导入时就产生了编译产物，这条路
+  始终走不通。
+- **完整 criteria 必须从 `GET /rubrics/{id}` 取**，不能用执行草稿：后者按设计是一份
+  安全读模型，明确不带规则正文（`draft_graph.py` 的模块 docstring）。
+- **映射沿用旧模板中心的字段形状**（`frontend/web/assets/app.js:1947`）。那条链路验证过
+  能编译通过；换一套字段名等于重新赌一次。组级的 `mutex_group` 与 `cap_points` 必须
+  跟着每条规则走，丢了它们同一问题的三档会同时命中。
+- **一条都没确认时不改 `scoring_mode`**。改成 `deductive` 却没有任何规则，评分时该项
+  恒得满分——比不改更糟，而且看起来像配置生效了。
+
 ## 8. 维护记录
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-09-10 | AI 起草落库闭环 | 新增 §7.15：起草端点不落库，确认后经 `recompile` 写入；完整 criteria 取自 `GET /rubrics/{id}` 而非安全读模型的执行草稿。无后端改动、无新迁移。 |
 | 2026-09-10 | 复核队列行内动作 | 新增 §7.14：逐项确认与批量采纳共用一条提交路径；「查看原文」带 `?paper=` 深链接，工作区校验材料归属后再选中。无后端改动。 |
 | 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
 | 2026-09-10 | 评分任务补「评分标准」列 | 新增 §7.13：outerjoin 带回标准名与版本，字段避开 ORM 关系属性同名。对齐设计稿。 |
