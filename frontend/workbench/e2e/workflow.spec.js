@@ -114,6 +114,24 @@ test.describe("V05/V06 复核队列", () => {
     await expect(page.locator("tbody tr", { hasText: "SE-2026-011" })).toHaveCount(0);
   });
 
+  // 设计稿的「复核进度」有一条进度条。只给「6 / 7」这样的数字，读的人要自己换算
+  // 才知道差多少；一眼能看出的信息不该要求心算。
+  test("复核进度画出进度条，宽度对得上已确认比例", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    const fill = page.locator(".progress-bar .fill");
+    await expect(fill).toBeVisible();
+    const width = await fill.evaluate((el) => el.style.width);
+    expect(width).toMatch(/^\d+(\.\d+)?%$/);
+  });
+
+  test("总数为 0 时不画进度条，也不显示 0%——那是「还没有项」，不是「一项都没确认」", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    // 有项时进度条在；这条断言配合上一条，确保空态走的是另一个分支。
+    await expect(page.locator(".progress-line")).toContainText("已确认");
+  });
+
   // 上一条用例已经确认掉第二份材料的那一项，这里剩的是第一份材料的低置信度项。
   // 顺序相关：同一个后端、按声明顺序跑。
   test("批量采纳只计入可采纳项", async ({ page }) => {

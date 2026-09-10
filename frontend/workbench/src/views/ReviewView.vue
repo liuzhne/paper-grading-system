@@ -33,6 +33,13 @@ function formatConfidence(value) {
   return value === null || value === undefined ? "未提供" : `${Math.round(value * 100)}%`;
 }
 
+/** 已确认占比。分母为 0 时不该走到这里——模板已经先挡掉了。 */
+const confirmedPercent = computed(() => {
+  const stats = review.stats;
+  if (!stats?.total_items) return "0%";
+  return `${Math.round((stats.confirmed_items / stats.total_items) * 100)}%`;
+});
+
 function formatTime(value) {
   if (!value) return "—";
   const date = new Date(value);
@@ -198,6 +205,14 @@ async function onComplete() {
             <span class="mono big">{{ review.stats.confirmed_items }}</span>
             <span class="faint mono"> / {{ review.stats.total_items }} 项已确认</span>
           </p>
+          <!-- 总数为 0 时不画：一条 0% 的进度条读起来是「一项都没确认」，而实际
+               是「还没有项」。这两件事在复核页上意味着完全不同的下一步。 -->
+          <div v-if="review.stats.total_items" class="progress-bar">
+            <span class="bar">
+              <span class="fill" :style="{ width: confirmedPercent }"></span>
+            </span>
+            <span class="faint mono pct">{{ confirmedPercent }}</span>
+          </div>
           <dl class="stats">
             <div><dt>采纳系统给分</dt><dd class="mono">{{ review.stats.accepted_items }}</dd></div>
             <div><dt>人工调整</dt><dd class="mono">{{ review.stats.adjusted_items }}</dd></div>
@@ -298,7 +313,34 @@ async function onComplete() {
 }
 
 .progress-line {
-  margin: 14px 0 16px;
+  margin: 14px 0 8px;
+}
+
+.progress-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 16px;
+}
+
+.bar {
+  flex: 1 1 auto;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border-light);
+  overflow: hidden;
+}
+
+.fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.pct {
+  flex: none;
+  font-size: 11.5px;
 }
 
 .big {
