@@ -207,6 +207,25 @@ describe("grading store", () => {
 
     expect(store.activeQuote).toBeNull();
   });
+  it("带 paperId 打开时直接落在那一份，不是列表首项", async () => {
+    stub();
+    const store = useGradingStore();
+
+    await store.openBatch("b1", "p2");
+
+    expect(store.currentPaperId).toBe("p2");
+  });
+
+  it("指定的材料不在这个批次里时回落到首项，而不是空选中", async () => {
+    stub();
+    const store = useGradingStore();
+
+    // 复核队列里的链接可能指向一份已经被移出批次的材料。选中一个列表里没有的
+    // id，界面会显示成「一份都没选中」，而用户看不出发生了什么。
+    await store.openBatch("b1", "p-not-here");
+
+    expect(store.currentPaperId).toBe("p1");
+  });
 });
 
 describe("工作区写能力（V3-5）", () => {

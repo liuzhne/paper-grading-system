@@ -130,7 +130,9 @@ function onKeydown(event) {
 }
 
 onMounted(() => {
-  store.openBatch(route.params.batchId);
+  // `?paper=` 来自复核队列的「查看原文」。没有它就落在列表首项——用户点的是
+  // 某一行，打开的却是另一份材料，而页面上没有任何东西说明这件事。
+  store.openBatch(route.params.batchId, route.query.paper || null);
   window.addEventListener("keydown", onKeydown);
 });
 

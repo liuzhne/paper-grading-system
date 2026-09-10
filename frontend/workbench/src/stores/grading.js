@@ -75,7 +75,11 @@ export const useGradingStore = defineStore("grading", () => {
     error.value = null;
     try {
       papers.value = (await api.get(`/papers?batch_id=${id}`)) || [];
-      const target = paperId || papers.value[0]?.id || null;
+      // 指定的材料必须真的在这个批次里。复核队列的「查看原文」链接可能指向一份
+      // 已被移出批次的材料，直接选中它会让列表**一项都不高亮**——界面看起来正常，
+      // 只是没有任何一行是选中的，用户无从判断自己在看什么。
+      const requested = papers.value.some((p) => p.id === paperId) ? paperId : null;
+      const target = requested || papers.value[0]?.id || null;
       if (target) await selectPaper(target);
     } catch (err) {
       if (err instanceof StaleContextError) return;

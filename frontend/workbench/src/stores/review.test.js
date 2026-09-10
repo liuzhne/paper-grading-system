@@ -194,4 +194,74 @@ describe("review store", () => {
 
     expect(store.error).toContain("刷新");
   });
+  it("单项确认只提交那一条，不牵连同页其它待确认项", async () => {
+    let captured = null;
+    stub((url, init) => {
+      if (String(url).endsWith("/accept")) {
+        captured = JSON.parse(init.body);
+        return jsonResponse({
+          batch_id: "b1",
+          accepted_count: 1,
+          result_revision: QUEUE.result_revision,
+          replayed: false,
+        });
+      }
+      return jsonResponse(QUEUE);
+    });
+    const store = useReviewStore();
+    await store.load("b1");
+
+    await store.acceptOne(store.entries[1], "逐项确认");
+
+    expect(captured.items).toEqual([{ score_item_id: "i1", review_revision: 2 }]);
+    expect(captured.reason).toBe("逐项确认");
+  });
+
+  it("阻塞任务不能被单项确认——它缺的是结论，不是一次点击", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => jsonResponse(QUEUE));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useReviewStore();
+    await store.load("b1");
+    fetchMock.mockClear();
+
+    const result = await store.acceptOne(store.entries[0], "理由");
+
+    expect(result).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("没有 AI 分的项不能被单项确认", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => jsonResponse(QUEUE));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useReviewStore();
+    await store.load("b1");
+    fetchMock.mockClear();
+
+    // i2 的 ai_score 为 null：没有分可采纳，「确认」无从谈起。
+    expect(await store.acceptOne(store.entries[2], "理由")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("单项确认与批量采纳共用幂等键生成，不复用同一个键", async () => {
+    const keys = [];
+    stub((url, init) => {
+      if (String(url).endsWith("/accept")) {
+        keys.push(JSON.parse(init.body).idempotency_key);
+        return jsonResponse({
+          batch_id: "b1",
+          accepted_count: 1,
+          result_revision: QUEUE.result_revision,
+          replayed: false,
+        });
+      }
+      return jsonResponse(QUEUE);
+    });
+    const store = useReviewStore();
+    await store.load("b1");
+
+    await store.acceptOne(store.entries[1], "理由");
+    await store.acceptVisible("理由");
+
+    expect(keys[0]).not.toBe(keys[1]);
+  });
 });

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from "vue";
+import { RouterLink } from "vue-router";
 
 import { useBatchesStore } from "@/stores/batches.js";
 import { useReviewStore } from "@/stores/review.js";
@@ -53,6 +54,11 @@ onMounted(async () => {
 
 async function onAccept() {
   await review.acceptVisible("采纳系统给分");
+  await Promise.all([review.loadStats(), review.loadTimeline()]);
+}
+
+async function onAcceptOne(entry) {
+  if (!(await review.acceptOne(entry, "逐项确认系统给分"))) return;
   await Promise.all([review.loadStats(), review.loadTimeline()]);
 }
 
@@ -127,6 +133,7 @@ async function onComplete() {
               <th>系统给分</th>
               <th>置信度</th>
               <th>需要确认的原因</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -147,9 +154,36 @@ async function onComplete() {
                 {{ formatConfidence(entry.confidence) }}
               </td>
               <td class="muted reason">{{ entry.review_reason || "—" }}</td>
+              <td class="actions">
+                <!-- 带上 paper：工作区默认落在列表首项，不带的话点「查看原文」
+                     会打开另一份材料，而用户以为自己在看这一行。 -->
+                <RouterLink
+                  v-if="entry.paper_id"
+                  class="btn btn-sm"
+                  :to="{
+                    name: 'grade',
+                    params: { batchId: selected },
+                    query: { paper: entry.paper_id },
+                  }"
+                >
+                  查看原文
+                </RouterLink>
+                <span v-else class="faint">材料已删除</span>
+                <!-- 阻塞任务与无 AI 分的项不给「确认」：前者缺的是结论本身，
+                     后者根本没有分可采纳，点了必然失败。 -->
+                <button
+                  v-if="entry.acceptable"
+                  class="btn btn-sm"
+                  type="button"
+                  :disabled="review.busy"
+                  @click="onAcceptOne(entry)"
+                >
+                  确认
+                </button>
+              </td>
             </tr>
             <tr v-if="!review.entries.length && !review.loading">
-              <td class="table-empty" colspan="5">
+              <td class="table-empty" colspan="6">
                 该批次没有待确认项，可以完成复核。
               </td>
             </tr>
@@ -245,6 +279,22 @@ async function onComplete() {
 .reason {
   font-size: 12.5px;
   max-width: 320px;
+}
+
+.actions {
+  white-space: nowrap;
+}
+
+.actions > * + * {
+  margin-left: 8px;
+}
+
+/* `.btn` 用在 `<a>` 上不会自己居中——原生 `<button>` 会，行内元素不会。 */
+.actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 .progress-line {

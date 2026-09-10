@@ -89,11 +89,11 @@ export const useReviewStore = defineStore("review", () => {
     return `accept-${random}`;
   }
 
-  async function acceptVisible(reason) {
-    const items = acceptableEntries.value.map((entry) => ({
-      score_item_id: entry.score_item_id,
-      review_revision: entry.review_revision,
-    }));
+  /**
+   * 提交一组已经在界面上出现过的条目。批量与逐项走同一条路径——两者的服务端
+   * 前置条件完全一致，分成两份实现只会让其中一份先忘记带 revision。
+   */
+  async function accept(items, reason) {
     if (!items.length) return null;
 
     busy.value = true;
@@ -125,6 +125,29 @@ export const useReviewStore = defineStore("review", () => {
     } finally {
       busy.value = false;
     }
+  }
+
+  function payloadOf(entry) {
+    return {
+      score_item_id: entry.score_item_id,
+      review_revision: entry.review_revision,
+    };
+  }
+
+  async function acceptVisible(reason) {
+    return accept(acceptableEntries.value.map(payloadOf), reason);
+  }
+
+  /**
+   * 确认单独一项（设计稿复核表的行内「确认」）。
+   *
+   * 不可采纳的条目直接拒绝，**不发请求**：阻塞任务缺的是结论本身（provider
+   * 失败、规则被阻断），没有 AI 分的项则根本没有分可采纳。给它们一个会 400
+   * 的按钮，等于让用户去点一个注定失败的动作。
+   */
+  async function acceptOne(entry, reason) {
+    if (!entry?.acceptable || !entry.score_item_id) return null;
+    return accept([payloadOf(entry)], reason);
   }
 
   async function completeReview() {
@@ -164,6 +187,7 @@ export const useReviewStore = defineStore("review", () => {
     loadStats,
     loadTimeline,
     acceptVisible,
+    acceptOne,
     completeReview,
     reset,
   };

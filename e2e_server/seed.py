@@ -323,7 +323,12 @@ def _seed_batch_with_review_work(session, rubric):
         session.add(run)
         session.flush()
 
-        # 第一份带完整的三种证据形态；第二份全部已确认。
+        # 第一份带完整的三种证据形态；第二份只留一项待确认。
+        #
+        # 第二份必须留下**一条可采纳项**：复核页的「逐项确认」与「批量采纳」都要
+        # 消掉一条，而验收共用同一个后端、按声明顺序跑。只留一条时，先跑的那个
+        # 用例把它吃掉，后跑的那个面对空队列——失败原因看起来像功能坏了，实际是
+        # 两个用例在抢同一行数据。
         if position == 0:
             items = [
                 (criteria[0], 8, 0.94, False, None,
@@ -338,7 +343,7 @@ def _seed_batch_with_review_work(session, rubric):
             items = [
                 (criteria[0], 9, 0.92, False, None, []),
                 (criteria[1], 13, 0.88, False, None, []),
-                (criteria[2], 22, 0.9, False, None, []),
+                (criteria[2], 22, 0.62, True, LOW_CONFIDENCE, []),
             ]
 
         # 总分按逐项求和回填：写死一个数会和右栏的评分表对不上，而工作台的

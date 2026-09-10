@@ -216,7 +216,7 @@ onMounted(async () => {
               </td>
             </tr>
             <tr v-if="!store.visible.length && !store.loading">
-              <td class="table-empty" colspan="6">
+              <td class="table-empty" colspan="7">
                 {{ store.stageFilter ? "该阶段暂无批次。" : "还没有评分任务。" }}
               </td>
             </tr>

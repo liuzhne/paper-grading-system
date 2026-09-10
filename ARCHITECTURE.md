@@ -408,10 +408,37 @@ V3 新增的表单区块用了裸 `<input>` / `<select>` / `<textarea>` 与 `<la
 - 字段叫 `rubric_version_label` 而不是 `rubric_version`：`GradingBatch` 已有同名的
   **关系属性**，`from_attributes` 会把那个 ORM 对象当成本字段的值。
 
+### 7.14 复核队列的行内动作与深链接（2026-09-10）
+
+设计稿的「待确认给分」表最后一列是逐行的「查看原文 / 确认」。生产此前只有页顶的
+批量采纳，**逐项确认在界面上做不到**：用户对单独一项要么整页采纳，要么自己去工作区
+里翻。
+
+调用链：
+
+```
+ReviewView 行内「确认」
+  → review.acceptOne(entry)
+  → review.accept([一条])                 ← 与 acceptVisible 同一条路径
+  → POST /batches/{id}/review-queue/accept
+```
+
+- **逐项与批量共用 `accept(items, reason)`**：两者的服务端前置条件完全一致
+  （`result_revision` + 每项 `review_revision` + 幂等键）。拆成两份实现，迟早有一份
+  先忘记带 revision。
+- **不可采纳的行不给「确认」按钮**：阻塞任务缺的是结论本身（provider 失败、规则被
+  阻断），无 AI 分的项根本没有分可采纳。`acceptOne` 对这两类直接返回 `null`，
+  **不发请求**。
+- **「查看原文」是深链接**：`/batches/{batchId}/grade?paper=<paper_id>`。
+  `GradeView` 把 `route.query.paper` 传给 `openBatch(id, paperId)`；`openBatch` 校验
+  该 id 确实在本批次的材料列表里，否则回落到首项——选中一个列表里没有的 id 会让
+  **一行都不高亮**，界面看起来正常，用户却不知道自己在看什么。
+
 ## 8. 维护记录
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-09-10 | 复核队列行内动作 | 新增 §7.14：逐项确认与批量采纳共用一条提交路径；「查看原文」带 `?paper=` 深链接，工作区校验材料归属后再选中。无后端改动。 |
 | 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
 | 2026-09-10 | 评分任务补「评分标准」列 | 新增 §7.13：outerjoin 带回标准名与版本，字段避开 ORM 关系属性同名。对齐设计稿。 |
 | 2026-09-10 | 弹窗可关闭与按钮居中 | 弹窗补 ✕ 与点链接自动收起（遮罩曾挡住配置表单）；`.btn` 用在 `<a>` 上补 display 修文字居中；验收改为验可点击而非可见。无后端改动。 |

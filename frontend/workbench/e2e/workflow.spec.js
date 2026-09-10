@@ -64,6 +64,56 @@ test.describe("V05/V06 复核队列", () => {
     await expect(page.getByRole("button", { name: "完成复核" })).toBeDisabled();
   });
 
+  // 设计稿的复核表最后一列是逐行的「查看原文 / 确认」。少了这一列，用户对单独
+  // 一项只能整页采纳或者自己去工作区里找——「确认这一项」在界面上做不到。
+  test("每一行都能直接查看原文", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    const rows = page.locator("tbody tr");
+    const count = await rows.count();
+    expect(count).toBeGreaterThan(0);
+    for (let i = 0; i < count; i += 1) {
+      await expect(rows.nth(i).getByRole("link", { name: "查看原文" })).toBeVisible();
+    }
+  });
+
+  test("「查看原文」落在这一行对应的那份材料上，不是列表首项", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    const row = page.locator("tbody tr", { hasText: "SE-2026-011" });
+    const student = await row.locator(".mono").first().innerText();
+    await row.getByRole("link", { name: "查看原文" }).click();
+
+    await expect(page).toHaveURL(/\/grade\?paper=/);
+    // 工作区默认落在列表首项；带着 paper 进来必须换成这一行的材料。
+    await expect(page.locator(".material.active")).toContainText(student.trim());
+  });
+
+  test("阻塞行不给「确认」——它缺的是结论，不是一次点击", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    const blocking = page.locator("tbody tr", { hasText: "阻塞" }).first();
+    await expect(blocking.getByRole("button", { name: "确认" })).toHaveCount(0);
+    await expect(blocking.getByRole("link", { name: "查看原文" })).toBeVisible();
+  });
+
+  test("逐项确认只消掉那一行", async ({ page }) => {
+    await page.goto("/workbench/review");
+
+    const row = page.locator("tbody tr", { hasText: "SE-2026-011" });
+    // 先等这一行出现再数总数：队列加载完成之前表里只有空态占位行，那时候数到的
+    // 是 1，后面的「少一行」断言就变成了跟一个假的起点比。
+    await expect(row).toBeVisible();
+    const before = await page.locator("tbody tr").count();
+    await row.getByRole("button", { name: "确认" }).click();
+
+    await expect(page.getByText(/已采纳 1 项/)).toBeVisible();
+    await expect(page.locator("tbody tr")).toHaveCount(before - 1);
+    await expect(page.locator("tbody tr", { hasText: "SE-2026-011" })).toHaveCount(0);
+  });
+
+  // 上一条用例已经确认掉第二份材料的那一项，这里剩的是第一份材料的低置信度项。
+  // 顺序相关：同一个后端、按声明顺序跑。
   test("批量采纳只计入可采纳项", async ({ page }) => {
     await page.goto("/workbench/review");
 
