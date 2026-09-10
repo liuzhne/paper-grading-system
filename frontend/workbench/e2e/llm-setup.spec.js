@@ -80,3 +80,49 @@ test.describe("未配置模型时的引导", () => {
     await expect(page.getByLabel("Base URL")).toHaveValue("https://api.example.com/v1");
   });
 });
+
+
+test.describe("关掉弹窗不等于可以用系统", () => {
+  test("关掉后直接访问功能页仍被送回配置页", async ({ page }) => {
+    await login(page, "teacher");
+    await page.getByRole("button", { name: "关闭" }).click();
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+
+    await page.goto("/workbench/tasks");
+
+    // 上一版把拦截交给了弹窗，关掉后全站畅通——用户能进去，但页面上的动作在
+    // 后端一律失败，看到的是「能进去，但什么都做不成」。
+    await expect(page).toHaveURL(/\/workbench\/account$/);
+  });
+
+  test("关掉后工作台也进不去", async ({ page }) => {
+    await login(page, "teacher");
+    await page.getByRole("button", { name: "关闭" }).click();
+
+    await page.goto("/workbench/");
+
+    await expect(page).toHaveURL(/\/workbench\/account$/);
+  });
+
+  test("配置页始终可达，且能真正填表", async ({ page }) => {
+    await login(page, "platform");
+    await page.getByRole("button", { name: "关闭" }).click();
+
+    await page.goto("/workbench/ops");
+
+    await expect(page).toHaveURL(/\/workbench\/ops$/);
+    // 不是断言可见：遮罩之下表单照样 visible。直接填一次。
+    await page.getByLabel("Base URL").fill("https://api.example.com/v1");
+    await expect(page.getByLabel("Base URL")).toHaveValue("https://api.example.com/v1");
+  });
+
+  test("平台管理员被送到运维页，不是账户页", async ({ page }) => {
+    await login(page, "platform");
+    await page.getByRole("button", { name: "关闭" }).click();
+
+    await page.goto("/workbench/tasks");
+
+    // 配平台默认模型能让所有人都能用，优先送他去那里。
+    await expect(page).toHaveURL(/\/workbench\/ops$/);
+  });
+});

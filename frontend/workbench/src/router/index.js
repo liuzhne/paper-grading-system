@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 import { useSessionStore } from "@/stores/session.js";
+import { blockedByMissingModel, modelSetupRoute } from "@/router/llm-gate.js";
 
 /**
  * 新页面统一挂在 /workbench/ 下（计划 §8.3）。
@@ -111,6 +112,12 @@ router.beforeEach(async (to) => {
   if (to.meta.public) return true;
   if (session.status !== "authenticated") {
     return { name: "login", query: { redirect: to.fullPath } };
+  }
+  // 没有可用模型时功能页一律拦下（D-032）。**这与弹窗是否被关掉无关**：关掉弹窗
+  // 只表示不想再看那段说明，不表示已经配好模型。放行的话用户能进去，但页面上的
+  // 动作在后端一律失败。
+  if (blockedByMissingModel(session, to)) {
+    return { name: modelSetupRoute(session) };
   }
   return true;
 });
