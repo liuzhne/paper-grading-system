@@ -209,6 +209,63 @@ test.describe("V11 导出", () => {
   });
 });
 
+test.describe("V03 中栏页签：篇章与格式发现", () => {
+  async function openWorkspace(page) {
+    await page.goto("/workbench/tasks");
+    await page.locator("tbody tr", { hasText: "2026 届毕业论文评分" }).click();
+    await expect(page.getByText("材料 ·")).toBeVisible();
+    await page.getByRole("button", { name: /SE-2026-009/ }).click();
+    await expect(page.locator(".ident .mono")).toHaveText("SE-2026-009");
+  }
+
+  // 这两组发现一直随 `GET /scoring-runs` 回到浏览器里，也进了 HTML 报告与 JSON
+  // 导出，只有工作区从来没显示过——评分时扣了分，界面上却看不到扣在哪。
+  test("页签上标出发现条数，用户在切之前就知道有没有东西", async ({ page }) => {
+    await openWorkspace(page);
+
+    await expect(page.getByRole("tab", { name: /格式发现\s*2/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /篇章结构\s*1/ })).toBeVisible();
+  });
+
+  test("格式发现列出级别、项、说明与是否计入扣分", async ({ page }) => {
+    await openWorkspace(page);
+
+    await page.getByRole("tab", { name: /格式发现/ }).click();
+    const row = page.locator(".findings tbody tr", { hasText: "line_spacing" });
+    await expect(row).toContainText("正文行距不是模板规定的 1.5 倍");
+    // 「已经扣过分」和「只是提示」是两件事，混在一起用户会重复扣。
+    await expect(row).toContainText("T01");
+    await expect(row).toContainText("2");
+  });
+
+  test("没有计入扣分的发现明确标成未计入，不留空", async ({ page }) => {
+    await openWorkspace(page);
+
+    await page.getByRole("tab", { name: /格式发现/ }).click();
+    const row = page.locator(".findings tbody tr", { hasText: "margin" });
+    await expect(row).toContainText("未计入");
+  });
+
+  test("切回正文页签，正文还在", async ({ page }) => {
+    await openWorkspace(page);
+
+    await page.getByRole("tab", { name: /格式发现/ }).click();
+    await page.getByRole("tab", { name: "正文" }).click();
+
+    await expect(page.locator(".paper")).toBeVisible();
+  });
+
+  test("干净的材料说「未发现」，而不是给一张空表", async ({ page }) => {
+    await openWorkspace(page);
+    await page.getByRole("button", { name: /SE-2026-011/ }).click();
+    await expect(page.locator(".ident .mono")).toHaveText("SE-2026-011");
+
+    await page.getByRole("tab", { name: /格式发现/ }).click();
+
+    await expect(page.getByText(/未发现格式问题/)).toBeVisible();
+  });
+});
+
 test.describe("V09 评分标准", () => {
   test("没有扣分细则的评分项显示为阻断并说明后果", async ({ page }) => {
     await page.goto("/workbench/rubrics");

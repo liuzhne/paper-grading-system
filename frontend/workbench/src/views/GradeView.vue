@@ -12,6 +12,30 @@ const position = computed(() =>
   store.neighbors ? `${store.neighbors.position} / ${store.neighbors.total}` : "—",
 );
 
+/** 中栏三页签（设计稿）。正文之外的两个读的是评分时已经产出的检查发现。 */
+const TABS = [
+  { key: "text", label: "正文" },
+  { key: "coherence", label: "篇章结构" },
+  { key: "format", label: "格式发现" },
+];
+
+const EMPTY_TEXT = {
+  // 空表说明不了「查过但没问题」还是「压根没查」。这两句话分别对应两种情况。
+  coherence: "未发现确定性一致性问题（图表引用、编号制引文与参考文献核对通过）。",
+  format: "未发现格式问题（或模板未规定格式，非 docx 提交无法判定）。",
+};
+
+const SEVERITY_LABEL = { error: "错误", warn: "提醒", info: "提示" };
+const SEVERITY_TONE = { error: "chip-danger", warn: "chip-warn" };
+
+const docTab = ref("text");
+
+function findingsOf(key) {
+  if (key === "coherence") return store.coherenceFindings;
+  if (key === "format") return store.formatFindings;
+  return [];
+}
+
 /** 定位状态决定这条证据能不能点、点了会发生什么。 */
 const LOCATION_LABEL = {
   verified: "可定位",
@@ -176,42 +200,105 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         </button>
       </aside>
 
-      <!-- 中：正文 -->
+      <!-- 中：正文 / 篇章结构 / 格式发现 -->
       <section class="col document">
-        <p v-if="store.provenanceNotice" class="notice notice-warn doc-notice">
-          {{ store.provenanceNotice }}
-        </p>
-        <p v-if="store.documentFrozen" class="faint mono doc-frozen">
-          冻结快照 {{ store.documentView?.document_snapshot_hash?.slice(0, 12) }}…
-        </p>
-
-        <div v-if="store.documentUnavailableReason" class="notice notice-danger">
-          {{ store.documentUnavailableReason }}
-        </div>
-        <div v-else-if="!store.documentBlocks.length" class="faint doc-empty">
-          {{ store.currentRunId ? "该材料没有可显示的正文。" : "该材料尚未评分。" }}
-        </div>
-
-        <article v-else class="paper">
-          <div
-            v-for="block in store.documentBlocks"
-            :key="block.block_id"
-            class="block"
-            :class="{ anchored: isAnchored(block) }"
-            :data-anchor="block.chunk_id || block.evidence_unit_id"
+        <!-- 页签上带条数：不点开就能知道有没有东西，省掉一次「切过去看看」。 -->
+        <div class="doc-tabs" role="tablist" aria-label="正文与检查发现">
+          <button
+            v-for="tab in TABS"
+            :key="tab.key"
+            class="doc-tab"
+            :class="{ on: docTab === tab.key }"
+            type="button"
+            role="tab"
+            :aria-selected="docTab === tab.key"
+            @click="docTab = tab.key"
           >
-            <div v-if="block.section_title" class="block-head mono faint">
-              {{ block.section_title }}
-              <span v-if="block.page_start">· 第 {{ block.page_start }} 页</span>
-            </div>
-            <p class="block-text">
-              <template v-for="(part, index) in highlight(block)" :key="index">
-                <mark v-if="part.mark">{{ part.text }}</mark>
-                <span v-else>{{ part.text }}</span>
-              </template>
-            </p>
+            {{ tab.label }}
+            <span v-if="tab.key !== 'text'" class="faint mono tab-count">
+              {{ findingsOf(tab.key).length }}
+            </span>
+          </button>
+        </div>
+
+        <template v-if="docTab === 'text'">
+          <p v-if="store.provenanceNotice" class="notice notice-warn doc-notice">
+            {{ store.provenanceNotice }}
+          </p>
+          <p v-if="store.documentFrozen" class="faint mono doc-frozen">
+            冻结快照 {{ store.documentView?.document_snapshot_hash?.slice(0, 12) }}…
+          </p>
+
+          <div v-if="store.documentUnavailableReason" class="notice notice-danger">
+            {{ store.documentUnavailableReason }}
           </div>
-        </article>
+          <div v-else-if="!store.documentBlocks.length" class="faint doc-empty">
+            {{ store.currentRunId ? "该材料没有可显示的正文。" : "该材料尚未评分。" }}
+          </div>
+
+          <article v-else class="paper">
+            <div
+              v-for="block in store.documentBlocks"
+              :key="block.block_id"
+              class="block"
+              :class="{ anchored: isAnchored(block) }"
+              :data-anchor="block.chunk_id || block.evidence_unit_id"
+            >
+              <div v-if="block.section_title" class="block-head mono faint">
+                {{ block.section_title }}
+                <span v-if="block.page_start">· 第 {{ block.page_start }} 页</span>
+              </div>
+              <p class="block-text">
+                <template v-for="(part, index) in highlight(block)" :key="index">
+                  <mark v-if="part.mark">{{ part.text }}</mark>
+                  <span v-else>{{ part.text }}</span>
+                </template>
+              </p>
+            </div>
+          </article>
+        </template>
+
+        <!-- 发现项。这两组数据一直随 run 回到浏览器里，也进了 HTML 报告与 JSON
+             导出，只有工作区从来没显示过——评分时扣了分，界面上看不到扣在哪。 -->
+        <template v-else>
+          <p v-if="!findingsOf(docTab).length" class="faint doc-empty">
+            {{ EMPTY_TEXT[docTab] }}
+          </p>
+          <div v-else class="table-wrap findings">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>级别</th>
+                  <th>{{ docTab === "format" ? "项" : "类型" }}</th>
+                  <th>说明</th>
+                  <th>计入扣分</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(finding, index) in findingsOf(docTab)" :key="index">
+                  <td>
+                    <span class="chip" :class="SEVERITY_TONE[finding.severity] || ''">
+                      {{ SEVERITY_LABEL[finding.severity] || finding.severity || "—" }}
+                    </span>
+                  </td>
+                  <td class="mono field">{{ finding.field || finding.kind || "—" }}</td>
+                  <td class="muted">{{ finding.message || "—" }}</td>
+                  <!-- 「已经扣过分」和「只是提示」是两件事。留空会被当成后者，
+                       于是同一个问题在人工复核时又被扣一次。 -->
+                  <td>
+                    <template v-if="finding.deducted_by">
+                      <span class="mono">{{ finding.deducted_by }}</span>
+                      <span v-if="finding.deducted_points != null" class="mono deduct">
+                        −{{ finding.deducted_points }}
+                      </span>
+                    </template>
+                    <span v-else class="faint">未计入</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
       </section>
 
       <!-- 右：评分表 -->
@@ -458,6 +545,52 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 .doc-frozen {
   font-size: 11px;
   margin: 0 0 14px;
+}
+
+.doc-tabs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+  padding-bottom: 0;
+}
+
+.doc-tab {
+  border: 0;
+  background: transparent;
+  padding: 8px 12px 9px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  /* 选中态用一条下边线，不是背景块：中栏本身是阅读区，色块会跟正文抢注意力。 */
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.doc-tab:hover {
+  color: var(--text-secondary);
+}
+
+.doc-tab.on {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+.tab-count {
+  margin-left: 5px;
+  font-size: 11.5px;
+}
+
+.findings .field {
+  white-space: nowrap;
+}
+
+.findings .deduct {
+  margin-left: 6px;
 }
 
 .doc-empty {

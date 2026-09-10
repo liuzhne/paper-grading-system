@@ -21,7 +21,22 @@ describe("grading store", () => {
     { id: "p2", student_id: "SE-2026-011", student_name: "陈景行", title: "缺陷定位", status: "parsed" },
   ];
 
-  const RUNS = [{ id: "r1", paper_id: "p1", status: "scored", final_total_score: 86 }];
+  const RUNS = [
+    {
+      id: "r1",
+      paper_id: "p1",
+      status: "scored",
+      final_total_score: 86,
+      // `GET /scoring-runs` 本来就带这两项（ScoringRunRead）。工作区一直没显示。
+      coherence_findings: [
+        { severity: "warn", kind: "figure_reference", message: "图 3 未在正文中引用。", deducted_by: null },
+      ],
+      format_findings: [
+        { severity: "error", field: "line_spacing", message: "正文行距不是 1.5 倍。", deducted_by: "C04", deducted_points: 2 },
+        { severity: "warn", field: "margin", message: "页边距小于模板规定。", deducted_by: null },
+      ],
+    },
+  ];
 
   const ITEMS = [
     {
@@ -225,6 +240,39 @@ describe("grading store", () => {
     await store.openBatch("b1", "p-not-here");
 
     expect(store.currentPaperId).toBe("p1");
+  });
+
+  it("留住当前 run 的篇章与格式发现——它们已经随 run 列表回来了", async () => {
+    stub();
+    const store = useGradingStore();
+
+    await store.openBatch("b1");
+
+    // 数据一直在浏览器里，只是从来没显示过：中栏「篇章结构 / 格式发现」两个页签
+    // 读的就是这里，不必再发一次请求。
+    expect(store.coherenceFindings).toHaveLength(1);
+    expect(store.formatFindings).toHaveLength(2);
+  });
+
+  it("未评分的材料没有发现项，返回空数组而不是 undefined", async () => {
+    // 这份材料没有 run：`/scoring-runs` 返回空数组。
+    stub({ "/scoring-runs": [] });
+    const store = useGradingStore();
+
+    await store.openBatch("b1");
+
+    expect(store.coherenceFindings).toEqual([]);
+    expect(store.formatFindings).toEqual([]);
+  });
+
+  it("run 上没有这两个字段时也不炸——历史 run 可能是 null", async () => {
+    stub({ "/scoring-runs": [{ id: "r1", paper_id: "p1", status: "scored" }] });
+    const store = useGradingStore();
+
+    await store.openBatch("b1");
+
+    expect(store.coherenceFindings).toEqual([]);
+    expect(store.formatFindings).toEqual([]);
   });
 });
 

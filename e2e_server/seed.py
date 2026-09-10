@@ -48,6 +48,30 @@ NO_CONFIDENCE = [
     }
 ]
 
+COHERENCE_FINDINGS = [
+    {
+        "severity": "warn",
+        "kind": "figure_reference",
+        "message": "示例：图 3 未在正文中被引用。",
+        "deducted_by": None,
+    }
+]
+FORMAT_FINDINGS = [
+    {
+        "severity": "error",
+        "field": "line_spacing",
+        "message": "示例：正文行距不是模板规定的 1.5 倍。",
+        "deducted_by": "T01",
+        "deducted_points": 2,
+    },
+    {
+        "severity": "warn",
+        "field": "margin",
+        "message": "示例：页边距小于模板规定值。",
+        "deducted_by": None,
+    },
+]
+
 #: 0022_legacy_tenant_backfill 建立的不可变默认组织。
 DEFAULT_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000002"
 
@@ -319,7 +343,15 @@ def _seed_batch_with_review_work(session, rubric):
             session.flush()
             chunks.append(chunk)
 
-        run = ScoringRun(paper_id=paper.id, rubric_id=rubric.id, status="scored")
+        run = ScoringRun(
+            paper_id=paper.id,
+            rubric_id=rubric.id,
+            status="scored",
+            # 篇章与格式发现：第一份带，第二份干净。工作区中栏的两个页签读它们，
+            # 两种状态都要有，否则「没有发现时说什么」测不到。
+            coherence_findings=(COHERENCE_FINDINGS if position == 0 else []),
+            format_findings=(FORMAT_FINDINGS if position == 0 else []),
+        )
         session.add(run)
         session.flush()
 

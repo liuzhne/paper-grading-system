@@ -19,6 +19,9 @@ export const useGradingStore = defineStore("grading", () => {
   const papers = ref([]);
   const currentPaperId = ref(null);
   const currentRunId = ref(null);
+  /** 当前 run 的篇章一致性与格式发现（中栏页签，设计稿「篇章结构 / 格式发现」）。 */
+  const coherenceFindings = ref([]);
+  const formatFindings = ref([]);
   const items = ref([]);
   const documentView = ref(null);
   const neighbors = ref(null);
@@ -61,6 +64,8 @@ export const useGradingStore = defineStore("grading", () => {
     papers.value = [];
     currentPaperId.value = null;
     currentRunId.value = null;
+    coherenceFindings.value = [];
+    formatFindings.value = [];
     items.value = [];
     documentView.value = null;
     neighbors.value = null;
@@ -96,7 +101,12 @@ export const useGradingStore = defineStore("grading", () => {
     activeQuote.value = null;
     try {
       const runs = (await api.get(`/scoring-runs?paper_id=${paperId}`)) || [];
-      currentRunId.value = runs[0]?.id ?? null;
+      const run = runs[0] ?? null;
+      currentRunId.value = run?.id ?? null;
+      // 篇章与格式发现随 run 列表一起回来（`ScoringRunRead`），不必再发请求。
+      // 历史 run 这两列可能是 null，`|| []` 兜住。
+      coherenceFindings.value = run?.coherence_findings || [];
+      formatFindings.value = run?.format_findings || [];
       if (!currentRunId.value) {
         // 未评分的材料不是错误状态，只是还没有结果可看。
         items.value = [];
@@ -179,6 +189,8 @@ export const useGradingStore = defineStore("grading", () => {
     currentPaperId,
     currentPaper,
     currentRunId,
+    coherenceFindings,
+    formatFindings,
     items,
     documentView,
     documentBlocks,
