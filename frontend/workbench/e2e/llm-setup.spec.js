@@ -23,55 +23,60 @@ test.describe("未配置模型时的引导", () => {
   test("登录后弹窗说清原因，而不是把人默默送走", async ({ page }) => {
     await login(page, "teacher");
 
-    // 此前是直接跳到账户页 + 一条横幅：横幅容易被忽略，而且用户已经被送到一个
-    // 自己没主动去的页面，不知道发生了什么。
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText("尚未配置可用模型");
   });
 
-  test("弹窗不可关闭：没有模型时整套能力都用不了", async ({ page }) => {
+  test("按钮文字居中", async ({ page }) => {
+    await login(page, "teacher");
+    const link = page.getByRole("alertdialog").getByRole("link").first();
+
+    /*
+     * `.btn` 没有设 display：原生 `<button>` 自己居中，而 RouterLink 渲染成 `<a>`
+     * 是行内元素，文字会左对齐。
+     */
+    const centered = await link.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return cs.justifyContent === "center" && cs.display.includes("flex");
+    });
+
+    expect(centered).toBe(true);
+  });
+
+  test("有关闭按钮，点了就收起", async ({ page }) => {
     await login(page, "teacher");
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible();
 
-    // 给一个「关闭」等于放人进去撞一连串失败。
-    await expect(dialog.getByRole("button", { name: /关闭|稍后|知道了/ })).toHaveCount(0);
-    await page.keyboard.press("Escape");
-    await expect(dialog).toBeVisible();
+    await page.getByRole("button", { name: "关闭" }).click();
+
+    await expect(dialog).toHaveCount(0);
   });
 
-  test("普通用户被指向账户与连接", async ({ page }) => {
+  test("点操作链接后弹窗收起，目的地可以直接操作", async ({ page }) => {
     await login(page, "teacher");
 
-    const link = page.getByRole("alertdialog").getByRole("link", {
-      name: /账户与连接/,
-    });
-    await expect(link).toBeVisible();
-    await link.click();
+    await page.getByRole("alertdialog").getByRole("link", { name: /账户与连接/ }).click();
 
     await expect(page).toHaveURL(/\/workbench\/account$/);
-    await expect(page.getByRole("heading", { name: "账户与连接" })).toBeVisible();
+    // 弹窗必须收起：留着的话遮罩铺满视口，用户点得到链接却填不了表。
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
   });
 
-  test("平台管理员两条出路都给，且能进运维页配置", async ({ page }) => {
+  test("平台管理员点进运维页后能真正填表", async ({ page }) => {
     await login(page, "platform");
 
     const dialog = page.getByRole("alertdialog");
     await expect(dialog.getByRole("link", { name: /运维与质量/ })).toBeVisible();
-    await expect(dialog.getByRole("link", { name: /账户与连接/ })).toBeVisible();
-
     await dialog.getByRole("link", { name: /运维与质量/ }).click();
 
     await expect(page).toHaveURL(/\/workbench\/ops$/);
-    await expect(page.getByRole("heading", { name: "平台默认模型" })).toBeVisible();
-  });
-
-  test("配置页本身可达，弹窗不挡住配置动作", async ({ page }) => {
-    await login(page, "platform");
-    await page.getByRole("alertdialog").getByRole("link", { name: /运维与质量/ }).click();
-
-    // 弹窗仍在（还没配好），但不能盖住表单——否则用户点得到链接却填不了表。
-    await expect(page.getByLabel("Base URL")).toBeVisible();
+    /*
+     * **不是断言「可见」**：遮罩层 `inset: 0` 之下表单照样 visible，但点不到。
+     * 直接填一次——Playwright 的可操作性检查会因为遮挡而失败。
+     */
+    await page.getByLabel("Base URL").fill("https://api.example.com/v1");
+    await expect(page.getByLabel("Base URL")).toHaveValue("https://api.example.com/v1");
   });
 });

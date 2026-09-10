@@ -58,17 +58,49 @@ describe("模型配置弹窗", () => {
     expect(wrapper.find(".dialog").exists()).toBe(false);
   });
 
-  it("不提供关闭按钮", () => {
+  it("提供关闭按钮", async () => {
+    /*
+     * 初版设计成不可关闭，理由是「没有模型时整套能力都用不了」。实际用下来这条
+     * 站不住：遮罩铺满视口，用户点进配置页之后**弹窗还在，表单点不到**——把人
+     * 挡在了他正要去做的那件事前面。改为可关闭（用户决定，2026-09-10）。
+     */
     const wrapper = mountWith({
       platform_model_available: false,
       has_own_connection: false,
       can_use_llm: false,
     });
 
-    // 没有可用模型时整套评分能力都用不了；给一个「关闭」等于放人进去撞一连串失败。
-    expect(wrapper.find("[data-test=close]").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("关闭");
-    expect(wrapper.text()).not.toContain("稍后");
+    const close = wrapper.find("[data-test=close]");
+    expect(close.exists()).toBe(true);
+
+    await close.trigger("click");
+    expect(wrapper.find(".dialog").exists()).toBe(false);
+  });
+
+  it("点操作链接后自动收起，不挡住目的地", async () => {
+    const wrapper = mountWith({
+      platform_model_available: false,
+      has_own_connection: false,
+      can_use_llm: false,
+    });
+
+    await wrapper.findAll("a")[0].trigger("click");
+
+    // 用户点的就是「去配置」——到了目的地还挡着，等于没让他去成。
+    expect(wrapper.find(".dialog").exists()).toBe(false);
+  });
+
+  it("收起后不再反复弹出", async () => {
+    const wrapper = mountWith({
+      platform_model_available: false,
+      has_own_connection: false,
+      can_use_llm: false,
+    });
+    await wrapper.find("[data-test=close]").trigger("click");
+
+    // 每次路由变化都重新弹，比不弹更烦人。
+    await wrapper.vm.$forceUpdate();
+    expect(wrapper.find(".dialog").exists()).toBe(false);
   });
 
   it("普通用户只被指向账户与连接", () => {
