@@ -1,7 +1,13 @@
 import { setActivePinia, createPinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { blockedByMissingModel, requiresModelSetup } from "@/router/llm-gate.js";
+import {
+  blockedByMissingModel,
+  clearBlockedAttempt,
+  noteBlockedAttempt,
+  pendingBlock,
+  requiresModelSetup,
+} from "@/router/llm-gate.js";
 import { useSessionStore } from "@/stores/session.js";
 
 /**
@@ -112,5 +118,63 @@ describe("功能页拦截", () => {
     const session = noModel();
 
     expect(blockedByMissingModel(session, { name: "tasks" })).toBe(true);
+  });
+});
+
+/**
+ * 被拦下的那次导航要留痕（2026-09-10 缺陷修复）。
+ *
+ * 拦截判据一直是实时的 `can_use_llm`，这没错。错的是**呈现**：弹窗用一个组件级的
+ * `dismissed` 标记，关掉一次就整个会话不再出现，于是用户点「评分任务」被静默弹回
+ * 配置页，屏幕上没有任何解释。
+ *
+ * 改法是把「这一次导航被拦了」记下来：弹窗按它显示，关闭只清掉这一次。下次再点，
+ * 守卫产生新的一条，弹窗重新出现。**没有任何一次性开关跨越两次导航。**
+ */
+describe("被拦下的导航意图", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    clearBlockedAttempt();
+  });
+
+  it("初始没有待处理的拦截", () => {
+    expect(pendingBlock.value).toBeNull();
+  });
+
+  it("守卫拦下一次导航后留下意图，带着目标路由", () => {
+    noteBlockedAttempt({ name: "tasks", fullPath: "/tasks" });
+
+    expect(pendingBlock.value?.name).toBe("tasks");
+    expect(pendingBlock.value?.fullPath).toBe("/tasks");
+  });
+
+  it("关闭只清掉当前这一次", () => {
+    noteBlockedAttempt({ name: "tasks", fullPath: "/tasks" });
+    clearBlockedAttempt();
+
+    expect(pendingBlock.value).toBeNull();
+  });
+
+  it("关闭之后再被拦一次，意图重新出现——这正是上一版丢掉的行为", () => {
+    noteBlockedAttempt({ name: "tasks", fullPath: "/tasks" });
+    clearBlockedAttempt();
+    noteBlockedAttempt({ name: "exports", fullPath: "/exports" });
+
+    expect(pendingBlock.value?.name).toBe("exports");
+  });
+
+  it("连续拦两次记最后一次：用户最后想去哪，就说哪一次", () => {
+    noteBlockedAttempt({ name: "tasks", fullPath: "/tasks" });
+    noteBlockedAttempt({ name: "review", fullPath: "/review" });
+
+    expect(pendingBlock.value?.name).toBe("review");
+  });
+
+  it("每次记录都是新对象——同一个目标连点两次也算两次拦截", () => {
+    noteBlockedAttempt({ name: "tasks", fullPath: "/tasks" });
+    const first = pendingBlock.value;
+    noteBlockedAttempt({ name: "tasks", fullPath: "/tasks" });
+
+    expect(pendingBlock.value).not.toBe(first);
   });
 });

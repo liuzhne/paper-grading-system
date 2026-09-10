@@ -299,6 +299,14 @@ textarea.input {
   flex-wrap: wrap;
 }
 
+/* 被 URL 锚点定位到的区块。未配置模型时守卫会把用户直接送到某个配置区，落在页顶
+   他还得自己找「到底要我配哪个」。用描边而不是背景色：卡片内部有表单，换底色会
+   把输入框衬得很脏。 */
+.highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 /* ---------- 状态标签 ---------- */
 
 .chip {

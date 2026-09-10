@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
+import { useAnchorHighlight } from "@/lib/anchor-highlight.js";
 import { useSessionStore } from "@/stores/session.js";
 
 /**
@@ -27,6 +28,8 @@ const canOrg = computed(() => session.can("view_organization_ops"));
 const canPlatform = computed(() => session.can("view_platform_ops"));
 
 // --- 平台默认模型（D-028）---------------------------------------------------
+const { highlighted: llmHighlighted } = useAnchorHighlight("platform-llm");
+
 //
 // 配置它等于决定「所有没绑 BYOK 的用户用哪个模型、花谁的钱」，所以只在平台
 // 管理员视图里出现。表单里的 key 只进不出：读接口从不回显它。
@@ -176,8 +179,13 @@ onMounted(async () => {
       日常评分与复核入口不受影响。
     </p>
 
-    <!-- 平台默认模型 -->
-    <section v-if="canPlatform" class="card card-pad">
+    <!-- 平台默认模型。带 id 与高亮：未配置模型的守卫会把管理员直接送到这里。 -->
+    <section
+      v-if="canPlatform"
+      id="platform-llm"
+      class="card card-pad"
+      :class="{ highlight: llmHighlighted }"
+    >
       <h2 class="card-title">平台默认模型</h2>
       <p class="card-note">
         未绑定自有 AI 连接的用户会使用它。未配置时全站无法评分——这是刻意的：

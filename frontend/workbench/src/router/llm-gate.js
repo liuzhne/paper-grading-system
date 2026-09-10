@@ -1,6 +1,8 @@
 // @ts-check
+import { ref } from "vue";
+
 /**
- * 模型可用性：判定、拦截（D-027、D-028、D-032）。
+ * 模型可用性：判定、拦截、留痕（D-027、D-028、D-032、D-039）。
  *
  * **判定、呈现、拦截是三件事**：
  * - 这里的 `requiresModelSetup` 只回答「需不需要配置」；
@@ -52,4 +54,58 @@ export function blockedByMissingModel(session, to) {
  */
 export function modelSetupRoute(session) {
   return session?.isPlatformAdmin ? "ops" : "account";
+}
+
+/** 配置页里该定位到哪个区块。跳到页顶不够——那两页都还有别的内容。 */
+/** @type {Record<string, string>} */
+export const SETUP_ANCHOR = {
+  account: "ai-connections",
+  ops: "platform-llm",
+};
+
+/** 各功能页的中文名，用来告诉用户「你刚才想去的是哪一页」。 */
+/** @type {Record<string, string>} */
+const ROUTE_LABEL = {
+  dashboard: "工作台",
+  tasks: "评分任务",
+  "task-new": "新建评分任务",
+  grade: "评分工作区",
+  review: "结果复核",
+  rubrics: "评分标准",
+  exports: "输出中心",
+};
+
+/**
+ * 最近一次**被拦下的导航**。`null` 表示没有待解释的拦截。
+ *
+ * 这不是「弹过没有」的开关——是「这一次点击被挡了」的事实。两者的区别正是这次
+ * 缺陷的全部：上一版用组件级的 `dismissed`，关掉一次整个会话不再提示，用户点任何
+ * 入口都变成**被静默弹回配置页**，屏幕上没有任何解释。
+ *
+ * 每次守卫拦截都写入一条新的；关闭弹窗只清掉当前这一条。**没有任何标记跨越两次
+ * 导航**，所以判据始终是实时的 `can_use_llm`，而不是历史行为。
+ *
+ * @type {import("vue").Ref<{name: string, label: string, fullPath: string, at: number}|null>}
+ */
+export const pendingBlock = ref(null);
+
+/**
+ * 记下这一次被拦下的导航。
+ *
+ * @param {{name?: string|symbol|null, fullPath?: string}} to
+ */
+export function noteBlockedAttempt(to) {
+  const name = typeof to?.name === "string" ? to.name : "";
+  // 每次都建新对象：同一个目标连点两次也是两次拦截，弹窗要重新出现。
+  pendingBlock.value = {
+    name,
+    label: ROUTE_LABEL[name] || "该页面",
+    fullPath: to?.fullPath || "",
+    at: Date.now(),
+  };
+}
+
+/** 用户看过这一条了。下一次被拦会产生新的一条。 */
+export function clearBlockedAttempt() {
+  pendingBlock.value = null;
 }

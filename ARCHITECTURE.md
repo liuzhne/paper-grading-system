@@ -499,10 +499,50 @@ ReviewView 行内「确认」
 `e2e/button-centering.spec.js` 按**几何量**：用 `Range` 取文字的可视矩形，和元素矩形
 比中心偏差，容差 1px。它不看用什么写法达成，所以下一次换个实现方式也拦得住。
 
+### 7.18 未配置模型的拦截：判定 / 拦截 / 留痕 / 呈现（2026-09-10，D-039）
+
+四件事，四个位置，**没有任何一次性开关**：
+
+```
+router.beforeEach
+  ├─ blockedByMissingModel(session, to)   判定：读实时 can_use_llm，配置页白名单
+  ├─ noteBlockedAttempt(to)               留痕：记下「这一次导航被拦了」
+  └─ redirect → account#ai-connections    拦截：带锚点，落在具体配置区
+                / ops#platform-llm
+
+ModelSetupDialog
+  visible = requiresModelSetup && pendingBlock !== null    呈现
+  close   → clearBlockedAttempt()          只清当前这一条
+```
+
+**为什么拦在路由守卫**：
+
+- 请求拦截器太晚——页面已经渲染，用户可能填了半天表单才被拦；而 `can_use_llm` 是
+  会话级状态，不是单个请求的属性。
+- 页面级校验要在每个页面重复，漏一个就是一个洞。
+- 守卫是唯一收敛点，且每次导航重新求值。
+
+守卫的短板是只能拦不能解释，所以配一个 `pendingBlock`。它**不是**「弹过没有」的开关，
+是「这一次点击被挡了」的事实：每次拦截写入新对象，关闭只清当前这条。用户没配置就
+离开配置页、再点任何入口，守卫写入新的一条，弹窗重新出现。
+
+**缓存与刷新时机**：`can_use_llm` 来自 `/system/capabilities`，在 `bootstrap()` 时拉取。
+任何会改变可用性的写操作之后必须 `session.loadCapabilities()`：
+
+| 位置 | 动作 | 方向 |
+|---|---|---|
+| `OpsView` | 保存 / 测试 / 停用平台模型 | 双向 |
+| `AccountView` | 新建 AI 连接 | false → true |
+| `AccountView` | 停用 / 删除连接 | true → false |
+
+**反向同样要刷**：停用最后一个连接后 `can_use_llm` 已变 false，不刷新的话前端仍以为
+可用，放人进功能页——然后每个动作在后端失败。
+
 ## 8. 维护记录
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-09-10 | 未配置模型的拦截修复 | 新增 §7.18：判定/拦截/留痕/呈现四分；`pendingBlock` 取代组件级 `dismissed`；能力表刷新时机列表。无后端改动。 |
 | 2026-09-10 | 按钮居中与文件选择框 | 新增 §7.17：`.btn` 的居中回到类本身，删两处局部补丁；文件框走 `::file-selector-button`。无后端改动。 |
 | 2026-09-10 | 复核进度条 | 复核进度补进度条，总数为 0 时不画。无后端改动。 |
 | 2026-09-10 | 工作区中栏三页签 | 新增 §7.16：篇章与格式发现接进工作区，数据复用已到手的 run 对象。无后端改动、无新请求。 |

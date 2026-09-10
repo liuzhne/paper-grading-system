@@ -1,7 +1,12 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 import { useSessionStore } from "@/stores/session.js";
-import { blockedByMissingModel, modelSetupRoute } from "@/router/llm-gate.js";
+import {
+  SETUP_ANCHOR,
+  blockedByMissingModel,
+  modelSetupRoute,
+  noteBlockedAttempt,
+} from "@/router/llm-gate.js";
 
 /**
  * 新页面统一挂在 /workbench/ 下（计划 §8.3）。
@@ -117,7 +122,11 @@ router.beforeEach(async (to) => {
   // 只表示不想再看那段说明，不表示已经配好模型。放行的话用户能进去，但页面上的
   // 动作在后端一律失败。
   if (blockedByMissingModel(session, to)) {
-    return { name: modelSetupRoute(session) };
+    // 留痕之后再重定向：弹窗按这条记录说明「你刚才想去哪、为什么去不成」。
+    // 只重定向不留痕，用户看到的就是页面莫名其妙跳走。
+    noteBlockedAttempt(to);
+    const name = modelSetupRoute(session);
+    return { name, hash: `#${SETUP_ANCHOR[name]}` };
   }
   return true;
 });

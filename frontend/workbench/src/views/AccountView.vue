@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
+import { useAnchorHighlight } from "@/lib/anchor-highlight.js";
 import { useSessionStore } from "@/stores/session.js";
 
 const session = useSessionStore();
@@ -124,6 +125,8 @@ async function onIssueReset(member) {
 }
 
 /* ---------------- 私有 AI 连接（BYOK） ---------------- */
+const { highlighted: aiHighlighted } = useAnchorHighlight("ai-connections");
+
 
 const connections = ref([]);
 const connectionsError = ref(null);
@@ -193,6 +196,9 @@ async function onCreateConnection() {
     // 明文 Key 用完即弃，不留在组件状态里。
     draft.api_key = "";
     await loadConnections();
+    // 绑好连接，`can_use_llm` 就该翻过来。不刷新的话用户配完了仍然进不去功能页，
+    // 得自己按 F5——而页面上没有任何东西提示他要这么做。
+    await session.loadCapabilities();
   } catch (error) {
     if (!(error instanceof StaleContextError)) {
       draft.error = error?.message || "保存连接失败";
@@ -215,6 +221,9 @@ async function connectionAction(connection, action) {
       await api.del(`/ai-connections/${connection.id}`, { organizationId });
     }
     await loadConnections();
+    // 停用或删掉最后一个连接，`can_use_llm` 会翻回 false。不刷新的话前端仍以为
+    // 可用，放人进功能页——然后每个动作在后端失败。**反向也要刷。**
+    await session.loadCapabilities();
   } catch (error) {
     if (!(error instanceof StaleContextError)) {
       connectionsError.value = error?.message || "操作失败";
@@ -416,8 +425,8 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 私有 AI 连接 -->
-    <section class="card">
+    <!-- 私有 AI 连接。带 id 与高亮：未配置模型的守卫会把用户直接送到这里。 -->
+    <section id="ai-connections" class="card" :class="{ highlight: aiHighlighted }">
       <div class="card-head">
         <div>
           <h2 class="card-title">我的 AI 连接</h2>
