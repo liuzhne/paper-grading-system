@@ -190,6 +190,21 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
     return batch
 
 
+def _batch_with_rubric(batch: GradingBatch, name, version) -> dict:
+    """把批次投影成带标准标签的字典。
+
+    直接改 ORM 对象的属性会把 `rubric_name` 当成待持久化的列；这里返回字典，
+    由 `BatchRead` 校验形状。
+    """
+    payload = {
+        column.name: getattr(batch, column.name)
+        for column in batch.__table__.columns
+    }
+    payload["rubric_name"] = name
+    payload["rubric_version_label"] = version
+    return payload
+
+
 @router.get("", response_model=list[BatchRead])
 def list_batches(
     db: Session = Depends(get_db),
@@ -216,12 +231,22 @@ def list_batches(
                 % (" / ".join(unknown), " / ".join(state.BATCH_STAGES)),
             )
 
-    query = select(GradingBatch).order_by(GradingBatch.created_at.desc())
+    # 一次 outer join 带回标准的名称与版本：批次绑定哪个标准版本决定了它怎么判分，
+    # 是列表里仅次于批次名的信息。按 id 逐个去查的话，一页 20 个批次就是 20 次往返。
+    # outer 而不是 inner——标准被删时批次仍要出现在列表里。
+    query = (
+        select(GradingBatch, Rubric.name, Rubric.version)
+        .outerjoin(Rubric, Rubric.id == GradingBatch.rubric_id)
+        .order_by(GradingBatch.created_at.desc())
+    )
     if principal.organization_id is not None:
         query = query.where(GradingBatch.organization_id == principal.organization_id)
     if status:
         query = query.where(GradingBatch.status.in_(status))
-    return db.scalars(query).all()
+    return [
+        _batch_with_rubric(batch, name, version)
+        for batch, name, version in db.execute(query).all()
+    ]
 
 
 @router.get("/overview", response_model=BatchOverviewRead)
@@ -837,4 +862,11 @@ def get_batch(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    return _visible_batch(db, batch_id, principal)
+    batch = _visible_batch(db, batch_id, principal)
+    # 与列表同一形状：详情页也要显示绑定的是哪个标准版本。
+    rubric = db.get(Rubric, batch.rubric_id) if batch.rubric_id else None
+    return _batch_with_rubric(
+        batch,
+        rubric.name if rubric else None,
+        rubric.version if rubric else None,
+    )

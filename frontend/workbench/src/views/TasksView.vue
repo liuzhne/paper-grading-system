@@ -119,6 +119,7 @@ onMounted(async () => {
           <thead>
             <tr>
               <th>批次名称</th>
+              <th>评分标准</th>
               <th>材料</th>
               <th>进度</th>
               <th>阶段</th>
@@ -138,6 +139,16 @@ onMounted(async () => {
               <td>
                 <div class="name">{{ batch.name }}</div>
                 <div class="faint sub">{{ batch.department || "—" }}{{ batch.major ? ` · ${batch.major}` : "" }}</div>
+              </td>
+              <td class="rubric-cell">
+                <template v-if="batch.rubric_name">
+                  <span>{{ batch.rubric_name }}</span>
+                  <span v-if="batch.rubric_version_label" class="faint mono rubric-ver">
+                    {{ batch.rubric_version_label }}
+                  </span>
+                </template>
+                <!-- 找不到时留空：一串 UUID 对读的人没有意义，还会被当成标准名。 -->
+                <span v-else class="faint">—</span>
               </td>
               <td class="num">{{ store.progressFor(batch.id)?.counts.total ?? "—" }}</td>
               <td>
@@ -265,6 +276,15 @@ onMounted(async () => {
 .layout > .table-wrap {
   flex: 999 1 460px;
   min-width: 0;
+}
+
+.rubric-cell {
+  line-height: 1.6;
+}
+
+.rubric-ver {
+  display: block;
+  font-size: 11.5px;
 }
 
 .legend {

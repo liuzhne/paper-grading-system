@@ -54,6 +54,12 @@ class BatchRead(BaseModel):
     paper_type: Optional[str] = None
     rubric_id: str
     rubric_version_id: Optional[str] = None
+    #: 绑定标准的可显示名称与版本号（设计稿的「评分标准」列）。
+    #: 不叫 `rubric_version`——`GradingBatch` 已有同名的关系属性，`from_attributes`
+    #: 会把那个 ORM 对象当成本字段的值。标准被删或不可见时为 None：宁可这一列
+    #: 空着，也不能让整页 500。
+    rubric_name: Optional[str] = None
+    rubric_version_label: Optional[str] = None
     ai_connection_id: Optional[str] = None
     ai_connection_key_version: Optional[int] = None
     ai_connection_snapshot: Optional[dict] = None

@@ -440,3 +440,30 @@ test.describe("全页视觉契约", () => {
     });
   }
 });
+
+
+test.describe("V3-6 评分任务列出绑定的标准", () => {
+  test("表头有「评分标准」列", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    // 设计稿里它排在批次名之后：批次绑定哪个标准版本决定了它怎么判分。
+    await expect(page.getByRole("columnheader", { name: "评分标准" })).toBeVisible();
+  });
+
+  test("每行显示标准名与版本号", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    const row = page.locator("tbody tr", { hasText: "2026 届毕业论文评分" });
+    await expect(row).toContainText("本科毕业论文评分标准");
+  });
+
+  test("标准找不到时该列留空，不显示裸 id", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    // 一串 UUID 对读的人没有意义，还会让人以为那是标准的名字。
+    const cells = await page.locator("tbody tr td:nth-child(2)").allTextContents();
+    for (const text of cells) {
+      expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}/);
+    }
+  });
+});

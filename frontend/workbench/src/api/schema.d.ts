@@ -2623,8 +2623,12 @@ export interface components {
             paper_type?: string | null;
             /** Rubric Id */
             rubric_id: string;
+            /** Rubric Name */
+            rubric_name?: string | null;
             /** Rubric Version Id */
             rubric_version_id?: string | null;
+            /** Rubric Version Label */
+            rubric_version_label?: string | null;
             /** State Version */
             state_version: number;
             /** Status */
