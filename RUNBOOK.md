@@ -774,3 +774,4 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 | 2026-09-08 | 运维脚本目标库守卫 | `backfill_export_events` 对非本地目标默认拒绝并要求显式确认；RUNBOOK 命令补 `DATABASE_URL`。`seed_dev` / `build_anchors` **未加同款守卫**：前者在 Docker 冒烟里于容器内执行，那里的库主机本就不是 localhost，照搬会打断一条正当流程。未运行生产变更。 |
 | 2026-09-08 | 阶段 6B、浏览器验收与合同门禁 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。补齐 §12.2 的类型与 OpenAPI 合同门禁（`api:dump` / `api:check` + 前端调用路径静态契约）。未运行生产操作。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |
+| 2026-09-11 | 平台模型配置默认折叠 | 验收：未配置显示完整表单；已配置刷新后显示摘要、展开入口与测试按钮，展开后可保存/停用；保存成功收起，失败保留表单，测试反馈在折叠状态可见。运行 `cd frontend/workbench && npm run test:unit && npm run typecheck`；根目录运行 `.venv/bin/python scripts/build_web_static.py --with-workbench` 重建提交产物。发布沿用 main CI 门禁；回滚撤销前端变更并重建产物，无数据库回退。未执行生产发布。 |

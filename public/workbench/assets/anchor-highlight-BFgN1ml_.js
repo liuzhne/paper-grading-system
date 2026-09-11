@@ -1,0 +1,1 @@
+import{n as u,j as a,N as s,a as c}from"./index-v8hxlx6P.js";function h(e){const r=c(),t=u(()=>r.hash===`#${e}`);function o(){t.value&&requestAnimationFrame(()=>{var n;(n=document.getElementById(e))==null||n.scrollIntoView({block:"start"})})}return a(o),s(t,o),{highlighted:t}}export{h as u};

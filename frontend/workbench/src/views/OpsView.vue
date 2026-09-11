@@ -40,6 +40,8 @@ const llmForm = reactive({
   model_name: "",
   api_key: "",
 });
+const llmExpanded = ref(false);
+const llmFormVisible = computed(() => !platformLlm.value?.configured || llmExpanded.value);
 const llmBusy = ref(false);
 const llmError = ref(null);
 const llmNotice = ref(null);
@@ -62,6 +64,7 @@ async function runLlmAction(action) {
       platformLlm.value = await api.post("/system/platform-llm", llmForm);
       // 保存后立刻清掉表单里的明文 key，别让它留在内存与 DOM 里。
       llmForm.api_key = "";
+      llmExpanded.value = false;
       llmNotice.value = "已保存。所有未绑定自有连接的用户将使用该模型。";
     } else if (action === "test") {
       await api.post("/system/platform-llm/test", {});
@@ -204,7 +207,18 @@ onMounted(async () => {
         由 {{ platformLlm.configured_by }} 于 {{ platformLlm.configured_at }} 配置。
       </p>
 
-      <form class="llm-form" @submit.prevent="runLlmAction('save')">
+      <button
+        v-if="platformLlm?.configured"
+        class="llm-toggle"
+        type="button"
+        :aria-expanded="llmFormVisible"
+        aria-controls="platform-llm-form"
+        @click="llmExpanded = !llmExpanded"
+      >
+        {{ llmFormVisible ? "收起配置 ▴" : "展开配置 ▾" }}
+      </button>
+
+      <form v-if="llmFormVisible" id="platform-llm-form" class="llm-form" @submit.prevent="runLlmAction('save')">
         <div class="form-grid">
           <label class="field">
             <span class="field-label">供应商类型</span>
@@ -242,20 +256,23 @@ onMounted(async () => {
             class="btn"
             type="button"
             :disabled="llmBusy || !platformLlm?.configured || platformLlm?.status === 'disabled'"
-            @click="runLlmAction('test')"
-          >
-            测试连接
-          </button>
-          <button
-            class="btn"
-            type="button"
-            :disabled="llmBusy || !platformLlm?.configured || platformLlm?.status === 'disabled'"
             @click="runLlmAction('disable')"
           >
             停用
           </button>
         </div>
       </form>
+
+      <div class="form-actions">
+          <button
+            class="btn"
+            type="button"
+            :disabled="llmBusy || !platformLlm?.configured || platformLlm?.status === 'disabled'"
+            @click="runLlmAction('test')"
+          >
+            测试连接
+          </button>
+      </div>
 
       <p v-if="llmError" class="notice notice-danger" role="alert">{{ llmError }}</p>
       <p v-else-if="llmNotice" class="notice" role="status">{{ llmNotice }}</p>
@@ -351,6 +368,17 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.llm-toggle {
+  display: block;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
 .signals {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
