@@ -1301,6 +1301,7 @@ def _apply_projection(rubric: models.Rubric, projections: list[Mapping[str, obje
                 rubric=rubric,
                 code=code,
             )
+            existing[code] = criterion
         criterion.name = str(value["name"])
         criterion.max_score = _decimal(value["max_score"])
         criterion.weight = None if value.get("weight") is None else _decimal(value["weight"])
@@ -1423,6 +1424,7 @@ def persist_prepared_import(
                 raise ValueError("import actor does not exist")
             rubric_data = graph["rubric"]
             directive = _draft_recompile(graph.get("draft_recompile"))
+            same_rubric_context = False
             if target_rubric_id is None:
                 if directive is not None:
                     raise ValueError(
@@ -1452,6 +1454,11 @@ def persist_prepared_import(
                     raise ValueError("target rubric does not exist")
                 if rubric.status != "draft":
                     raise ValueError("only a draft rubric may receive an upgrade compilation")
+                same_rubric_context = (
+                    rubric.total_score == _decimal(rubric_data["total_score"])
+                    and rubric.description == rubric_data.get("description")
+                    and rubric.format_spec == (rubric_data.get("format_spec") or {})
+                )
                 rubric.name = str(rubric_data["name"])
                 rubric.version = str(rubric_data["version"])
                 rubric.total_score = _decimal(rubric_data["total_score"])
@@ -1477,6 +1484,17 @@ def persist_prepared_import(
                 reason=reason,
             )
 
+            from backend.app.services.rubrics.review_carry import (
+                snapshot_confirmed_rows, carry_confirmed_rows,
+            )
+            previous_reviews = snapshot_confirmed_rows(session, predecessor) if same_rubric_context else {}
+            if graph.get("expected_rule_tokens"):
+                from backend.app.services.rubrics.review_workspace import content_token
+                current_rules = session.scalars(select(models.AtomicRule).join(models.RubricVersion).where(
+                    models.RubricVersion.compilation_id == predecessor.id
+                ).execution_options(populate_existing=True)).all()
+                if {rule.id: content_token(rule) for rule in current_rules} != graph["expected_rule_tokens"]:
+                    raise ValueError("条款已被修改，请重新加载后核对")
             criteria = _apply_projection(rubric, projection_values)
             compilation_data = graph["compilation"]
             provisional_hash = _digest_value(
@@ -1578,7 +1596,7 @@ def persist_prepared_import(
                     raw_text=value["raw_text"],
                 )
                 session.add(source)
-                source_by_code[value["source_rule_code"]] = source
+                source_by_code[value.get("source_token") or value["source_rule_code"]] = source
 
             template_by_code: dict[str, models.TemplateItem] = {}
             for value in graph["template_items"]:
@@ -1596,7 +1614,7 @@ def persist_prepared_import(
                     parse_confidence=_decimal(value.get("parse_confidence", "1")),
                 )
                 session.add(item)
-                template_by_code[value["item_code"]] = item
+                template_by_code[value.get("item_token") or value["item_code"]] = item
 
             rule_by_code: dict[str, models.AtomicRule] = {}
             for value in graph["atomic_rules"]:
@@ -1661,6 +1679,9 @@ def persist_prepared_import(
                 )
                 session.add(link)
             session.flush()
+            if previous_reviews:
+                carry_confirmed_rows(session, rubric.id, rule_by_code.values(),
+                                     previous_reviews, predecessor.id, actor_id)
             identity = PersistedImportIdentity(rubric.id, compilation.id, version.id)
         return identity
     except Exception:

@@ -28,7 +28,7 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-09-03-1"  # Core V4 scoped evidence + token-budget identity
+PROMPT_VERSION = "2026-09-11-1"  # Preserve original rubric context in rule-drafting inputs
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,15 @@
 import { expect, test } from "@playwright/test";
 
+async function selectSeedRubric(page) {
+  await page.getByRole("button", { name: "模板库", exact: true }).click();
+  await page.locator(".library-menu .lib-item", { hasText: "本科毕业论文评分标准" }).click();
+  await expect(page.getByRole("heading", { name: "本科毕业论文评分标准", exact: true })).toBeVisible();
+}
+async function openSeedRubric(page) {
+  await page.goto("/workbench/rubrics");
+  await selectSeedRubric(page);
+}
+
 /**
  * V12 · 窄屏与可达性（前端 v2 计划 §8、§12.1）。
  *
@@ -47,7 +57,7 @@ test.describe("V12 键盘可达性", () => {
 
 test.describe("V12 窄屏表单", () => {
   const FORM_PAGES = [
-    ["/workbench/rubrics", "评分标准"],
+    ["/workbench/rubrics", "本科毕业论文评分标准"],
     ["/workbench/ops", "运维与质量"],
     ["/workbench/account", "账户与连接"],
     ["/workbench/tasks/new", "新建评分任务"],
@@ -56,6 +66,7 @@ test.describe("V12 窄屏表单", () => {
   for (const [path, title] of FORM_PAGES) {
     test(`${title}：窄屏下表单不撑破页面`, async ({ page }) => {
       await page.goto(path);
+      if (path === "/workbench/rubrics") await selectSeedRubric(page);
       await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
 
       /*
@@ -74,6 +85,7 @@ test.describe("V12 窄屏表单", () => {
 
     test(`${title}：窄屏下并排字段折叠为单列`, async ({ page }) => {
       await page.goto(path);
+      if (path === "/workbench/rubrics") await selectSeedRubric(page);
       await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
 
       // `.form-grid` 用的是 auto-fit + minmax(210px)，窄屏应当自然落到一列。

@@ -132,6 +132,15 @@ describe("确认后的结构化规则", () => {
 });
 
 describe("合并进评分项", () => {
+  it("分次确认保留已有规则，重复应用同一生成行不重复追加", () => {
+    const source = [{ code: "T02", deduction_rules_structured: [{ trigger: "原文已有规则", points: 1 }] }];
+    const items = [{ criterion_code: "T02", draft: DRAFT }];
+    const first = mergeConfirmedDrafts(source, items, new Set(["T02::G1::1"]));
+    const second = mergeConfirmedDrafts(first, items, new Set(["T02::G1::0"]));
+    expect(second[0].deduction_rules_structured).toHaveLength(3);
+    expect(second[0].deduction_rules_structured[0]).toEqual(source[0].deduction_rules_structured[0]);
+    expect(mergeConfirmedDrafts(second, items, new Set())[0].deduction_rules_structured).toHaveLength(3);
+  });
   const CRITERIA = [
     { code: "T01", name: "选题", max_score: 10, scoring_mode: "llm_direct", deduction_rules_structured: [] },
     { code: "T02", name: "文献综述", max_score: 15, scoring_mode: "review_only", deduction_rules_structured: [] },

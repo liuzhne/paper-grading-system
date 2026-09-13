@@ -46,7 +46,7 @@ export function draftRows(draft) {
         issue: group?.issue || group?.group_code || "",
         mutexGroup: group?.mutex_group ?? null,
         capPoints: group?.cap_points ?? null,
-        index,
+        index: rule?.draft_index ?? index,
         severity: rule?.severity || "",
         // 未知的严重程度原样透出：显示成空白等于把一条真实存在的规则藏起来。
         severityLabel: SEVERITY_LABEL[rule?.severity] || rule?.severity || "—",
@@ -100,6 +100,8 @@ export function confirmedStructuredRules(draft, excluded) {
       source: row.source,
       source_refs: row.sourceRefs,
       generation_fingerprint: row.fingerprint,
+      generation_metadata: draft.generation_metadata || null,
+      draft_row_key: rowKey(row),
       confirmed: true,
       display_order: order,
     }));
@@ -121,14 +123,21 @@ export function mergeConfirmedDrafts(criteria, items, excluded) {
   }
 
   return (criteria || []).map((criterion) => {
+    /** @type {Array<any>|undefined} */
     const rules = byCode.get(criterion.code);
+    /** @type {Array<any>} */
+    const existing = criterion.deduction_rules_structured || [];
     // 一条都没确认时保持原样。改成 deductive 却没有任何规则，评分时这一项恒得
     // 满分——比不改更糟，而且看起来像是配置生效了。
     if (!rules || !rules.length) return criterion;
     return {
       ...criterion,
       scoring_mode: "deductive",
-      deduction_rules_structured: rules,
+      deduction_rules_structured: [
+        ...existing,
+        ...rules.filter((rule) => !existing.some((old) =>
+          old.draft_row_key === rule.draft_row_key && old.generation_fingerprint === rule.generation_fingerprint)),
+      ],
     };
   });
 }

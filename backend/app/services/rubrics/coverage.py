@@ -18,6 +18,7 @@ from backend.app.db.models import AtomicRule
 from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricCriterion
 from backend.app.db.models import RubricVersion
+from backend.app.services.rubrics.rule_origin import is_ai_rule
 
 
 #: 视为「用户提供」的规则来源。legacy_upgrade 是历史数据的原样搬迁，
@@ -61,13 +62,13 @@ def build_rule_coverage(session, rubric):
         ai_pending = [
             r
             for r in rules
-            if r.creation_method not in USER_SOURCED_METHODS
+            if (is_ai_rule(r, criterion) or r.creation_method not in USER_SOURCED_METHODS)
             and r.status != APPROVED_STATUS
         ]
         user_pending = [
             r
             for r in rules
-            if r.creation_method in USER_SOURCED_METHODS
+            if r.creation_method in USER_SOURCED_METHODS and not is_ai_rule(r, criterion)
             and r.status != APPROVED_STATUS
         ]
 
@@ -93,10 +94,10 @@ def build_rule_coverage(session, rubric):
                 "ai_pending_count": len(ai_pending),
                 "user_pending_count": len(user_pending),
                 "from_source_count": sum(
-                    1 for r in rules if r.creation_method in USER_SOURCED_METHODS
+                    1 for r in rules if r.creation_method in USER_SOURCED_METHODS and not is_ai_rule(r, criterion)
                 ),
                 "from_ai_count": sum(
-                    1 for r in rules if r.creation_method not in USER_SOURCED_METHODS
+                    1 for r in rules if is_ai_rule(r, criterion) or r.creation_method not in USER_SOURCED_METHODS
                 ),
             }
         )

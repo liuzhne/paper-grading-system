@@ -58,6 +58,10 @@ function toggle(row) {
 function isExcluded(row) {
   return excluded.value.has(rowKey(row));
 }
+
+function confirmOne(row) {
+  emit("apply", new Set(rows.value.filter((item) => rowKey(item) !== rowKey(row)).map(rowKey)));
+}
 </script>
 
 <template>
@@ -93,22 +97,25 @@ function isExcluded(row) {
               <div>{{ row.issue }}</div>
               <div class="faint mono code">{{ row.criterionCode }} · {{ row.groupCode }}</div>
             </td>
-            <td><span class="chip">{{ row.severityLabel }}</span></td>
+            <td><span class="chip" :class="row.severity === 'severe' ? 'chip-danger' : row.severity === 'moderate' ? 'chip-warn' : ''">{{ row.severityLabel }}</span></td>
             <td class="num">{{ row.points }}</td>
             <td class="trigger">
               <div>{{ row.trigger }}</div>
               <div class="faint reason">{{ row.reason }}</div>
             </td>
-            <td class="muted">{{ row.sourceLabel }}</td>
+            <td class="muted">{{ row.sourceLabel }}<p v-for="ref in row.sourceRefs" :key="String(ref)" class="faint">{{ ref }}</p></td>
             <td class="actions">
               <button
                 class="btn btn-sm"
                 type="button"
                 data-test="exclude"
+                :disabled="busy"
                 @click="toggle(row)"
               >
                 {{ isExcluded(row) ? "已排除 · 撤销" : "排除" }}
               </button>
+              <button class="btn btn-sm" type="button" data-test="confirm-one"
+                :disabled="busy || isExcluded(row)" @click="confirmOne(row)">确认</button>
             </td>
           </tr>
         </tbody>
@@ -120,7 +127,7 @@ function isExcluded(row) {
         未确认的规则不会进入可执行评分版本。确认会记录确认人、时间与生成指纹。
       </p>
       <div class="btn-row">
-        <button class="btn" type="button" data-test="discard" @click="emit('discard')">
+        <button class="btn" type="button" data-test="discard" :disabled="busy" @click="emit('discard')">
           丢弃这批建议
         </button>
         <button
