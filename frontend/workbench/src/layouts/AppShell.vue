@@ -58,24 +58,24 @@ async function onLogout() {
       <nav class="nav" aria-label="主导航">
         <div class="nav-label">评审</div>
         <RouterLink class="nav-item" :class="{ active: activeNav === 'home' }" :to="{ name: 'dashboard' }">
-          工作台
+          <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z" /></svg>工作台
         </RouterLink>
         <RouterLink class="nav-item" :class="{ active: activeNav === 'tasks' }" :to="{ name: 'tasks' }">
-          评分任务
+          <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z M4 9h16 M9 9v11" /></svg>评分任务
         </RouterLink>
         <RouterLink class="nav-item" :class="{ active: activeNav === 'review' }" :to="{ name: 'review' }">
-          结果复核
+          <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4 10-10" /></svg>结果复核
         </RouterLink>
 
         <div class="nav-label">标准与输出</div>
         <RouterLink class="nav-item" :class="{ active: activeNav === 'rubric' }" :to="{ name: 'rubrics' }">
-          评分标准
+          <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 9-9 9-9-9z" /></svg>评分标准
         </RouterLink>
         <RouterLink class="nav-item" :class="{ active: activeNav === 'export' }" :to="{ name: 'exports' }">
-          输出中心
+          <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12 m-5-5 5 5 5-5 M4 17v4h16v-4" /></svg>输出中心
         </RouterLink>
         <RouterLink class="nav-item" :class="{ active: activeNav === 'account' }" :to="{ name: 'account' }">
-          账户与连接
+          <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8" /></svg>账户与连接
         </RouterLink>
 
         <!-- 运维页不进主分组。可见性只由服务端下发的能力表决定（计划 §2.1）；
@@ -187,8 +187,11 @@ async function onLogout() {
   padding: 14px 8px 8px;
 }
 
+.nav-icon { width: 17px; height: 17px; flex: none; }
 .nav-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 9px 10px;
   border-radius: 7px;
   font-size: 13.5px;

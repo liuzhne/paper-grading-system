@@ -57,6 +57,11 @@ function mountPanel(items = DRAFT_ITEMS, props = {}) {
 }
 
 describe("AI 起草确认面板", () => {
+  it("单条确认只选中这一条，不顺带确认其它建议", async () => {
+    const wrapper = mountPanel();
+    await wrapper.findAll('[data-test="confirm-one"]')[0].trigger("click");
+    expect([...wrapper.emitted("apply")[0][0]]).toEqual(["T02::G1::1"]);
+  });
   it("没有起草结果时整块不渲染", () => {
     const wrapper = mountPanel([]);
 

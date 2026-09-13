@@ -1,5 +1,15 @@
 import { expect, test } from "@playwright/test";
 
+async function selectSeedRubric(page) {
+  await page.getByRole("button", { name: "模板库", exact: true }).click();
+  await page.locator(".library-menu .lib-item", { hasText: "本科毕业论文评分标准" }).click();
+  await expect(page.getByRole("heading", { name: "本科毕业论文评分标准", exact: true })).toBeVisible();
+}
+async function openSeedRubric(page) {
+  await page.goto("/workbench/rubrics");
+  await selectSeedRubric(page);
+}
+
 /**
  * V03/V04/V05/V06/V07/V11 · 评审动线（前端 v2 计划 §12.1）。
  *
@@ -286,16 +296,16 @@ test.describe("V03 中栏页签：篇章与格式发现", () => {
 
 test.describe("V09 评分标准", () => {
   test("没有扣分细则的评分项显示为阻断并说明后果", async ({ page }) => {
-    await page.goto("/workbench/rubrics");
+    await openSeedRubric(page);
 
-    await expect(page.getByText(/存在 1 个阻断项/)).toBeVisible();
+    await expect(page.getByText(/存在 1 个缺少规则的评分项/)).toBeVisible();
     await expect(page.getByText(/评分到该项时没有判据可用/)).toBeVisible();
   });
 
   test("规则来源分列原文与 AI", async ({ page }) => {
-    await page.goto("/workbench/rubrics");
+    await openSeedRubric(page);
 
-    const row = page.locator("tbody tr", { hasText: "研究方法与技术方案" });
+    const row = page.locator(".criteria-nav .lib-item", { hasText: "研究方法与技术方案" });
     await expect(row).toContainText("原文");
     await expect(row).toContainText("AI");
     await expect(row).toContainText("待确认");
@@ -375,7 +385,7 @@ test.describe("V08 草稿续传", () => {
 
 test.describe("V3-1 评分标准导入", () => {
   test("列表页有导入入口，且没有空白新建", async ({ page }) => {
-    await page.goto("/workbench/rubrics");
+    await openSeedRubric(page);
 
     await expect(page.getByRole("button", { name: "导入评分模板" })).toBeVisible();
     // D-026：标准只能由导入产生。留一个「新建」按钮会让人建出没有模板溯源的标准。
@@ -383,7 +393,7 @@ test.describe("V3-1 评分标准导入", () => {
   });
 
   test("导入面板要求规则 Excel，并说明可见范围", async ({ page }) => {
-    await page.goto("/workbench/rubrics");
+    await openSeedRubric(page);
     await page.getByRole("button", { name: "导入评分模板" }).click();
 
     await expect(page.getByLabel(/规则 Excel/)).toBeVisible();
@@ -392,7 +402,7 @@ test.describe("V3-1 评分标准导入", () => {
   });
 
   test("Word 模板是可选的，不选也能提交", async ({ page }) => {
-    await page.goto("/workbench/rubrics");
+    await openSeedRubric(page);
     await page.getByRole("button", { name: "导入评分模板" }).click();
 
     const template = page.getByLabel(/Word 模板/);
@@ -430,7 +440,7 @@ test.describe("V3-4 新建任务入口", () => {
 
 test.describe("V3-2 AI 起草缺失细则", () => {
   test("有阻断项时给出起草入口，且必须先选连接", async ({ page }) => {
-    await page.goto("/workbench/rubrics");
+    await openSeedRubric(page);
 
     const button = page.getByRole("button", { name: /生成全部缺失细则/ });
     await expect(button).toBeVisible();
@@ -440,7 +450,7 @@ test.describe("V3-2 AI 起草缺失细则", () => {
   });
 
   test("说明 AI 只补缺失部分，用户原文保留", async ({ page }) => {
-    await page.goto("/workbench/rubrics");
+    await openSeedRubric(page);
 
     await expect(page.getByText(/AI 只补缺失部分/)).toBeVisible();
   });
@@ -523,7 +533,7 @@ test.describe("全页视觉契约", () => {
     ["/workbench/tasks", "评分任务"],
     ["/workbench/tasks/new", "新建评分任务"],
     ["/workbench/review", "结果复核"],
-    ["/workbench/rubrics", "评分标准"],
+    ["/workbench/rubrics", "本科毕业论文评分标准"],
     ["/workbench/exports", "输出中心"],
     ["/workbench/account", "账户与连接"],
     ["/workbench/ops", "运维与质量"],
@@ -532,6 +542,7 @@ test.describe("全页视觉契约", () => {
   for (const [path, title] of PAGES) {
     test(`${title}：表单控件都带设计系统的类`, async ({ page }) => {
       await page.goto(path);
+      if (path === "/workbench/rubrics") await selectSeedRubric(page);
       await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
 
       /*
@@ -554,6 +565,7 @@ test.describe("全页视觉契约", () => {
 
     test(`${title}：没有横向溢出`, async ({ page }) => {
       await page.goto(path);
+      if (path === "/workbench/rubrics") await selectSeedRubric(page);
       await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
 
       // 控件宽度失控最典型的表现就是把页面撑出横向滚动条。

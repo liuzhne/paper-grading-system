@@ -1458,6 +1458,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/review-workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Rubric Review Workspace */
+        get: operations["get_rubric_review_workspace_api_rubrics__rubric_id__review_workspace_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/rule-coverage": {
         parameters: {
             query?: never;
@@ -1509,6 +1526,23 @@ export interface paths {
         put?: never;
         /** Approve Atomic Rule Review */
         post: operations["approve_atomic_rule_review_api_rubrics__rubric_id__rules__rule_code__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/rules/{rule_code}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Rubric Rule */
+        post: operations["confirm_rubric_rule_api_rubrics__rubric_id__rules__rule_code__confirm_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2441,6 +2475,20 @@ export interface components {
             provider_options?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** AtomicRuleConfirmRequest */
+        AtomicRuleConfirmRequest: {
+            /** Compilation Id */
+            compilation_id: string;
+            /** Content Token */
+            content_token: string;
+            /**
+             * Reason
+             * @default 人工生命周期操作
+             */
+            reason: string;
+            /** Rule Id */
+            rule_id: string;
         };
         /** AtomicRuleEditRequest */
         AtomicRuleEditRequest: {
@@ -3826,6 +3874,10 @@ export interface components {
         };
         /** RubricDraftRecompileRequest */
         RubricDraftRecompileRequest: {
+            /** Atomic Rules */
+            atomic_rules?: {
+                [key: string]: unknown;
+            }[] | null;
             /**
              * Business Profile Key
              * @default thesis
@@ -7583,6 +7635,41 @@ export interface operations {
             };
         };
     };
+    get_rubric_review_workspace_api_rubrics__rubric_id__review_workspace_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_rule_coverage_api_rubrics__rubric_id__rule_coverage_get: {
         parameters: {
             query?: never;
@@ -7675,6 +7762,46 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RubricLifecycleReason"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_rubric_rule_api_rubrics__rubric_id__rules__rule_code__confirm_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+                rule_code: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AtomicRuleConfirmRequest"];
             };
         };
         responses: {

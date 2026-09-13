@@ -53,6 +53,12 @@ class RubricLifecycleReason(BaseModel):
     reason: str = Field(default="人工生命周期操作", min_length=1)
 
 
+class AtomicRuleConfirmRequest(RubricLifecycleReason):
+    compilation_id: str = Field(min_length=1)
+    rule_id: str = Field(min_length=1)
+    content_token: str = Field(min_length=64, max_length=64)
+
+
 class RubricPublishRequest(RubricLifecycleReason):
     compilation_id: Optional[str] = None
     #: 分享范围（D-029）。不传就沿用当前范围——扩大范围必须是显式动作。
@@ -71,6 +77,7 @@ class RubricDraftRecompileRequest(RubricLifecycleReason):
     description: Optional[str] = None
     total_score: Optional[float] = Field(default=None, gt=0)
     criteria: list[RubricCriterionCreate] = Field(min_length=1)
+    atomic_rules: Optional[list[dict]] = None
     global_policy: dict = Field(default_factory=dict)
     workflow_profile: str = Field(default="manual_json", min_length=1)
     business_profile_key: str = Field(default="thesis", min_length=1)

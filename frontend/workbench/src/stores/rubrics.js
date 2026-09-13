@@ -31,6 +31,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
     rubrics.value = [];
     error.value = null;
     lastImport.value = { warnings: [], templateSummary: null, rubricId: null };
+    lastDraft.value = { items: [] };
   }
 
   async function load() {
@@ -85,7 +86,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
    */
   async function clone(rubricId, input) {
     const { name, version } = input;
-    return api.post(`/rubrics/${rubricId}/clone`, { name, version });
+    return api.post(`/rubrics/${rubricId}/clone`, { name, new_version: version });
   }
 
   /**

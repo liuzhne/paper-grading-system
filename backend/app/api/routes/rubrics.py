@@ -1,4 +1,5 @@
 from typing import Optional
+from copy import deepcopy
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
 from backend.app.db.models import Rubric
+from backend.app.db.models import AtomicRule
 from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricVersion
 from backend.app.db.models import ScoringRun
@@ -22,6 +24,7 @@ from backend.app.services.rubrics.coverage import build_rule_coverage
 from backend.app.schemas.rubric import RubricCreate
 from backend.app.schemas.rubric import RubricCloneRequest
 from backend.app.schemas.rubric import AtomicRuleEditRequest
+from backend.app.schemas.rubric import AtomicRuleConfirmRequest
 from backend.app.schemas.rubric import RubricImportResult
 from backend.app.schemas.rubric import RubricLifecycleReason
 from backend.app.schemas.rubric import RubricPublishRequest
@@ -44,6 +47,7 @@ from backend.app.services.rubric_import.persist import build_criterion
 from backend.app.services.rubric_import.persist import extra_criterion_fields
 from backend.app.services.rubric_import.template import build_rubric_import_template
 from backend.app.services.scoring.core.policy import validate_weight_configuration
+from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.services.rubric_import import pipeline as rubric_pipeline
 from backend.app.services.rubric_import.ai_rule_drafter import (
     AIRuleDraftValidationError,
@@ -52,6 +56,7 @@ from backend.app.services.rubric_import.ai_rule_drafter import (
 from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 from backend.app.services.rubrics.draft_graph import read_execution_draft
+from backend.app.services.rubrics.review_workspace import read_review_workspace, confirm_rule
 from backend.app.services.ai_connections import resolve_connection_runtime
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
@@ -353,6 +358,39 @@ def get_rubric_execution_draft(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/{rubric_id}/review-workspace")
+def get_rubric_review_workspace(
+    rubric_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _visible_rubric(db, rubric_id, principal)
+    response.headers["Cache-Control"] = "private, no-store"
+    return read_review_workspace(db, rubric_id)
+
+
+@router.post("/{rubric_id}/rules/{rule_code}/confirm")
+def confirm_rubric_rule(
+    rubric_id: str,
+    rule_code: str,
+    payload: AtomicRuleConfirmRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    ensure_dev_user(db)
+    _visible_rubric(db, rubric_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        rule = confirm_rule(db, rubric_id, rule_code, user_id, payload)
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
 @router.get("/{rubric_id}/rule-coverage")
 def get_rule_coverage(
     rubric_id: str,
@@ -618,8 +656,19 @@ def recompile_rubric_draft(
     try:
         # Preparation is DB-free.  End the read transaction before the
         # persistence service takes its short lock/commit transaction.
+        if payload.atomic_rules is not None:
+            from backend.app.services.rubrics.atomic_recompile import prepare_atomic_recompile
+            prepared = prepare_atomic_recompile(db, predecessor_version, command, payload.atomic_rules)
+        else:
+            if db.scalar(select(AtomicRule.id).where(
+                AtomicRule.rubric_version_id == predecessor_version.id,
+                AtomicRule.creation_method != "manual",
+            )):
+                from backend.app.services.rubrics.atomic_recompile import prepare_atomic_ai_append
+                prepared = prepare_atomic_ai_append(db, predecessor_version, command)
+            else:
+                prepared = rubric_pipeline.prepare_manual_json_recompile(command=command)
         db.commit()
-        prepared = rubric_pipeline.prepare_manual_json_recompile(command=command)
         identity = rubric_pipeline.persist_prepared_import(
             session=db,
             prepared=prepared,
@@ -992,6 +1041,15 @@ def _manual_recompile_command(
     predecessor_version: RubricVersion,
     compiled_version: str,
 ) -> dict:
+    policy = deepcopy(predecessor_version.global_policy or {})
+    next_total = payload.total_score or float(rubric.total_score)
+    if policy and next_total != float(rubric.total_score):
+        try:
+            policy["aggregation"]["total_score"] = str(next_total)
+            policy.pop("policy_hash", None)
+            policy = compile_scoring_policy(policy, total_score=next_total).to_mapping()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="总分修改与现有全局评分政策不兼容，请核对政策配置。") from exc
     return {
         "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
         "source_kind": "manual_json",
@@ -1010,7 +1068,7 @@ def _manual_recompile_command(
             ],
             "business_profile_key": predecessor_version.business_profile_key,
             "workflow_profile": predecessor_version.workflow_profile,
-            "global_policy": dict(predecessor_version.global_policy or {}),
+            "global_policy": policy,
         },
         "compiler": _compiler_identity("manual-json-parser@1"),
         "version": {

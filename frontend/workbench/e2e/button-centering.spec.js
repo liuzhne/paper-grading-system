@@ -1,5 +1,15 @@
 import { expect, test } from "@playwright/test";
 
+async function selectSeedRubric(page) {
+  await page.getByRole("button", { name: "模板库", exact: true }).click();
+  await page.locator(".library-menu .lib-item", { hasText: "本科毕业论文评分标准" }).click();
+  await expect(page.getByRole("heading", { name: "本科毕业论文评分标准", exact: true })).toBeVisible();
+}
+async function openSeedRubric(page) {
+  await page.goto("/workbench/rubrics");
+  await selectSeedRubric(page);
+}
+
 /**
  * `.btn` 渲染成 `<a>` 时文字必须居中（2026-09-10 生产走查，第三次出现）。
  *
@@ -17,7 +27,7 @@ const PAGES = [
   ["/workbench/", "工作台"],
   ["/workbench/tasks", "评分任务"],
   ["/workbench/review", "结果复核"],
-  ["/workbench/rubrics", "评分标准"],
+  ["/workbench/rubrics", "本科毕业论文评分标准"],
   ["/workbench/exports", "输出中心"],
   ["/workbench/tasks/new", "新建评分任务"],
 ];
@@ -44,6 +54,7 @@ const MEASURE = (el) => {
 for (const [path, name] of PAGES) {
   test(`${name}：链接型按钮的文字在两个方向上都居中`, async ({ page }) => {
     await page.goto(path);
+      if (path === "/workbench/rubrics") await selectSeedRubric(page);
     // 等首屏请求落定再数：`h1` 出现只说明壳渲染了，复核页的「查看原文」是表格
     // 数据回来之后才有的。数早了得到空集合，用例会在**什么都没检查**的情况下
     // 跳过——比失败更难发现。
@@ -78,7 +89,7 @@ for (const [path, name] of PAGES) {
  * 再用 label 冒充（那样会丢掉键盘可达性，除非另外补一整套焦点处理）。
  */
 test("导入表单的文件选择框按设计系统渲染", async ({ page }) => {
-  await page.goto("/workbench/rubrics");
+  await openSeedRubric(page);
   await page.getByRole("button", { name: "导入评分模板" }).click();
 
   const input = page.locator('.import-panel input[type="file"]').first();
@@ -104,7 +115,7 @@ test("导入表单的文件选择框按设计系统渲染", async ({ page }) => 
 });
 
 test("文件选择框的说明文字与表单其它文字同源，不是系统默认的黑", async ({ page }) => {
-  await page.goto("/workbench/rubrics");
+  await openSeedRubric(page);
   await page.getByRole("button", { name: "导入评分模板" }).click();
 
   const input = page.locator('.import-panel input[type="file"]').first();
