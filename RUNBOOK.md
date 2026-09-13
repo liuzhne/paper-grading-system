@@ -750,7 +750,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 开发模式（`AUTH_ENABLED=false`）恒为 true——本地复现不了这一整套，要用
 `playwright test --project=llm-setup`。
 
-### 评分标准条款确认与原型还原（2026-09-11，待发布）
+### 评分标准条款确认与原型还原（2026-09-13，已部署，待登录验收）
 
 症状：导入后有“待确认”但无正文/确认入口；完整度无缺失仍可能有编译阻断。
 诊断时分别检查当前执行草稿的 blockers 与规则审核状态，不将完整度计数当作发布许可。
@@ -765,6 +765,14 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 发布后核对健康接口、静态资源和合成模板确认流程；发生异常停止后续写操作，按既有
 生产回滚流程恢复先前部署，保留确认审计。此节不构成测试或发布已完成的证据。
 
+发布证据：[主线 CI 34746064881](https://github.com/liuzhne/paper-grading-system/actions/runs/34746064881)
+对提交 `95d189f95ed079d2f90787965859441ab5ba4e0e` 的后端、前端、Postgres、Docker 与
+production 部署均成功。线上 `/`、`/workbench/rubrics`、`/api/system/integrations` 为 200；
+未登录请求 `/api/rubrics/synthetic-release-check/review-workspace` 为 401。入口
+`index-BQnCK4in.js`、`RubricsView-DSk2UsPD.js` 与相关 CSS 均与本地发布产物字节一致。
+尚未在生产登录，未执行合成模板写入；登录后仍须完成导入、原文核对、逐条/当前评分项批量
+确认、刷新保留与不自动发布验收。未发现已检查项异常，未执行回滚。
+
 原子编辑验收：同一 METHOD 评分项导入两条规则，展开“编辑当前评分项的原子规则”，
 修改其中一条正文与分档，保存后核对规则编号集合、数量、来源原文与其它条款均保留。
 新草稿须重新确认。若出现 `band_criterion_invalid`，同一评分项不得保留两条计分分档
@@ -777,7 +785,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-09-13 | 评分标准条款确认与原型还原 | 本地后端 1911 passed；前端 176 passed、类型检查与接口快照生成通过；浏览器 139 passed、3 skipped（原按钮测试无匹配项条件）。已重建 public，待 CI 与生产验收；不降级数据库。 |
+| 2026-09-13 | 评分标准条款确认与原型还原 | 本地后端 1911 passed，后续总分补充修复专项 10 passed；前端 176 passed、类型与接口快照通过；浏览器 139 passed、3 skipped。主线完整 CI 和 production 部署通过，线上健康与资源已验证；待登录后的合成流程，不降级数据库。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 新增复现、状态区分、确认回归及发布/回滚检查；实施与验证进行中，尚未发布。 |
 | 2026-09-10 | 未配置模型的拦截修复 | 新增 §11.20（被静默弹回的排查顺序、模块级 ref 的测试污染）与 §11.21（能力表刷新时机表、反向的洞）。未运行生产操作。 |
 | 2026-09-10 | 按钮居中与文件选择框 | 新增 §11.18（视觉契约静默跳过）与 §11.19（同一视觉问题修三次的判断依据）。未运行生产操作。 |
