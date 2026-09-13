@@ -770,6 +770,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 新草稿须重新确认。若出现 `band_criterion_invalid`，同一评分项不得保留两条计分分档
 规则；按授权模板明确另一条的生效方式，不能通过忽略发布校验或自动合并条款绕过。
 `test_rubric_review_workspace.py` 覆盖完整输入、旧摘要拒绝、来源保留及 AI 追加；
+普通评分项总分编辑也须验证不再出现 `global_policy_unsupported`；不兼容的政策输入应返回 422 并保留编辑内容。
 `e2e/rubric-review.spec.js` 覆盖编辑、保存失败重试、审核、发布和冻结闭环。
 
 ## 12. 维护记录

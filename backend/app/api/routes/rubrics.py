@@ -1,4 +1,5 @@
 from typing import Optional
+from copy import deepcopy
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -46,6 +47,7 @@ from backend.app.services.rubric_import.persist import build_criterion
 from backend.app.services.rubric_import.persist import extra_criterion_fields
 from backend.app.services.rubric_import.template import build_rubric_import_template
 from backend.app.services.scoring.core.policy import validate_weight_configuration
+from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.services.rubric_import import pipeline as rubric_pipeline
 from backend.app.services.rubric_import.ai_rule_drafter import (
     AIRuleDraftValidationError,
@@ -1039,6 +1041,15 @@ def _manual_recompile_command(
     predecessor_version: RubricVersion,
     compiled_version: str,
 ) -> dict:
+    policy = deepcopy(predecessor_version.global_policy or {})
+    next_total = payload.total_score or float(rubric.total_score)
+    if policy and next_total != float(rubric.total_score):
+        try:
+            policy["aggregation"]["total_score"] = str(next_total)
+            policy.pop("policy_hash", None)
+            policy = compile_scoring_policy(policy, total_score=next_total).to_mapping()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="总分修改与现有全局评分政策不兼容，请核对政策配置。") from exc
     return {
         "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
         "source_kind": "manual_json",
@@ -1057,7 +1068,7 @@ def _manual_recompile_command(
             ],
             "business_profile_key": predecessor_version.business_profile_key,
             "workflow_profile": predecessor_version.workflow_profile,
-            "global_policy": dict(predecessor_version.global_policy or {}),
+            "global_policy": policy,
         },
         "compiler": _compiler_identity("manual-json-parser@1"),
         "version": {

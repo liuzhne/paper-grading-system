@@ -61,6 +61,21 @@ def test_ai_append_keeps_imported_atomic_rule_and_source(client):
     assert "band_criterion_invalid" in {item["code"] for item in after["structural_blockers"]}
 
 
+def test_manual_total_edit_keeps_policy_consistent(client):
+    created = client.post('/api/rubrics', json={"name":"合成总分编辑", "version":"v1", "total_score":10,
+        "criteria":[{"code":"T01", "name":"论证", "max_score":10, "scoring_mode":"deductive",
+                     "deduction_rules_structured":[{"match":"缺少论证", "points":2, "reason":"合成条款"}]}]})
+    assert created.status_code == 200, created.text
+    rubric = created.json()
+    before = workspace(client, rubric['id'])
+    rubric['criteria'][0]['max_score'] = 20
+    saved = client.post(f"/api/rubrics/{rubric['id']}/recompile", json={
+        "supersedes_compilation_id": before['compilation_id'], "version":"v2", "total_score":20,
+        "criteria":rubric['criteria']})
+    assert saved.status_code == 200, saved.text
+    assert 'global_policy_unsupported' not in {item['code'] for item in workspace(client, rubric['id'])['structural_blockers']}
+
+
 def test_import_view_confirm_and_reload_is_audited_without_publication(client):
     rubric_id = _import_rubric(client, name="条款确认合成模板")["rubric"]["id"]
     view = workspace(client, rubric_id)
