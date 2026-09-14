@@ -215,17 +215,24 @@ class OpenAICompatibleChatScorer(LLMScorer):
             }}
         if self.service_tier:
             body["service_tier"] = self.service_tier
-        response = self._post_with_retry(body)
+        if response_schema is not None:
+            if not thinking_type or thinking_type == "disabled":
+                body["reasoning"] = {"enabled": False}
+            # The drafting layer already permits one schema repair. Avoid multiplying
+            # that by transport retries inside a synchronous serverless request.
+            response = self._post_with_retry(body, attempts_limit=1)
+        else:
+            response = self._post_with_retry(body)
         response.raise_for_status()
         return _parse_chat_json_output(response.json())
 
-    def _post_with_retry(self, payload):
+    def _post_with_retry(self, payload, *, attempts_limit=None):
         url = "%s/chat/completions" % self.base_url
         headers = {
             "Authorization": "Bearer %s" % self.api_key,
             "Content-Type": "application/json",
         }
-        attempts = max(1, settings.OPENAI_COMPATIBLE_MAX_RETRIES + 1)
+        attempts = max(1, settings.OPENAI_COMPATIBLE_MAX_RETRIES + 1) if attempts_limit is None else max(1, attempts_limit)
         last_error = None
         with observation(
             "llm_generation",

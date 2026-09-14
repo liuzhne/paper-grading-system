@@ -6,7 +6,7 @@
   "regions": ["sin1"],
   "functions": {
     "api/**/*.py": {
-      "maxDuration": 60,
+      "maxDuration": 300,
       "excludeFiles": "{.env,.env.*,storage/**,backend/app/tests/**,docs/**,.github/**,test/**,frontend/**,**/*.docx,**/*.pdf,**/*.png,**/*.svg,**/*.mmd}"
     }
   },

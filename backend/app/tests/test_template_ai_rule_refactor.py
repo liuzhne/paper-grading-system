@@ -583,7 +583,7 @@ def test_drafting_schema_is_scoped_to_openrouter(host, structured):
     from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
     calls = []
     class Scorer(OpenAICompatibleChatScorer):
-        def _post_with_retry(self, body):
+        def _post_with_retry(self, body, **kwargs):
             calls.append(body)
             value = {"rule_groups": [{"group_code": "G1", "issue": "缺失",
                 "mutex_group": "G1", "cap_points": 2, "rules": [{"severity": "minor",
@@ -597,6 +597,7 @@ def test_drafting_schema_is_scoped_to_openrouter(host, structured):
     if structured:
         schema = calls[0]["response_format"]["json_schema"]
         assert schema["strict"]
+        assert calls[0]["reasoning"] == {"enabled": False}
         assert "mutex_group" in schema["schema"]["properties"]["rule_groups"]["items"]["required"]
     else:
         assert "response_format" not in calls[0]
@@ -617,7 +618,7 @@ def test_draft_budget_is_separate_and_respects_explicit_connection_limit(configu
     from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
     calls = []
     class Scorer(OpenAICompatibleChatScorer):
-        def _post_with_retry(self, body):
+        def _post_with_retry(self, body, **kwargs):
             calls.append(body)
             return httpx.Response(200, request=httpx.Request("POST", self.base_url),
                 json={"choices": [{"message": {"content": "{}"}}]})
@@ -628,3 +629,21 @@ def test_draft_budget_is_separate_and_respects_explicit_connection_limit(configu
     scorer.complete_json("other task", {})
     assert calls[-1]["max_tokens"] == original
     assert scorer.max_tokens == original
+
+
+def test_schema_drafting_does_not_multiply_transport_retries(monkeypatch):
+    from backend.app.core.config import settings
+    from backend.app.services.llm.errors import ProviderCallError
+    from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MAX_RETRIES", 3)
+    calls = []
+    class Client:
+        def post(self, url, **kwargs):
+            calls.append(kwargs["json"])
+            raise httpx.ReadTimeout("synthetic timeout")
+    scorer = OpenAICompatibleChatScorer(api_key="test", client=Client(), thinking_type="enabled")
+    with pytest.raises(ProviderCallError):
+        scorer.complete_json("draft", {}, response_schema={})
+    assert len(calls) == 1
+    assert calls[0]["thinking"] == {"type": "enabled"}
+    assert "reasoning" not in calls[0]

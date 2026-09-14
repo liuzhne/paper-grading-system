@@ -111,7 +111,7 @@ def test_vercel_entrypoint_and_bundle_contract():
     config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
     assert config["regions"] == ["sin1"]
     function = config["functions"]["api/**/*.py"]
-    assert function["maxDuration"] == 60
+    assert function["maxDuration"] == 300
     assert ".env.*" in function["excludeFiles"]
     assert "frontend/**" in function["excludeFiles"]
     ignore_rules = (ROOT / ".vercelignore").read_text(encoding="utf-8").splitlines()
