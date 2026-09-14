@@ -608,3 +608,23 @@ def test_malformed_model_arrays_fail_closed_with_bounded_repair(groups):
     with pytest.raises(AIRuleDraftValidationError):
         draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
     assert len(scorer.payloads) == 2
+
+
+@pytest.mark.parametrize("configured,expected", [(None, 8192), (512, 512), (16384, 16384)])
+def test_draft_budget_is_separate_and_respects_explicit_connection_limit(configured, expected, monkeypatch):
+    from backend.app.core.config import settings
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MAX_TOKENS", 1200)
+    from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
+    calls = []
+    class Scorer(OpenAICompatibleChatScorer):
+        def _post_with_retry(self, body):
+            calls.append(body)
+            return httpx.Response(200, request=httpx.Request("POST", self.base_url),
+                json={"choices": [{"message": {"content": "{}"}}]})
+    scorer = Scorer(api_key="test", max_tokens=configured)
+    original = scorer.max_tokens
+    scorer.complete_json("draft", {}, response_schema={}, default_max_tokens=8192)
+    assert calls[-1]["max_tokens"] == expected
+    scorer.complete_json("other task", {})
+    assert calls[-1]["max_tokens"] == original
+    assert scorer.max_tokens == original

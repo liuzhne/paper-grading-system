@@ -42,6 +42,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
         self.model_name = model_name or settings.OPENAI_COMPATIBLE_MODEL
         self.provider_name = provider_name or settings.OPENAI_COMPATIBLE_PROVIDER_NAME
         self.timeout_seconds = float(timeout_seconds or settings.OPENAI_COMPATIBLE_TIMEOUT_SECONDS)
+        self.max_tokens_explicit = max_tokens is not None
         self.max_tokens = int(max_tokens or settings.OPENAI_COMPATIBLE_MAX_TOKENS)
         self.temperature = float(temperature if temperature is not None else settings.OPENAI_COMPATIBLE_TEMPERATURE)
         self.response_format_json = settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON if response_format_json is None else bool(response_format_json)
@@ -193,7 +194,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
             _parse_chat_json_output(data),
         )
 
-    def complete_json(self, instructions, payload, *, response_schema=None):
+    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None):
         body = {
             "model": self.model_name,
             "messages": [
@@ -201,7 +202,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": self.max_tokens if self.max_tokens_explicit or default_max_tokens is None else max(self.max_tokens, default_max_tokens),
         }
         thinking_type = (self.thinking_type or "").strip()
         if thinking_type:
