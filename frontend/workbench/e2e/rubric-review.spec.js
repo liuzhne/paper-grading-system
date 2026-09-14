@@ -150,6 +150,8 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   await expect(panel.locator("tbody tr")).toHaveCount(1);
   await panel.getByRole("button", { name: "确认", exact: true }).click();
   await expect(panel).toHaveCount(0);
+  // Recompile removes the draft panel before the separate confirm request finishes.
+  await expect(page.getByRole("status").filter({ hasText: "已应用并确认 1 条建议" })).toBeVisible();
   full = await (await request.get(`/api/rubrics/${rubric.id}`)).json();
   expect(full.criteria.find((c) => c.code === "T01").deduction_rules_structured).toHaveLength(2);
   expect(full.criteria.find((c) => c.code === "T02").deduction_rules_structured).toHaveLength(0);
