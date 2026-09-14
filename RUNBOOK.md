@@ -781,6 +781,14 @@ production 部署均成功。线上 `/`、`/workbench/rubrics`、`/api/system/in
 普通评分项总分编辑也须验证不再出现 `global_policy_unsupported`；不兼容的政策输入应返回 422 并保留编辑内容。
 `e2e/rubric-review.spec.js` 覆盖编辑、保存失败重试、审核、发布和冻结闭环。
 
+### 2026-09-14 OpenRouter 规则起草错误处理
+
+OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mutex_group）；其他厂商及评分调用不变。依据 [OpenRouter 结构化输出文档](https://openrouter.ai/docs/guides/features/structured-outputs) 和 [免费路由说明](https://openrouter.ai/openrouter/free/apps)，声明所需输出能力，仍保留应用层业务校验，不将 JSON Schema 当作评分规则授权。
+
+症状：工作台生成规则显示通用 503/422。先在 Chrome Network 读取该请求 Response 的 detail.code/message/user_action，再用 `vercel logs --environment production --since 1h --query draft-deduction-rules --limit 30 --json` 关联请求。上游 HTTP 200 不代表规则有效，也不能据此判为额度不足。新日志 `rubric_ai_draft_failed` / `rubric_ai_draft_repair` 仅含原因码、状态或异常类型；禁止打开包含原文的生产 debug 日志。output_truncated 检查连接输出 token 预算，invalid_json/empty_content 检查模型 JSON 输出，MUTEX_GROUP_MISSING 表示缺少必填字段；不应绕过校验发布。
+
+验证：`.venv/bin/python -m pytest -q`；`cd frontend/workbench && npm run test:unit && npm run typecheck && npm run test:e2e`；根目录 `.venv/bin/python scripts/build_web_static.py --with-workbench`。发布遵循 main CI 全部门禁，通过后核对生产健康与 Chrome 生成→查看建议；验证部分失败保留结果、失败原因可见，未经用户确认不确认或发布真实模板。回滚用 revert 修复提交并经同一 CI 重建发布；无数据库迁移或数据回退。本条记录诊断与实施，生产验证结果另记上线清单。
+
 ## 12. 维护记录
 
 | 日期 | 主题 | 操作基线变化 |
@@ -808,3 +816,5 @@ production 部署均成功。线上 `/`、`/workbench/rubrics`、`/api/system/in
 | 2026-09-08 | 阶段 6B、浏览器验收与合同门禁 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。补齐 §12.2 的类型与 OpenAPI 合同门禁（`api:dump` / `api:check` + 前端调用路径静态契约）。未运行生产操作。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |
 | 2026-09-11 | 平台模型配置默认折叠 | 验收：未配置显示完整表单；已配置刷新后显示摘要、展开入口与测试按钮，展开后可保存/停用；保存成功收起，失败保留表单，测试反馈在折叠状态可见。运行 `cd frontend/workbench && npm run test:unit && npm run typecheck`；根目录运行 `.venv/bin/python scripts/build_web_static.py --with-workbench` 重建提交产物。发布沿用 main CI 门禁；回滚撤销前端变更并重建产物，无数据库回退。未执行生产发布。 |
+
+| 2026-09-14 | OpenRouter 规则起草错误处理 | 记录输出校验、错误分类、有限纠正和分项保留结果；未改变确认及发布边界。 |

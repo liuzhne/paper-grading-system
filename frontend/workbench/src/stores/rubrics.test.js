@@ -354,3 +354,19 @@ describe("确认后的 AI 规则落库（V3-2 闭环）", () => {
     expect(captured.reason).toBeTruthy();
   });
 });
+
+
+it("分项起草在后续失败时保留成功结果", async () => {
+  setActivePinia(createPinia());
+  const calls = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+    calls.push(JSON.parse(init.body).criteria);
+    return calls.length === 1
+      ? jsonResponse({ items: [{ criterion_code: "T01", draft: { rule_groups: [] } }] })
+      : new Response(JSON.stringify({ detail: { message: "模型输出不完整。" } }), { status: 422 });
+  }));
+  const store = useRubricsStore();
+  await expect(store.draftRules("r1", { criteria: [{ code: "T01" }, { code: "T02" }], connectionId: "c1" })).rejects.toThrow("已保留 1 项结果");
+  expect(calls.map((items) => items.length)).toEqual([1, 1]);
+  expect(store.lastDraft.items[0].criterion_code).toBe("T01");
+});

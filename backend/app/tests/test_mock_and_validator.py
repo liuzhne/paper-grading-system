@@ -173,8 +173,8 @@ def test_openai_compatible_empty_content_error_has_diagnostics():
     else:
         raise AssertionError("expected empty content to raise")
 
-    assert "reasoning_content_chars" in message
-    assert "thinking 模式" in message
+    assert "output_truncated" in message
+    assert "思考内容" not in message
 
 
 def test_score_output_normalizes_loose_llm_shapes():

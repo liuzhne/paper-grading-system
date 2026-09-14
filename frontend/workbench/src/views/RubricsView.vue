@@ -282,6 +282,7 @@ const structuralMessages = {
 const activeIssues = computed(() => [...(draft.value?.active_compilation?.blockers || []),
   ...(workspace.value?.structural_blockers || []).map(issue => ({ ...issue, message: structuralMessages[issue.code] || issue.message, criterion_code: issue.identity?.criterion_code }))]);
 const generationCandidates = computed(() => (editForm.value?.criteria || []).filter((criterion) =>
+  !store.lastDraft.items.some((item) => item.criterion_code === criterion.code && item.draft) &&
   !(criterion.deduction_rules_structured || []).length && (
     blocking.value.some((item) => item.code === criterion.code) ||
     (draft.value?.active_compilation?.blockers || []).some((issue) => issue.criterion_code === criterion.code && ['MISSING_EXECUTABLE_SCORING_MODE', 'SEVERITY_CONFIRMATION_REQUIRED', 'DEDUCTION_RULES_MISSING', 'MISSING_DEDUCTION_RULES'].includes(issue.code)))));

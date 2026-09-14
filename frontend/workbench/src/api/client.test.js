@@ -105,3 +105,13 @@ describe("api client", () => {
     expect(new StaleContextError()).toBeInstanceOf(Error);
   });
 });
+
+
+it("结构化业务错误显示具体原因和操作建议", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    detail: { code: "MUTEX_GROUP_MISSING", message: "缺少互斥标识。", user_action: "请重新生成。", context: { hidden: "不要显示" } },
+  }), { status: 422 })));
+  await expect(api.post("/rubrics/r1/draft-deduction-rules", {})).rejects.toMatchObject({
+    status: 422, message: "缺少互斥标识。 请重新生成。",
+  });
+});

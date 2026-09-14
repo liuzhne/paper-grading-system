@@ -522,3 +522,89 @@ def test_template_center_frontend_uses_recompile_and_persistent_errors():
     edit_handler = edit_handler[: edit_handler.index('document.querySelector("#batch-form")')]
     assert "method: \"PATCH\"" not in edit_handler
     assert "/recompile" in edit_handler
+
+
+@pytest.mark.parametrize("body,reason", [
+    ({"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}, "output_truncated"),
+    ({"choices": [{"message": {"content": "secret invalid output"}}]}, "invalid_json"),
+    ({"choices": [{"message": {"content": ""}}]}, "empty_content"),
+    ({"error": {"message": "secret provider body"}}, "error_envelope"),
+    ({"choices": []}, "missing_choices"),
+])
+def test_chat_output_failure_is_safe_and_not_service_unavailable(body, reason, caplog):
+    from backend.app.services.llm.openai_compatible_adapter import _parse_chat_json_output
+
+    class Scorer(_DraftScorer):
+        def complete_json(self, instructions, payload):
+            return _parse_chat_json_output(body)
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(None), business_profile_key="thesis")
+    assert caught.value.code == ("AI_DRAFT_OUTPUT_TRUNCATED" if reason == "output_truncated" else "AI_DRAFT_PROVIDER_ERROR" if reason == "error_envelope" else "AI_DRAFT_OUTPUT_INVALID")
+    assert reason in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_wrapped_provider_rejection_remains_rejection(caplog):
+    from backend.app.services.llm.errors import raise_provider_call_error
+
+    class Scorer(_RejectedDraftScorer):
+        def complete_json(self, instructions, payload):
+            try:
+                super().complete_json(instructions, payload)
+            except httpx.HTTPStatusError as exc:
+                raise_provider_call_error("openai_compatible", exc)
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(), business_profile_key="thesis")
+    assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "status=400" in caplog.text
+
+
+def test_missing_mutex_is_repaired_once_without_relaxing_validation():
+    class Scorer(_DraftScorer):
+        def complete_json(self, instructions, payload):
+            self.payloads.append((instructions, payload))
+            return {"rule_groups": [{"group_code": "G1", "issue": "需求缺失",
+                "mutex_group": "G1-severity" if len(self.payloads) == 2 else "",
+                "cap_points": 2, "rules": [{"severity": "minor", "trigger": "需求缺失",
+                "points": 2, "reason": "需求不完整", "source_refs": ["/criterion/description"]}]}]}
+    scorer = Scorer(None)
+    result = draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
+    assert len(scorer.payloads) == 2
+    assert "MUTEX_GROUP_MISSING" in scorer.payloads[1][0]
+    assert result["requires_confirmation"]
+    assert not result["rule_groups"][0]["rules"][0]["confirmed"]
+
+
+@pytest.mark.parametrize("host,structured", [("openrouter.ai", True), ("example.com", False)])
+def test_drafting_schema_is_scoped_to_openrouter(host, structured):
+    import json
+    from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
+    calls = []
+    class Scorer(OpenAICompatibleChatScorer):
+        def _post_with_retry(self, body):
+            calls.append(body)
+            value = {"rule_groups": [{"group_code": "G1", "issue": "缺失",
+                "mutex_group": "G1", "cap_points": 2, "rules": [{"severity": "minor",
+                "trigger": "需求缺失", "points": 2, "reason": "不完整",
+                "source_refs": ["/criterion/description"]}]}]}
+            return httpx.Response(200, request=httpx.Request("POST", self.base_url),
+                json={"choices": [{"message": {"content": json.dumps(value)}}]})
+    scorer = Scorer(api_key="test-key", base_url="https://" + host + "/api/v1", response_format_json=False)
+    draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
+    assert len(calls) == 1
+    if structured:
+        schema = calls[0]["response_format"]["json_schema"]
+        assert schema["strict"]
+        assert "mutex_group" in schema["schema"]["properties"]["rule_groups"]["items"]["required"]
+    else:
+        assert "response_format" not in calls[0]
+
+
+@pytest.mark.parametrize("groups", [None, 4, {}, [4], [{"group_code": "G", "mutex_group": "M", "cap_points": 2, "rules": 4}]])
+def test_malformed_model_arrays_fail_closed_with_bounded_repair(groups):
+    scorer = _DraftScorer({"rule_groups": groups})
+    with pytest.raises(AIRuleDraftValidationError):
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
+    assert len(scorer.payloads) == 2
