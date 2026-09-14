@@ -110,9 +110,17 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   expect(created.ok(), await created.text()).toBeTruthy();
   const rubric = await created.json();
   await page.route("**/api/ai-connections", (route) => route.fulfill({ json: [{ id: "synthetic", name: "合成测试连接", model_name: "fixture" }] }));
+  const generatedCodes = [];
+  let failSecond = true;
   await page.route(`**/api/rubrics/${rubric.id}/draft-deduction-rules`, async (route) => {
     const input = route.request().postDataJSON();
-    expect(input.criteria).toHaveLength(2);
+    expect(input.criteria).toHaveLength(1);
+    generatedCodes.push(input.criteria[0].code);
+    if (input.criteria[0].code === "T02" && failSecond) {
+      failSecond = false;
+      await route.fulfill({ status: 422, json: { detail: { code: "MUTEX_GROUP_MISSING", message: "缺少互斥标识。", user_action: "请重新生成。" } } });
+      return;
+    }
     expect(input.criteria[0].deduction_rules).toEqual(["缺少方案论证扣2至6分"]);
     expect(input.criteria[0].description).toBe("核对方案论证");
     await route.fulfill({ json: { items: input.criteria.map((c) => ({ criterion_code: c.code,
@@ -128,6 +136,10 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   await expect(page.getByRole("heading", { level: 1, name: rubric.name })).toBeVisible();
   await page.getByLabel("用哪个 AI 连接起草").selectOption("synthetic");
   await page.getByRole("button", { name: /生成全部缺失细则/ }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "已保留 1 项结果" })).toContainText("缺少互斥标识。");
+  await page.getByRole("button", { name: "生成全部缺失细则（1）", exact: true }).click();
+  await expect(page.getByRole("button", { name: /生成全部缺失细则|起草中/ })).toHaveCount(0);
+  expect(generatedCodes).toEqual(["T01", "T02", "T02"]);
   const panel = page.locator("[data-test=draft-panel]");
   await expect(panel.locator("tbody tr")).toHaveCount(2);
   await panel.getByRole("button", { name: "确认", exact: true }).first().click();
@@ -138,6 +150,8 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   await expect(panel.locator("tbody tr")).toHaveCount(1);
   await panel.getByRole("button", { name: "确认", exact: true }).click();
   await expect(panel).toHaveCount(0);
+  // Recompile removes the draft panel before the separate confirm request finishes.
+  await expect(page.getByRole("status").filter({ hasText: "已应用并确认 1 条建议" })).toBeVisible();
   full = await (await request.get(`/api/rubrics/${rubric.id}`)).json();
   expect(full.criteria.find((c) => c.code === "T01").deduction_rules_structured).toHaveLength(2);
   expect(full.criteria.find((c) => c.code === "T02").deduction_rules_structured).toHaveLength(0);

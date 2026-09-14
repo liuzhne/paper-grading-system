@@ -110,6 +110,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
   }
 
   /** 最近一次 AI 起草的结果。起草只是建议，确认之前不改变任何已发布内容。 */
+  /** @type {import('vue').Ref<{items: any[]}>} */
   const lastDraft = ref({ items: [] });
 
   /**
@@ -125,12 +126,24 @@ export const useRubricsStore = defineStore("rubrics", () => {
     if (!input.connectionId) {
       throw new Error("请先选择用于起草的 AI 连接。");
     }
-    const result = await api.post(`/rubrics/${rubricId}/draft-deduction-rules`, {
-      criteria: input.criteria,
-      ai_connection_id: input.connectionId,
-    });
-    lastDraft.value = { items: result.items || [] };
-    return result;
+    // One criterion per request: a large template must not consume one function's
+    // entire time budget, and a later failure must not discard completed drafts.
+    const collection = lastDraft.value;
+    for (const criterion of input.criteria) {
+      try {
+        const result = await api.post(`/rubrics/${rubricId}/draft-deduction-rules`, {
+          criteria: [criterion],
+          ai_connection_id: input.connectionId,
+        });
+        if (lastDraft.value !== collection) throw new StaleContextError();
+        collection.items = [...collection.items.filter((item) => item.criterion_code !== criterion.code), ...(result.items || [])];
+      } catch (err) {
+        if (err instanceof StaleContextError) throw err;
+        const message = err instanceof Error ? err.message : "起草失败";
+        throw new Error(`评分项 ${criterion.code} 起草失败；已保留 ${collection.items.length} 项结果。${message}`);
+      }
+    }
+    return collection;
   }
 
   /**

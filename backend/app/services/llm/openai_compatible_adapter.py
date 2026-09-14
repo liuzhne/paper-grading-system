@@ -193,7 +193,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
             _parse_chat_json_output(data),
         )
 
-    def complete_json(self, instructions, payload):
+    def complete_json(self, instructions, payload, *, response_schema=None):
         body = {
             "model": self.model_name,
             "messages": [
@@ -208,6 +208,10 @@ class OpenAICompatibleChatScorer(LLMScorer):
             body["thinking"] = {"type": thinking_type}
         if self.response_format_json:
             body["response_format"] = {"type": "json_object"}
+        if response_schema is not None:
+            body["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": "rubric_rule_draft", "strict": True, "schema": response_schema,
+            }}
         if self.service_tier:
             body["service_tier"] = self.service_tier
         response = self._post_with_retry(body)
@@ -456,19 +460,34 @@ def _input_payload(paper, criterion, evidence_candidates, structure_checks, anch
     return json.dumps(payload, ensure_ascii=False)
 
 
+class ChatJSONOutputError(ValueError):
+    """Safe metadata only; never include provider content in this exception."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__("OpenAI-compatible JSON output: " + reason)
+
+
 def _parse_chat_json_output(data):
-    choices = data.get("choices") or []
-    if not choices:
-        raise ValueError("OpenAI-compatible response did not contain choices")
+    if not isinstance(data, dict):
+        raise ChatJSONOutputError("invalid_envelope")
+    if data.get("error"):
+        raise ChatJSONOutputError("error_envelope")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ChatJSONOutputError("missing_choices")
     choice = choices[0]
-    message = choice.get("message") or {}
+    truncated = choice.get("finish_reason") == "length"
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise ChatJSONOutputError("missing_message")
     text = _message_content_to_text(message.get("content"))
     if not text.strip():
-        raise ValueError("OpenAI-compatible response did not contain message content: %s" % _empty_content_detail(choice))
+        raise ChatJSONOutputError("output_truncated" if truncated else "empty_content")
     try:
         return json.loads(_strip_json_fence(text))
     except json.JSONDecodeError as exc:
-        raise ValueError("OpenAI-compatible response was not valid JSON: %s" % exc) from exc
+        raise ChatJSONOutputError("output_truncated" if truncated else "invalid_json") from exc
 
 
 def _message_content_to_text(content):

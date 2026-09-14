@@ -129,7 +129,10 @@ export async function request(path, options = {}) {
         : null;
     throw new ApiError(
       response.status,
-      typeof detail === "string" ? detail : null,
+      typeof detail === "string" ? detail :
+        detail && typeof detail.message === "string"
+          ? [detail.message, typeof detail.user_action === "string" ? detail.user_action : ""].filter(Boolean).join(" ")
+          : null,
       payload,
     );
   }
