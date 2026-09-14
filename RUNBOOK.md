@@ -783,6 +783,8 @@ production 部署均成功。线上 `/`、`/workbench/rubrics`、`/api/system/in
 
 ### 2026-09-14 OpenRouter 规则起草错误处理
 
+生产补充证据：部署 ef500cf 后，同一 Chrome 连接再次返回 HTTP 200，应用安全日志明确为 output_truncated；连接公开配置 provider_options 为空。起草使用通用评分预算造成容量不匹配，现为 OpenRouter 起草提供 8192 token 的独立默认下限；连接显式 max_tokens 始终优先，不修改连接持久化配置和正式评分预算。拒绝无上限增大及对截断输出静默拼接，较高默认值可能增加输出时长/调用成本；继续保留分项请求与人工确认。起草版本 rubric-rule-draft@4，缓存版本 2026-09-14-2。上线后须验证不再出现截断且返回可核对建议；若仍达到连接显式上限则提示管理员调整，不自动越过该上限。
+
 OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mutex_group）；其他厂商及评分调用不变。依据 [OpenRouter 结构化输出文档](https://openrouter.ai/docs/guides/features/structured-outputs) 和 [免费路由说明](https://openrouter.ai/openrouter/free/apps)，声明所需输出能力，仍保留应用层业务校验，不将 JSON Schema 当作评分规则授权。
 
 症状：工作台生成规则显示通用 503/422。先在 Chrome Network 读取该请求 Response 的 detail.code/message/user_action，再用 `vercel logs --environment production --since 1h --query draft-deduction-rules --limit 30 --json` 关联请求。上游 HTTP 200 不代表规则有效，也不能据此判为额度不足。新日志 `rubric_ai_draft_failed` / `rubric_ai_draft_repair` 仅含原因码、状态或异常类型；禁止打开包含原文的生产 debug 日志。output_truncated 检查连接输出 token 预算，invalid_json/empty_content 检查模型 JSON 输出，MUTEX_GROUP_MISSING 表示缺少必填字段；不应绕过校验发布。
@@ -818,3 +820,5 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-09-11 | 平台模型配置默认折叠 | 验收：未配置显示完整表单；已配置刷新后显示摘要、展开入口与测试按钮，展开后可保存/停用；保存成功收起，失败保留表单，测试反馈在折叠状态可见。运行 `cd frontend/workbench && npm run test:unit && npm run typecheck`；根目录运行 `.venv/bin/python scripts/build_web_static.py --with-workbench` 重建提交产物。发布沿用 main CI 门禁；回滚撤销前端变更并重建产物，无数据库回退。未执行生产发布。 |
 
 | 2026-09-14 | OpenRouter 规则起草错误处理 | 记录输出校验、错误分类、有限纠正和分项保留结果；未改变确认及发布边界。CI 验收等待确认成功提示后再查审核状态，不能以建议面板消失代替确认完成。 |
+
+| 2026-09-14 | OpenRouter 起草输出预算 | 依据生产 output_truncated 增加独立默认预算，保留显式限制和原有评分预算；需再次经完整 CI 发布验证。 |

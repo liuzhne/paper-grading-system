@@ -555,9 +555,11 @@ Alembic head `0030_platform_llm_config` 不变；用户已明确批准本次接�
 
 ### 2026-09-14 OpenRouter 规则起草错误处理
 
+生产补充证据：部署 ef500cf 后，同一 Chrome 连接再次返回 HTTP 200，应用安全日志明确为 output_truncated；连接公开配置 provider_options 为空。起草使用通用评分预算造成容量不匹配，现为 OpenRouter 起草提供 8192 token 的独立默认下限；连接显式 max_tokens 始终优先，不修改连接持久化配置和正式评分预算。拒绝无上限增大及对截断输出静默拼接，较高默认值可能增加输出时长/调用成本；继续保留分项请求与人工确认。起草版本 rubric-rule-draft@4，缓存版本 2026-09-14-2。上线后须验证不再出现截断且返回可核对建议；若仍达到连接显式上限则提示管理员调整，不自动越过该上限。
+
 OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mutex_group）；其他厂商及评分调用不变。依据 [OpenRouter 结构化输出文档](https://openrouter.ai/docs/guides/features/structured-outputs) 和 [免费路由说明](https://openrouter.ai/openrouter/free/apps)，声明所需输出能力，仍保留应用层业务校验，不将 JSON Schema 当作评分规则授权。
 
-核对链路：工作台逐评分项调用 draft-deduction-rules → 私有连接运行时 → OpenAI-compatible JSON 解析 → 严格规则校验。前端保留已返回的建议，后续失败停止；再次生成排除已有建议。解析错误使用仅含固定原因码的 ChatJSONOutputError，起草层区分输出截断、无效 JSON 与 ProviderCallError，日志仅记录原因码/状态/异常类型，禁止记录模型正文。缺字段或无效输出最多重新生成一次，纠正请求只追加校验码；截断和连接错误不在此层重试。未确认规则不落库、不发布；有效 JSON 的评分解析语义、迁移 head 0030_platform_llm_config、默认 legacy 引擎均不变。提示词版本 rubric-rule-draft@3，缓存输入版本 2026-09-14-1。
+核对链路：工作台逐评分项调用 draft-deduction-rules → 私有连接运行时 → OpenAI-compatible JSON 解析 → 严格规则校验。前端保留已返回的建议，后续失败停止；再次生成排除已有建议。解析错误使用仅含固定原因码的 ChatJSONOutputError，起草层区分输出截断、无效 JSON 与 ProviderCallError，日志仅记录原因码/状态/异常类型，禁止记录模型正文。缺字段或无效输出最多重新生成一次，纠正请求只追加校验码；截断和连接错误不在此层重试。未确认规则不落库、不发布；有效 JSON 的评分解析语义、迁移 head 0030_platform_llm_config、默认 legacy 引擎均不变。提示词版本 rubric-rule-draft@4，缓存输入版本 2026-09-14-2。
 
 ## 8. 维护记录
 
@@ -593,3 +595,5 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-09-11 | 平台模型配置默认折叠 | 核对 OpsView：按接口 configured 判断，未配置展开，已配置默认收起（含停用配置）；保存成功收起，测试连接独立于表单。API、数据流、权限、迁移 head `0030_platform_llm_config` 与评分边界不变。 |
 
 | 2026-09-14 | OpenRouter 规则起草错误处理 | 记录输出校验、错误分类、有限纠正和分项保留结果；未改变确认及发布边界。CI 验收等待确认成功提示后再查审核状态，不能以建议面板消失代替确认完成。 |
+
+| 2026-09-14 | OpenRouter 起草输出预算 | 依据生产 output_truncated 增加独立默认预算，保留显式限制和原有评分预算；需再次经完整 CI 发布验证。 |
