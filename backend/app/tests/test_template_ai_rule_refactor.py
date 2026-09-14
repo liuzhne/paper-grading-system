@@ -647,3 +647,26 @@ def test_schema_drafting_does_not_multiply_transport_retries(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["thinking"] == {"type": "enabled"}
     assert "reasoning" not in calls[0]
+
+
+@pytest.mark.parametrize("status,code", [(400, "invalid_request"), (429, "rate_limited"), (503, "provider_unavailable")])
+def test_numeric_openrouter_error_code_is_projected_without_type_error(status, code):
+    from backend.app.services.llm.errors import project_provider_error
+    response = httpx.Response(status, request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        json={"error": {"code": status, "message": "Provider returned error"}})
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        response.raise_for_status()
+    error = project_provider_error(caught.value)
+    assert error.code == code
+    assert error.provider_error_code == str(status)
+
+
+def test_nested_provider_error_fields_are_not_reflected():
+    from backend.app.services.llm.errors import project_provider_error
+    response = httpx.Response(400, request=httpx.Request("POST", "https://example.com"),
+        json={"error": {"code": {"private": "secret"}, "type": [], "message": {"private": "secret"}}})
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        response.raise_for_status()
+    error = project_provider_error(caught.value)
+    assert error.provider_error_code is None
+    assert "secret" not in str(error.to_mapping())

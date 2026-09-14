@@ -209,11 +209,15 @@ def _response_error_fields(response):
     if not isinstance(payload, dict):
         return None, None, None
     error = payload.get("error")
-    if isinstance(error, dict):
-        return error.get("type"), error.get("code"), error.get("message")
     if isinstance(error, str):
         return None, None, error
-    return payload.get("type"), payload.get("code"), payload.get("message")
+    fields = error if isinstance(error, dict) else payload
+    # OpenRouter uses numeric error codes. Nested/unrecognized fields are not
+    # diagnostic text and must not be stringified into logs or public errors.
+    def scalar(value):
+        return str(value) if type(value) in (str, int, float) else None
+    return (scalar(fields.get("type")), scalar(fields.get("code")),
+            fields.get("message") if isinstance(fields.get("message"), str) else None)
 
 
 def _project_non_http(code, scope, *, retryable, message):

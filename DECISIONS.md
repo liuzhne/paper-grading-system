@@ -559,6 +559,8 @@
 
 ### 2026-09-14 OpenRouter 规则起草错误处理（Accepted）
 
+错误协议补充：生产出现上游 400 后错误处理 TypeError，本地用 OpenRouter 数字 error.code=400 重现字符串 join 崩溃。ProviderError 统一将标量 type/code 转为字符串，忽略嵌套非标量字段；数字 400/429/503 保留对应分类，避免再次伪装为通用 503。拒绝直接 stringify 嵌套厂商错误字段，避免把私有内容带入诊断。评分结果语义、API 权限与数据库结构不变；验收覆盖数字码及嵌套字段脱敏。
+
 执行时限补充：76d6806 上线后的同一请求被 Vercel 明确记录为 “Task timed out after 60 seconds”（504）。`vercel.json` 的 Python 函数 maxDuration 改为 300 秒；依据 [Vercel 限制](https://vercel.com/docs/functions/limitations) 验证部署支持，不升级付费套餐。OpenRouter 起草 Schema 请求默认显式关闭额外 reasoning（若连接明确启用 thinking 则保留），依据 [OpenRouter reasoning 参数](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)；单次生成不再叠加传输层重试，仍最多一次结构修正，总共最多两次模型调用。默认 HTTP 超时仍 60 秒，现有显式连接超时不变；平台 300 秒是最终硬上限，超过仍可能 504。原因日志附输出预算与 HTTP 超时数值，不记录正文。接受更长函数运行上限的成本，拒绝无限等待、自动切换付费模型与截断结果放行。
 
 生产补充证据：部署 ef500cf 后，同一 Chrome 连接再次返回 HTTP 200，应用安全日志明确为 output_truncated；连接公开配置 provider_options 为空。起草使用通用评分预算造成容量不匹配，现为 OpenRouter 起草提供 8192 token 的独立默认下限；连接显式 max_tokens 始终优先，不修改连接持久化配置和正式评分预算。拒绝无上限增大及对截断输出静默拼接，较高默认值可能增加输出时长/调用成本；继续保留分项请求与人工确认。起草版本 rubric-rule-draft@5，缓存版本 2026-09-14-3。上线后须验证不再出现截断且返回可核对建议；若仍达到连接显式上限则提示管理员调整，不自动越过该上限。
@@ -597,3 +599,5 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-09-14 | OpenRouter 起草输出预算 | 依据生产 output_truncated 增加独立默认预算，保留显式限制和原有评分预算；需再次经完整 CI 发布验证。 |
 
 | 2026-09-14 | OpenRouter 起草执行时限 | 根据生产 60 秒硬超时调整 Vercel 上限至 300 秒，关闭未显式启用的额外推理并限制起草传输重试；无数据迁移。 |
+
+| 2026-09-14 | OpenRouter 数字错误码兼容 | 修复错误投影自身的 TypeError，保留数字码分类，忽略非标量诊断字段。 |
