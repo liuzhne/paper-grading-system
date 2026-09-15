@@ -852,3 +852,5 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 症状：上传队列 done，但预检提示 uploaded。诊断检查直传归档后是否调用 POST /papers/{id}/parse。验证：直传归档→解析→预检；200 failed 必须显示失败；再次执行及刷新恢复只解析原 ID，不重传，已 parsed 不重解析。运行 frontend/workbench 下 npm run typecheck、npm run test:unit、npm run test:e2e -- upload.spec.js --project=chromium；运行 scripts/build_web_static.py --with-workbench 构建。经 main 完整 CI 部署后检查线上资源；回滚使用修复前提交生成回退提交并通过同一 CI，不回滚数据库。不得将学生文件或身份信息写入日志。
 
 维护记录：2026-09-15 · 上传后解析衔接：已核对本节涉及的上传、解析及预检边界。
+
+维护记录：2026-09-15 · 上传后解析衔接生产验收：c213a23 经 main CI 34920902739 全部门禁部署成功，生产页面/资源校验 9/9；Chrome 恢复原草稿的三份已上传材料并完成解析，刷新后仍为 3 份解析正常、0 阻断，开始评分可用，未启动评分。
