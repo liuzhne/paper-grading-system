@@ -641,6 +641,6 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 生产评分入口从同步 `POST /batches/{id}/score` 切换为既有持久化批任务：请求只创建 `BatchScoringJob/BatchScoringItem` 并立即返回，容器化常驻执行器以 `python -m backend.app.scripts.run_batch_worker` 领取 queued 或租约过期的任务。执行器复用逐材料检查点、120 秒 runner lease、15 秒 heartbeat、失败隔离和定向重试；每次 item 状态变化与 job 汇总计数同事务提交。材料外的执行器异常会把未完成项收口为 `worker_failure` 并清除 runner lease，页面只显示安全的重试提示，具体异常留在 worker 日志。Vercel 上的手工 `/batch-scoring-jobs/{id}/run` 明确拒绝同步执行，避免再次把整批模型调用放入 300 秒 HTTP 生命周期。
 
-前端 `/tasks/running` 展示当前组织的活跃任务与 24 小时内异常终态，`/tasks/:batchId/run` 展示 job counts、heartbeat 与逐材料状态。任务列表中的“评分中”状态及进度条都链接到运行详情，普通整行入口仍进入评分工作区。API 只返回租约时长与健康状态，不返回 runner token；材料详情只展示文件名和错误摘要，不读取正文。Vercel 继续托管短 API 和静态页面，独立 worker 连接同一 Postgres、私有存储和模型配置。迁移 head `0030_platform_llm_config` 与评分算法不变。
+前端 `/tasks/running` 展示当前组织的活跃任务与 24 小时内异常终态，`/tasks/:batchId/run` 展示 job counts、heartbeat 与逐材料状态。任务列表中的“评分中”状态及进度条都链接到运行详情，普通整行入口仍进入评分工作区。API 只返回租约时长与健康状态，不返回 runner token；材料详情只展示文件名和错误摘要，不读取正文。Vercel 继续托管短 API 和静态页面，独立 worker 连接同一 Postgres、私有存储和模型配置。`render.yaml` 声明新加坡单实例 Docker worker，CI 通过后自动部署，最长优雅退出 300 秒；生产密钥全部使用 `sync: false`，仓库不保存值。迁移 head `0030_platform_llm_config` 与评分算法不变。
 
 维护记录：2026-09-15 · 持久化后台评分：根据生产 300 秒 504 将评分入口改为持久化 job，新增独立 worker、租约恢复、实时计数与运行详情；核对数据库结构、评分算法、prompt 和 Core 默认边界均不变。

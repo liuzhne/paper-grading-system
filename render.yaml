@@ -1,0 +1,36 @@
+services:
+  - type: worker
+    name: paper-grading-background-worker
+    runtime: docker
+    repo: https://github.com/liuzhne/paper-grading-system
+    plan: 0.5c-512mb
+    region: singapore
+    branch: main
+    autoDeployTrigger: checksPass
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m backend.app.scripts.run_batch_worker --poll-seconds 3
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: PGS_DISABLE_ENV_FILE
+        value: "1"
+      - key: AUTH_ENABLED
+        value: "true"
+      - key: AUTH_PASSWORD
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: STORAGE_PROVIDER
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        sync: false
+      - key: BYOK_MASTER_KEY
+        sync: false
+      - key: LLM_FALLBACK_TO_MOCK
+        value: "false"
+      - key: SCORING_ENGINE_MODE
+        value: legacy
