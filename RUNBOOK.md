@@ -858,6 +858,10 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 ### 2026-09-15 平台用量外键与评分异常状态
 
-诊断：评分请求 500，ai_usage_ledger_ai_connection_id_fkey 错误且 platform 被用作连接 ID，批次仍 scoring。验证：运行 .venv/bin/python -m pytest -q backend/app/tests/test_ai_connections.py backend/app/tests/test_scoring_failure_state.py；平台快照/token 可持久化、BYOK 账本保留、模型初始化/评分/真实 flush 异常后批次 scored_with_errors。发布经 main 完整 CI，不改迁移或生产连接表。存量残留需先确认原请求已终止，再通过已有状态机取消/恢复入口处理，不可将仍运行的任务直接改为完成。回滚使用 revert 业务提交后重跑 CI；保留评分和用量数据。Python 无法捕获函数硬终止，相关恢复须另行使用租约后台任务方案。
+诊断：评分请求 500，ai_usage_ledger_ai_connection_id_fkey 错误且 platform 被用作连接 ID，批次仍 scoring。验证：运行 .venv/bin/python -m pytest -q backend/app/tests/test_ai_connections.py backend/app/tests/test_scoring_failure_state.py；平台快照/token 可持久化、BYOK 账本保留、模型初始化/评分/真实 flush 异常后批次 scored_with_errors。发布经 main 完整 CI，不改迁移或生产连接表。存量残留需先确认原请求已终止，再通过状态机 finish_scoring(outcome="scored_with_errors", expected_version=原版本) 在锁定目标行、核对原更新时间后处理，并同事务记录审计，不可将仍运行的任务直接改为完成。回滚使用 revert 业务提交后重跑 CI；保留评分和用量数据。Python 无法捕获函数硬终止，相关恢复须另行使用租约后台任务方案。
 
 维护记录：2026-09-15 · 平台用量外键与评分异常状态：核对并更新上述调用链、决策与操作边界。
+
+维护记录：2026-09-15 · 平台用量异常存量修复：生产日志确认原请求 HTTP 500 后，锁定唯一目标批次并校验 scoring、state_version=2、原更新时间及 0 条评分结果，经 finish_scoring 转为 scored_with_errors、版本 3；同事务写入 batch.failed_request_state_reconciled 审计。三份材料保留，未重新评分。
+
+维护记录：2026-09-15 · 平台用量与异常状态生产验收：eaf947f 经完整 CI 34922785204 部署成功，生产服务/资源检查 9/9；Chrome 刷新确认目标批次退出 scoring，显示 scored_with_errors，材料 3 份、有效评分结果 0，未重新调用 AI。平台模型真实再次评分未执行；通过合成 Core 评分落库及全量回归验证修复。

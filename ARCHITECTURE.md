@@ -632,3 +632,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 平台模型在 ScoringRun 中保留来源快照和 token 用量，连接外键为 NULL；AIUsageLedger 仍仅用于 BYOK。legacy engine 与 Core persistence 共用 usage_connection_id 投影。同步批评分在成功领取 scoring 后捕获异常，先 rollback，再经状态机保存 scored_with_errors 并重新抛出异常；已提交的逐份结果保留。无 API、表结构、prompt 或计分算法变更，迁移 head 0030_platform_llm_config 不变。硬超时/进程被终止不能由 Python 异常处理保证恢复，独立后台任务接入不在本次范围。
 
 维护记录：2026-09-15 · 平台用量外键与评分异常状态：核对并更新上述调用链、决策与操作边界。
+
+维护记录：2026-09-15 · 平台用量异常存量修复：生产日志确认原请求 HTTP 500 后，锁定唯一目标批次并校验 scoring、state_version=2、原更新时间及 0 条评分结果，经 finish_scoring 转为 scored_with_errors、版本 3；同事务写入 batch.failed_request_state_reconciled 审计。三份材料保留，未重新评分。
+
+维护记录：2026-09-15 · 平台用量与异常状态生产验收：eaf947f 经完整 CI 34922785204 部署成功，生产服务/资源检查 9/9；Chrome 刷新确认目标批次退出 scoring，显示 scored_with_errors，材料 3 份、有效评分结果 0，未重新调用 AI。平台模型真实再次评分未执行；通过合成 Core 评分落库及全量回归验证修复。
