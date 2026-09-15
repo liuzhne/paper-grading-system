@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
-import { requiresOwnConnection, useUploadStore } from "@/stores/upload.js";
+import { requiresOwnConnection, uploadStatusLabel, useUploadStore } from "@/stores/upload.js";
 import { useSessionStore } from "@/stores/session.js";
 
 const router = useRouter();
@@ -21,7 +21,7 @@ const busy = ref(false);
 const publishable = computed(() => rubrics.value.filter((r) => r.status === "published"));
 const drafts = computed(() => rubrics.value.filter((r) => r.status !== "published"));
 
-const canCreate = computed(() => form.name.trim() && form.rubric_id);
+const canCreate = computed(() => batchId.value || (form.name.trim() && form.rubric_id));
 // `connectionMissing` 定义在下方（与连接加载放在一起），这里只做组合。
 const canStart = computed(
   () => precheck.value?.can_start === true && !connectionMissing.value,
@@ -78,6 +78,7 @@ async function ensureBatch() {
     ai_connection_id: form.ai_connection_id || null,
   });
   batchId.value = batch.id;
+  await router.replace({ query: { ...route.query, batch: batch.id } });
   return batch.id;
 }
 
@@ -86,12 +87,14 @@ function onPick(event) {
   event.target.value = "";
 }
 
-async function onUpload() {
+async function onUpload({ retryOnly = false } = {}) {
   busy.value = true;
   error.value = null;
   try {
+    precheck.value = null;
     const id = await ensureBatch();
-    await upload.uploadAll(id);
+    if (retryOnly) await upload.retryFailed(id);
+    else await upload.uploadAll(id);
     await runPrecheck();
   } catch (err) {
     if (!(err instanceof StaleContextError)) {
@@ -151,6 +154,8 @@ onMounted(async () => {
   if (!resume) return;
   batchId.value = String(resume);
   try {
+    const batch = await api.get(`/batches/${batchId.value}`);
+    for (const key of Object.keys(form)) form[key] = batch[key] || "";
     await upload.restoreFromServer(batchId.value);
     if (upload.uploadedPaperIds.length) await runPrecheck();
   } catch (err) {
@@ -282,7 +287,7 @@ onMounted(async () => {
           <ul v-if="upload.queue.length" class="queue">
             <li v-for="entry in upload.queue" :key="entry.id" :class="entry.status">
               <span class="q-name">{{ entry.name }}</span>
-              <span class="q-status faint mono">{{ entry.status }}</span>
+              <span class="q-status faint mono">{{ uploadStatusLabel(entry.status) }}</span>
               <span v-if="entry.error" class="q-error">{{ entry.error }}</span>
             </li>
           </ul>
@@ -296,7 +301,7 @@ onMounted(async () => {
             <button v-if="busy" class="btn" type="button" @click="upload.cancel()">
               取消剩余上传
             </button>
-            <button v-if="upload.failedCount" class="btn" type="button" :disabled="busy" @click="upload.retryFailed(batchId)">
+            <button v-if="upload.failedCount" class="btn" type="button" :disabled="busy" @click="onUpload({ retryOnly: true })">
               重试失败项（{{ upload.failedCount }}）
             </button>
           </div>

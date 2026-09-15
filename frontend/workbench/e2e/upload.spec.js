@@ -48,10 +48,10 @@ test.describe("V08 上传预检与逐文件状态", () => {
 
     // 一个被拒不影响另一个：批量上传最容易被写成「一错全停」。
     await expect(page.locator("ul.queue li", { hasText: "good.docx" })).toContainText(
-      "pending",
+      "待上传",
     );
     await expect(page.locator("ul.queue li", { hasText: "bad.txt" })).toContainText(
-      "rejected",
+      "文件不符合要求",
     );
   });
 
@@ -81,4 +81,41 @@ test.describe("V08 上传预检与逐文件状态", () => {
 
     await expect(page.getByRole("button", { name: "上传并解析" })).toBeDisabled();
   });
+});
+
+// 这里只模拟接口状态以验证 UI 编排，不作为真实 Supabase 存储验收。
+test("恢复待解析材料并重试失败后刷新预检，不上传重复文件", async ({ page }) => {
+  let parsed = false;
+  let attempts = 0;
+  let uploadRequests = 0;
+  await page.route("**/api/papers**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/parse")) {
+      attempts += 1;
+      parsed = attempts > 1;
+      return route.fulfill({ json: { id: "resume-paper", status: parsed ? "parsed" : "failed", error_message: parsed ? null : "解析暂时失败，请重试" } });
+    }
+    if (route.request().method() !== "GET") uploadRequests += 1;
+    const paper = { id: "resume-paper", file_name: "synthetic.docx", status: parsed ? "parsed" : "uploaded" };
+    return route.fulfill({ json: url.searchParams.has("batch_id") ? [paper] : paper });
+  });
+  await page.route("**/api/batches/resume-batch", route => route.fulfill({ json: { id: "resume-batch", name: "合成续传测试", rubric_id: "resume-rubric" } }));
+  await page.route("**/api/batches/resume-batch/upload-precheck", route => route.fulfill({ json: {
+    can_start: parsed, blocking_count: parsed ? 0 : 1, warning_count: 0,
+    findings: [], duration_estimate: { available: false },
+  } }));
+  await page.goto("/workbench/tasks/new?batch=resume-batch");
+  const row = page.locator("ul.queue li");
+  await expect(row).toContainText("已上传，待解析");
+  await page.getByRole("button", { name: "上传并解析", exact: true }).click();
+  await expect(row).toContainText("解析暂时失败，请重试");
+  await expect(page.getByRole("button", { name: "开始评分", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: /重试失败项/ }).click();
+  await expect(row).toContainText("解析完成");
+  await expect(page.getByText(/份材料存在阻断问题/)).toHaveCount(0);
+  expect(attempts).toBe(2);
+  expect(uploadRequests).toBe(0);
+  await page.reload();
+  await expect(row).toContainText("解析完成");
+  expect(attempts).toBe(2);
 });

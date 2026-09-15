@@ -33,6 +33,11 @@ export function requiresOwnConnection(llm) {
   return !llm.platform_model_available;
 }
 
+export function uploadStatusLabel(status) {
+  return { pending: "待上传", uploading: "上传中", uploaded: "已上传，待解析",
+    parsing: "解析中", done: "解析完成", failed: "处理失败", rejected: "文件不符合要求" }[status] || status;
+}
+
 export const useUploadStore = defineStore("upload", () => {
   const provider = ref(null);
   const maxSizeMb = ref(null);
@@ -154,18 +159,28 @@ export const useUploadStore = defineStore("upload", () => {
   }
 
   async function uploadOne(entry, batchId) {
-    entry.status = "uploading";
+    entry.status = entry.paperId ? "parsing" : "uploading";
     entry.error = null;
     try {
-      const paper =
-        provider.value === "supabase"
+      // 有归档 ID 时只继续解析，不能再次上传产生重复材料。
+      let paper = entry.paperId
+        ? await api.get(`/papers/${entry.paperId}`)
+        : provider.value === "supabase"
           ? await uploadDirect(entry, batchId)
           : await uploadLocal(entry, batchId);
       entry.paperId = paper.id;
-      entry.status = "done";
       if (!uploadedPaperIds.value.includes(paper.id)) {
         uploadedPaperIds.value = [...uploadedPaperIds.value, paper.id];
       }
+      if (paper.status !== "parsed") {
+        entry.status = "parsing";
+        paper = await api.post(`/papers/${paper.id}/parse`, {});
+      }
+      // 解析接口可能以 200 返回 failed；HTTP 成功不代表解析成功。
+      if (paper.status !== "parsed") {
+        throw new Error(paper.error_message || "材料尚未完成解析，请稍后重试解析。");
+      }
+      entry.status = "done";
     } catch (err) {
       if (err instanceof StaleContextError) throw err;
       entry.status = "failed";
@@ -190,7 +205,7 @@ export const useUploadStore = defineStore("upload", () => {
     try {
       for (const entry of queue.value) {
         // 逐个串行：一个失败不阻断后面的文件，也不撤销前面的成功。
-        if (entry.status === "pending" || entry.status === "failed") {
+        if (["pending", "failed", "uploaded", "parsing"].includes(entry.status)) {
           await uploadOne(entry, batchId);
         }
         // 取消不是失败：剩下的保持 pending，重试入口不该把它们当成错误，
@@ -214,11 +229,12 @@ export const useUploadStore = defineStore("upload", () => {
   async function restoreFromServer(batchId) {
     const papers = (await api.get(`/papers?batch_id=${batchId}`)) || [];
     queue.value = papers.map((paper) => ({
+      id: paper.id,
       name: paper.file_name,
       size: null,
-      // 服务端已有即已归档，标 done。
-      status: "done",
-      error: null,
+      // 已上传与已解析必须分别恢复；未归档记录不能直接解析。
+      status: paper.status === "parsed" ? "done" : paper.status === "uploading" ? "rejected" : paper.status,
+      error: paper.status === "uploading" ? "文件尚未完成上传，请到材料列表处理。" : paper.error_message || null,
       paperId: paper.id,
       file: null,
     }));

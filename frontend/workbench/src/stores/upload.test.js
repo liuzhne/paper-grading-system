@@ -141,6 +141,61 @@ describe("upload store", () => {
     expect(store.queue[0].error).toContain("存储");
   });
 
+  it("直传归档后逐文件解析；200 failed 不冒充成功，重试只解析原材料", async () => {
+    let next = 0;
+    let fail = true;
+    const calls = [];
+    vi.stubGlobal("fetch", vi.fn((url, init) => {
+      const path = String(url);
+      calls.push([path, init?.method]);
+      if (path.includes("direct-upload-intents")) {
+        next += 1;
+        return jsonResponse({ paper: { id: `p${next}` }, signed_url: `/storage/p${next}` });
+      }
+      if (path.startsWith("/storage/")) return Promise.resolve(new Response("", { status: 200 }));
+      const id = path.match(/papers\/(p\d+)/)?.[1];
+      if (path.endsWith("/parse")) {
+        if (id === "p1" && fail) return jsonResponse({ id, status: "failed", error_message: "读取失败，请重试" });
+        return jsonResponse({ id, status: "parsed" });
+      }
+      return jsonResponse({ id, status: "uploaded" });
+    }));
+    const store = useUploadStore();
+    store.provider = "supabase";
+    store.stage([file("a.pdf"), file("b.pdf")]);
+    await store.uploadAll("b1");
+    expect(store.queue.map(e => e.status)).toEqual(["failed", "done"]);
+    expect(store.queue[0].error).toBe("读取失败，请重试");
+    expect(store.uploadedPaperIds).toEqual(["p1", "p2"]);
+    expect(calls.map(([path]) => path)).toEqual([
+      "/api/papers/direct-upload-intents", "/storage/p1", "/api/papers/p1/complete-upload", "/api/papers/p1/parse",
+      "/api/papers/direct-upload-intents", "/storage/p2", "/api/papers/p2/complete-upload", "/api/papers/p2/parse",
+    ]);
+    fail = false;
+    calls.length = 0;
+    await store.retryFailed("b1");
+    expect(calls.map(([path]) => path)).toEqual(["/api/papers/p1", "/api/papers/p1/parse"]);
+    expect(store.doneCount).toBe(2);
+  });
+
+  it("恢复已上传材料后可继续解析，不重新上传或重解析已完成材料", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", vi.fn((url) => {
+      const path = String(url);
+      calls.push(path);
+      if (path.includes("?batch_id=")) return jsonResponse([
+        { id: "p1", file_name: "a.pdf", status: "parsed" },
+        { id: "p2", file_name: "b.pdf", status: "uploaded" },
+      ]);
+      return jsonResponse({ id: "p2", status: path.endsWith("/parse") ? "parsed" : "uploaded" });
+    }));
+    const store = useUploadStore();
+    await store.restoreFromServer("b1");
+    await store.uploadAll("b1");
+    expect(calls).toEqual(["/api/papers?batch_id=b1", "/api/papers/p2", "/api/papers/p2/parse"]);
+    expect(store.doneCount).toBe(2);
+  });
+
   it("进度分别报告上传与解析的完成数", async () => {
     let seq = 0;
     vi.stubGlobal(
@@ -278,7 +333,7 @@ describe("取消调度与刷新恢复", () => {
     let served = 0;
     vi.stubGlobal("fetch", () => {
       served += 1;
-      return jsonResponse({ id: `p${served}` });
+      return jsonResponse({ id: `p${served}`, status: "parsed" });
     });
     const store = useUploadStore();
     store.provider = "local";
@@ -301,7 +356,7 @@ describe("取消调度与刷新恢复", () => {
     let served = 0;
     vi.stubGlobal("fetch", () => {
       served += 1;
-      return jsonResponse({ id: `p${served}` });
+      return jsonResponse({ id: `p${served}`, status: "parsed" });
     });
     const store = useUploadStore();
     store.provider = "local";
@@ -334,8 +389,7 @@ describe("取消调度与刷新恢复", () => {
 
     expect(store.uploadedPaperIds).toEqual(["p1", "p2"]);
     expect(store.queue.map((e) => e.name)).toEqual(["a.docx", "b.docx"]);
-    // 服务端已有的条目标为 done：它们已经归档，重传会产生重复对象。
-    expect(store.queue.every((e) => e.status === "done")).toBe(true);
+    expect(store.queue.map((e) => e.status)).toEqual(["done", "uploaded"]);
   });
 
   it("恢复失败时不假装队列是空的", async () => {
