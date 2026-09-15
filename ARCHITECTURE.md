@@ -565,6 +565,12 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 核对链路：工作台逐评分项调用 draft-deduction-rules → 私有连接运行时 → OpenAI-compatible JSON 解析 → 严格规则校验。前端保留已返回的建议，后续失败停止；再次生成排除已有建议。解析错误使用仅含固定原因码的 ChatJSONOutputError，起草层区分输出截断、无效 JSON 与 ProviderCallError，日志仅记录原因码/状态/异常类型，禁止记录模型正文。缺字段或无效输出最多重新生成一次，纠正请求只追加校验码；截断和连接错误不在此层重试。未确认规则不落库、不发布；有效 JSON 的评分解析语义、迁移 head 0030_platform_llm_config、默认 legacy 引擎均不变。提示词版本 rubric-rule-draft@5，缓存输入版本 2026-09-14-3。
 
+### 2026-09-15 AI 规则组上限与单条上限分离
+
+调用链为 ai_rule_drafter → frontend/lib/ai-draft.js → rubric_import/deduction_caps.py → pipeline / atomic_recompile → AtomicRule → executable_validator。起草结果仍使用组 cap_points；应用时写入结构化行的 group_cap_points，单条 cap_points=null。后端核对 AI 来源、生成指纹、评分项/组编号、同组互斥身份、once 模式、无档位和分值范围，再将可证明等价的旧格式转换；未知人工/Excel 单条上限保持原样交由发布校验，新格式不合法组信息拒绝保存。
+
+组上限保留在评分项 JSON 投影与来源记录中；不新增数据库列。Core once 只扣一次 max_points，单条 cap_points 仅由 capped 分支消费；同一互斥组多条触发仍阻断，不自动选最高档。编辑器禁止在非 capped 模式输入单条上限，旧冲突提供显式清除入口；发布错误定位具体规则并说明中文原因。数据修复沿现有完整原子重新编译与审核链路创建新草稿，旧版本和历史确认不变。数据库 head 0030_platform_llm_config、默认 legacy、Core 算法及发布边界不变。
+
 ## 8. 维护记录
 
 | 日期 | 主题 | 架构核对结果 |
@@ -602,3 +608,4 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-09-14 | OpenRouter 起草执行时限 | 根据生产 60 秒硬超时调整 Vercel 上限至 300 秒，关闭未显式启用的额外推理并限制起草传输重试；无数据迁移。 |
 | 2026-09-14 | OpenRouter 数字错误码兼容 | 修复错误投影自身的 TypeError，保留数字码分类，忽略非标量诊断字段。 |
 | 2026-09-14 | OpenRouter 规则生成生产验收完成 | 最终 f350092 经 main CI 34819189045 全门禁部署；1934 项后端测试通过，生产健康/资源检查 8/8。生成链路 f453834 已实测 6/6 请求 200、40 条待确认建议；最终提交仅修复错误投影，保留页面建议，未确认或发布模板。详情见 docs/上线清单.md。 |
+| 2026-09-15 | AI 规则组上限与单条上限冲突 | 落实组/单条上限分离、中文校验及存量修复验证；生产执行结果见上线清单。 |

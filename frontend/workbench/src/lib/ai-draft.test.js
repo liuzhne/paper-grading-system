@@ -107,7 +107,8 @@ describe("确认后的结构化规则", () => {
     const rules = confirmedStructuredRules(DRAFT, new Set());
 
     expect(rules[0].mutex_group).toBe("T02-coverage");
-    expect(rules[0].cap_points).toBe(6);
+    expect(rules[0].group_cap_points).toBe(6);
+    expect(rules[0].cap_points).toBeNull();
   });
 
   it("带上生成指纹，确认记录能追回是哪一次生成", () => {

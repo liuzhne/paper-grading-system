@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.db import models
+from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
 from backend.app.services.rubric_import.docx_comments import parse_comments
 from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubric_import.parser import _criterion_from_row
@@ -925,6 +926,8 @@ def _manual_nodes(payload: Mapping[str, object]):
                     }
                     for rule in input_analysis["parsed_rules"]
                 ]
+        structured_deductions = normalize_ai_group_caps(
+            structured_deductions, criterion_code=code, maximum=item.get("max_score"))
         projection = {
             "code": code,
             "name": _text(item.get("name")) or code,

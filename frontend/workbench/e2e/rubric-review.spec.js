@@ -126,8 +126,8 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
     await route.fulfill({ json: { items: input.criteria.map((c) => ({ criterion_code: c.code,
       draft: { criterion_code: c.code, generation_metadata: { provider: "fixture", model_name: "fixture", fingerprint: "f".repeat(64) },
         rule_groups: [{ group_code: "G1", issue: "方案论证不足", cap_points: 6, mutex_group: `${c.code}-G1`, rules: [
-          { severity: "minor", trigger: "论证不充分", points: 2, reason: "轻微论证不足", source: "user_text", source_refs: ["原文扣分下限"] },
-          { severity: "severe", trigger: "没有论证", points: 6, reason: "严重论证不足", source: "user_text", source_refs: ["原文扣分上限"] },
+          { severity: "minor", trigger: "论证不充分", points: 2, reason: "轻微论证不足", source: "ai_interpreted_user_text", source_refs: ["原文扣分下限"] },
+          { severity: "severe", trigger: "没有论证", points: 6, reason: "严重论证不足", source: "ai_interpreted_user_text", source_refs: ["原文扣分上限"] },
         ] }],
       },
     })) } });
@@ -157,6 +157,11 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   expect(full.criteria.find((c) => c.code === "T02").deduction_rules_structured).toHaveLength(0);
   const review = await (await request.get(`/api/rubrics/${rubric.id}/review-workspace`)).json();
   expect(review.rules.filter((r) => r.status === "approved")).toHaveLength(2);
+  expect(review.structural_blockers.filter((b) => b.code === "deduct_rule_invalid")).toEqual([]);
+  for (const rule of review.rules.filter(r => r.direction === "deduct")) {
+    expect(rule.cap_points).toBeNull();
+    expect(rule.origin.group_cap_points).toBe(6);
+  }
   await page.locator(".criteria-nav .lib-item", { hasText: "T02" }).click();
   await expect(panel.locator("tbody tr")).toHaveCount(2);
 });
@@ -201,4 +206,35 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   expect((await (await request.get(`/api/rubrics/${id}`)).json()).status).toBe("published");
   await page.getByRole("button", { name: /2 评分规则/ }).click();
   await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /确认并应用全部/ })).toBeDisabled();
+});
+
+test("存量单次上限冲突可显式清除并保存新草稿，其它评分项保持原样", async ({ page, request }) => {
+  const { id, name } = await importTemplate(page);
+  const before = await (await request.get(`/api/rubrics/${id}/review-workspace`)).json();
+  const full = await (await request.get(`/api/rubrics/${id}`)).json();
+  const invalid = await request.post(`/api/rubrics/${id}/recompile`, { data: {
+    version: 'legacy-conflict', criteria: full.criteria.map(c => ({...c, scoring_mode:'deductive', rubric_levels:[]})), total_score: full.criteria.reduce((sum, c) => sum + Number(c.max_score), 0),
+    supersedes_compilation_id: before.compilation_id,
+    atomic_rules: before.rules.map(r => ({id:r.id, content_token:r.content_token,
+      changes:{direction:'deduct', effect_type:'score', max_points:2, repeat_policy:'once', cap_points:6, levels:[]}})),
+  } });
+  expect(invalid.ok(), await invalid.text()).toBeTruthy();
+  await reopen(page, name);
+  await expect(page.getByRole('alert').filter({hasText:'3 个校验阻断'})).toContainText('单条累计上限');
+  await page.getByText('编辑当前评分项的原子规则', {exact:true}).click();
+  const editor = page.locator('.atomic-editor');
+  await expect(editor).toHaveCount(2);
+  await expect(editor.first().getByLabel('单条累计上限', {exact:true})).toBeDisabled();
+  await editor.first().getByRole('button', {name:'清除不适用的单条上限',exact:true}).click();
+  await editor.nth(1).getByRole('button', {name:'清除不适用的单条上限',exact:true}).click();
+  await page.getByRole('button', {name:'保存并重新校验',exact:true}).click();
+  await expect(page.getByRole('status').filter({hasText:'仍有 1 个校验阻断'})).toBeVisible();
+  const after = await (await request.get(`/api/rubrics/${id}/review-workspace`)).json();
+  expect(after.rules.filter(r => r.cap_points === null)).toHaveLength(2);
+  expect(after.rules.find(r => r.rule_code === 'thesis.result_quality.v1').cap_points).toBe('6');
+  for (const r of after.rules) {
+    expect(r.max_points).toBe('2');
+    expect(r.repeat_policy).toBe('once');
+    expect(r.sources).toEqual(before.rules.find(b => b.rule_code === r.rule_code).sources);
+  }
 });

@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import select
 
 from backend.app.db import models
+from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
 from backend.app.services.rubric_import import pipeline
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.review_workspace import content_token, number_text
@@ -87,6 +88,10 @@ def prepare_atomic_recompile(session, version, command, edits):
               "match_confidence": number_text(link.match_confidence), "review_status": "pending"}
              for rule in rules for link in rule.template_links]
     rubric = deepcopy(command["rubric"])
+    for criterion in rubric["criteria"]:
+        criterion["deduction_rules_structured"] = normalize_ai_group_caps(
+            criterion.get("deduction_rules_structured") or [],
+            criterion_code=criterion["code"], maximum=criterion["max_score"])
     policy = deepcopy(rubric["global_policy"])
     policy["aggregation"]["total_score"] = number_text(rubric["total_score"])
     policy.pop("policy_hash", None)

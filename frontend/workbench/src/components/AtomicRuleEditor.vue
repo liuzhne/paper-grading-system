@@ -26,7 +26,12 @@ function updateJson(event, object, key) {
       <div class="grid-2">
         <label v-for="([label, options], key) in selects" :key="key" class="field"><span class="field-label">{{ label }}</span><select v-model="rule.changes[key]" class="select"><option v-for="option in options" :key="option" :value="option">{{ labels[option] }}</option></select></label>
         <label class="field"><span class="field-label">规则分值</span><input v-model="rule.changes.max_points" type="number" min="0" step="0.01" class="input" @change="rule.changes.max_points ||= null" /></label>
-        <label class="field"><span class="field-label">累计上限</span><input v-model="rule.changes.cap_points" type="number" min="0" step="0.01" class="input" @change="rule.changes.cap_points ||= null" /></label>
+        <label class="field"><span class="field-label">单条累计上限</span><input aria-label="单条累计上限" :disabled="rule.changes.repeat_policy !== 'capped'" v-model="rule.changes.cap_points" type="number" min="0" step="0.01" class="input" @change="rule.changes.cap_points ||= null" />
+          <template v-if="rule.changes.repeat_policy !== 'capped' && rule.changes.cap_points != null">
+            <span class="faint">当前命中方式不允许单条累计上限。清除后需保存并重新核对。</span>
+            <button type="button" class="btn btn-sm" @click="rule.changes.cap_points = null">清除不适用的单条上限</button>
+          </template>
+        </label>
         <label class="field"><span class="field-label">重复命中方式</span><select v-model="rule.changes.repeat_policy" class="select"><option :value="null">不适用</option><option value="once">一次</option><option value="per_occurrence">每次</option><option value="capped">累计封顶</option></select></label>
         <label class="field"><span class="field-label">互斥组</span><input v-model="rule.changes.mutex_group" class="input" @change="rule.changes.mutex_group ||= null" /></label>
       </div>

@@ -10,8 +10,7 @@
  * 上一版前端把起草结果存进 store 就再没用过：用户点「生成全部缺失细则」、等一次
  * 真实模型调用、然后页面纹丝不动，阻断项一个没少。这个模块补的正是那一段。
  *
- * 映射关系照旧版模板中心的实现（`frontend/web/assets/app.js`）——那条链路是验证过
- * 能编译通过的，换一套字段名等于重新赌一次。
+ * 规则组上限使用 group_cap_points 保留；cap_points 专用于单条累计扣分。
  */
 
 /** @type {Record<string, string>} */
@@ -93,9 +92,9 @@ export function confirmedStructuredRules(draft, excluded) {
       reason: row.reason,
       severity: row.severity,
       repeat_policy: row.repeatPolicy,
-      // 组级的互斥标识与上限必须跟着走：丢了它们，同一个问题的轻微/中等/严重
-      // 三档会同时命中，一处毛病被扣三次。
-      cap_points: row.capPoints,
+      // 组上限与单条重复扣分上限是不同字段；后端验证单次、互斥及分值范围。
+      group_cap_points: row.capPoints,
+      cap_points: null,
       mutex_group: row.mutexGroup,
       source: row.source,
       source_refs: row.sourceRefs,

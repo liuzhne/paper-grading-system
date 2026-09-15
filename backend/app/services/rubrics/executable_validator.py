@@ -550,25 +550,24 @@ def validate_publishable_rubric(
                 )
         elif direction == "deduct":
             repeat = rule.repeat_policy
-            invalid = (
-                criterion_max is None
-                or max_points is None
-                or max_points <= 0
-                or max_points > criterion_max
-                or repeat not in {"once", "per_occurrence", "capped"}
-                or bool(levels)
-            )
+            reasons = []
+            if criterion_max is None or max_points is None or max_points <= 0 or max_points > criterion_max:
+                reasons.append("扣分值必须大于 0 且不超过评分项满分")
+            if repeat not in {"once", "per_occurrence", "capped"}:
+                reasons.append("请选择有效的重复命中方式")
+            if levels:
+                reasons.append("扣分规则不能包含分档档位")
             if repeat in {"once", "per_occurrence"} and rule.cap_points is not None:
-                invalid = True
+                reasons.append("单次或每次扣分规则不能设置单条累计上限；规则组上限应单独保存")
             if repeat == "capped" and (
                 cap_points is None or cap_points <= 0 or cap_points > criterion_max
             ):
-                invalid = True
-            if invalid:
+                reasons.append("累计封顶规则的单条上限必须大于 0 且不超过评分项满分")
+            if reasons:
                 add(
                     "deduct_rule_invalid",
                     path,
-                    "deduct max/repeat/cap/levels contract is invalid",
+                    f"规则 {rule.rule_code}：" + "；".join(reasons),
                     **rule_entity,
                 )
         elif direction == "none":

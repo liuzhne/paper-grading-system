@@ -47,7 +47,8 @@ function displayPoints(rule) {
               <p v-if="rule.checker_params?.match">触发条件：{{ rule.checker_params.match }}</p>
               <p v-for="level in rule.levels" :key="level.code">{{ level.code }} · {{ level.points }} 分：{{ level.descriptor }}</p>
               <p v-if="rule.mutex_group" class="faint">互斥组：{{ rule.mutex_group }}，同组最多命中一档。</p>
-              <p v-if="rule.cap_points != null" class="faint">累计扣分上限 {{ Number(rule.cap_points) }} 分。</p>
+              <p v-if="rule.cap_points != null" class="faint">单条累计扣分上限 {{ Number(rule.cap_points) }} 分。</p>
+              <p v-if="rule.origin?.group_cap_points != null" class="faint">规则组上限 {{ Number(rule.origin.group_cap_points) }} 分；同组最多命中一档。</p>
               <details v-if="rule.reviewed_at"><summary class="faint">确认记录</summary><p class="faint">确认人 {{ rule.reviewed_by }} · {{ rule.reviewed_at }}</p></details>
             </td>
             <td class="rule-source">
