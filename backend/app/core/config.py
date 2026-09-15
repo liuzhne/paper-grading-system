@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     # Keep the serialized chat request below providers' HTTP body limit as well
     # as the model context window.  16k leaves room for JSON/chat framing on
     # providers such as Groq that reject an otherwise token-valid body with 413.
-    SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=16384, ge=1024)
+    SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=8192, ge=1024)
     SCORING_CONTEXT_SAFETY_MARGIN_TOKENS: int = Field(default=1024, ge=0)
     SCORING_RULE_TASKS_ENABLED: bool = True
     MANUAL_REVIEW_QUEUE_ENABLED: bool = True
