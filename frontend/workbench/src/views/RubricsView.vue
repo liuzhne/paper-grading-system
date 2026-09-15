@@ -4,7 +4,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { api, StaleContextError } from "@/api/client.js";
 import RuleReviewPanel from "@/components/RuleReviewPanel.vue";
 import AtomicRuleEditor from "@/components/AtomicRuleEditor.vue";
-import { canPublishRubric, canSubmitReview } from "@/lib/rubric-workflow.js";
+import { canPublishRubric, canSubmitReview, compilationReady } from "@/lib/rubric-workflow.js";
 import AiRuleDraftPanel from "@/components/AiRuleDraftPanel.vue";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
@@ -288,6 +288,13 @@ const generationCandidates = computed(() => (editForm.value?.criteria || []).fil
     (draft.value?.active_compilation?.blockers || []).some((issue) => issue.criterion_code === criterion.code && ['MISSING_EXECUTABLE_SCORING_MODE', 'SEVERITY_CONFIRMATION_REQUIRED', 'DEDUCTION_RULES_MISSING', 'MISSING_DEDUCTION_RULES'].includes(issue.code)))));
 const reviewReady = computed(() => !dirty.value && !scoreFormError.value && !activeIssues.value.length && !blocking.value.length && canEdit.value && canSubmitReview(current.value?.status, draft.value));
 const editableCriterion = computed(() => editForm.value?.criteria.find((c) => c.code === activeCriterion.value?.code));
+const pendingRules = computed(() => (workspace.value?.rules || []).filter(r => r.status !== 'approved'));
+const pendingMappings = computed(() => (workspace.value?.template_links || []).filter(link => link.review_status !== 'confirmed'));
+const validationReady = computed(() => compilationReady(draft.value, draft.value?.active_compilation?.id) && !activeIssues.value.length && !scoreFormError.value && !blocking.value.length);
+function goToPendingRules() {
+  if (pendingRules.value.length) selectedCriterion.value = pendingRules.value[0].criterion_id;
+  step.value = 2;
+}
 let loadSequence = 0;
 
 async function refreshDetail(id = selected.value) {
@@ -478,7 +485,7 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
           <button class="btn" :disabled="operationBusy" @click="libraryOpen = !libraryOpen">模板库</button>
           <button class="btn" :disabled="operationBusy || !canEdit" @click="importOpen = !importOpen">导入评分模板</button>
           <button v-if="current?.status === 'draft'" class="btn" :disabled="operationBusy || loading || !canEdit" @click="saveAndValidate">{{ saveBusy ? '保存中…' : '保存并重新校验' }}</button>
-          <button v-if="current?.status === 'draft'" class="btn btn-primary" :disabled="operationBusy || !reviewReady" @click="submitReview">提交模板审核</button>
+          <button v-if="current?.status === 'draft' && step !== 3" class="btn btn-primary" :disabled="operationBusy || loading" @click="step = 3">前往校验与发布</button>
         </div>
       </div>
     </header>
@@ -626,20 +633,37 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
               <button class="btn" :disabled="!canEdit || operationBusy" @click="addDeduction()">添加扣分细则</button>
             </details>
           </template>
-          <section v-if="step === 3" class="card card-pad">
-            <h2 class="card-title">校验与发布</h2>
-            <p class="card-note">发布后版本与分享范围一起冻结；扩大范围需克隆为新版本。</p>
-            <label class="field"><span class="field-label">发布哪一份执行草稿</span><select v-model="chosenCompilation" class="select" :disabled="operationBusy"><option :value="null">请选择</option><option v-for="item in draft?.compilations || []" :key="item.id" :value="item.id">{{ item.status === 'validated' ? '校验通过' : item.status === 'blocked' ? '存在阻断' : item.status }} · {{ item.blocker_count }} 个阻断 · {{ item.created_at }}</option></select></label>
+          <section v-if="step === 3" class="card card-pad" data-test="release-panel">
+            <h2 class="card-title">{{ current.status === 'draft' ? '发布前检查' : current.status === 'review' ? '确认并发布' : '评分标准已发布' }}</h2>
+            <p class="card-note">{{ current.status === 'draft' ? '核对条款与模板映射，通过校验后提交模板审核。提交审核不会自动发布。' : current.status === 'review' ? '模板已提交审核。请核对本次发布版本与分享范围，确认后发布。' : '此版本与分享范围已冻结；后续修改请复制为新版本。' }}</p>
+            <template v-if="current.status === 'draft'">
+              <div class="issue-row"><span>条款核对</span><span class="chip" :class="pendingRules.length ? 'chip-warn' : 'chip-ok'">{{ pendingRules.length ? `${pendingRules.length} 条待确认` : '全部已确认' }}</span></div>
+              <div class="issue-row"><span>模板映射</span><span class="chip" :class="pendingMappings.length ? 'chip-warn' : 'chip-ok'">{{ pendingMappings.length ? `${pendingMappings.length} 项待核对` : workspace?.template_links?.length ? '全部已确认' : '无需核对' }}</span></div>
+              <div class="issue-row"><span>规则校验</span><span class="chip" :class="validationReady && !dirty ? 'chip-ok' : 'chip-warn'">{{ dirty ? '修改尚未保存' : validationReady ? '校验通过' : '尚未通过校验' }}</span></div>
+              <p v-if="!canEdit" class="notice notice-warn">当前账号没有审核与发布权限，请联系管理员处理。</p>
+              <p v-else-if="dirty" class="notice notice-warn">请先保存修改并重新校验，再核对更新后的条款。</p>
+              <p v-else-if="reviewReady" class="notice">条款、模板映射与校验均已完成。下一步：提交模板审核。</p>
+              <p v-else class="notice notice-warn">请完成上方未通过的检查项。条款确认后会自动更新检查结果。</p>
+            </template>
+            <template v-else>
+            <label class="field"><span class="field-label">发布哪一份执行草稿</span><select v-model="chosenCompilation" class="select" :disabled="operationBusy || current.status === 'published'"><option :value="null">请选择</option><option v-for="item in draft?.compilations || []" :key="item.id" :value="item.id" :disabled="item.id !== draft?.active_compilation?.id">{{ item.status === 'validated' ? '校验通过' : item.status === 'blocked' ? '存在阻断' : item.status }} · {{ item.blocker_count }} 个阻断 · {{ item.created_at }}</option></select></label>
             <label class="field"><span class="field-label">分享给谁</span><select v-model="chosenVisibility" class="select" :disabled="operationBusy || current.status === 'published'"><option :value="null">保持当前（{{ visibilityLabel(current.visibility) }}）</option><option value="organization">本组织</option><option value="system" :disabled="!session.isPlatformAdmin">所有人{{ session.isPlatformAdmin ? '' : '（需平台管理员）' }}</option></select></label>
+            </template>
             <div v-if="draft?.active_compilation?.template_links?.length" class="template-links">
               <h3>模板映射核对</h3><p class="faint">规则确认与模板映射确认分别记录，请核对模板来源后操作。</p>
               <div v-for="link in workspace?.template_links || []" :key="link.id" class="issue-row"><div><span>{{ link.rule_code }} · {{ link.review_status === 'confirmed' ? '已确认' : '待核对' }}</span><p>{{ link.section_path?.join(' / ') }} · {{ link.text }}</p><p class="faint">{{ link.rationale }}</p></div><button v-if="link.review_status === 'pending'" class="btn" :disabled="operationBusy || !editable" @click="confirmLink(link)">确认模板映射</button></div>
             </div>
-            <p v-if="current.status === 'draft'" class="faint">请先完成条款与模板映射确认，再提交模板审核。</p>
+
             <p v-if="!canPublish && current.status === 'review'" class="notice notice-warn">当前版本尚不满足发布条件，请核对条款、映射与校验阻断。</p>
             <div class="head-actions">
+              <template v-if="current.status === 'draft'">
+                <button v-if="dirty" class="btn btn-primary" :disabled="operationBusy || !canEdit" @click="saveAndValidate">{{ saveBusy ? '保存中…' : '保存并重新校验' }}</button>
+                <button v-else-if="pendingRules.length" class="btn" :disabled="operationBusy" @click="goToPendingRules">去核对条款（{{ pendingRules.length }}）</button>
+                <button v-else-if="!validationReady" class="btn" :disabled="operationBusy" @click="scoreFormError ? step = 1 : step = 2">查看并处理校验问题</button>
+                <button class="btn" :class="reviewReady ? 'btn-primary' : ''" :disabled="operationBusy || !reviewReady" @click="submitReview">{{ reviewBusy ? '提交中…' : '提交模板审核' }}</button>
+              </template>
               <button v-if="current.status === 'review'" class="btn" :disabled="operationBusy || !canEdit" @click="returnToDraft">退回草稿</button>
-              <button v-if="current.status !== 'published'" class="btn btn-primary" :disabled="operationBusy || !canPublish || dirty" @click="submitPublish">{{ publishBusy ? '发布中…' : '发布' }}</button>
+              <button v-if="current.status === 'review'" class="btn btn-primary" :disabled="operationBusy || !canPublish || dirty" @click="submitPublish">{{ publishBusy ? '发布中…' : '发布' }}</button>
               <button v-if="current.status === 'published'" class="btn" :disabled="operationBusy || !canEdit" @click="cloneRubric(current)">复制为新版本</button>
             </div>
             <p v-if="publishError" class="notice notice-danger" role="alert">{{ publishError }}</p>

@@ -52,6 +52,13 @@ async function reopen(page, name) {
 
 test("导入→原文核对→单条及当前评分项批量确认→刷新保留；不自动发布", async ({ page, request }) => {
   const { id, name } = await importTemplate(page);
+  await page.getByRole('button', {name:'前往校验与发布'}).click();
+  const checklist = page.locator('[data-test="release-panel"]');
+  await expect(checklist).toContainText('3 条待确认');
+  await expect(checklist.getByRole('button', {name:'提交模板审核',exact:true})).toBeDisabled();
+  await expect(checklist.getByRole('button', {name:'发布',exact:true})).toHaveCount(0);
+  await expect(checklist.getByLabel('分享给谁')).toHaveCount(0);
+  await checklist.getByRole('button', {name:'去核对条款（3）'}).click();
   const panel = page.locator("[data-test=rule-review-panel]");
   await expect(page.getByRole("navigation", { name: "评分标准编辑步骤" })).toBeVisible();
   await panel.locator(".rule-source summary").first().click();
@@ -197,13 +204,28 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: "确认", exact: true })).toHaveCount(0);
   await page.locator(".criteria-nav .lib-item", { hasText: "RESULT" }).click();
   await page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /确认并应用全部/ }).click();
+  await page.getByRole("button", { name: "前往校验与发布" }).click();
+  const release = page.locator('[data-test="release-panel"]');
+  await expect(release).toContainText('下一步：提交模板审核');
+  await page.screenshot({path:test.info().outputPath('release-ready.png'),fullPage:true});
+  await expect(release.getByRole('button', {name:'发布',exact:true})).toHaveCount(0);
   await expect(page.getByRole("button", { name: "提交模板审核" })).toBeEnabled();
   expect((await (await request.get(`/api/rubrics/${id}`)).json()).status).toBe("draft");
+  await page.route(`**/rubrics/${id}/submit-review`, route => route.fulfill({status:409,json:{detail:'合成审核冲突，请重新核对'}}));
   await page.getByRole("button", { name: "提交模板审核" }).click();
+  await expect(page.getByRole('alert').filter({hasText:'合成审核冲突'})).toBeVisible();
+  await expect(release.getByRole('button', {name:'发布',exact:true})).toHaveCount(0);
+  await page.unroute(`**/rubrics/${id}/submit-review`);
+  await page.getByRole("button", { name: "提交模板审核" }).click();
+  await expect(release).toContainText('模板已提交审核');
+  await page.screenshot({path:test.info().outputPath('release-review.png'),fullPage:true});
+  await expect(release.getByRole('button', {name:'提交模板审核',exact:true})).toHaveCount(0);
   await expect(page.getByRole("button", { name: "发布", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "发布", exact: true }).click();
   await expect(page.getByRole("button", { name: "复制为新版本" })).toBeVisible();
   expect((await (await request.get(`/api/rubrics/${id}`)).json()).status).toBe("published");
+  await expect(release).toContainText('评分标准已发布');
+  await expect(release.getByLabel('分享给谁')).toBeDisabled();
   await page.getByRole("button", { name: /2 评分规则/ }).click();
   await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /确认并应用全部/ })).toBeDisabled();
 });
