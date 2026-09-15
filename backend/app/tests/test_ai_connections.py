@@ -348,8 +348,9 @@ def test_connection_probe_is_server_side_audited_and_keeps_key_out_of_response(c
         assert "ai_connection.verified" in events
 
 
-def test_usage_ledger_records_only_snapshot_and_token_projection(client, monkeypatch):
-    from backend.app.services.ai_connections import record_usage_ledger
+@pytest.mark.parametrize("platform", [False, True])
+def test_usage_ledger_records_only_snapshot_and_token_projection(client, monkeypatch, platform):
+    from backend.app.services.ai_connections import record_usage_ledger, usage_connection_id
 
     owner = _login(client, monkeypatch, "ai-ledger")
     created = client.post("/api/ai-connections", json=_connection_payload("ledger"))
@@ -383,6 +384,7 @@ def test_usage_ledger_records_only_snapshot_and_token_projection(client, monkeyp
         )
         session.add(paper)
         session.flush()
+        snapshot_id = "platform" if platform else created.json()["id"]
         run = models.ScoringRun(
             paper_id=paper.id,
             rubric_id=rubric.id,
@@ -390,10 +392,10 @@ def test_usage_ledger_records_only_snapshot_and_token_projection(client, monkeyp
             organization_id=organization_id,
             model_provider="openai",
             model_name="gpt-4.1-mini",
-            ai_connection_id=created.json()["id"],
+            ai_connection_id=usage_connection_id({"ai_connection_id": snapshot_id}),
             ai_connection_key_version=1,
             ai_connection_snapshot={
-                "ai_connection_id": created.json()["id"],
+                "ai_connection_id": snapshot_id,
                 "key_version": 1,
                 "provider_type": "openai_responses",
                 "base_url": "https://api.openai.com/v1",
@@ -409,6 +411,13 @@ def test_usage_ledger_records_only_snapshot_and_token_projection(client, monkeyp
         record_usage_ledger(session, run)
         session.commit()
         ledger = session.scalar(select(models.AIUsageLedger))
+        if platform:
+            session.refresh(run)
+            assert ledger is None
+            assert run.ai_connection_id is None
+            assert run.ai_connection_snapshot["ai_connection_id"] == "platform"
+            assert (run.prompt_tokens, run.completion_tokens, run.total_tokens) == (12, 7, 19)
+            return
         assert (ledger.prompt_tokens, ledger.completion_tokens, ledger.total_tokens) == (12, 7, 19)
         assert (ledger.organization_id, ledger.owner_id, ledger.ai_connection_id) == (
             organization_id,

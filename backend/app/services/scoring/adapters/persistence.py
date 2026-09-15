@@ -38,6 +38,7 @@ from backend.app.services.scoring.core.contracts import (
 )
 from backend.app.services.scoring.core.results import ScoringOutcome
 from backend.app.services.ai_connections import record_usage_ledger
+from backend.app.services.ai_connections import usage_connection_id
 
 
 def _mapping(value, *, label: str) -> dict:
@@ -712,7 +713,7 @@ class CoreRunPersistence:
             model_provider=provider["name"],
             model_name=provider["model"],
             model_version=provider["model_version"],
-            ai_connection_id=(ai_connection_snapshot or {}).get("ai_connection_id"),
+            ai_connection_id=usage_connection_id(ai_connection_snapshot),
             ai_connection_key_version=(ai_connection_snapshot or {}).get("key_version"),
             ai_connection_snapshot=deepcopy(ai_connection_snapshot),
             status="scored",

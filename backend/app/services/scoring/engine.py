@@ -34,6 +34,7 @@ from backend.app.services.llm.base import LLMScoringError
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.services.ai_connections import resolve_connection_runtime
 from backend.app.services.ai_connections import record_usage_ledger
+from backend.app.services.ai_connections import usage_connection_id
 from backend.app.services.ai_connections import validate_outbound_base_url
 from backend.app.services.llm.debug_logging import log_llm_throttle_sleep
 from backend.app.services.llm.mock import MockLLMScorer
@@ -1084,7 +1085,7 @@ def persist_scoring(db: Session, paper_id, inputs: ScoringInputs, result: Scorin
         model_provider=scorer.provider,
         model_name=scorer.model_name,
         model_version=scorer.model_version,
-        ai_connection_id=(getattr(scorer, "_ai_connection_snapshot", {}) or {}).get("ai_connection_id"),
+        ai_connection_id=usage_connection_id(getattr(scorer, "_ai_connection_snapshot", None)),
         ai_connection_key_version=(getattr(scorer, "_ai_connection_snapshot", {}) or {}).get("key_version"),
         ai_connection_snapshot=getattr(scorer, "_ai_connection_snapshot", None),
         status="scored",
@@ -1295,50 +1296,61 @@ def score_batch(db: Session, batch_id: str, rescore: bool = False):
     batch_state.apply_event(db, batch, "start_scoring")
     db.commit()
 
-    scorer = _scorer_for_batch(db, batch)  # 整批复用一个 scorer（连接池跨论文复用），结束时统一关闭
     try:
-        for paper in papers:
-            if paper.status == "failed" or not paper.parsed_text_path:
-                result["failed_count"] += 1
-                result["errors"].append(
-                    {
-                        "paper_id": paper.id,
-                        "file_name": paper.file_name,
-                        "error": paper.error_message or "paper is not parsed",
-                    }
-                )
-                continue
-            if paper.scoring_runs and not rescore:
-                result["skipped_count"] += 1
-                continue
-            try:
-                if rescore and paper.scoring_runs:
-                    previous = max(
-                        paper.scoring_runs,
-                        key=lambda item: (item.created_at, item.id),
+        scorer = _scorer_for_batch(db, batch)  # 整批复用一个 scorer（连接池跨论文复用），结束时统一关闭
+        try:
+            for paper in papers:
+                if paper.status == "failed" or not paper.parsed_text_path:
+                    result["failed_count"] += 1
+                    result["errors"].append(
+                        {
+                            "paper_id": paper.id,
+                            "file_name": paper.file_name,
+                            "error": paper.error_message or "paper is not parsed",
+                        }
                     )
-                    run = retry_score_paper(db, previous.id, scorer=scorer)
-                else:
-                    run = score_paper(db, paper.id, scorer=scorer)
-            except (ValueError, LLMScoringError) as exc:
-                result["failed_count"] += 1
-                result["errors"].append({"paper_id": paper.id, "file_name": paper.file_name, "error": str(exc)})
-                continue
-            result["scored_count"] += 1
-            result["run_ids"].append(run.id)
-    finally:
-        _close_scorer(scorer)
+                    continue
+                if paper.scoring_runs and not rescore:
+                    result["skipped_count"] += 1
+                    continue
+                try:
+                    if rescore and paper.scoring_runs:
+                        previous = max(
+                            paper.scoring_runs,
+                            key=lambda item: (item.created_at, item.id),
+                        )
+                        run = retry_score_paper(db, previous.id, scorer=scorer)
+                    else:
+                        run = score_paper(db, paper.id, scorer=scorer)
+                except (ValueError, LLMScoringError) as exc:
+                    result["failed_count"] += 1
+                    result["errors"].append({"paper_id": paper.id, "file_name": paper.file_name, "error": str(exc)})
+                    continue
+                result["scored_count"] += 1
+                result["run_ids"].append(run.id)
+        finally:
+            _close_scorer(scorer)
 
-    batch = db.get(GradingBatch, batch_id)
-    if result["failed_count"]:
-        batch_state.apply_event(db, batch, "finish_scoring", outcome="scored_with_errors")
-    elif result["scored_count"] or result["skipped_count"]:
-        batch_state.apply_event(db, batch, "finish_scoring", outcome="scored")
-    else:
-        # 一份都没评出结果：这不是「已评分」，回落到取消语义而非伪造终态。
-        batch_state.apply_event(db, batch, "cancel")
-    db.commit()
-    return result
+        batch = db.get(GradingBatch, batch_id)
+        if result["failed_count"]:
+            batch_state.apply_event(db, batch, "finish_scoring", outcome="scored_with_errors")
+        elif result["scored_count"] or result["skipped_count"]:
+            batch_state.apply_event(db, batch, "finish_scoring", outcome="scored")
+        else:
+            # 一份都没评出结果：这不是「已评分」，回落到取消语义而非伪造终态。
+            batch_state.apply_event(db, batch, "cancel")
+        db.commit()
+        return result
+    except Exception:
+        # 状态已提交为 scoring。包含 flush/commit 失败时，必须先恢复事务，
+        # 再独立保存异常终态；此前逐份已提交的评分结果保留。
+        db.rollback()
+        failed_batch = db.get(GradingBatch, batch_id)
+        if failed_batch is not None and failed_batch.status == "scoring":
+            batch_state.apply_event(db, failed_batch, "finish_scoring", outcome="scored_with_errors")
+            db.commit()
+        raise
+
 
 
 def update_score_item(db: Session, item_id: str, final_score: float, reason: str, reviewer_id: str):

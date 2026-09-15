@@ -391,11 +391,18 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
     return {"provider_type": runtime.provider_type, "model_name": runtime.model_name}
 
 
+def usage_connection_id(snapshot) -> str | None:
+    """真实 BYOK 外键；平台来源仅存在于不可变快照中。"""
+    connection_id = (snapshot or {}).get("ai_connection_id")
+    return None if connection_id == "platform" else connection_id
+
+
 def record_usage_ledger(db: Session, scoring_run) -> None:
     """Append a non-secret usage projection for a BYOK scoring run."""
 
     snapshot = getattr(scoring_run, "ai_connection_snapshot", None) or {}
-    connection_id = snapshot.get("ai_connection_id")
+    connection_id = usage_connection_id(snapshot)
+    # 平台用量保留在 ScoringRun；此表只投影具有真实用户连接外键的 BYOK。
     if not connection_id:
         return
     db.add(

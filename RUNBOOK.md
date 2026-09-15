@@ -854,3 +854,10 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 维护记录：2026-09-15 · 上传后解析衔接：已核对本节涉及的上传、解析及预检边界。
 
 维护记录：2026-09-15 · 上传后解析衔接生产验收：c213a23 经 main CI 34920902739 全部门禁部署成功，生产页面/资源校验 9/9；Chrome 恢复原草稿的三份已上传材料并完成解析，刷新后仍为 3 份解析正常、0 阻断，开始评分可用，未启动评分。
+
+
+### 2026-09-15 平台用量外键与评分异常状态
+
+诊断：评分请求 500，ai_usage_ledger_ai_connection_id_fkey 错误且 platform 被用作连接 ID，批次仍 scoring。验证：运行 .venv/bin/python -m pytest -q backend/app/tests/test_ai_connections.py backend/app/tests/test_scoring_failure_state.py；平台快照/token 可持久化、BYOK 账本保留、模型初始化/评分/真实 flush 异常后批次 scored_with_errors。发布经 main 完整 CI，不改迁移或生产连接表。存量残留需先确认原请求已终止，再通过已有状态机取消/恢复入口处理，不可将仍运行的任务直接改为完成。回滚使用 revert 业务提交后重跑 CI；保留评分和用量数据。Python 无法捕获函数硬终止，相关恢复须另行使用租约后台任务方案。
+
+维护记录：2026-09-15 · 平台用量外键与评分异常状态：核对并更新上述调用链、决策与操作边界。
