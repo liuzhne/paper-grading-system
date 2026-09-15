@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 from threading import Lock
 import importlib
 import time
@@ -587,6 +588,7 @@ def test_hundred_item_soak_is_bounded_checkpointed_and_run_unique(tmp_path):
     active = 0
     maximum_active = 0
     lock = Lock()
+    concurrency_seen = Event()
 
     def fake_score(_session, *, paper_id, job_id):
         nonlocal active, maximum_active
@@ -594,7 +596,11 @@ def test_hundred_item_soak_is_bounded_checkpointed_and_run_unique(tmp_path):
         with lock:
             active += 1
             maximum_active = max(maximum_active, active)
-        time.sleep(0.003)
+            if active >= 2:
+                concurrency_seen.set()
+        # Keep the first worker alive long enough for a second worker to enter;
+        # a millisecond sleep is scheduler-dependent on shared CI runners.
+        concurrency_seen.wait(timeout=1)
         with lock:
             active -= 1
         return {
