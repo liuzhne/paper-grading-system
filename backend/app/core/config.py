@@ -113,7 +113,10 @@ class Settings(BaseSettings):
     SCORING_PROMPT_ENVELOPE_VERSION: Literal["v3", "v4"] = "v4"
     SCORING_EVIDENCE_SELECTION_MODE: Literal["all", "scoped"] = "scoped"
     SCORING_EVIDENCE_TOP_K: int = Field(default=12, ge=1, le=100)
-    SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=32768, ge=1024)
+    # Keep the serialized chat request below providers' HTTP body limit as well
+    # as the model context window.  16k leaves room for JSON/chat framing on
+    # providers such as Groq that reject an otherwise token-valid body with 413.
+    SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=16384, ge=1024)
     SCORING_CONTEXT_SAFETY_MARGIN_TOKENS: int = Field(default=1024, ge=0)
     SCORING_RULE_TASKS_ENABLED: bool = True
     MANUAL_REVIEW_QUEUE_ENABLED: bool = True

@@ -619,6 +619,24 @@ def _telemetry_for_run(session, run, *, latency_ms):
     }
 
 
+def _run_has_complete_scores(session, run):
+    """A persisted run is reusable only when every rubric item formed a score."""
+    run = session.scalar(
+        select(ScoringRun)
+        .where(ScoringRun.id == run.id)
+        .options(selectinload(ScoringRun.items))
+    )
+    items = list(run.items)
+    if not items:
+        # Historical/manual runs may only carry an authoritative total.
+        return run.final_total_score is not None
+    return all(
+        item.final_score is not None
+        and item.auto_score_status not in ("invalid", "blocked")
+        for item in items
+    )
+
+
 def _default_score_item(session, *, paper_id, job_id):
     from backend.app.services.scoring.engine import retry_score_paper
     from backend.app.services.scoring.engine import score_paper
@@ -649,12 +667,13 @@ def _default_score_item(session, *, paper_id, job_id):
         and previous is not None
         and previous.id != job_item.baseline_scoring_run_id
     ):
-        return {
-            "status": "succeeded",
-            "run_id": previous.id,
-            "telemetry": _telemetry_for_run(session, previous, latency_ms=0),
-        }
-    if previous is not None and not job.rescore:
+        if _run_has_complete_scores(session, previous):
+            return {
+                "status": "succeeded",
+                "run_id": previous.id,
+                "telemetry": _telemetry_for_run(session, previous, latency_ms=0),
+            }
+    if previous is not None and not job.rescore and _run_has_complete_scores(session, previous):
         return {
             "status": "skipped",
             "run_id": previous.id,
@@ -665,6 +684,8 @@ def _default_score_item(session, *, paper_id, job_id):
         run = retry_score_paper(session, previous.id)
     else:
         run = score_paper(session, paper.id)
+    if not _run_has_complete_scores(session, run):
+        raise ValueError("评分结果不完整：模型未形成全部评分项的有效分数")
     latency_ms = max(0, int((monotonic() - started) * 1000))
     return {
         "status": "succeeded",

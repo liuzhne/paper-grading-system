@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Lock
 import importlib
 import time
+from types import SimpleNamespace
 
 from alembic import command
 from alembic.config import Config
@@ -78,6 +79,30 @@ def _seed_batch(session, *, count: int, name: str):
 
 def _jobs_module():
     return importlib.import_module("backend.app.services.batch_scoring.jobs")
+
+
+def test_queue_rejects_persisted_run_with_blocked_scores():
+    jobs = _jobs_module()
+    invalid = SimpleNamespace(
+        id="run-invalid",
+        final_total_score=0,
+        items=[SimpleNamespace(final_score=None, auto_score_status="invalid")],
+    )
+    valid = SimpleNamespace(
+        id="run-valid",
+        final_total_score=8,
+        items=[SimpleNamespace(final_score=8, auto_score_status="calculated")],
+    )
+
+    class Session:
+        def __init__(self, run):
+            self.run = run
+
+        def scalar(self, _statement):
+            return self.run
+
+    assert jobs._run_has_complete_scores(Session(invalid), invalid) is False
+    assert jobs._run_has_complete_scores(Session(valid), valid) is True
 
 
 def test_0017_migration_and_models_define_durable_job_item_relationships(
