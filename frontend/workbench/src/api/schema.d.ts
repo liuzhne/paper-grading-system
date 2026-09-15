@@ -250,6 +250,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batch-scoring-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Attention Jobs */
+        get: operations["list_attention_jobs_api_batch_scoring_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batch-scoring-jobs/{job_id}": {
         parameters: {
             query?: never;
@@ -2741,13 +2758,13 @@ export interface components {
         BatchScoringJobCreate: {
             /**
              * Max Workers
-             * @default 4
+             * @default 2
              */
             max_workers: number;
             /** Observation Policy */
-            observation_policy: {
+            observation_policy?: {
                 [key: string]: unknown;
-            };
+            } | null;
             /**
              * Rescore
              * @default false
@@ -2775,6 +2792,8 @@ export interface components {
             grading_batch_id: string;
             /** Heartbeat At */
             heartbeat_at?: string | null;
+            /** Heartbeat State */
+            readonly heartbeat_state: string;
             /** Id */
             id: string;
             /** Items */
@@ -2795,8 +2814,8 @@ export interface components {
             pending_count: number;
             /** Rescore */
             rescore: boolean;
-            /** Runner Token */
-            runner_token?: string | null;
+            /** Runner Lease Seconds */
+            readonly runner_lease_seconds: number;
             /** Running Count */
             running_count: number;
             /** Skipped Count */
@@ -4964,6 +4983,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_attention_jobs_api_batch_scoring_jobs_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchScoringJobRead"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
@@ -17,6 +19,7 @@ from backend.app.services.batch_scoring.jobs import cancel_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import create_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import get_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import get_latest_batch_scoring_job
+from backend.app.services.batch_scoring.jobs import list_attention_batch_scoring_jobs
 from backend.app.services.batch_scoring.jobs import retry_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import run_batch_scoring_job
 from backend.app.services.dev_user import ensure_dev_user
@@ -47,6 +50,19 @@ def _job_or_404(db, job_id, principal: CurrentPrincipal):
     ):
         raise HTTPException(status_code=404, detail="batch scoring job not found")
     return job
+
+
+@router.get(
+    "/batch-scoring-jobs",
+    response_model=list[BatchScoringJobRead],
+)
+def list_attention_jobs(
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    return list_attention_batch_scoring_jobs(
+        db, organization_id=principal.organization_id
+    )
 
 
 @router.post(
@@ -154,6 +170,11 @@ def run_job(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
+    if os.getenv("VERCEL"):
+        raise HTTPException(
+            status_code=409,
+            detail="生产评分由后台执行器领取；请查看任务进度，无需在请求中启动。",
+        )
     _job_or_404(db, job_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
     bind = db.get_bind()

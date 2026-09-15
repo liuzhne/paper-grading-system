@@ -9,6 +9,13 @@ import { STAGES, STAGE_ORDER, stageLabel, stageTone } from "@/stores/stages.js";
 const store = useBatchesStore();
 const router = useRouter();
 
+const activeJobStatuses = new Set(["queued", "running", "cancel_requested"]);
+const activeCount = computed(() =>
+  store.batches.filter((batch) =>
+    activeJobStatuses.has(store.progressFor(batch.id)?.job?.status),
+  ).length,
+);
+
 const filters = computed(() =>
   STAGE_ORDER.filter((code) => store.stageCounts[code] > 0).map((code) => ({
     code,
@@ -84,9 +91,14 @@ onMounted(async () => {
         <h1 class="page-title">评分任务</h1>
         <p class="page-sub">一个批次固定绑定一个已发布的评分标准版本。</p>
       </div>
-      <RouterLink class="btn btn-primary" :to="{ name: 'task-new' }">
-        新建评分任务
-      </RouterLink>
+      <div class="btn-row">
+        <RouterLink class="btn" :to="{ name: 'tasks-running' }">
+          正在评分 {{ activeCount }}
+        </RouterLink>
+        <RouterLink class="btn btn-primary" :to="{ name: 'task-new' }">
+          新建评分任务
+        </RouterLink>
+      </div>
     </header>
 
     <p v-if="store.error" class="notice notice-danger" role="alert">{{ store.error }}</p>
@@ -152,13 +164,22 @@ onMounted(async () => {
               </td>
               <td class="num">{{ store.progressFor(batch.id)?.counts.total ?? "—" }}</td>
               <td>
-                <div v-if="percent(store.progressFor(batch.id)?.completion_ratio)" class="progress">
+                <RouterLink
+                  v-if="store.progressFor(batch.id)?.job"
+                  class="progress progress-link"
+                  :to="{ name: 'task-run', params: { batchId: batch.id } }"
+                  @click.stop
+                >
                   <span class="bar">
                     <span
                       class="fill"
                       :style="{ width: percent(store.progressFor(batch.id)?.completion_ratio) }"
                     ></span>
                   </span>
+                  <span class="num faint">{{ percent(store.progressFor(batch.id)?.completion_ratio) || "0%" }}</span>
+                </RouterLink>
+                <div v-else-if="percent(store.progressFor(batch.id)?.completion_ratio)" class="progress">
+                  <span class="bar"><span class="fill" :style="{ width: percent(store.progressFor(batch.id)?.completion_ratio) }"></span></span>
                   <span class="num faint">{{ percent(store.progressFor(batch.id)?.completion_ratio) }}</span>
                 </div>
                 <span v-else class="faint">暂无材料</span>
@@ -177,9 +198,13 @@ onMounted(async () => {
                 </div>
               </td>
               <td>
-                <span class="chip" :class="toneClass(batch.status)">
-                  {{ stageLabel(batch.status) }}
-                </span>
+                <RouterLink
+                  v-if="batch.status === 'scoring' && store.progressFor(batch.id)?.job"
+                  class="chip chip-ok stage-link"
+                  :to="{ name: 'task-run', params: { batchId: batch.id } }"
+                  @click.stop
+                >{{ stageLabel(batch.status) }}</RouterLink>
+                <span v-else class="chip" :class="toneClass(batch.status)">{{ stageLabel(batch.status) }}</span>
                 <div class="faint mono code">{{ batch.status }}</div>
               </td>
               <td class="num muted">{{ formatTime(batch.updated_at) }}</td>
@@ -318,6 +343,11 @@ onMounted(async () => {
   font-size: 11.5px;
   margin-top: 4px;
   color: var(--danger);
+}
+
+.progress-link:hover .faint,
+.stage-link:hover {
+  color: var(--accent-hover);
 }
 
 .progress {

@@ -82,7 +82,7 @@ def test_the_extractor_actually_finds_calls():
 
     assert len(calls) >= 20, calls
     assert ("get", "/batches/overview") in calls
-    assert ("post", "/batches/{}/score") in calls
+    assert ("post", "/batches/{}/score-jobs") in calls
 
 
 def test_every_frontend_call_hits_a_real_endpoint():

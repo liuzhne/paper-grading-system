@@ -155,6 +155,133 @@ def test_api_start_is_idempotent_and_cancel_retry_progress_is_persistent(client)
     assert all(item["attempt_count"] == 0 for item in retried.json()["items"])
 
 
+def test_workbench_can_create_with_safe_defaults_and_list_attention_jobs(client):
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=2, name="workbench durable job"
+        )
+
+    created = client.post(
+        f"/api/batches/{batch_id}/score-jobs",
+        json={"rescore": False, "max_workers": 2},
+    )
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["observation_policy"]["minimum_sample_size"] == 2
+    assert payload["max_workers"] == 2
+    assert "runner_token" not in payload
+    assert payload["runner_lease_seconds"] == 120
+    assert payload["heartbeat_state"] == "inactive"
+
+    listed = client.get("/api/batch-scoring-jobs")
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()] == [payload["id"]]
+
+
+def test_worker_cycle_executes_a_queued_job(client):
+    jobs = _jobs_module()
+    worker = importlib.import_module("backend.app.services.batch_scoring.worker")
+    with client.session_factory() as session:
+        batch_id, rubric_id, paper_ids = _seed_batch(
+            session, count=1, name="worker cycle"
+        )
+        run = models.ScoringRun(
+            paper_id=paper_ids[0],
+            rubric_id=rubric_id,
+            status="scored",
+            ai_total_score=8,
+            final_total_score=8,
+            grade="通过",
+            need_manual_review=False,
+        )
+        session.add(run)
+        session.commit()
+        job, _ = jobs.create_batch_scoring_job(
+            session,
+            batch_id=batch_id,
+            rescore=False,
+            max_workers=1,
+            observation_policy=None,
+            actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        job_id = job.id
+
+    assert worker.run_worker_cycle(client.session_factory) is True
+    with client.session_factory() as session:
+        completed = jobs.get_batch_scoring_job(session, job_id)
+        assert completed.status == "completed"
+        assert completed.skipped_count == 1
+        assert completed.batch.status == "scored"
+    assert worker.run_worker_cycle(client.session_factory) is False
+
+
+def test_worker_level_exception_persists_retryable_terminal_state(client, monkeypatch):
+    jobs = _jobs_module()
+    worker = importlib.import_module("backend.app.services.batch_scoring.worker")
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=2, name="worker failure"
+        )
+        job, _ = jobs.create_batch_scoring_job(
+            session,
+            batch_id=batch_id,
+            rescore=False,
+            max_workers=1,
+            observation_policy=None,
+            actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        job_id = job.id
+
+    def explode(*_args, **_kwargs):
+        with client.session_factory() as session:
+            current = jobs.get_batch_scoring_job(session, job_id)
+            current.status = "running"
+            current.heartbeat_at = models.utcnow()
+            current.batch.status = "scoring"
+            session.commit()
+        raise RuntimeError("sensitive provider detail must stay in worker logs")
+
+    monkeypatch.setattr(worker, "run_batch_scoring_job", explode)
+    assert worker.run_worker_cycle(client.session_factory) is True
+
+    with client.session_factory() as session:
+        failed = jobs.get_batch_scoring_job(session, job_id)
+        assert failed.status == "failed"
+        assert failed.failed_count == 2
+        assert failed.batch.status == "draft"
+        assert all(item.error_code == "worker_failure" for item in failed.items)
+        assert all("sensitive provider detail" not in item.error_message for item in failed.items)
+
+
+def test_stale_cancel_request_is_finalized_and_batch_leaves_scoring(client):
+    jobs = _jobs_module()
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=1, name="stale cancellation"
+        )
+        job, _ = jobs.create_batch_scoring_job(
+            session,
+            batch_id=batch_id,
+            rescore=False,
+            max_workers=1,
+            observation_policy=None,
+            actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        batch = session.get(models.GradingBatch, batch_id)
+        batch.status = "scoring"
+        job.status = "cancel_requested"
+        job.runner_token = "dead-runner"
+        job.heartbeat_at = datetime(2020, 1, 1)
+        session.commit()
+        job_id = job.id
+
+    result = jobs.run_batch_scoring_job(client.session_factory, job_id=job_id)
+    assert result.status == "canceled"
+    assert result.canceled_count == 1
+    with client.session_factory() as session:
+        assert session.get(models.GradingBatch, batch_id).status == "draft"
+
+
 def test_api_run_uses_persistent_checkpoints_and_fails_gate_closed(client):
     with client.session_factory() as session:
         batch_id, rubric_id, paper_ids = _seed_batch(
@@ -203,6 +330,25 @@ def test_api_run_uses_persistent_checkpoints_and_fails_gate_closed(client):
         ]
         is False
     )
+
+
+def test_serverless_run_endpoint_refuses_synchronous_execution(client, monkeypatch):
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=1, name="serverless guard"
+        )
+    created = client.post(
+        f"/api/batches/{batch_id}/score-jobs",
+        json={"max_workers": 1},
+    )
+    monkeypatch.setenv("VERCEL", "1")
+
+    response = client.post(
+        f"/api/batch-scoring-jobs/{created.json()['id']}/run"
+    )
+
+    assert response.status_code == 409
+    assert "后台执行器" in response.json()["detail"]
 
 
 def test_observation_policy_fails_closed_without_complete_comparison_identity():

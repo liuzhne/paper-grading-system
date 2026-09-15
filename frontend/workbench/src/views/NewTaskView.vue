@@ -133,8 +133,11 @@ async function onStart() {
   busy.value = true;
   error.value = null;
   try {
-    await api.post(`/batches/${batchId.value}/score`, {});
-    await router.push({ name: "grade", params: { batchId: batchId.value } });
+    await api.post(`/batches/${batchId.value}/score-jobs`, {
+      rescore: false,
+      max_workers: 2,
+    });
+    await router.push({ name: "task-run", params: { batchId: batchId.value } });
   } catch (err) {
     error.value = err instanceof ApiError ? err.detail || err.message : err?.message;
   } finally {

@@ -57,6 +57,18 @@ const routes = [
         meta: { title: "新建评分任务", nav: "tasks" },
       },
       {
+        path: "tasks/running",
+        name: "tasks-running",
+        component: () => import("@/views/RunningTasksView.vue"),
+        meta: { title: "正在评分", nav: "tasks" },
+      },
+      {
+        path: "tasks/:batchId/run",
+        name: "task-run",
+        component: () => import("@/views/TaskRunView.vue"),
+        meta: { title: "评分进度", nav: "tasks" },
+      },
+      {
         path: "batches/:batchId/grade",
         name: "grade",
         component: () => import("@/views/GradeView.vue"),

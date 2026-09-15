@@ -15,6 +15,8 @@ from datetime import datetime
 import sqlalchemy as sa
 
 from backend.app.db.models import AtomicRule
+from backend.app.db.models import BatchScoringItem
+from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import ManualReviewTask
 from backend.app.db.models import Paper
@@ -114,6 +116,7 @@ def seed_all(*, with_auth=False, with_platform_model=True):
         rubric = _seed_rubric(session, user)
         _seed_batch_with_review_work(session, rubric)
         _seed_empty_draft_batch(session, rubric)
+        _seed_running_job(session, rubric, user)
         if with_auth:
             _seed_identities(session, rubric)
             if with_platform_model:
@@ -455,6 +458,56 @@ def _seed_empty_draft_batch(session, rubric):
             status="draft",
             state_version=1,
         )
+    )
+
+
+def _seed_running_job(session, rubric, user):
+    """Synthetic heartbeat/progress fixture; no model call is started."""
+    batch = GradingBatch(
+        name="后台评分验收批次",
+        department="计算机学院",
+        major="软件工程",
+        rubric_id=rubric.id,
+        status="scoring",
+        state_version=2,
+    )
+    session.add(batch)
+    session.flush()
+    papers = []
+    for index in range(2):
+        paper = Paper(
+            batch_id=batch.id,
+            file_name=f"验收材料-{index + 1}.docx",
+            file_path=f"acceptance-{index + 1}.docx",
+            parsed_text_path=f"acceptance-{index + 1}.json",
+            status="parsed",
+        )
+        session.add(paper)
+        papers.append(paper)
+    session.flush()
+    job = BatchScoringJob(
+        grading_batch_id=batch.id,
+        generation=1,
+        rescore=False,
+        max_workers=2,
+        status="running",
+        total_items=2,
+        pending_count=1,
+        running_count=1,
+        observation_policy={},
+        observation_policy_hash="0" * 64,
+        runner_token="e2e-runner",
+        heartbeat_at=datetime.utcnow(),
+        started_at=datetime.utcnow(),
+        created_by=user.id,
+    )
+    session.add(job)
+    session.flush()
+    session.add_all(
+        [
+            BatchScoringItem(job_id=job.id, paper_id=papers[0].id, status="running", attempt_count=1),
+            BatchScoringItem(job_id=job.id, paper_id=papers[1].id, status="pending"),
+        ]
     )
 
 

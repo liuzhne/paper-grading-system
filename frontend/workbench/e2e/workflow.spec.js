@@ -18,6 +18,29 @@ async function openSeedRubric(page) {
  */
 
 test.describe("V07 评分任务与阶段", () => {
+  test("正在评分入口与任务详情给出下一步", async ({ page }) => {
+    await page.goto("/workbench/tasks");
+
+    await expect(page.getByRole("link", { name: "正在评分 1" })).toBeVisible();
+    const row = page.locator("tbody tr", { hasText: "后台评分验收批次" });
+    await row.getByRole("link", { name: "评分中" }).click();
+
+    await expect(page).toHaveURL(/\/tasks\/.+\/run$/);
+    await expect(page.getByRole("heading", { name: "后台评分验收批次" })).toBeVisible();
+    await expect(page.getByText("页面每 3 秒自动更新")).toBeVisible();
+    await expect(page.getByRole("button", { name: "取消剩余任务" })).toBeVisible();
+    await expect(page.getByText("验收材料-1.docx")).toBeVisible();
+    await expect(page.getByText("验收材料-2.docx")).toBeVisible();
+  });
+
+  test("正在评分聚合页列出后台任务", async ({ page }) => {
+    await page.goto("/workbench/tasks/running");
+
+    await expect(page.getByRole("heading", { name: "正在评分 1" })).toBeVisible();
+    await expect(page.getByText("后台评分验收批次")).toBeVisible();
+    await expect(page.getByRole("link", { name: "查看进度" })).toBeVisible();
+  });
+
   test("阶段标签与内部编码并列，任务故障单独显示", async ({ page }) => {
     await page.goto("/workbench/tasks");
 

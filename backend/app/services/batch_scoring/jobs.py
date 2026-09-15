@@ -47,6 +47,7 @@ POLICY_SCHEMA_VERSION = "core-cutover-observation-policy@1"
 METRICS_SCHEMA_VERSION = "batch-observation-metrics@1"
 RUNNER_LEASE_SECONDS = 120
 RUNNER_HEARTBEAT_SECONDS = 15
+ATTENTION_FAILURE_HOURS = 24
 
 _THRESHOLD_DIRECTIONS = {
     "max_abs_legacy_core_delta": "max",
@@ -64,6 +65,34 @@ _RATE_THRESHOLDS = {
     for name in _THRESHOLD_DIRECTIONS
     if name.endswith("_rate")
 }
+
+
+def default_observation_policy(*, sample_size=1):
+    """Return a fail-closed observation policy for ordinary scoring jobs.
+
+    The policy exists because the durable job model predates the workbench and
+    also carries Core cutover observations.  A normal teacher action must not
+    have to invent release-gate thresholds; the unavailable paired comparison
+    keeps this policy from authorizing a Core switch.
+    """
+    minimum = max(1, int(sample_size or 1))
+    return {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "minimum_sample_size": minimum,
+        "observation_window": {"minimum_completed_items": minimum},
+        "thresholds": {
+            "max_abs_legacy_core_delta": "0.5",
+            "max_invalid_evidence_rate": "0.05",
+            "max_unauthorized_rule_rate": "0",
+            "max_manual_review_rate": "1",
+            "min_cache_hit_rate": "0",
+            "max_checker_failure_rate": "1",
+            "max_llm_failure_rate": "1",
+            "max_retry_rate": "1",
+            "max_p95_latency_ms": "600000",
+        },
+        "fallback_tolerance": {"max_abs_score_delta": "0.5"},
+    }
 
 
 def _decimal(value, *, field):
@@ -171,6 +200,115 @@ def get_latest_batch_scoring_job(session, batch_id):
     )
 
 
+def list_attention_batch_scoring_jobs(session, *, organization_id=None):
+    """List the latest active or failed execution for each visible batch."""
+    recent_failure_cutoff = utcnow() - timedelta(hours=ATTENTION_FAILURE_HOURS)
+    latest_generation = (
+        select(
+            BatchScoringJob.grading_batch_id.label("batch_id"),
+            func.max(BatchScoringJob.generation).label("generation"),
+        )
+        .group_by(BatchScoringJob.grading_batch_id)
+        .subquery()
+    )
+    query = (
+        select(BatchScoringJob)
+        .join(
+            latest_generation,
+            (BatchScoringJob.grading_batch_id == latest_generation.c.batch_id)
+            & (BatchScoringJob.generation == latest_generation.c.generation),
+        )
+        .join(GradingBatch, GradingBatch.id == BatchScoringJob.grading_batch_id)
+        .where(
+            BatchScoringJob.status.in_(ACTIVE_JOB_STATUSES)
+            | (
+                BatchScoringJob.status.in_(("completed_with_errors", "failed"))
+                & (BatchScoringJob.updated_at >= recent_failure_cutoff)
+            )
+        )
+        .options(selectinload(BatchScoringJob.items))
+        .order_by(BatchScoringJob.updated_at.desc(), BatchScoringJob.id.desc())
+    )
+    if organization_id is not None:
+        query = query.where(GradingBatch.organization_id == organization_id)
+    return list(session.scalars(query).all())
+
+
+def next_runnable_batch_scoring_job_id(session):
+    """Return the oldest queued job, otherwise an expired runner lease."""
+    cutoff = utcnow() - timedelta(seconds=RUNNER_LEASE_SECONDS)
+    return session.scalar(
+        select(BatchScoringJob.id)
+        .where(
+            (BatchScoringJob.status == "queued")
+            | (
+                BatchScoringJob.status.in_(("running", "cancel_requested"))
+                & (
+                    (BatchScoringJob.heartbeat_at.is_(None))
+                    | (BatchScoringJob.heartbeat_at <= cutoff)
+                )
+            )
+        )
+        .order_by(BatchScoringJob.created_at, BatchScoringJob.id)
+        .limit(1)
+    )
+
+
+def finalize_batch_scoring_job_failure(session_factory, *, job_id):
+    """Persist a safe terminal state for an executor-level failure."""
+    with session_factory() as session:
+        job = session.scalar(
+            select(BatchScoringJob)
+            .where(BatchScoringJob.id == job_id)
+            .options(selectinload(BatchScoringJob.items))
+            .with_for_update()
+        )
+        if job is None or job.status in TERMINAL_JOB_STATUSES:
+            return job
+        now = utcnow()
+        for item in job.items:
+            if item.status not in ("pending", "running"):
+                continue
+            item.status = "failed"
+            item.error_code = "worker_failure"
+            item.error_message = "后台执行异常，请重试失败项或联系管理员。"
+            item.finished_at = now
+            history = list(item.attempt_history or [])
+            history.append(
+                {
+                    "attempt": item.attempt_count,
+                    "status": "failed",
+                    "error_code": "worker_failure",
+                    "failure_kind": "worker",
+                    "scoring_run_id": None,
+                    "latency_ms": 0,
+                }
+            )
+            item.attempt_history = history
+        _set_job_counts(job)
+        has_results = bool(job.succeeded_count or job.skipped_count)
+        job.status = "completed_with_errors" if has_results else "failed"
+        job.runner_token = None
+        job.heartbeat_at = now
+        job.finished_at = now
+        metrics = _aggregate_metrics(job)
+        job.metrics_snapshot = {
+            "schema_version": METRICS_SCHEMA_VERSION,
+            **metrics,
+            "gate": evaluate_observation_policy(job.observation_policy, metrics),
+        }
+        batch = session.get(GradingBatch, job.grading_batch_id)
+        if batch is not None and batch.status == "scoring":
+            if has_results:
+                batch_state.apply_event(
+                    session, batch, "finish_scoring", outcome="scored_with_errors"
+                )
+            else:
+                batch_state.apply_event(session, batch, "cancel")
+        session.commit()
+        return get_batch_scoring_job(session, job.id)
+
+
 def create_batch_scoring_job(
     session,
     *,
@@ -184,8 +322,6 @@ def create_batch_scoring_job(
         raise ValueError("max_workers must be an integer")
     if max_workers < 1 or max_workers > 16:
         raise ValueError("max_workers must be between 1 and 16")
-    policy = validate_observation_policy(observation_policy)
-    policy_hash = canonical_sha256(policy)
     batch = session.scalar(
         select(GradingBatch)
         .where(GradingBatch.id == batch_id)
@@ -196,6 +332,12 @@ def create_batch_scoring_job(
         raise ValueError("batch not found")
     if not batch.papers:
         raise ValueError("batch has no papers")
+    policy = validate_observation_policy(
+        observation_policy
+        if observation_policy is not None
+        else default_observation_policy(sample_size=len(batch.papers))
+    )
+    policy_hash = canonical_sha256(policy)
 
     active = session.scalar(
         select(BatchScoringJob)
@@ -577,6 +719,14 @@ def _checkpoint_started(session_factory, item_id):
         item.attempt_count += 1
         item.started_at = utcnow()
         item.finished_at = None
+        job = session.scalar(
+            select(BatchScoringJob)
+            .where(BatchScoringJob.id == item.job_id)
+            .options(selectinload(BatchScoringJob.items))
+            .with_for_update()
+        )
+        if job is not None:
+            _set_job_counts(job)
         session.commit()
         return True
 
@@ -639,6 +789,14 @@ def _checkpoint_result(session_factory, item_id, *, result=None, error=None):
         history = list(item.attempt_history or [])
         history.append(history_entry)
         item.attempt_history = history
+        job = session.scalar(
+            select(BatchScoringJob)
+            .where(BatchScoringJob.id == item.job_id)
+            .options(selectinload(BatchScoringJob.items))
+            .with_for_update()
+        )
+        if job is not None:
+            _set_job_counts(job)
         session.commit()
 
 
@@ -831,7 +989,8 @@ def run_batch_scoring_job(
         if job is None:
             raise ValueError("batch scoring job not found")
         now = utcnow()
-        if job.status == "running":
+        resume_cancel = job.status == "cancel_requested"
+        if job.status in ("running", "cancel_requested"):
             lease_cutoff = now - timedelta(seconds=RUNNER_LEASE_SECONDS)
             if job.heartbeat_at is not None and job.heartbeat_at > lease_cutoff:
                 raise ValueError("batch scoring job is already running")
@@ -846,6 +1005,11 @@ def run_batch_scoring_job(
         job.heartbeat_at = now
         job.started_at = job.started_at or now
         job.finished_at = None
+        if resume_cancel:
+            for item in job.items:
+                if item.status == "pending":
+                    item.status = "canceled"
+                    item.finished_at = now
         # 批次业务阶段随执行进入 scoring。恢复既有 running 任务时阶段已经是
         # scoring，重复触发会被状态机判为非法转移，因此只在需要时推进。
         batch = session.get(GradingBatch, job.grading_batch_id)
@@ -928,6 +1092,8 @@ def run_batch_scoring_job(
                 batch_state.apply_event(
                     session, batch, "finish_scoring", outcome="scored_with_errors"
                 )
+            elif job.status in ("canceled", "failed") and batch.status == "scoring":
+                batch_state.apply_event(session, batch, "cancel")
         session.commit()
         job_id = job.id
     with session_factory() as session:
@@ -937,9 +1103,13 @@ def run_batch_scoring_job(
 __all__ = [
     "cancel_batch_scoring_job",
     "create_batch_scoring_job",
+    "default_observation_policy",
     "evaluate_observation_policy",
+    "finalize_batch_scoring_job_failure",
     "get_batch_scoring_job",
     "get_latest_batch_scoring_job",
+    "list_attention_batch_scoring_jobs",
+    "next_runnable_batch_scoring_job_id",
     "retry_batch_scoring_job",
     "run_batch_scoring_job",
     "validate_observation_policy",

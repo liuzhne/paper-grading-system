@@ -865,3 +865,15 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 维护记录：2026-09-15 · 平台用量异常存量修复：生产日志确认原请求 HTTP 500 后，锁定唯一目标批次并校验 scoring、state_version=2、原更新时间及 0 条评分结果，经 finish_scoring 转为 scored_with_errors、版本 3；同事务写入 batch.failed_request_state_reconciled 审计。三份材料保留，未重新评分。
 
 维护记录：2026-09-15 · 平台用量与异常状态生产验收：eaf947f 经完整 CI 34922785204 部署成功，生产服务/资源检查 9/9；Chrome 刷新确认目标批次退出 scoring，显示 scored_with_errors，材料 3 份、有效评分结果 0，未重新调用 AI。平台模型真实再次评分未执行；通过合成 Core 评分落库及全量回归验证修复。
+
+### 2026-09-15 持久化后台评分
+
+操作流程：前端创建 score job 后立即跳到 `/workbench/tasks/:batchId/run`；常驻执行器用 `.venv/bin/python -m backend.app.scripts.run_batch_worker --poll-seconds 3` 领取任务并周期更新 heartbeat。评分任务列表的“评分中”状态和进度条均可进入该页，页面顶部另设“正在评分”入口进入 `/workbench/tasks/running`。运行列表展示 queued/running/cancel_requested，以及 24 小时内的 completed_with_errors/failed。详情页轮询 latest job，展示批次名称、评分标准、开始/更新时间、总数、待处理、运行、成功、失败、取消、最后心跳及逐材料状态；不展示论文正文。单次模型调用保留有限超时和分类重试，整批不受 Vercel 300 秒限制。
+
+诊断顺序：先查看详情页的状态、最后心跳和失败项；再查 worker 日志中的 job 级异常摘要，不记录原文或密钥。heartbeat 在 120 秒租约内时禁止第二 runner；过期后页面显示“执行中断，等待恢复”，worker 自动领取，running item 回到 pending 并从持久化检查点继续。执行器捕获到材料外异常时，未完成项会落为 `worker_failure`、批次退出 scoring；日志保留异常栈，页面只给安全提示。失败重试只恢复 failed/canceled/running 项，`rescore=false` 时不得覆盖已有有效结果。Vercel 上直接调用 `/batch-scoring-jobs/{id}/run` 返回 409 是预期保护，不表示 worker 故障。
+
+操作权限：运行中允许“取消剩余任务”，只影响未开始材料；完成含异常后允许“重试失败项”；正常运行时不显示人工接管按钮；心跳未过期时禁止重启。任务完成后主按钮切换为“查看评分结果”，聚合页默认移除已完成任务，任务详情仍可从批次历史进入。
+
+验收至少覆盖：开始请求快速返回并跳转运行详情；列表“评分中”和进度均可跳转；聚合页只列活跃或待恢复任务；关闭浏览器后任务继续；三份/42 次调用可跨越 300 秒完成；强制终止 worker 后页面识别心跳过期，租约恢复且不重复有效结果；模型 429/5xx 与材料失败逐项可见；完成、含异常、取消三种终态正确；按钮权限与状态一致；生产日志和页面不含正文与非必要身份信息。回滚时先停止新 worker 领取，再将前端入口恢复到上一版本；不得回滚或删除已生成的 job、item、评分结果与审计记录。
+
+维护记录：2026-09-15 · 持久化后台评分：补充 worker 启动、心跳诊断、租约恢复、用户动作、验收与回滚步骤；迁移 head 不变。
