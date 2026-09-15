@@ -28,6 +28,7 @@ dependencies = [
   "supabase>=2.0.0,<3.0.0",
   "typer>=0.23.2",
   "uvicorn[standard]>=0.27.1",
+  "vercel-queue>=0.8.1",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,9 @@ pgs = "backend.app.cli.main:run"
 
 [tool.vercel.scripts]
 build = "python scripts/build_web_static.py"
+
+[[tool.vercel.subscribers]]
+entrypoint = "backend.app.services.batch_scoring.vercel_queue:score_batch_item"
 
 [dependency-groups]
 dev = [

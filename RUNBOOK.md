@@ -868,14 +868,16 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 ### 2026-09-15 持久化后台评分
 
-操作流程：前端创建 score job 后立即跳到 `/workbench/tasks/:batchId/run`；常驻执行器用 `.venv/bin/python -m backend.app.scripts.run_batch_worker --poll-seconds 3` 领取任务并周期更新 heartbeat。评分任务列表的“评分中”状态和进度条均可进入该页，页面顶部另设“正在评分”入口进入 `/workbench/tasks/running`。运行列表展示 queued/running/cancel_requested，以及 24 小时内的 completed_with_errors/failed。详情页轮询 latest job，展示批次名称、评分标准、开始/更新时间、总数、待处理、运行、成功、失败、取消、最后心跳及逐材料状态；不展示论文正文。单次模型调用保留有限超时和分类重试，整批不受 Vercel 300 秒限制。
+操作流程：前端创建 score job 后立即跳到 `/workbench/tasks/:batchId/run`；API 为每个 pending item 发布 `batch-scoring-items` 消息，Vercel 私有 Python subscriber 一次处理一份材料并周期更新 heartbeat。评分任务列表的“评分中”状态和进度条均可进入该页，页面顶部另设“正在评分”入口进入 `/workbench/tasks/running`。运行列表展示 queued/running/cancel_requested，以及 24 小时内的 completed_with_errors/failed。详情页轮询 latest job，展示批次名称、评分标准、开始/更新时间、总数、待处理、运行、成功、失败、取消、最后心跳及逐材料状态；不展示论文正文。整批可跨越 300 秒，单份材料仍必须在一次 Vercel 函数期限内完成。
 
-Render 生产 worker 由根目录 `render.yaml` 定义，Docker 启动命令为 `python -m backend.app.scripts.run_batch_worker --poll-seconds 3`。创建时必须从受控生产配置填入 `DATABASE_URL`、`AUTH_PASSWORD`、`SUPABASE_URL`、`SUPABASE_SECRET_KEY`、`SUPABASE_STORAGE_BUCKET` 与 `BYOK_MASTER_KEY`；不得在终端输出或提交这些值。`AUTH_ENABLED=true` 与 `LLM_FALLBACK_TO_MOCK=false` 是运行安全边界：缺少平台/BYOK 模型或真实调用失败时必须记录失败，不得生成 Mock 假分。worker 不执行 Alembic，数据库迁移仍只走现有受控工作流。
+生产只部署 Vercel。`pyproject.toml` 的 `[[tool.vercel.subscribers]]` 指向 `backend.app.services.batch_scoring.vercel_queue:score_batch_item`；Vercel 构建必须显示队列 subscriber 已生成。平台自动注入 OIDC，生产消息按 deployment 隔离，不新增队列密钥。`AUTH_ENABLED=true` 与 `LLM_FALLBACK_TO_MOCK=false` 仍是运行安全边界：缺少平台/BYOK 模型或真实调用失败时必须记录失败，不得生成 Mock 假分。数据库迁移仍只走现有受控工作流。
 
-诊断顺序：先查看详情页的状态、最后心跳和失败项；再查 worker 日志中的 job 级异常摘要，不记录原文或密钥。heartbeat 在 120 秒租约内时禁止第二 runner；过期后页面显示“执行中断，等待恢复”，worker 自动领取，running item 回到 pending 并从持久化检查点继续。执行器捕获到材料外异常时，未完成项会落为 `worker_failure`、批次退出 scoring；日志保留异常栈，页面只给安全提示。失败重试只恢复 failed/canceled/running 项，`rescore=false` 时不得覆盖已有有效结果。Vercel 上直接调用 `/batch-scoring-jobs/{id}/run` 返回 409 是预期保护，不表示 worker 故障。
+诊断顺序：先查看详情页的状态、最后心跳和失败项；再在 Vercel Logs 按 `batch_scoring_dispatched`、`batch_scoring_item_started`、`batch_scoring_item_finished` 或 `batch_scoring_dispatch_failed` 查询，只使用 job/item ID 关联，不记录原文或密钥。heartbeat 在 120 秒内表示至少一个消费者最近仍活动；Vercel 硬终止会留下 running item，队列在函数失败后重投，330 秒 item 租约过期后重新领取并从持久化结果恢复。模型/材料异常落为失败项，失败重试只恢复 failed/canceled/running 项，`rescore=false` 时不得覆盖已有有效结果。直接调用 `/batch-scoring-jobs/{id}/run` 返回 409 是预期保护。
 
 操作权限：运行中允许“取消剩余任务”，只影响未开始材料；完成含异常后允许“重试失败项”；正常运行时不显示人工接管按钮；心跳未过期时禁止重启。任务完成后主按钮切换为“查看评分结果”，聚合页默认移除已完成任务，任务详情仍可从批次历史进入。
 
-验收至少覆盖：开始请求快速返回并跳转运行详情；列表“评分中”和进度均可跳转；聚合页只列活跃或待恢复任务；关闭浏览器后任务继续；三份/42 次调用可跨越 300 秒完成；强制终止 worker 后页面识别心跳过期，租约恢复且不重复有效结果；模型 429/5xx 与材料失败逐项可见；完成、含异常、取消三种终态正确；按钮权限与状态一致；生产日志和页面不含正文与非必要身份信息。回滚时先停止新 worker 领取，再将前端入口恢复到上一版本；不得回滚或删除已生成的 job、item、评分结果与审计记录。
+验收至少覆盖：Vercel 构建识别 subscriber；开始请求快速返回并跳转运行详情；每个 item 仅发布 ID 消息；列表“评分中”和进度均可跳转；关闭浏览器后任务继续；三份/42 次调用可跨越 300 秒完成；强制终止单份函数后消息重投、330 秒后恢复且不重复有效结果；模型 429/5xx 与材料失败逐项可见；完成、含异常、取消三种终态正确；生产日志和页面不含正文与非必要身份信息。回滚时先将新建任务入口置为不可用或回滚代码，再撤销 subscriber 版本；保留 job、item、评分结果和审计数据，不执行数据库降级。
 
 维护记录：2026-09-15 · 持久化后台评分：补充 worker 启动、心跳诊断、租约恢复、用户动作、验收与回滚步骤；迁移 head 不变。
+
+维护记录：2026-09-15 · Vercel-only 后台评分：生产操作改为 Queues Python subscriber，补充投递、函数超时恢复、日志、验收与回滚；删除 Render 步骤。

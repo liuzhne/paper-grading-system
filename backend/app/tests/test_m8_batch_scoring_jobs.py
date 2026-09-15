@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -213,6 +214,138 @@ def test_worker_cycle_executes_a_queued_job(client):
         assert completed.skipped_count == 1
         assert completed.batch.status == "scored"
     assert worker.run_worker_cycle(client.session_factory) is False
+
+
+def test_vercel_queue_dispatches_each_pending_item_with_stable_identity(
+    client, monkeypatch
+):
+    jobs = _jobs_module()
+    queue = importlib.import_module(
+        "backend.app.services.batch_scoring.vercel_queue"
+    )
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=2, name="queue dispatch"
+        )
+        job, _ = jobs.create_batch_scoring_job(
+            session,
+            batch_id=batch_id,
+            rescore=False,
+            max_workers=2,
+            observation_policy=None,
+            actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+
+    sent = []
+
+    async def fake_send(topic, payload, **options):
+        sent.append((topic, payload, options))
+        return f"message-{len(sent)}"
+
+    monkeypatch.setenv("BATCH_SCORING_DISPATCH", "vercel_queue")
+    monkeypatch.setattr(queue, "send", fake_send)
+    message_ids = asyncio.run(queue.dispatch_batch_scoring_job(job))
+
+    assert message_ids == ["message-1", "message-2"]
+    assert {value[1]["item_id"] for value in sent} == {
+        item.id for item in job.items
+    }
+    assert all(value[0] == queue.SCORING_TOPIC for value in sent)
+    assert all(value[2]["retention"] == 86400 for value in sent)
+    assert all(value[2]["idempotency_key"].endswith("-0") for value in sent)
+
+
+def test_vercel_queue_item_checkpoint_completes_job(client):
+    jobs = _jobs_module()
+    with client.session_factory() as session:
+        batch_id, rubric_id, paper_ids = _seed_batch(
+            session, count=1, name="queue item"
+        )
+        session.add(
+            models.ScoringRun(
+                paper_id=paper_ids[0],
+                rubric_id=rubric_id,
+                status="scored",
+                ai_total_score=8,
+                final_total_score=8,
+                grade="通过",
+                need_manual_review=False,
+            )
+        )
+        session.commit()
+        job, _ = jobs.create_batch_scoring_job(
+            session,
+            batch_id=batch_id,
+            rescore=False,
+            max_workers=2,
+            observation_policy=None,
+            actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        job_id = job.id
+        item_id = job.items[0].id
+
+    completed = jobs.run_batch_scoring_item(
+        client.session_factory,
+        job_id=job_id,
+        item_id=item_id,
+    )
+
+    assert completed.status == "completed"
+    assert completed.skipped_count == 1
+    assert completed.pending_count == 0
+    assert completed.items[0].attempt_count == 1
+    with client.session_factory() as session:
+        assert session.get(models.GradingBatch, batch_id).status == "scored"
+
+
+def test_vercel_queue_reclaims_stale_item_without_duplicate_score(client):
+    jobs = _jobs_module()
+    with client.session_factory() as session:
+        batch_id, rubric_id, paper_ids = _seed_batch(
+            session, count=1, name="queue stale recovery"
+        )
+        run = models.ScoringRun(
+            paper_id=paper_ids[0],
+            rubric_id=rubric_id,
+            status="scored",
+            ai_total_score=8,
+            final_total_score=8,
+            grade="通过",
+            need_manual_review=False,
+        )
+        session.add(run)
+        session.flush()
+        job, _ = jobs.create_batch_scoring_job(
+            session,
+            batch_id=batch_id,
+            rescore=True,
+            max_workers=2,
+            observation_policy=None,
+            actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        item = job.items[0]
+        item.status = "running"
+        item.attempt_count = 1
+        item.baseline_scoring_run_id = None
+        item.started_at = datetime(2020, 1, 1)
+        job.status = "running"
+        job.batch.status = "scoring"
+        session.commit()
+        job_id = job.id
+        item_id = item.id
+        run_id = run.id
+
+    completed = jobs.run_batch_scoring_item(
+        client.session_factory,
+        job_id=job_id,
+        item_id=item_id,
+    )
+
+    assert completed.status == "completed"
+    assert completed.items[0].attempt_count == 2
+    assert completed.items[0].scoring_run_id == run_id
+    with client.session_factory() as session:
+        assert session.query(models.ScoringRun).count() == 1
 
 
 def test_worker_level_exception_persists_retryable_terminal_state(client, monkeypatch):

@@ -1,4 +1,5 @@
 import os
+import logging
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -22,10 +23,23 @@ from backend.app.services.batch_scoring.jobs import get_latest_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import list_attention_batch_scoring_jobs
 from backend.app.services.batch_scoring.jobs import retry_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import run_batch_scoring_job
+from backend.app.services.batch_scoring.vercel_queue import dispatch_batch_scoring_job
 from backend.app.services.dev_user import ensure_dev_user
 
 
 router = APIRouter(tags=["batch-scoring-jobs"])
+logger = logging.getLogger("batch-scoring-jobs")
+
+
+async def _dispatch_or_503(job):
+    try:
+        await dispatch_batch_scoring_job(job)
+    except Exception as exc:
+        logger.exception("batch_scoring_dispatch_failed job_id=%s", job.id)
+        raise HTTPException(
+            status_code=503,
+            detail="后台评分任务暂未进入执行队列，请稍后重新开始。",
+        ) from exc
 
 
 def _batch_or_404(
@@ -70,7 +84,7 @@ def list_attention_jobs(
     response_model=BatchScoringJobRead,
     status_code=201,
 )
-def create_job(
+async def create_job(
     batch_id: str,
     payload: BatchScoringJobCreate,
     response: Response,
@@ -94,6 +108,7 @@ def create_job(
         detail = str(exc)
         status = 404 if detail == "batch not found" else 409 if "active" in detail else 400
         raise HTTPException(status_code=status, detail=detail) from exc
+    await _dispatch_or_503(job)
     response.status_code = 201 if created else 200
     return job
 
@@ -147,7 +162,7 @@ def cancel_job(
     "/batch-scoring-jobs/{job_id}/retry",
     response_model=BatchScoringJobRead,
 )
-def retry_job(
+async def retry_job(
     job_id: str,
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
@@ -155,10 +170,12 @@ def retry_job(
     try:
         _job_or_404(db, job_id, principal)
         require_organization_role(principal, "org_admin", "teacher")
-        return retry_batch_scoring_job(db, job_id)
+        job = retry_batch_scoring_job(db, job_id)
     except ValueError as exc:
         status = 404 if "not found" in str(exc) else 409
         raise HTTPException(status_code=status, detail=str(exc)) from exc
+    await _dispatch_or_503(job)
+    return job
 
 
 @router.post(
@@ -173,7 +190,7 @@ def run_job(
     if os.getenv("VERCEL"):
         raise HTTPException(
             status_code=409,
-            detail="生产评分由后台执行器领取；请查看任务进度，无需在请求中启动。",
+            detail="生产评分由 Vercel 后台执行器通过队列逐份领取；请查看任务进度，无需在请求中启动。",
         )
     _job_or_404(db, job_id, principal)
     require_organization_role(principal, "org_admin", "teacher")

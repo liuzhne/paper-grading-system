@@ -16,6 +16,8 @@ from datetime import timedelta
 from decimal import Decimal
 from decimal import InvalidOperation
 from math import ceil
+from threading import Event
+from threading import Thread
 from time import monotonic
 import uuid
 
@@ -47,6 +49,7 @@ POLICY_SCHEMA_VERSION = "core-cutover-observation-policy@1"
 METRICS_SCHEMA_VERSION = "batch-observation-metrics@1"
 RUNNER_LEASE_SECONDS = 120
 RUNNER_HEARTBEAT_SECONDS = 15
+QUEUE_ITEM_LEASE_SECONDS = 330
 ATTENTION_FAILURE_HOURS = 24
 
 _THRESHOLD_DIRECTIONS = {
@@ -970,6 +973,180 @@ def _heartbeat_job(session_factory, job_id, runner_token):
         session.commit()
 
 
+def _heartbeat_queue_job(session_factory, job_id):
+    """Refresh the user-visible heartbeat for independently queued items."""
+    with session_factory() as session:
+        job = session.scalar(
+            select(BatchScoringJob)
+            .where(BatchScoringJob.id == job_id)
+            .with_for_update()
+        )
+        if job is None or job.status not in ("running", "cancel_requested"):
+            return False
+        job.heartbeat_at = utcnow()
+        session.commit()
+        return True
+
+
+def _finalize_queue_job_if_settled(session_factory, job_id):
+    """Aggregate one queue item's checkpoint and close a settled job."""
+    with session_factory() as session:
+        job = session.scalar(
+            select(BatchScoringJob)
+            .where(BatchScoringJob.id == job_id)
+            .options(selectinload(BatchScoringJob.items))
+            .with_for_update()
+        )
+        if job is None:
+            raise ValueError("batch scoring job not found")
+        if job.status in TERMINAL_JOB_STATUSES:
+            return get_batch_scoring_job(session, job.id)
+
+        now = utcnow()
+        if job.status == "cancel_requested" and not any(
+            item.status == "running" for item in job.items
+        ):
+            for item in job.items:
+                if item.status == "pending":
+                    item.status = "canceled"
+                    item.finished_at = now
+
+        _set_job_counts(job)
+        if job.pending_count or job.running_count:
+            job.heartbeat_at = now
+            session.commit()
+            return get_batch_scoring_job(session, job.id)
+
+        if job.canceled_count:
+            job.status = "canceled"
+        elif job.failed_count:
+            job.status = "completed_with_errors"
+        elif job.succeeded_count or job.skipped_count:
+            job.status = "completed"
+        else:
+            job.status = "failed"
+        job.finished_at = now
+        job.runner_token = None
+        job.heartbeat_at = now
+        metrics = _aggregate_metrics(job)
+        job.metrics_snapshot = {
+            "schema_version": METRICS_SCHEMA_VERSION,
+            **metrics,
+            "gate": evaluate_observation_policy(job.observation_policy, metrics),
+        }
+        batch = session.get(GradingBatch, job.grading_batch_id)
+        if batch is not None:
+            if job.status == "completed":
+                batch_state.apply_event(session, batch, "finish_scoring", outcome="scored")
+            elif job.status == "completed_with_errors":
+                batch_state.apply_event(
+                    session, batch, "finish_scoring", outcome="scored_with_errors"
+                )
+            elif job.status in ("canceled", "failed") and batch.status == "scoring":
+                batch_state.apply_event(session, batch, "cancel")
+        session.commit()
+        return get_batch_scoring_job(session, job.id)
+
+
+def _claim_queue_item(session_factory, *, job_id, item_id):
+    """Claim one queue-delivered item, recovering a platform-timeout checkpoint."""
+    with session_factory() as session:
+        job = session.scalar(
+            select(BatchScoringJob)
+            .where(BatchScoringJob.id == job_id)
+            .options(selectinload(BatchScoringJob.items))
+            .with_for_update()
+        )
+        if job is None:
+            raise ValueError("batch scoring job not found")
+        item = next((value for value in job.items if value.id == item_id), None)
+        if item is None:
+            raise ValueError("batch scoring item not found")
+        if item.status in ("succeeded", "skipped", "failed", "canceled"):
+            return None
+        now = utcnow()
+        if job.status in TERMINAL_JOB_STATUSES:
+            return None
+        if job.status == "cancel_requested":
+            item.status = "canceled"
+            item.finished_at = now
+            _set_job_counts(job)
+            session.commit()
+            return None
+        if item.status == "running":
+            lease_cutoff = now - timedelta(seconds=QUEUE_ITEM_LEASE_SECONDS)
+            if item.started_at is not None and item.started_at > lease_cutoff:
+                raise ValueError("batch scoring item lease is still active")
+            item.status = "pending"
+            item.finished_at = None
+
+        if item.attempt_count == 0:
+            item.baseline_scoring_run_id = session.scalar(
+                select(ScoringRun.id)
+                .where(ScoringRun.paper_id == item.paper_id)
+                .order_by(ScoringRun.created_at.desc(), ScoringRun.id.desc())
+                .limit(1)
+            )
+        item.status = "running"
+        item.attempt_count += 1
+        item.started_at = now
+        item.finished_at = None
+        job.status = "running"
+        job.started_at = job.started_at or now
+        job.finished_at = None
+        job.heartbeat_at = now
+        batch = session.get(GradingBatch, job.grading_batch_id)
+        if batch is not None and batch.status != "scoring":
+            batch_state.apply_event(session, batch, "start_scoring")
+        _set_job_counts(job)
+        paper_id = item.paper_id
+        session.commit()
+        return paper_id
+
+
+def run_batch_scoring_item(
+    session_factory,
+    *,
+    job_id,
+    item_id,
+    score_item=None,
+):
+    """Run one idempotent queue checkpoint within a Vercel function."""
+    score_item = score_item or _default_score_item
+    paper_id = _claim_queue_item(
+        session_factory,
+        job_id=job_id,
+        item_id=item_id,
+    )
+    if paper_id is None:
+        return _finalize_queue_job_if_settled(session_factory, job_id)
+
+    stop_heartbeat = Event()
+
+    def heartbeat_loop():
+        while not stop_heartbeat.wait(RUNNER_HEARTBEAT_SECONDS):
+            if not _heartbeat_queue_job(session_factory, job_id):
+                return
+
+    heartbeat = Thread(target=heartbeat_loop, daemon=True)
+    heartbeat.start()
+    try:
+        result = _worker(
+            session_factory,
+            score_item,
+            paper_id=paper_id,
+            job_id=job_id,
+        )
+    except Exception as exc:  # paper/provider failures are durable item results
+        _checkpoint_result(session_factory, item_id, error=exc)
+    else:
+        _checkpoint_result(session_factory, item_id, result=result)
+    finally:
+        stop_heartbeat.set()
+        heartbeat.join(timeout=1)
+    return _finalize_queue_job_if_settled(session_factory, job_id)
+
+
 def run_batch_scoring_job(
     session_factory,
     *,
@@ -1111,6 +1288,7 @@ __all__ = [
     "list_attention_batch_scoring_jobs",
     "next_runnable_batch_scoring_job_id",
     "retry_batch_scoring_job",
+    "run_batch_scoring_item",
     "run_batch_scoring_job",
     "validate_observation_policy",
 ]
