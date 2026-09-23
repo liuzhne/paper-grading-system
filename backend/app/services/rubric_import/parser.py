@@ -9,44 +9,13 @@ from backend.app.services.document_parser.format_resolver import resolve_default
 from backend.app.services.rubric_import.compiler import annotations_for_criterion
 from backend.app.services.rubric_import.compiler import compile_criterion_rules
 from backend.app.services.rubric_import.docx_comments import parse_comments
+from backend.app.services.rubric_import.extraction.table_extractor import HEADER_ALIASES  # noqa: F401
+from backend.app.services.rubric_import.extraction.table_extractor import ImportedCriterion  # noqa: F401
+from backend.app.services.rubric_import.extraction.table_extractor import _criterion_from_row
+from backend.app.services.rubric_import.extraction.table_extractor import _find_header
+from backend.app.services.rubric_import.extraction.table_extractor import _normalize
+from backend.app.services.rubric_import.extraction.table_extractor import _parse_sub_checks  # noqa: F401
 
-
-HEADER_ALIASES = {
-    "code": ["编号", "指标编号", "评分项编号", "代码", "code", "criterion_code"],
-    # 部分院校模板把稳定标识和满分合并在“打分项”文本中，例如
-    # “指导教师成绩项1（20分）”。它不是评分项名称，需单独识别。
-    "item_label": ["打分项", "成绩项"],
-    "name": [
-        "评分项",
-        "评分指标",
-        "评价内容",
-        "指标",
-        "评价项目",
-        "项目",
-        "name",
-        "criterion",
-    ],
-    "max_score": ["分值", "满分", "分数", "最高分", "权重分", "max_score", "score", "points"],
-    "weight": ["权重", "weight"],
-    "description": [
-        "说明",
-        "评分说明",
-        "评价标准",
-        "评分标准",
-        "标准说明",
-        "具体要求",
-        "描述",
-        "description",
-    ],
-    "evidence_hints": ["依据", "证据", "证据提示", "章节依据", "相关章节", "关键词", "evidence_hints"],
-    "deduction_rules": ["扣分规则", "扣分点", "扣分说明", "扣分原因", "deduction_rules"],
-    "display_order": ["顺序", "排序", "display_order"],
-    "criterion_type": ["类型", "判定类型", "评分类型", "判定方式", "type"],
-    "applies_to": ["适用范围", "适用章节", "作用范围", "范围", "applies_to"],
-    "rubric_levels": ["分档", "档位", "等级标准", "评分档次", "rubric_levels"],
-    "dimension": ["维度", "评价维度", "评分维度", "所属维度", "dimension"],
-    "sub_checks": ["子检查", "子项", "子检查项", "混合子项", "子项检查", "sub_checks"],
-}
 
 TEMPLATE_HINTS = [
     "中文摘要",
@@ -72,25 +41,6 @@ TEMPLATE_HINTS = [
 
 
 @dataclass
-class ImportedCriterion:
-    code: str
-    name: str
-    max_score: float
-    weight: float | None
-    description: str | None
-    evidence_hints: list[str]
-    deduction_rules: list[str]
-    display_order: int
-    criterion_type: str = "llm_judgment"
-    scoring_mode: str = "llm_direct"
-    applies_to: str = "global"
-    rubric_levels: list = field(default_factory=list)
-    sub_checks: list = field(default_factory=list)
-    dimension: str | None = None
-    deduction_rules_structured: list = field(default_factory=list)
-
-
-@dataclass
 class RubricImport:
     total_score: float
     criteria: list[ImportedCriterion]
@@ -100,6 +50,7 @@ class RubricImport:
 
 
 def parse_rubric_files(rules_bytes: bytes, template_bytes: bytes | None = None, scorer=None):
+    """CLI 离线评分使用的旧导入入口（Web 导入只走 ``pipeline.prepare_file_import``）。"""
     warnings = []
     template_summary = (
         parse_word_template(template_bytes)
@@ -189,78 +140,6 @@ def parse_excel_rules(rules_bytes):
     return criteria, warnings
 
 
-def _find_header(rows):
-    for index, row in enumerate(rows[:15]):
-        normalized = [_normalize_header(cell) for cell in row]
-        mapping = {}
-        used_columns = set()
-        for field, aliases in HEADER_ALIASES.items():
-            for alias in aliases:
-                alias_norm = _normalize_header(alias)
-                for col, value in enumerate(normalized):
-                    if col in used_columns:
-                        continue
-                    if value and (value == alias_norm or alias_norm in value):
-                        mapping[field] = col
-                        used_columns.add(col)
-                        break
-                if field in mapping:
-                    break
-        if "name" in mapping and (
-            "max_score" in mapping or "item_label" in mapping
-        ):
-            return index, mapping
-    return None, {}
-
-
-def _criterion_from_row(row, mapping, order):
-    item_label = _value(row, mapping.get("item_label"))
-    name = _value(row, mapping.get("name")) or item_label
-    if not name or name in {"合计", "总分", "总计"}:
-        return None
-    max_score = _parse_score(_value(row, mapping.get("max_score")))
-    if max_score is None:
-        max_score = _parse_embedded_max_score(item_label)
-    if max_score is None:
-        return None
-
-    code = (
-        _value(row, mapping.get("code"))
-        or _code_from_item_label(item_label)
-        or "C%02d" % order
-    )
-    description = _value(row, mapping.get("description"))
-    evidence_hints = _split_items(_value(row, mapping.get("evidence_hints")))
-    deduction_rules = _split_items(_value(row, mapping.get("deduction_rules")))
-    weight = _parse_score(_value(row, mapping.get("weight"))) if "weight" in mapping else None
-    parsed_order = _parse_score(_value(row, mapping.get("display_order")))
-    display_order = int(parsed_order if parsed_order is not None else order)
-    criterion_type = _parse_type(_value(row, mapping.get("criterion_type")))
-    applies_to = _parse_applies_to(_value(row, mapping.get("applies_to")))
-    rubric_levels = _parse_bands(_value(row, mapping.get("rubric_levels")))
-    scoring_mode = "banded" if rubric_levels else "llm_direct"
-    dimension = _value(row, mapping.get("dimension"))
-    sub_checks = _parse_sub_checks(_raw_value(row, mapping.get("sub_checks")))
-    if sub_checks:
-        criterion_type = "hybrid"  # 提供子检查即启用混合制（设计§2/§6.3）
-    return ImportedCriterion(
-        code=str(code),
-        name=str(name),
-        max_score=max_score,
-        weight=weight,
-        description=description,
-        evidence_hints=evidence_hints,
-        deduction_rules=deduction_rules,
-        display_order=display_order,
-        criterion_type=criterion_type,
-        scoring_mode=scoring_mode,
-        applies_to=applies_to,
-        rubric_levels=rubric_levels,
-        sub_checks=sub_checks,
-        dimension=dimension,
-    )
-
-
 def _rows_with_merged_values(sheet):
     """Return worksheet rows while expanding merged-cell top-left values.
 
@@ -282,20 +161,6 @@ def _rows_with_merged_values(sheet):
         )
         for row in sheet.iter_rows()
     ]
-
-
-def _parse_embedded_max_score(value):
-    if not value:
-        return None
-    match = re.search(r"[（(]\s*(\d+(?:\.\d+)?)\s*分\s*[）)]", str(value))
-    return float(match.group(1)) if match else None
-
-
-def _code_from_item_label(value):
-    if not value:
-        return None
-    match = re.search(r"指导教师(?:成绩|评分)项\s*(\d+)", str(value))
-    return "T%02d" % int(match.group(1)) if match else None
 
 
 def _enrich_with_template(criterion, template_summary):
@@ -364,118 +229,6 @@ def _looks_like_template_title(text, style_name):
     if re.match(r"^(第[一二三四五六七八九十\d]+[章节]|[一二三四五六七八九十\d]+[、.．])", text):
         return True
     return any(hint == text or hint in text for hint in TEMPLATE_HINTS)
-
-
-def _value(row, index):
-    if index is None or index >= len(row):
-        return None
-    value = row[index]
-    if value is None:
-        return None
-    return _normalize(value)
-
-
-def _raw_value(row, index):
-    """取原始单元格文本，**保留换行**（子检查按行分隔，不能被空白折叠）。"""
-    if index is None or index >= len(row):
-        return None
-    value = row[index]
-    return None if value is None else str(value)
-
-
-def _parse_type(value):
-    if not value:
-        return "llm_judgment"
-    text = str(value)
-    if any(token in text for token in ["确定", "自动", "规则", "deterministic"]):
-        return "deterministic"
-    if any(token in text for token in ["混合", "hybrid"]):
-        return "hybrid"
-    return "llm_judgment"
-
-
-def _parse_sub_checks(value):
-    """解析混合制子检查列。每行一个子检查，字段以 `|`（或 `｜`）分隔：`名称 | 类型 | 分值`。
-
-    类型缺省为语义判断（llm_judgment），含"确定/规则/自动/deterministic"则为确定性子检查（不调 LLM）。
-    产出引擎可消费的 `{kind,name,criteria,max_points}` 列表（见 engine._make_sub_criterion）。
-    """
-    if not value:
-        return []
-    items = []
-    for line in re.split(r"[\n;；]+", str(value)):
-        line = line.strip()
-        if not line:
-            continue
-        parts = [part.strip() for part in re.split(r"[|｜]", line)]
-        name = parts[0] if parts else ""
-        if not name:
-            continue
-        kind = _parse_sub_kind(parts[1]) if len(parts) > 1 else "llm_judgment"
-        max_points = _parse_score(parts[2]) if len(parts) > 2 else 0.0
-        items.append(
-            {"kind": kind, "name": name, "criteria": name, "max_points": float(max_points or 0)}
-        )
-    return items
-
-
-def _parse_sub_kind(value):
-    if value and any(token in str(value) for token in ["确定", "规则", "自动", "deterministic", "det"]):
-        return "deterministic"
-    return "llm_judgment"
-
-
-def _parse_applies_to(value):
-    if not value:
-        return "global"
-    text = _normalize(value)
-    if text in {"全局", "整体", "全文", "通用", "global"}:
-        return "global"
-    return text
-
-
-def _parse_bands(value):
-    if not value:
-        return []
-    text = str(value)
-    pairs = re.findall(r"([一-鿿A-Za-z]+)\s*[:：]?\s*(\d+(?:\.\d+)?)", text)
-    if pairs:
-        return [{"label": label, "points": float(points)} for label, points in pairs]
-    return [{"raw": _normalize(text)}]
-
-
-def _parse_score(value):
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    match = re.search(r"\d+(?:\.\d+)?", str(value))
-    if not match:
-        return None
-    return float(match.group(0))
-
-
-def _split_items(value):
-    if not value:
-        return []
-    parts = re.split(r"[\n\r;；、]+", str(value))
-    return [part.strip() for part in parts if part and part.strip()]
-
-
-def _normalize(value):
-    if value is None:
-        return ""
-    return " ".join(str(value).strip().split())
-
-
-def _normalize_header(value):
-    """Normalize headers more aggressively than cell content.
-
-    Internal spaces in headers such as ``具  体  要  求`` are layout-only and
-    must not prevent alias matching.
-    """
-
-    return re.sub(r"\s+", "", _normalize(value)).lower()
 
 
 def _dedupe(items):

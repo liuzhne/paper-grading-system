@@ -206,3 +206,222 @@ class RubricImportResult(BaseModel):
     rubric: RubricRead
     warnings: list[str] = Field(default_factory=list)
     template_summary: dict = Field(default_factory=dict)
+    coverage: dict = Field(default_factory=dict)
+    triggers: list[dict] = Field(default_factory=list)
+    unclaimed_summary: dict = Field(default_factory=dict)
+    conflicts: list[dict] = Field(default_factory=list)
+    artifacts: list[dict] = Field(default_factory=list)
+
+
+class RubricImportCriterionDraft(BaseModel):
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    max_score: int = Field(gt=0)
+    description: Optional[str] = None
+    display_order: int = Field(default=0, ge=0)
+    source_refs: list[dict] = Field(default_factory=list)
+    parse_status: str = "parsed"
+    deleted: bool = False
+
+
+class RubricScoreAdjustment(BaseModel):
+    code: str
+    original: str
+    rounded: int
+    message: str
+
+
+class RubricImportSessionRead(BaseModel):
+    id: str
+    status: Literal["draft", "confirmed", "expired", "cancelled"]
+    state_version: int
+    rubric_id: Optional[str] = None
+    name: str
+    version: str
+    description: Optional[str] = None
+    visibility: Literal["system", "organization", "private"]
+    total_score: int = Field(ge=0)
+    criteria: list[RubricImportCriterionDraft] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    score_adjustments: list[RubricScoreAdjustment] = Field(default_factory=list)
+    files: dict = Field(default_factory=dict)
+    template_summary: dict = Field(default_factory=dict)
+    coverage: dict = Field(default_factory=dict)
+    conflicts: list[dict] = Field(default_factory=list)
+    expires_at: datetime
+
+
+class RubricImportSessionUpdate(BaseModel):
+    expected_state_version: int = Field(ge=1)
+    name: Optional[str] = Field(default=None, min_length=1)
+    version: Optional[str] = Field(default=None, min_length=1)
+    description: Optional[str] = None
+    total_score: Optional[int] = Field(default=None, gt=0)
+    criteria: Optional[list[RubricImportCriterionDraft]] = None
+
+
+class RubricImportSessionConfirm(BaseModel):
+    expected_state_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class RubricImportConflictResolve(BaseModel):
+    expected_state_version: int = Field(ge=1)
+    decision: Literal["use_excel", "use_word"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class RubricImportSessionStateRequest(BaseModel):
+    expected_state_version: int = Field(ge=1)
+
+
+class RubricImportSessionConfirmResult(BaseModel):
+    status: Literal["confirmed"]
+    import_session_id: str
+    state_version: int
+    rubric: RubricRead
+
+
+class RubricReuploadCriterionDiff(BaseModel):
+    code: str
+    name: str
+    change_type: Literal["added", "removed", "modified", "unchanged"]
+    old_max_score: Optional[float] = None
+    new_max_score: Optional[float] = None
+    old_name: Optional[str] = None
+    new_name: Optional[str] = None
+
+
+class RubricReuploadPreviewResponse(BaseModel):
+    fingerprint: str
+    file_type: Literal["rules", "template"]
+    filename: str
+    criteria_diff: list[RubricReuploadCriterionDiff] = Field(default_factory=list)
+    added_count: int = 0
+    removed_count: int = 0
+    modified_count: int = 0
+    unchanged_count: int = 0
+    invalidated_rules_count: int = 0
+    retained_rules_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RubricImportReuploadPreviewResponse(BaseModel):
+    fingerprint: str
+    criteria_diff: list[RubricReuploadCriterionDiff] = Field(default_factory=list)
+    added_count: int = 0
+    removed_count: int = 0
+    modified_count: int = 0
+    unchanged_count: int = 0
+    score_adjustments: list[RubricScoreAdjustment] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RubricImportSourcePreviewItem(BaseModel):
+    unit_id: Optional[str] = None
+    kind: Optional[str] = None
+    locator: dict = Field(default_factory=dict)
+    text: str = ""
+
+
+class RubricImportSourcePreview(BaseModel):
+    document: Literal["word", "excel"]
+    items: list[RubricImportSourcePreviewItem] = Field(default_factory=list)
+
+
+class RubricSourceFiles(BaseModel):
+    rules: Optional[str] = None
+    template: Optional[str] = None
+
+
+class RubricSourceFileMetadata(BaseModel):
+    size_bytes: int = Field(ge=0)
+    uploaded_at: datetime
+
+
+class RubricSourceFilesMetadata(BaseModel):
+    rules: Optional[RubricSourceFileMetadata] = None
+    template: Optional[RubricSourceFileMetadata] = None
+
+
+class RubricSourceReference(BaseModel):
+    kind: Optional[Literal["word", "excel"]] = None
+    sheet_name: Optional[str] = None
+    row_number: Optional[int] = None
+    locator: Optional[str] = None
+    text: Optional[str] = None
+
+
+class RubricCriterionSourceRead(BaseModel):
+    code: str
+    source_refs: list[RubricSourceReference] = Field(default_factory=list)
+    parse_status: str
+
+
+class RubricSourcePreviews(BaseModel):
+    word: list[RubricImportSourcePreviewItem] = Field(default_factory=list)
+    excel: list[RubricImportSourcePreviewItem] = Field(default_factory=list)
+
+
+class RubricSourceWorkspaceRead(BaseModel):
+    rubric_id: str
+    compilation_id: Optional[str] = None
+    files: RubricSourceFiles
+    file_metadata: RubricSourceFilesMetadata
+    criteria: list[RubricCriterionSourceRead] = Field(default_factory=list)
+    score_adjustments: list[RubricScoreAdjustment] = Field(default_factory=list)
+    previews: RubricSourcePreviews
+
+
+class RubricStepOneConfirmRequest(RubricLifecycleReason):
+    name: Optional[str] = Field(default=None, min_length=1)
+    version: str = Field(min_length=1)
+    description: Optional[str] = None
+    total_score: float = Field(gt=0)
+    business_profile_key: str = Field(default="thesis", min_length=1)
+    criteria: list[RubricCriterionCreate] = Field(min_length=1)
+
+
+
+class RuleReviewRequest(BaseModel):
+    ai_connection_id: Optional[str] = None
+    scope: Literal["priority", "all"] = "priority"
+    dry_run: bool = False
+
+
+class FindingDismissRequest(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+class StructureSuggestionRequest(BaseModel):
+    ai_connection_id: Optional[str] = None
+    dry_run: bool = False
+
+
+class StructureMergeRequest(BaseModel):
+    fingerprint: str = Field(min_length=1)
+    confirm: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
+class StructureUndoRequest(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+class UnitClassificationRequest(BaseModel):
+    unit_ids: Optional[list[str]] = Field(default=None, max_length=500)
+    ai_connection_id: Optional[str] = None
+
+
+class SourceUnitBatchResolveRequest(BaseModel):
+    unit_ids: list[str] = Field(min_length=1, max_length=500)
+    action: Literal["assign", "not_rule"]
+    reason: str = Field(min_length=1)
+    criterion_code: Optional[str] = None
+
+
+class SourceUnitResolveRequest(BaseModel):
+    action: Literal["assign", "not_rule"]
+    reason: str = Field(min_length=1)
+    criterion_code: Optional[str] = None

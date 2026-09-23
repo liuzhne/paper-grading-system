@@ -335,14 +335,18 @@ def _score_items(
         if criterion_id is None:
             raise ValueError(f"outcome criterion identity is unknown: {code}")
         status = criterion["status"]
-        # ``review_required`` is a Core criterion outcome, not a persisted
-        # score-calculation failure.  The automatic score remains valid and
-        # reviewability is represented by ``need_manual_review`` plus a null
-        # final score.  The legacy table deliberately limits this column to
-        # calculated/invalid/blocked.
-        auto_score_status = (
-            status if status in {"invalid", "blocked"} else "calculated"
-        )
+        # ``review_required`` can mean either a calculated score awaiting human
+        # confirmation or a review-only criterion that intentionally has no
+        # automatic score.  The legacy column has no review_required value, so
+        # preserve a valid calculated score when present and represent the
+        # scoreless review-only case as blocked.  This keeps the row consistent
+        # with ck_score_items_aggregation_state without inventing a score.
+        if status in {"invalid", "blocked"}:
+            auto_score_status = status
+        elif criterion["auto_score"] is None:
+            auto_score_status = "blocked"
+        else:
+            auto_score_status = "calculated"
         evidence_refs = [
             deepcopy(ref)
             for result in rule_results.get(code, [])

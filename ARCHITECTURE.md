@@ -1,6 +1,6 @@
 # 系统架构
 
-> 当前事实快照：2026-09-07。运行时为 Python 3.10+（CI/锁文件使用 3.12），Alembic head 为 `0023_rule_scoring_review_tasks`。本文描述已实现代码，不代替 Accepted ADR、数据库迁移或发布门禁。
+> 当前事实快照：2026-09-20。运行时为 Python 3.10+（CI/锁文件使用 3.12），Alembic head 为 `0031_rubric_import_sessions`。本文描述已实现代码，不代替 Accepted ADR、数据库迁移或发布门禁。
 
 ## 1. 系统边界
 
@@ -650,3 +650,117 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 维护记录：2026-09-15 · Vercel-only 后台评分：按用户部署边界改为 Vercel Queues Python subscriber，逐材料投递与执行；删除 Render 服务声明，数据库结构、评分算法、prompt 和 Core 默认边界仍不变。
 
 维护记录：2026-09-15 · 队列结果完整性：消费者在成功检查点前验证每个评分项均形成有效分数；全项无分或 invalid/blocked 的持久化运行不再复用，材料进入失败态。默认评分上下文预算收紧为 8k，避免 token 预算内的 JSON 请求触发兼容模型服务的 HTTP 413。
+
+### 2026-09-17 评分模板与评分项导入方案（待实施）
+
+方案见 [评分模板与评分项导入改进方案](docs/评分模板与评分项导入改进方案.md)。已核对 RubricsView、导入接口及 rubric_import 边界：当前仍为 Excel 必填、Word 可选批注输入，未实现 Word 正文单文件导入。目标前端固定上方 Word、下方 Excel 上传框，组合解析、来源匹配与冲突记录由后端承担，前端呈现统一评分项及确认问题。数据库迁移 head 仍为 `0030_platform_llm_config`，评分链、组织隔离、发布审核与默认 Core 边界不变；计划不代表已实现架构。
+
+维护记录：2026-09-17 · 评分模板与评分项导入方案：核对当前页面、接口、解析和生命周期边界，记录待实施设计；实现及迁移不变。
+
+### 2026-09-18 评分规则解析模块重构（待实施）
+
+方案见 [评分规则解析模块重构方案](docs/评分规则解析模块重构方案.md)。目标将 `rubric_import` 第一部分拆为三层：格式适配器（Excel/Word → 带稳定 unit_id 的 `SourceUnit`，不用 LLM）→ 抽取器（单元 → 评分项候选并为每个单元登记 consumed/context/structural/ignored_by_rule 状态，确定性优先、LLM 结构识别仅作用户确认后的兜底）→ 兜底分类器（只处理 unclaimed 单元，只影响报告）。台账与覆盖率写入 `RubricCompilation.raw_parse_output`，LLM 建议写 `raw_model_output`，合入写 `human_changes`；路由改为只调用 `prepare_file_import` 一次。第二部分结束后增加用户触发的 LLM 规则审查。当前实现未变：路由仍先 `parse_rubric_files` 再 `prepare_file_import`，迁移 head 仍为 `0030_platform_llm_config`，评分链与默认 Core 边界不变。
+
+维护记录：2026-09-18 · 评分规则解析模块重构方案：记录目标分层、单元台账数据流与持久化落点；实现及迁移不变。
+维护记录：2026-09-18 · 规则解析方案澄清：明确双文件下 Excel 结构主干与 Word 候选冲突裁决、两级未认领门禁、LLM 建议指纹防并发与审查错误豁免规则，核对当前工作区 Phase 0–1 实现与 Phase 2–3 门禁端点。
+
+### 2026-09-18 评分规则解析模块重构（已实施）
+
+按 [方案](docs/评分规则解析模块重构方案.md) 阶段 0–8 落地，迁移 head 仍为 `0030_platform_llm_config`（第一期不新增表）。
+
+- **调用链**：`POST /rubrics/import-files` 只调用一次 `pipeline.prepare_file_import`（不再先跑 `parse_rubric_files`）。`prepare_file_import` = 加载来源（`sources/xlsx_adapter`、`sources/docx_adapter` → `SourceLedger`）→ 抽取（`extraction/table_extractor`、`extraction/docx_extractor`，或用户确认的 `structure_override` → `extraction/structure_override`）→ `_assemble_file_graph`（原有评分项/原子规则组装，行为由 `tests/snapshots/rubric_parse` 快照守护）。
+- **文档角色**：仅 Excel → Excel 为 rules；仅 Word → Word 为 rules（`rules_file` 已可选）；两者都有 → Excel 为结构主干，Word 为 template，其表格/段落评分项与 Excel 比对，一致的记 `word_evidence`，分值不一致或 Excel 缺失的记 `source_conflicts`。
+- **持久化**：台账、覆盖率、触发条件、抽取摘要、冲突、结构覆盖写 `RubricCompilation.raw_parse_output`（`source_ledger`/`coverage`/`triggers`/`extraction`/`source_conflicts`/`structure_override`/`template_summary`）；LLM 结果写 `raw_model_output`（`unit_classifications`/`structure_suggestions`/`rule_review`，均带指纹）；人工处理、合入、撤销、豁免、发布时审查状态写 `human_changes`。重编译（`persist_prepared_import`）在新编译记录缺少这些键时从前一编译记录继承，门禁与建议不会因重编译失效。
+- **门禁**：`executable_validator` 新增 `unresolved_source_units`（阻断单元＝未认领的批注或带分值/扣分动词的单元，加未裁决的双文件冲突），只作用于带台账的编译记录。2026-09-20 的原型整改将前端导航调整为：第 1 步处理来源冲突，第 2 步处理未认领规则，第 3 步保留完整发布阻断，避免尚不能进入规则页就被要求处理规则。
+- **结构重新解析**：`pipeline.prepare_structure_reparse` 从台账重建原文（`sources/rebuild`，文件本身不落库）并按确认结构重新解析；草稿重编译新增 `structure_reparse` 模式，是唯一允许评分项集合变化（只增不删）的路径，仅用于导入后未人工编辑的草稿。
+- **新增端点**：`GET /rubrics/{id}/parse-coverage`、`POST /rubrics/{id}/units/{unit_id}/resolve`、`POST /rubrics/{id}/units/resolve-batch`、`POST /rubrics/{id}/unit-classifications`、`POST /rubrics/import-files/structure-suggestions`、`POST /rubrics/{id}/structure-suggestions`、`POST /rubrics/{id}/suggestions/merge`、`POST /rubrics/{id}/suggestions/undo`、`POST|GET /rubrics/{id}/rule-review`、`POST /rubrics/{id}/rule-review/findings/{finding_id}/dismiss`。LLM 端点均为用户确认后调用、复用 `_rubric_ai_scorer` 连接选择，Mock 连接一律拒绝。
+- **前端**：`RubricsView` 导入面板改为上方 Word、下方 Excel 两个上传框（至少一份），识别失败时可主动走 AI 结构预检。2026-09-20 后 `ParseCoveragePanel` 在第 1 步以 `conflictsOnly` 展示来源冲突，完整台账与 `StructureSuggestionPanel` 在第 2 步，`RuleAuditPanel` 在第 3 步；门禁与合入规则在 `lib/parse-coverage.js`。
+- CLI 离线评分仍走旧的 `parser.parse_rubric_files` + `compile_criterion_rules`（CLI 计划下线，按用户决定不改）。评分链、默认 Core 边界不变。
+
+维护记录：2026-09-18 · 评分规则解析模块重构实施：记录三层解析调用链、文档角色、持久化落点、门禁、结构重新解析路径、新增端点与前端组件。
+
+### 2026-09-20 评分模板临时导入会话与重新上传（已实施）
+
+第一步调用链为 `RubricsView/RubricImportWorkspace → /rubrics/import-sessions → rubric_import.pipeline.prepare_file_import(scorer=None) → import_sessions → rubric_import_sessions`。确定性解析只写临时会话，不创建 `Rubric`；会话保存组织/创建人、四态状态机、`state_version`、文件内容、prepared graph、可编辑草稿、冲突、换算提示和 24 小时过期时间。读取、编辑、原文预览、冲突裁决、替换和取消均复用评分标准可见性与教师/管理员写权限。
+
+确认调用链为 `/import-sessions/{id}/confirm → import_sessions.prepared_for_confirmation → pipeline.persist_prepared_import`。短事务锁定会话并校验版本/幂等键，原子创建 Rubric、评分项、来源图和首个 compilation，随后把会话标为 confirmed；任一步失败整体回滚。整数换算使用十进制 `ROUND_HALF_UP`，原值和提示保留；同一评分项下多条原子规则按 code 折叠，同 code 名称或分值冲突直接拒绝。
+
+重新上传分两层：临时会话先 `/reupload-preview` 计算指纹与评分项差异，确认后才替换草稿；正式 draft Rubric 先 `/{id}/reupload-preview` 计算评分项和规则继承差异，`/{id}/reupload-confirm` 在一个短事务中 supersede 唯一活动的未发布 compilation 并生成后继。未变化项保留人工上下文、原子规则和仍有效的确认；名称/分值变化项使用新来源且确认失效；移除项在临时草稿软删除；新增项标记待补规则。review/published Rubric 不允许覆盖，必须复制新版本。迁移 head 为 `0031_rubric_import_sessions`，`pgs_app` 表权限/RLS 和 PostgreSQL verifier 均覆盖新表。评分引擎、prompt、Profile 与默认 `legacy` 不变。
+
+维护记录：2026-09-20 · 评分模板临时导入会话：记录确定性解析、确认事务、两级重新上传、规则继承/失效和迁移 0031；核对评分链及默认 Core 边界不变。
+
+### 2026-09-20 评分标准原型对齐与分步工作流（已实施）
+
+修复后的第一步由 `RubricImportWorkspace` 统一呈现初始选择、临时会话、正式草稿和只读标准；标题按当前操作对象派生，文件卡片、评分项表、基本信息及主操作保持稳定。`ParseCoveragePanel` 第一步只显示来源冲突，第二步显示未认领规则及规则导航，第三步显示完整校验与发布检查。总分与小数换算提示可定位对应输入；重新上传成功清除旧原文预览，迟到差异响应核对当前 Rubric 后再应用。
+
+正式来源读取链为 `RubricsView.refreshDetail → api.get(/rubrics/{id}/source-workspace) → _visible_rubric → rubric_import.source_workspace.read_source_workspace`，响应使用 `RubricSourceWorkspaceRead` 与 `Cache-Control: private, no-store`。来源优先匹配活动 compilation 的文件图，必要时沿同 Rubric predecessor 寻找文件记录，再按文件哈希匹配已确认会话以补充舍入等信息；不读取文件二进制、不写数据库。旧台账缺失时复用来源行，仍无出处则返回 `unknown`，不能伪称人工新增。详细改动和分项验证见 [原型差异与执行计划](docs/评分标准原型差异与改造执行计划.md)。
+
+临时评分项编辑、新增和删除的客户端复制边界为 `toRaw(Pinia criteria) → structuredClone → PATCH import-session`；原生克隆不再接收 Vue 代理，避免请求前发生 `DataCloneError`。确认操作的客户端收据键固定为 `confirm:<session_id>`；同一会话确认响应丢失后的再次点击复用此键，由现有后端幂等合同返回同一 Rubric，不因重试生成新确认身份。
+
+本轮没有新增持久化数据结构，迁移 head 保持 `0031_rubric_import_sessions`；确认事务、重新上传指纹/继承规则、组织权限和 review/published 锁定仍由原有服务端承担。阶段性呈现调整不能放宽最终未处理来源、规则确认与最新校验的发布门禁。评分算法、prompt、Profile 和默认 `legacy` 均不变。
+
+维护记录：2026-09-20 · 评分标准原型对齐与分步工作流：已实现统一工作区、来源只读调用链、问题定位及分步门禁，补齐响应式复制与确认重试边界；后端全量 2197、来源专项 18、前端 238、受影响 E2E 96 通过（另 3 项不适用跳过），实际页面及桌面/窄屏截图已核对；数据库和评分/发布边界不变，未执行生产发布。
+
+### 2026-09-21 合并父级评分项名称解析修复
+
+XLSX 适配器继续以 `unit_id` 保留合并单元格来源；确定性表格抽取器在第一次解析后检查 `name` 列的来源，而不是按名称文本去重。同一纵向合并 `unit_id` 覆盖多个独立评分行、各行具有稳定且不同的 `item_label`/code、说明或分值不同，且没有已有 `dimension` 列时，抽取器把原 `name` 列重映射为 `dimension`，再从原始行重新抽取；评分项名称取独立 `item_label`，仅从显示名称移除已结构化的末尾分值，原文和来源单元不变。最终台账按 `Txx.dimension` 认领父单元，评分项数量、code、分值、说明和来源行保持不变。
+
+若缺少稳定子项名称或原表已有 `dimension` 列，抽取器不覆盖、不去重、不追加序号，而是在 `structure_issues` 记录 `MERGED_NAME_AMBIGUOUS`，由触发器生成 E9，进入现有“结构 LLM 建议 → 用户确认”路径。独立单元格中的同名项不会触发该逻辑；分类器 LLM、`ai_rule_drafter.py`、评分引擎、数据库模型和 Alembic head `0031_rubric_import_sessions` 均不变。
+
+维护记录：2026-09-21 · 合并父级评分项名称解析修复：核对 XLSX 来源、两遍确定性抽取、E9 结构兜底和台账认领链路；数据库、规则起草和评分边界不变。
+
+### 2026-09-21 合并父级评分项层级展示修正
+
+解析结果继续以 `dimension` 保存父级评价项目、以 `name` 保存稳定子项标识，不为缺失的短标题生成模型文本。导入工作区不再只显示 `name`：存在 dimension 时按“父维度主标题 → 可编辑子项标识 → 可见的具体要求摘要”呈现；无 dimension 的评分项保持原单层名称显示。该修正只改变前端投影，不改导入数据、规则来源、评分语义、数据库或迁移。
+
+维护记录：2026-09-21 · 合并父级评分项层级展示修正：核对导入工作区的 dimension/name/description 投影，补齐层级展示；解析和评分边界不变。
+
+### 2026-09-21 解析辅助与规则拆分步骤归位
+
+评分标准工作流第一步统一承载文件结构识别：来源覆盖率、未认领内容分类、Word/Excel 冲突、AI 表头/列用途建议及结构差异合入均在 `RubricImportWorkspace` 的 analysis 区展示；存在阻断单元或未解决冲突时不能进入第二步。第二步不再挂载解析覆盖率或结构建议组件，只保留原文规则核对、AI 扣分细则拆分、分档/等级原子规则编辑与确认。后端解析、起草端点、数据模型和迁移不变。
+
+维护记录：2026-09-21 · 解析辅助与规则拆分步骤归位：将 AI 表结构识别及未认领内容处理移至第一步，第二步收敛为原子评分规则拆分与确认。
+
+### 2026-09-21 AI 扣分细则有界输出与分批生成
+
+第二步的扣分细则起草继续按评分项调用 `draft-deduction-rules`，并在单个复杂评分项内部按待处理原文确定性拆分为最多 6 批。每批只处理 `focus_units` 指定的局部内容，最多返回 2 个规则组、每组最多 3 个互斥严重程度；组数、字符串长度、分值范围、来源枚举及来源数量同时由严格 JSON Schema 和服务端业务校验约束。各批独立校验，格式或业务字段错误只允许一次定向纠正；截断、认证、配额和传输错误不叠加业务重试。全部批次成功后才以稳定编号合并并再次执行全局校验，任一批失败都不接受残缺 JSON，也不覆盖原有条款。
+
+规则起草使用独立缺省输出预算 6144 token；若连接显式配置输出上限，则显式值继续优先。OpenAI Responses 与 OpenAI-compatible 路径都传递严格 schema；OpenRouter 专属的 reasoning 参数不发送给其他兼容厂商。`max_output_tokens`/`max_tokens` 只限制模型侧输出，代码不按字符数模拟模型 token；最终安全边界由 schema、分批与业务校验共同保证。提示词版本为 `rubric-rule-draft@6`，缓存输入版本为 `2026-09-21-1`。数据库、迁移 head `0031_rubric_import_sessions`、人工确认/发布边界和评分算法均不变。
+
+维护记录：2026-09-21 · AI 扣分细则有界输出与分批生成：记录严格 JSON Schema、6144 专用缺省预算、最多 6 批生成、双层业务校验及失败封闭边界；数据库和评分链路不变。
+
+### 2026-09-22 最终规则集合统一确认
+
+第二步的人工确认边界调整为“先定稿、后确认”。AI 起草结果仍是 non-persistent 建议；用户排除并应用建议时只经 `recompile` 形成后继 compilation，不再由 `RubricsView.applyDraft` 自动逐条审批新规则。当前评分项存在未处理 AI 建议时，`RuleReviewPanel` 继续展示原文规则但暂停确认操作；建议应用或丢弃后，面板读取后继 compilation，将原文解析规则与 AI 规则组成最终集合，由用户一次批量确认。后端仍为每条 AtomicRule 写独立审核事件，内容或评分上下文变化仍由 `review_carry.signature` 使旧确认失效，未放宽发布门禁。
+
+规则来源投影把 `ai_interpreted_user_text`、`ai_inferred` 和 `llm` 都归为 AI 来源；界面分别显示“AI 解读原文”和“AI 推断”，不再把模型解释过的原文误计为用户录入。结构化行中的 `confirmed=true` 仅表示允许该建议进入后继 compilation，正式审核仍唯一取决于 `AtomicRule.status=approved`。数据库、迁移 head `0031_rubric_import_sessions`、评分算法和已发布版本均不变。
+
+维护记录：2026-09-22 · 最终规则集合统一确认：将 AI 应用与 AtomicRule 审批分离，原文和 AI 规则在后继草稿统一确认一次，并修正 AI 解读原文的来源分类。
+
+### 2026-09-22 本地 PostgreSQL 评分执行器随 Web 启动
+
+`scripts/start-web-pg.sh` 在完成 PostgreSQL 健康检查、密钥加载和迁移后，同时启动 Uvicorn 与 `backend.app.scripts.run_batch_worker`。本地 worker 轮询数据库并领取 `queued` 或租约已过期的评分任务，复用生产消费者使用的持久化 job/item、评分、检查点、心跳、取消、失败隔离和重试逻辑；因此本地创建任务后不再依赖人工调用 `/run`。脚本统一管理两个子进程，任一退出都会终止另一方，避免形成“API 可访问但无人消费任务”的半启动状态。
+
+生产边界不变：Vercel 继续通过 Queue subscriber 按材料推送执行，本地 worker 只是同一业务执行语义的数据库轮询适配器，不模拟 Vercel 消息投递、平台重试、OIDC 或函数时限。数据库结构、Alembic head `0031_rubric_import_sessions`、评分算法、prompt、前端接口及 Core 默认边界均不变。
+
+维护记录：2026-09-22 · 本地评分 Worker 随 Web 启动：补齐 PostgreSQL 本地启动链路与 API/worker 联动退出，生产 Vercel Queue 部署及评分语义不变。
+
+### 2026-09-22 本地评分预算与规则错误诊断修复
+
+`scripts/start-web-pg.sh` 现在把 `.env.intranet` 作为宿主机 API 与 Worker 的显式运行配置源，在设置 `PGS_DISABLE_ENV_FILE=1` 之前以 export 语义加载全部字段；本机密钥文件随后只覆盖鉴权和加密密钥。脚本要求 `SCORING_CONTEXT_WINDOW_TOKENS`、`SCORING_CONTEXT_SAFETY_MARGIN_TOKENS` 与 `SCORING_EVIDENCE_TOP_K` 存在且为合法整数，并在启动摘要中输出非敏感预算。Docker Compose 与宿主机进程因此使用同一份评分配置，不再出现 Compose 看见 32768、宿主机 Core 静默使用默认 8192 的分裂状态。
+
+Core 仍以 V4 完整 EvidenceUnit 和服务端 token preflight 为安全边界，不截断权威证据。批评分在发现不完整 `ScoringRun` 时读取该 run 的 `RuleScoringTask`：优先把 `TOKEN_BUDGET_UNSATISFIABLE` 或稳定 Provider code 投影为材料级 LLM 失败，否则投影为安全的 `RULE_EXECUTION_FAILED`/`SCORING_RESULT_INCOMPLETE`。未知规则异常继续隔离为 invalid，但持久化消息与 Worker 日志只包含规则编号、稳定错误码和异常类型，不包含异常原文、论文正文、模型请求或密钥。数据库结构、Alembic head `0031_rubric_import_sessions`、评分规则、证据完整性门槛和 Vercel Queue 部署边界不变。
+
+维护记录：2026-09-22 · 本地评分预算与规则错误诊断修复：统一本地 Compose/宿主机评分配置，增加预算启动校验、材料级真实错误投影和无正文的规则异常类型日志。
+
+### 2026-09-22 评分心跳时区与复核项持久化修复
+
+批任务 API 的 `heartbeat_state` 现在把数据库返回的无时区时间明确解释为 UTC，再与 UTC 当前时间比较。PostgreSQL 继续保存既有 naive UTC 时间，不新增字段；马来西亚等非 UTC 宿主机不再把刚写入的心跳误判为超过 120 秒租约，Worker 的领取、心跳与恢复机制本身不变。
+
+Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` 的复核项仍映射为 `calculated`，`review_only` 且没有自动分数的项映射为 `blocked`，同时保留 aggregation 中的原始 `review_required`、空分数和 `need_manual_review=true`。该投影满足既有 `ck_score_items_aggregation_state`，不伪造分数、不放宽完整结果门槛，也不修改数据库约束或 Alembic head `0031_rubric_import_sessions`。
+
+批任务错误边界只承认同时声明稳定 `code` 与 `failure_kind` 的应用异常；SQLAlchemy 等第三方库的内部短码不再成为材料错误码。未知异常持久化为稳定 `scoring_failure` 和异常类型摘要，不保存 SQL、绑定参数、模型 payload 或文档文本。
+
+本地 `.env.intranet` 为缺省选项为空的平台 OpenAI-compatible 连接提供 `max_tokens=2400` 与 JSON object 响应约束；启动脚本验证 context 大于输出预算与安全余量之和，并显示非敏感预算摘要。当前 32768/2400/1024 组合保留约 29344 token 的理论输入空间。该设置不覆盖数据库中显式保存的连接选项，生产平台配置边界不变。
+
+维护记录：2026-09-22 · 评分心跳时区与复核项持久化修复：修正 naive UTC 心跳在非 UTC 主机上的展示误报，并使无自动分的 review-only 结果符合既有数据库状态约束。

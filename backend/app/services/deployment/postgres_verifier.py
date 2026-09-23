@@ -33,6 +33,7 @@ MIGRATION_SEQUENCE = (
     "0028_export_event_backfill",
     "0029_runtime_access_for_v2_tables",
     "0030_platform_llm_config",
+    "0031_rubric_import_sessions",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -66,6 +67,7 @@ def verify_postgres(session):
         "ai_usage_ledger",
         "rule_scoring_tasks",
         "manual_review_tasks",
+        "rubric_import_sessions",
     }
     missing = sorted(required_tables - tables)
     if missing:

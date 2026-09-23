@@ -4,10 +4,11 @@ import { computed, ref, watch } from "vue";
 import { draftRows, rowKey } from "@/lib/ai-draft.js";
 
 /**
- * AI 起草建议的确认面板（设计稿「扣分规则」区块，V3-2）。
+ * AI 起草建议的选择面板（设计稿「扣分规则」区块，V3-2）。
  *
  * 起草端点是 **non-persistent** 的：它返回建议，一条也不落库。所以这个面板做的
- * 是「看清、逐条排除、把最终集合交出去」，落库由调用方走 `recompile` 完成。
+ * 是「看清、逐条排除、把最终集合交出去」，落库由调用方走 `recompile` 完成；
+ * recompile 后的原文规则和 AI 规则仍要在统一规则面板完成一次最终确认。
  *
  * 逐条排除而不是逐条勾选确认：起草结果默认全部待应用，用户要做的是**挑出不要的
  * 那几条**。反过来要求逐条打勾，会让一次生成十几条规则的常见情形变成十几次点击，
@@ -59,7 +60,7 @@ function isExcluded(row) {
   return excluded.value.has(rowKey(row));
 }
 
-function confirmOne(row) {
+function applyOne(row) {
   emit("apply", new Set(rows.value.filter((item) => rowKey(item) !== rowKey(row)).map(rowKey)));
 }
 </script>
@@ -68,7 +69,7 @@ function confirmOne(row) {
   <section v-if="rows.length" class="card draft-panel" data-test="draft-panel">
     <div class="card-head">
       <div>
-        <h2 class="card-title">AI 起草的扣分规则</h2>
+        <h2 class="card-title">AI 起草建议</h2>
         <p class="card-note">
           同一问题的严重程度互斥，评分时最多命中一档。
           <span v-if="metadata" class="faint mono model">
@@ -76,7 +77,7 @@ function confirmOne(row) {
           </span>
         </p>
       </div>
-      <span class="chip chip-warn">待确认</span>
+      <span class="chip chip-warn">待应用</span>
     </div>
 
     <div class="table-wrap">
@@ -114,8 +115,8 @@ function confirmOne(row) {
               >
                 {{ isExcluded(row) ? "已排除 · 撤销" : "排除" }}
               </button>
-              <button class="btn btn-sm" type="button" data-test="confirm-one"
-                :disabled="busy || isExcluded(row)" @click="confirmOne(row)">确认</button>
+              <button class="btn btn-sm" type="button" data-test="apply-one"
+                :disabled="busy || isExcluded(row)" @click="applyOne(row)">仅应用此条</button>
             </td>
           </tr>
         </tbody>
@@ -124,7 +125,7 @@ function confirmOne(row) {
 
     <div class="card-foot foot">
       <p class="foot-note">
-        未确认的规则不会进入可执行评分版本。确认会记录确认人、时间与生成指纹。
+        应用只会形成最终规则草稿；之后统一核对原文规则和 AI 规则，确认才会记录确认人和时间。
       </p>
       <div class="btn-row">
         <button class="btn" type="button" data-test="discard" :disabled="busy" @click="emit('discard')">
@@ -137,7 +138,7 @@ function confirmOne(row) {
           :disabled="busy || !kept.length"
           @click="emit('apply', excluded)"
         >
-          {{ busy ? "应用中…" : `确认并应用（${kept.length}）` }}
+          {{ busy ? "应用中…" : `应用到最终草稿（${kept.length}）` }}
         </button>
       </div>
     </div>

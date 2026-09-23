@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -216,7 +217,12 @@ class OpenAICompatibleChatScorer(LLMScorer):
         if self.service_tier:
             body["service_tier"] = self.service_tier
         if response_schema is not None:
-            if not thinking_type or thinking_type == "disabled":
+            # ``reasoning`` is an OpenRouter extension.  Other OpenAI-compatible
+            # providers (including Google AI Studio) may reject the same field,
+            # even though they support strict ``json_schema`` output.
+            if urlparse(self.base_url).hostname == "openrouter.ai" and (
+                not thinking_type or thinking_type == "disabled"
+            ):
                 body["reasoning"] = {"enabled": False}
             # The drafting layer already permits one schema repair. Avoid multiplying
             # that by transport retries inside a synchronous serverless request.

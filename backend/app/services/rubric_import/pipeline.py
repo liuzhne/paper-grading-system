@@ -15,25 +15,39 @@ from datetime import datetime
 from datetime import timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-from io import BytesIO
 import json
 import re
 from types import MappingProxyType
 from typing import Any, Iterator
 from uuid import uuid4
 
-from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.db import models
 from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
-from backend.app.services.rubric_import.docx_comments import parse_comments
 from backend.app.services.rubric_import.compiler import analyze_rule_input
-from backend.app.services.rubric_import.parser import _criterion_from_row
-from backend.app.services.rubric_import.parser import _find_header
-from backend.app.services.rubric_import.parser import _rows_with_merged_values
+from backend.app.services.rubric_import.compiler import is_multi_judgement
+from backend.app.services.rubric_import.classification.signals import profile_signal_terms
+from backend.app.services.rubric_import.coverage import compute_coverage
+from backend.app.services.rubric_import.extraction.docx_extractor import candidate_criteria
+from backend.app.services.rubric_import.extraction.docx_extractor import extract_docx_rules
+from backend.app.services.rubric_import.extraction.docx_extractor import mark_remaining_blocks
+from backend.app.services.rubric_import.extraction.docx_extractor import table_sheets
+from backend.app.services.rubric_import.extraction.structure_override import extract_with_override
+from backend.app.services.rubric_import.extraction.structure_override import normalize_override
+from backend.app.services.rubric_import.extraction.table_extractor import TableExtraction
+from backend.app.services.rubric_import.extraction.table_extractor import extract_table
+from backend.app.services.rubric_import.extraction.table_extractor import header_aliases_for
+from backend.app.services.rubric_import.extraction.triggers import detect_triggers
 from backend.app.services.rubric_import.parser import parse_word_template
+from backend.app.services.rubric_import.sources.docx_adapter import load_docx
+from backend.app.services.rubric_import.sources.rebuild import docx_view_from_ledger
+from backend.app.services.rubric_import.sources.rebuild import sheets_from_ledger
+from backend.app.services.rubric_import.suggestions import RECORD_KEYS
+from backend.app.services.rubric_import.sources.units import SourceLedger
+from backend.app.services.rubric_import.sources.xlsx_adapter import load_xlsx
 from backend.app.services.scoring.core.policy import build_corrected_thesis_policy
 from backend.app.services.scoring.core.policy import validate_weight_configuration
 
@@ -41,6 +55,9 @@ from backend.app.services.scoring.core.policy import validate_weight_configurati
 IMPORT_SCHEMA_VERSION = "rubric-import-command@2"
 PREPARED_SCHEMA_VERSION = "prepared-rubric-graph@1"
 _DRAFT_RECOMPILE_MODE = "supersede_unpublished"
+# 按确认的结构从台账重新解析：唯一允许评分项集合增长的重编译方式（只增不删）。
+STRUCTURE_REPARSE_MODE = "structure_reparse"
+RUBRIC_REUPLOAD_MODE = "reupload"
 
 
 def _json_bytes(value: object) -> bytes:
@@ -155,7 +172,11 @@ def _draft_recompile(value: object, *, required: bool = False) -> dict | None:
         raise ValueError(
             "draft_recompile must contain only mode and supersedes_compilation_id"
         )
-    if directive.get("mode") != _DRAFT_RECOMPILE_MODE:
+    if directive.get("mode") not in (
+        _DRAFT_RECOMPILE_MODE,
+        STRUCTURE_REPARSE_MODE,
+        RUBRIC_REUPLOAD_MODE,
+    ):
         raise ValueError("unsupported draft recompile mode")
     predecessor_id = directive.get("supersedes_compilation_id")
     if not isinstance(predecessor_id, str) or not predecessor_id.strip():
@@ -403,45 +424,131 @@ def _base_graph(
     return PreparedRubricGraph.from_mapping(graph)
 
 
-def _excel_rows(rules_bytes: bytes) -> tuple[str, list[dict], list[str]]:
-    workbook = load_workbook(BytesIO(rules_bytes), data_only=True)
-    warnings: list[str] = []
-    for sheet in workbook.worksheets:
-        rows = _rows_with_merged_values(sheet)
-        header_index, mapping = _find_header(rows)
-        if header_index is not None:
-            headers = [_text(value) for value in rows[header_index]]
-            records = []
-            for row_number, values in enumerate(
-                rows[header_index + 1 :], start=header_index + 2
-            ):
-                criterion = _criterion_from_row(values, mapping, len(records) + 1)
-                if criterion is None:
-                    continue
-                # Keep every original cell for provenance, then add the
-                # canonical fields consumed by the auditable compiler.
-                record = {
-                    header: values[index] if index < len(values) else None
-                    for index, header in enumerate(headers)
-                    if header
-                }
-                record.update(
-                    {
-                        "编号": criterion.code,
-                        "评分项": criterion.name,
-                        "分值": criterion.max_score,
-                        "评分说明": criterion.description,
-                    }
-                )
-                record["__row_number__"] = row_number
-                records.append(record)
-            if records:
-                return sheet.title, records, warnings
-        warnings.append(f"工作表 {sheet.title} 未识别到评分规则表头，已跳过。")
-    raise ValueError("Excel 未解析到有效评分项，请确认包含评分项名称和分值列。")
+_EMPTY_TEMPLATE_SUMMARY = {"section_titles": [], "hints": [], "paragraph_count": 0, "format_spec": {}, "annotations": []}
 
 
-def _make_source_rule(record: dict, *, sheet_name: str, fallback_code: str) -> dict:
+def _records_from_extraction(extraction: TableExtraction, headers: list[str], locator) -> list[dict]:
+    records = []
+    for row in extraction.records:
+        values, criterion = row.values, row.criterion
+        # Keep every original cell for provenance, then add the
+        # canonical fields consumed by the auditable compiler.
+        record = {
+            header: values[index] if index < len(values) else None
+            for index, header in enumerate(headers)
+            if header
+        }
+        record.update(
+            {
+                "编号": criterion.code,
+                "评分项": criterion.name,
+                "分值": criterion.max_score,
+                "评分说明": criterion.description,
+            }
+        )
+        # Canonical projection metadata is kept outside the raw source payload:
+        # ``_make_source_rule`` deliberately excludes ``__`` keys so the source
+        # text remains exactly what the workbook contained.
+        record["__dimension__"] = criterion.dimension
+        record["__row_number__"] = row.row_number
+        record["__cell_locator__"] = locator(row)
+        records.append(record)
+    return records
+
+
+def _excel_rows(
+    rules_bytes: bytes, ledger: SourceLedger, business_profile_key: str | None = None, *, structure_override=None
+) -> tuple[str, list[dict], list[str], TableExtraction]:
+    sheets = load_xlsx(rules_bytes, ledger, doc_id="excel", doc_role="rules")
+    return _sheet_rows(sheets, ledger, business_profile_key, structure_override=structure_override)
+
+
+def _sheet_rows(sheets, ledger: SourceLedger, business_profile_key, *, structure_override=None):
+    if structure_override is not None:
+        extraction = extract_with_override(sheets, ledger, normalize_override(dict(structure_override), sheets))
+    else:
+        extraction = extract_table(sheets, ledger, header_aliases=header_aliases_for(business_profile_key))
+    sheet = next(item for item in sheets if item.title == extraction.sheet_title)
+    headers = [_text(value) for value in sheet.rows[extraction.header_index]]
+    records = _records_from_extraction(
+        extraction, headers, lambda row: _row_range(sheet.title, row.values, row.row_number)
+    )
+    return sheet.title, records, extraction.warnings, extraction
+
+
+def _word_rules_rows(view, ledger: SourceLedger, business_profile_key: str | None, profile_terms, *,
+                     structure_override=None):
+    if structure_override is not None:
+        sheets = table_sheets(view)
+        extraction = extract_with_override(sheets, ledger, normalize_override(dict(structure_override), sheets))
+        mark_remaining_blocks(view, ledger, profile_terms=profile_terms)
+    else:
+        extraction = extract_docx_rules(
+            view, ledger, header_aliases=header_aliases_for(business_profile_key), profile_terms=profile_terms
+        )
+    if extraction.header_index >= 0:
+        sheet = next(item for item in table_sheets(view) if item.title == extraction.sheet_title)
+        headers = [_text(value) for value in sheet.rows[extraction.header_index]]
+    else:
+        headers = list(extraction.headers)
+
+    def locator(row):
+        unit = next((u for u in row.unit_ids if u), "")
+        return unit.rsplit("/c", 1)[0] if "/c" in unit else unit
+
+    return extraction.sheet_title, _records_from_extraction(extraction, headers, locator), extraction.warnings, extraction
+
+
+def _word_conflicts(view, ledger: SourceLedger, records: list[dict], business_profile_key) -> tuple[list[dict], set]:
+    """双文件：Excel 为结构主干，Word 中的评分项作佐证；分值不一致或 Excel 缺失的项记为待确认冲突，
+    不自动合并、不自动取值（解析重构方案 §4.2）。"""
+
+    by_code = {_text(r.get("编号")): r for r in records if _text(r.get("编号"))}
+    by_name = {_text(r.get("评分项")): r for r in records}
+    conflicts: list[dict] = []
+    keep_unclaimed: set = set()
+    for row in candidate_criteria(view, header_aliases=header_aliases_for(business_profile_key)):
+        criterion = row.criterion
+        units = [u for u in dict.fromkeys(row.unit_ids) if u]
+        match = by_code.get(criterion.code) or by_name.get(criterion.name)
+        name_unit = next((u for u, v in zip(row.unit_ids, row.values) if u and _text(v) == criterion.name), None)
+        anchor = name_unit or (units[0] if units else None)
+        base = {
+            "word_code": criterion.code,
+            "word_name": criterion.name,
+            "word_max_score": criterion.max_score,
+            "unit_ids": units,
+            "anchor_unit_id": anchor,
+        }
+        if match is None:
+            conflicts.append(
+                {**base, "type": "word_only", "excel_code": None, "excel_max_score": None,
+                 "message": f"Word 中的评分项“{criterion.name}”在 Excel 中不存在，请确认是否需要新增。"}
+            )
+            keep_unclaimed.update(units)
+            continue
+        excel_score = float(match.get("分值") or 0)
+        if abs(excel_score - criterion.max_score) > 1e-9:
+            conflicts.append(
+                {**base, "type": "score_mismatch", "excel_code": _text(match.get("编号")),
+                 "excel_max_score": excel_score,
+                 "message": f"评分项“{criterion.name}”的分值在 Excel（{excel_score:g}）与 Word"
+                            f"（{criterion.max_score:g}）中不一致，请确认。"}
+            )
+            keep_unclaimed.update(units)
+            continue
+        for unit_id in units:
+            ledger.claim(unit_id, f"{_text(match.get('编号'))}.word_evidence")
+    return conflicts, keep_unclaimed
+
+
+def _row_range(sheet_title: str, values: tuple, row_number: int) -> str:
+    columns = [index + 1 for index, value in enumerate(values) if value is not None and _text(value)]
+    first, last = (columns[0], columns[-1]) if columns else (1, 1)
+    return f"{sheet_title}!{get_column_letter(first)}{row_number}:{get_column_letter(last)}{row_number}"
+
+
+def _make_source_rule(record: dict, *, sheet_name: str, fallback_code: str, artifact_token: str = "excel") -> dict:
     row_number = int(record["__row_number__"])
     source_code = _text(record.get("原子规则编号") or record.get("编号")) or fallback_code
     raw = {
@@ -453,9 +560,10 @@ def _make_source_rule(record: dict, *, sheet_name: str, fallback_code: str) -> d
         "source_rule_code": source_code,
         "sheet_name": sheet_name,
         "row_number": row_number,
-        "cell_locator": f"A{row_number}:{chr(64 + min(max(len(raw), 1), 26))}{row_number}",
+        "cell_locator": record.get("__cell_locator__")
+        or f"A{row_number}:{chr(64 + min(max(len(raw), 1), 26))}{row_number}",
         "raw_text": json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str),
-        "artifact_token": "excel",
+        "artifact_token": artifact_token,
     }
 
 
@@ -606,27 +714,49 @@ def _enrich_projection_from_template(
 def prepare_file_import(
     *,
     command: Mapping[str, object],
-    rules_bytes: bytes,
+    rules_bytes: bytes | None,
     template_bytes: bytes | None = None,
     scorer=None,
+    structure_override: Mapping[str, object] | None = None,
 ) -> PreparedRubricGraph:
+    """文件导入。文档角色由上传方式决定（解析重构方案 §4.2）：
+    仅 Excel → Excel 为规则文档；仅 Word → Word 为规则文档；
+    两者都有 → Excel 为结构主干，Word 为模板（佐证 + 冲突候选）。
+    ``structure_override`` 为用户确认的表格结构（E1 等识别失败时由 LLM 建议、用户确认）。"""
+
     value = _require_command(command, "file_import")
-    if not isinstance(rules_bytes, (bytes, bytearray)) or not rules_bytes:
-        raise ValueError("rules_bytes must contain an Excel workbook")
-    rules_data = bytes(rules_bytes)
-    template_data = bytes(template_bytes) if template_bytes is not None else None
-    sheet_name, records, warnings = _excel_rows(rules_data)
+    rules_data = bytes(rules_bytes) if rules_bytes else None
+    template_data = bytes(template_bytes) if template_bytes else None
+    if rules_data is None and template_data is None:
+        raise ValueError("请至少上传一份评分标准文件（Word 或 Excel）")
+    ledger = SourceLedger()
     rubric_input = deepcopy(value["rubric"])
+    profile_key = rubric_input.get("business_profile_key") or "thesis"
+    profile_terms = profile_signal_terms(profile_key)
     files = value.get("files") or {}
-    artifacts = [
-        {
-            "artifact_type": "excel",
-            "file_name": files.get("rules_file_name") or "rules.xlsx",
-            "file_hash": _digest_bytes(rules_data),
-            "file_size_bytes": len(rules_data),
-            "token": "excel",
-        }
-    ]
+    artifacts: list[dict] = []
+    word_view = None
+    source_conflicts: list[dict] = []
+    if rules_data is not None:
+        sheet_name, records, warnings, extraction = _excel_rows(
+            rules_data, ledger, profile_key, structure_override=structure_override
+        )
+        rules_token = "excel"
+        artifacts.append(
+            {
+                "artifact_type": "excel",
+                "file_name": files.get("rules_file_name") or "rules.xlsx",
+                "file_hash": _digest_bytes(rules_data),
+                "file_size_bytes": len(rules_data),
+                "token": "excel",
+            }
+        )
+    else:
+        word_view = load_docx(template_data, ledger, doc_id="word", doc_role="rules")
+        sheet_name, records, warnings, extraction = _word_rules_rows(
+            word_view, ledger, profile_key, profile_terms, structure_override=structure_override
+        )
+        rules_token = "word"
     template_items: list[dict] = []
     template_summary: dict = {}
     if template_data is not None:
@@ -639,7 +769,11 @@ def prepare_file_import(
                 "token": "word",
             }
         )
-        for index, comment in enumerate(parse_comments(template_data)):
+        if word_view is None:
+            word_view = load_docx(template_data, ledger, doc_id="word", doc_role="template")
+            source_conflicts, keep_unclaimed = _word_conflicts(word_view, ledger, records, profile_key)
+            mark_remaining_blocks(word_view, ledger, profile_terms=profile_terms, keep_unclaimed=keep_unclaimed)
+        for index, comment in enumerate(word_view.comments):
             section = _text(comment.get("section_title"))
             raw_text = _text(comment.get("comment_text"))
             template_items.append(
@@ -660,12 +794,145 @@ def prepare_file_import(
                     "artifact_token": "word",
                 }
             )
+            ledger.claim(comment["unit_id"], f"template_items.{template_items[-1]['item_code']}")
         try:
             template_summary = parse_word_template(template_data)
             rubric_input["format_spec"] = deepcopy(template_summary.get("format_spec") or {})
         except Exception as exc:  # format extraction is non-authoritative provenance
             warnings.append({"code": "TEMPLATE_FORMAT_PARSE_WARNING", "message": str(exc)})
 
+    return _assemble_file_graph(
+        value=value,
+        structure_override=(
+            normalize_override(dict(structure_override), _override_sheets(ledger))
+            if structure_override is not None else None
+        ),
+        rubric_input=rubric_input,
+        ledger=ledger,
+        sheet_name=sheet_name,
+        records=records,
+        warnings=warnings,
+        extraction=extraction,
+        rules_token=rules_token,
+        artifacts=artifacts,
+        template_items=template_items,
+        template_summary=template_summary,
+        source_conflicts=source_conflicts,
+        profile_terms=profile_terms,
+        scorer=scorer,
+    )
+
+
+def _override_sheets(ledger: SourceLedger):
+    rules_doc = next(doc for doc, role in ledger.documents().items() if role == "rules")
+    if rules_doc == "excel":
+        return sheets_from_ledger(ledger, doc_id="excel")
+    return table_sheets(docx_view_from_ledger(ledger, doc_id=rules_doc))
+
+
+def prepare_structure_reparse(
+    *,
+    command: Mapping[str, object],
+    raw_parse_output: Mapping[str, object],
+    artifacts: list[dict],
+    structure_override: Mapping[str, object] | None,
+    keep_values: list[dict] | None = None,
+    scorer=None,
+) -> PreparedRubricGraph:
+    """按确认的结构从台账重新解析（文件本身不落库，台账保存了全部原文单元）。
+
+    人工处理过的单元状态（extracted_by=human）在新台账中保留；``keep_values``
+    把未确认的修改改回当前值；Word 模板的批注条目、格式摘要沿用原编译记录。"""
+
+    value = _require_command(command, "file_import")
+    raw = deepcopy(dict(raw_parse_output))
+    previous = SourceLedger.from_mapping(raw["source_ledger"])
+    ledger = SourceLedger()
+    for unit in previous:
+        ledger.register(unit)
+    rubric_input = deepcopy(value["rubric"])
+    profile_key = rubric_input.get("business_profile_key") or raw.get("business_profile_key") or "thesis"
+    profile_terms = profile_signal_terms(profile_key)
+    documents = previous.documents()
+    rules_doc = next(doc for doc, role in documents.items() if role == "rules")
+    source_conflicts: list[dict] = []
+    if rules_doc == "excel":
+        sheet_name, records, warnings, extraction = _sheet_rows(
+            sheets_from_ledger(ledger, doc_id="excel"), ledger, profile_key, structure_override=structure_override
+        )
+    else:
+        sheet_name, records, warnings, extraction = _word_rules_rows(
+            docx_view_from_ledger(ledger, doc_id=rules_doc), ledger, profile_key, profile_terms,
+            structure_override=structure_override,
+        )
+    for keep in keep_values or []:
+        for record in records:
+            if record["__row_number__"] == keep["row_number"]:
+                kept = keep["value"]
+                if keep["field"] == "deduction_rules" and isinstance(kept, list):
+                    kept = "；".join(kept)
+                record[RECORD_KEYS[keep["field"]]] = kept
+    template_items = deepcopy(raw.get("template_items") or [])
+    template_summary = deepcopy(raw.get("template_summary") or {})
+    if documents.get("word") == "template":
+        view = docx_view_from_ledger(ledger, doc_id="word")
+        source_conflicts, keep_unclaimed = _word_conflicts(view, ledger, records, profile_key)
+        mark_remaining_blocks(view, ledger, profile_terms=profile_terms, keep_unclaimed=keep_unclaimed)
+    for item in template_items:
+        unit_id = f"docx:comment[{item['source_locator']['comment_id']}]"
+        if ledger.has(unit_id):
+            ledger.claim(unit_id, f"template_items.{item['item_code']}")
+    if template_summary.get("format_spec"):
+        rubric_input["format_spec"] = deepcopy(template_summary["format_spec"])
+    for unit in previous:
+        state = previous.status(unit.unit_id)
+        if state.extracted_by != "human" or ledger.status(unit.unit_id).status == "consumed":
+            continue
+        if state.status == "consumed":
+            for field_ref in state.claimed_by:
+                ledger.claim(unit.unit_id, field_ref, extracted_by="human")
+        else:
+            ledger.mark(unit.unit_id, state.status, reason=state.reason, extracted_by="human")
+    return _assemble_file_graph(
+        value=value,
+        structure_override=(
+            normalize_override(dict(structure_override), _override_sheets(ledger))
+            if structure_override is not None else None
+        ),
+        rubric_input=rubric_input,
+        ledger=ledger,
+        sheet_name=sheet_name,
+        records=records,
+        warnings=warnings,
+        extraction=extraction,
+        rules_token="excel" if rules_doc == "excel" else "word",
+        artifacts=deepcopy(list(artifacts)),
+        template_items=template_items,
+        template_summary=template_summary,
+        source_conflicts=source_conflicts,
+        profile_terms=profile_terms,
+        scorer=scorer,
+    )
+
+
+def _assemble_file_graph(
+    *,
+    value,
+    structure_override=None,
+    rubric_input,
+    ledger: SourceLedger,
+    sheet_name,
+    records,
+    warnings,
+    extraction,
+    rules_token,
+    artifacts,
+    template_items,
+    template_summary,
+    source_conflicts,
+    profile_terms,
+    scorer=None,
+) -> PreparedRubricGraph:
     source_rules: list[dict] = []
     criteria: list[dict] = []
     atomic_rules: list[dict] = []
@@ -674,7 +941,7 @@ def prepare_file_import(
     raw_model_output: dict = {}
     for order, record in enumerate(records):
         fallback = f"SOURCE-{order + 1:03d}"
-        source = _make_source_rule(record, sheet_name=sheet_name, fallback_code=fallback)
+        source = _make_source_rule(record, sheet_name=sheet_name, fallback_code=fallback, artifact_token=rules_token)
         source_rules.append(source)
         source_code = source["source_rule_code"]
         name = _text(record.get("评分项"))
@@ -704,6 +971,16 @@ def prepare_file_import(
 
         deduction_text = _text(record.get("扣分规则"))
         deduction_points = _parse_deduction_points(deduction_text)
+        if deduction_text and is_multi_judgement(deduction_text):
+            # 一段含多个独立判断时，按一条规则执行会只扣一次；改为待拆分，不生成可执行扣分。
+            deduction_points = None
+            blockers.append(
+                {
+                    "code": "DEDUCTION_RULE_NEEDS_SPLIT",
+                    "criterion_code": criterion_code,
+                    "message": "扣分规则包含多个独立判断，请拆分为多条规则后再执行",
+                }
+            )
         description_text = _text(record.get("评分说明"))
         checker_key = _text(record.get("checker_key")) or None
         if (
@@ -747,7 +1024,7 @@ def prepare_file_import(
             "applies_to": applies_to,
             "rubric_levels": deepcopy(levels),
             "sub_checks": [],
-            "dimension": _text(record.get("维度")) or None,
+            "dimension": _text(record.get("__dimension__") or record.get("维度")) or None,
             "deduction_rules_structured": [],
         }
         criteria.append(criterion)
@@ -859,6 +1136,7 @@ def prepare_file_import(
         "workflow_profile": rubric_input.get("workflow_profile") or "template_driven",
         "global_policy": deepcopy(rubric_input.get("global_policy") or {}),
     }
+    coverage = compute_coverage(ledger, profile_terms=profile_terms)
     return _base_graph(
         command=value,
         source_kind="file_import",
@@ -876,6 +1154,24 @@ def prepare_file_import(
             "criteria": deepcopy(criteria),
             "source_rules": deepcopy(source_rules),
             "template_items": deepcopy(template_items),
+            "source_ledger": ledger.to_mapping(),
+            "coverage": coverage,
+            "triggers": detect_triggers(extraction, ledger, coverage, profile_terms=profile_terms),
+            "template_summary": deepcopy(template_summary) if template_summary else deepcopy(_EMPTY_TEMPLATE_SUMMARY),
+            "business_profile_key": rubric["business_profile_key"],
+            "source_conflicts": source_conflicts,
+            "structure_override": deepcopy(structure_override),
+            "extraction": {
+                "sheet_title": extraction.sheet_title,
+                "header_row": extraction.header_index + 1,
+                "mapping": {name: column + 1 for name, column in extraction.mapping.items()},
+                "unmapped_columns": deepcopy(extraction.unmapped_columns),
+                "dropped_rows": deepcopy(extraction.dropped_rows),
+                "total_row": deepcopy(extraction.total_row),
+                "ignored_sheets": deepcopy(extraction.ignored_sheets),
+                "structure_issues": deepcopy(extraction.structure_issues),
+                "records": [{"row_number": row.row_number, "name": row.criterion.name} for row in extraction.records],
+            },
         },
         raw_model_output=raw_model_output,
     )
@@ -1291,8 +1587,18 @@ def prepare_legacy_draft_upgrade(*, command: Mapping[str, object]) -> PreparedRu
     )
 
 
-def _apply_projection(rubric: models.Rubric, projections: list[Mapping[str, object]]) -> dict[str, models.RubricCriterion]:
+def _apply_projection(
+    rubric: models.Rubric,
+    projections: list[Mapping[str, object]],
+    allow_removal: bool = False,
+) -> dict[str, models.RubricCriterion]:
     existing = {item.code: item for item in rubric.criteria}
+    incoming_codes = {str(value["code"]) for value in projections}
+    if allow_removal:
+        for code in list(existing.keys()):
+            if code not in incoming_codes:
+                crit = existing.pop(code)
+                rubric.criteria.remove(crit)
     result: dict[str, models.RubricCriterion] = {}
     for order, value in enumerate(projections):
         code = str(value["code"])
@@ -1301,9 +1607,9 @@ def _apply_projection(rubric: models.Rubric, projections: list[Mapping[str, obje
             criterion = models.RubricCriterion(
                 id=models.new_id(),
                 rubric_id=rubric.id,
-                rubric=rubric,
                 code=code,
             )
+            rubric.criteria.append(criterion)
             existing[code] = criterion
         criterion.name = str(value["name"])
         criterion.max_score = _decimal(value["max_score"])
@@ -1416,12 +1722,63 @@ def persist_prepared_import(
     visibility: str = "private",
     target_rubric_id: str | None = None,
     reason: str = "explicit draft recompilation",
+    file_payloads: Mapping[str, bytes] | None = None,
+    import_session_id: str | None = None,
+    import_session_state_version: int | None = None,
+    confirmation_key: str | None = None,
+    reupload_session_id: str | None = None,
+    reupload_session_state_version: int | None = None,
+    reupload_session_update: Mapping[str, object] | None = None,
 ) -> PersistedImportIdentity:
     graph = prepared.to_mapping() if isinstance(prepared, PreparedRubricGraph) else _thaw(prepared)
     if not isinstance(graph, dict) or graph.get("schema_version") != PREPARED_SCHEMA_VERSION:
         raise ValueError("persist_prepared_import requires prepared-rubric-graph@1")
     try:
         with _short_transaction(session):
+            import_session = None
+            reupload_session = None
+            if reupload_session_id is not None:
+                reupload_session = session.scalar(
+                    select(models.RubricImportSession)
+                    .where(models.RubricImportSession.id == reupload_session_id)
+                    .with_for_update()
+                )
+                if reupload_session is None or reupload_session.status != "confirmed":
+                    raise ValueError("rubric reupload source session does not exist")
+                if reupload_session.state_version != reupload_session_state_version:
+                    raise ValueError("rubric reupload source session is stale")
+                if reupload_session.rubric_id != target_rubric_id:
+                    raise ValueError("rubric reupload source session does not match target")
+            if import_session_id is not None:
+                import_session = session.scalar(
+                    select(models.RubricImportSession)
+                    .where(models.RubricImportSession.id == import_session_id)
+                    .with_for_update()
+                )
+                if import_session is None:
+                    raise ValueError("rubric import session does not exist")
+                if import_session.status == "confirmed":
+                    if import_session.confirmation_key != confirmation_key:
+                        raise ValueError("rubric import session was already confirmed")
+                    version = session.scalar(
+                        select(models.RubricVersion)
+                        .where(models.RubricVersion.rubric_id == import_session.rubric_id)
+                        .order_by(
+                            models.RubricVersion.created_at.desc(),
+                            models.RubricVersion.id.desc(),
+                        )
+                    )
+                    if version is None:
+                        raise ValueError("confirmed import session has no rubric version")
+                    return PersistedImportIdentity(
+                        str(import_session.rubric_id),
+                        version.compilation_id,
+                        version.id,
+                    )
+                if import_session.status != "draft":
+                    raise ValueError("rubric import session is no longer editable")
+                if import_session.state_version != import_session_state_version:
+                    raise ValueError("rubric import session state is stale")
             actor = session.get(models.User, actor_id)
             if actor is None:
                 raise ValueError("import actor does not exist")
@@ -1438,8 +1795,8 @@ def persist_prepared_import(
                     owner_id=actor_id,
                     organization_id=organization_id,
                     visibility=visibility,
-                    name=rubric_data["name"],
-                    version=rubric_data["version"],
+                    name=str(rubric_data["name"]),
+                    version=str(rubric_data["version"]),
                     total_score=_decimal(rubric_data["total_score"]),
                     status="draft",
                     description=rubric_data.get("description"),
@@ -1469,12 +1826,18 @@ def persist_prepared_import(
                 rubric.format_spec = deepcopy(rubric_data.get("format_spec") or {})
 
             projection_values = graph["legacy_projection"]["criteria"]
+            allow_removal = bool(directive and directive.get("mode") in ("step_one_confirm", "reupload"))
             if directive is not None:
                 existing_codes = {item.code for item in rubric.criteria}
                 incoming_codes = {
                     str(item["code"]) for item in projection_values
                 }
-                if existing_codes != incoming_codes:
+                if directive.get("mode") == STRUCTURE_REPARSE_MODE:
+                    if not existing_codes <= incoming_codes:
+                        raise ValueError("structure reparse may add criteria but must not remove existing ones")
+                elif allow_removal:
+                    pass
+                elif existing_codes != incoming_codes:
                     raise ValueError(
                         "draft recompilation must preserve the complete criterion code set"
                     )
@@ -1498,7 +1861,11 @@ def persist_prepared_import(
                 ).execution_options(populate_existing=True)).all()
                 if {rule.id: content_token(rule) for rule in current_rules} != graph["expected_rule_tokens"]:
                     raise ValueError("条款已被修改，请重新加载后核对")
-            criteria = _apply_projection(rubric, projection_values)
+            criteria = _apply_projection(rubric, projection_values, allow_removal=allow_removal)
+            # ``rubric`` 本身是同一短事务中新建时，显式登记子项，避免仅靠尚未
+            # flush 的 relationship cascade 使 AtomicRule 的跨 Rubric 守卫误判。
+            for criterion in criteria.values():
+                session.add(criterion)
             compilation_data = graph["compilation"]
             provisional_hash = _digest_value(
                 {
@@ -1538,8 +1905,8 @@ def persist_prepared_import(
                 model_name=compilation_data.get("model_name"),
                 sampling_params=deepcopy(compilation_data.get("sampling_params") or {}),
                 prompt_version=compilation_data["prompt_version"],
-                raw_parse_output=deepcopy(compilation_data.get("raw_parse_output") or {}),
-                raw_model_output=deepcopy(compilation_data.get("raw_model_output") or {}),
+                raw_parse_output=_carry_ledger(compilation_data.get("raw_parse_output"), predecessor),
+                raw_model_output=_carry_model_output(compilation_data.get("raw_model_output"), predecessor),
                 validation_result=validation_result,
                 blockers=deepcopy(compilation_data.get("blockers") or []),
                 warnings=deepcopy(compilation_data.get("warnings") or []),
@@ -1556,7 +1923,19 @@ def persist_prepared_import(
                 )
             )
             if version_collision is not None:
-                raise ValueError("rubric version already exists")
+                if target_rubric_id is not None or directive is not None:
+                    base_version = version_data["version"]
+                    ordinal = 2
+                    while session.scalar(
+                        select(models.RubricVersion.id).where(
+                            models.RubricVersion.rubric_id == rubric.id,
+                            models.RubricVersion.version == f"{base_version}-draft.{ordinal}",
+                        )
+                    ):
+                        ordinal += 1
+                    version_data["version"] = f"{base_version}-draft.{ordinal}"
+                else:
+                    raise ValueError("rubric version already exists")
             version = models.RubricVersion(
                 id=models.new_id(),
                 rubric_id=rubric.id,
@@ -1584,7 +1963,25 @@ def persist_prepared_import(
                     uploaded_by=actor_id,
                 )
                 session.add(artifact)
-                artifact_by_token[value.get("token") or value["artifact_type"]] = artifact
+                token = value.get("token") or value["artifact_type"]
+                artifact_by_token[token] = artifact
+
+                if file_payloads and token in file_payloads and file_payloads[token]:
+                    try:
+                        from io import BytesIO
+                        from backend.app.services.storage.local import (
+                            ensure_storage_dirs, store_binary, safe_filename,
+                        )
+                        ensure_storage_dirs()
+                        fname = f"{artifact.id}_{safe_filename(value['file_name'])}"
+                        store_binary(
+                            BytesIO(file_payloads[token]),
+                            namespace=f"rubrics/{rubric.id}/artifacts",
+                            filename=fname,
+                        )
+                    except Exception as err:
+                        pass
+
 
             source_by_code: dict[str, models.SourceRule] = {}
             for value in graph["source_rules"]:
@@ -1685,11 +2082,55 @@ def persist_prepared_import(
             if previous_reviews:
                 carry_confirmed_rows(session, rubric.id, rule_by_code.values(),
                                      previous_reviews, predecessor.id, actor_id)
+            if import_session is not None:
+                import_session.status = "confirmed"
+                import_session.state_version += 1
+                import_session.confirmation_key = confirmation_key
+                import_session.rubric = rubric
+                import_session.confirmed_at = models.utcnow()
+            if reupload_session is not None:
+                update = dict(reupload_session_update or {})
+                for field in (
+                    "prepared_graph",
+                    "draft_data",
+                    "warnings",
+                    "score_adjustments",
+                    "rules_file_name",
+                    "rules_file_bytes",
+                    "template_file_name",
+                    "template_file_bytes",
+                    "total_score",
+                ):
+                    if field in update:
+                        setattr(reupload_session, field, deepcopy(update[field]))
+                reupload_session.state_version += 1
             identity = PersistedImportIdentity(rubric.id, compilation.id, version.id)
         return identity
     except Exception:
         session.rollback()
         raise
+
+
+def _carry_model_output(raw_model_output, predecessor) -> dict:
+    from backend.app.services.rubric_import.parse_state import model_output_payload
+
+    raw = deepcopy(raw_model_output or {})
+    if predecessor is not None:
+        for key, value in model_output_payload(predecessor.raw_model_output).items():
+            raw.setdefault(key, value)
+    return raw
+
+
+def _carry_ledger(raw_parse_output, predecessor) -> dict:
+    """重编译若不带台账（如手工 JSON 重编译），继承前一编译记录的台账与人工处理结果，
+    避免“疑似规则未处理”门禁在重编译后静默失效。"""
+
+    from backend.app.services.rubric_import.parse_state import ledger_payload
+
+    raw = deepcopy(raw_parse_output or {})
+    if predecessor is not None and "source_ledger" not in raw:
+        raw.update(ledger_payload(predecessor.raw_parse_output))
+    return raw
 
 
 @contextmanager

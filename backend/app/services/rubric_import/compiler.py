@@ -25,6 +25,26 @@ _POINT_RANGE_RE = re.compile(
 )
 
 
+_MULTI_EACH_RE = re.compile(r"各(?:扣|减|计)|分别(?:扣|减)|每项(?:扣|减)")
+_JUDGEMENT_SEPARATOR_RE = re.compile(r"[、；;]")
+_DEDUCTION_VERB_RE = re.compile(r"扣|减")
+
+
+def is_multi_judgement(text) -> bool:
+    """一段扣分说明里是否混有多个独立判断（如“A、B、C 各扣 2 分”）。
+
+    这类文本若按一条规则解析，会只扣一次且 match 过长；必须交给 AI 起草或人工拆分。
+    """
+
+    value = str(text or "")
+    if _MULTI_EACH_RE.search(value):
+        return True
+    verb = _DEDUCTION_VERB_RE.search(value)
+    head = value[: verb.start()] if verb else value
+    parts = [part for part in _JUDGEMENT_SEPARATOR_RE.split(head) if part.strip()]
+    return len(parts) >= 2
+
+
 def parse_explicit_rules(deduction_rules):
     """解析 Excel 已写明分值的扣分规则文本，如「缺题注 -1」「研究问题未回应扣 3 分」「意义笼统扣 1-3 分」。
     无分值的条目跳过（无法自动扣分，仍可供人工参考）。"""
@@ -60,6 +80,11 @@ def analyze_rule_input(deduction_rules, *, criterion_code):
     needs_severity_expansion = False
     for index, text in enumerate(raw_segments):
         source_ref = f"/criteria/{criterion_code}/deduction_rules/{index}"
+        if is_multi_judgement(text):
+            unresolved_segments.append(
+                {"text": text, "source_refs": [source_ref], "index": index, "reason": "multiple_judgements"}
+            )
+            continue
         parsed = parse_explicit_rules([text])
         if not parsed:
             unresolved_segments.append(
@@ -126,6 +151,11 @@ def normalize_rules_llm(criterion, annotation_texts, scorer):
 
 
 def compile_criterion_rules(criterion, annotation_texts, scorer=None):
+    """旧的导入期 LLM 编译，仅供 CLI 离线评分（``parser.parse_rubric_files``）使用。
+
+    Web 导入已不再调用：自由文本规则改由 ``analyze_rule_input`` + ``ai_rule_drafter``
+    在用户确认后起草（带来源核验与人工确认）。CLI 计划下线，届时随之删除。
+    """
     explicit = parse_explicit_rules(getattr(criterion, "deduction_rules", None) or [])
     if explicit:
         return explicit

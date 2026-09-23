@@ -18,6 +18,9 @@ export const useRubricsStore = defineStore("rubrics", () => {
   /** @type {import('vue').Ref<string|null>} */
   const error = ref(null);
   const loading = ref(false);
+  /** 解析完成、尚未创建正式 Rubric 的数据库临时会话。 */
+  /** @type {import('vue').Ref<any|null>} */
+  const activeImportSession = ref(null);
 
   /**
    * 最近一次导入的结果。
@@ -25,12 +28,13 @@ export const useRubricsStore = defineStore("rubrics", () => {
    * `warnings` 与 `templateSummary` 是「你的 Excel 里哪几条没被识别」的唯一出口。
    * 吞掉它们，用户会以为全都导进去了，直到评分时才发现某个评分项没有判据。
    */
-  const lastImport = ref({ warnings: [], templateSummary: null, rubricId: null });
+  const lastImport = ref({ warnings: [], templateSummary: null, rubricId: null, coverage: null, triggers: [], conflicts: [] });
 
   function reset() {
     rubrics.value = [];
     error.value = null;
-    lastImport.value = { warnings: [], templateSummary: null, rubricId: null };
+    lastImport.value = { warnings: [], templateSummary: null, rubricId: null, coverage: null, triggers: [], conflicts: [] };
+    activeImportSession.value = null;
     lastDraft.value = { items: [] };
   }
 
@@ -50,22 +54,28 @@ export const useRubricsStore = defineStore("rubrics", () => {
   }
 
   /**
-   * 导入规则 Excel（可带 Word 批注模板）。
+   * 导入评分标准：Word 评分标准文档与 Excel 评分表至少一份（解析重构方案 §4.2）。
+   * 组合处理由后端决定：仅 Word 时 Word 为规则文档；两者都有时 Excel 为结构主干。
    *
-   * @param {{name: string, version: string, description?: string,
-   *          visibility?: string, rulesFile: File, templateFile?: File|null}} input
+   * @param {{name: string, version: string, description?: string, visibility?: string,
+   *          rulesFile?: File|null, templateFile?: File|null, structureOverride?: object|null}} input
    */
   async function importFiles(input) {
+    if (!input.rulesFile && !input.templateFile) {
+      throw new Error("请至少上传一份评分标准文件（Word 或 Excel）。");
+    }
     const form = new FormData();
     form.append("name", input.name);
     form.append("version", input.version);
     if (input.description) form.append("description", input.description);
     // D-026/V3-c：默认仅自己可见。扩大范围是发布时的显式动作，不在导入时顺手做掉。
     form.append("visibility", input.visibility || "private");
-    form.append("rules_file", input.rulesFile);
+    if (input.rulesFile) form.append("rules_file", input.rulesFile);
     // 模板是可选的。不传时**不要**append 一个空值——后端按「有没有这个字段」
     // 判断要不要解析批注。
     if (input.templateFile) form.append("template_file", input.templateFile);
+    // 用户确认过的表格结构（E1 等识别失败时由 AI 建议）：由后端确定性解析。
+    if (input.structureOverride) form.append("structure_override", JSON.stringify(input.structureOverride));
 
     const result = await api.post("/rubrics/import-files", undefined, {
       formData: form,
@@ -74,8 +84,235 @@ export const useRubricsStore = defineStore("rubrics", () => {
       warnings: result.warnings || [],
       templateSummary: result.template_summary || null,
       rubricId: result.rubric?.id || null,
+      coverage: result.coverage || null,
+      triggers: result.triggers || [],
+      conflicts: result.conflicts || [],
     };
     return result;
+  }
+
+  /**
+   * 第一步确定性解析。只创建临时会话，确认前不得产生 Rubric。
+   * @param {{name: string, version: string, description?: string, visibility?: string,
+   *          rulesFile?: File|null, templateFile?: File|null, structureOverride?: object|null}} input
+   */
+  async function createImportSession(input) {
+    if (!input.rulesFile && !input.templateFile) {
+      throw new Error("请至少上传一份评分标准文件（Word 或 Excel）。");
+    }
+    const form = new FormData();
+    form.append("name", input.name);
+    form.append("version", input.version);
+    if (input.description) form.append("description", input.description);
+    form.append("visibility", input.visibility || "private");
+    if (input.rulesFile) form.append("rules_file", input.rulesFile);
+    if (input.templateFile) form.append("template_file", input.templateFile);
+    if (input.structureOverride) form.append("structure_override", JSON.stringify(input.structureOverride));
+    const result = await api.post("/rubrics/import-sessions", undefined, { formData: form });
+    activeImportSession.value = result;
+    lastImport.value = {
+      warnings: result.warnings || [],
+      templateSummary: result.template_summary || null,
+      rubricId: null,
+      coverage: result.coverage || null,
+      triggers: [],
+      conflicts: result.conflicts || [],
+    };
+    return result;
+  }
+
+  /** @param {Record<string, unknown>} changes */
+  async function updateImportSession(changes) {
+    if (!activeImportSession.value?.id) throw new Error("当前没有待确认的导入会话。");
+    const result = await api.patch(`/rubrics/import-sessions/${activeImportSession.value.id}`, {
+      expected_state_version: activeImportSession.value.state_version,
+      ...changes,
+    });
+    activeImportSession.value = result;
+    return result;
+  }
+
+  /** @param {string} idempotencyKey */
+  async function confirmImportSession(idempotencyKey) {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    const result = await api.post(`/rubrics/import-sessions/${current.id}/confirm`, {
+      expected_state_version: current.state_version,
+      idempotency_key: idempotencyKey,
+    });
+    lastImport.value = { ...lastImport.value, rubricId: result.rubric?.id || null };
+    activeImportSession.value = null;
+    return result;
+  }
+
+  /** @param {"word"|"excel"} document */
+  async function previewImportSource(document) {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    return api.get(`/rubrics/import-sessions/${current.id}/source-preview?document=${document}`);
+  }
+
+  /** @param {{rulesFile?: File|null, templateFile?: File|null}} input */
+  async function previewImportReupload(input) {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    if (!input.rulesFile && !input.templateFile) throw new Error("请选择要重新上传的文件。");
+    const form = new FormData();
+    form.append("expected_state_version", String(current.state_version));
+    if (input.rulesFile) form.append("rules_file", input.rulesFile);
+    if (input.templateFile) form.append("template_file", input.templateFile);
+    return api.post(`/rubrics/import-sessions/${current.id}/reupload-preview`, undefined, { formData: form });
+  }
+
+  /** @param {{fingerprint: string, rulesFile?: File|null, templateFile?: File|null}} input */
+  async function confirmImportReupload(input) {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    const form = new FormData();
+    form.append("expected_state_version", String(current.state_version));
+    form.append("fingerprint", input.fingerprint);
+    if (input.rulesFile) form.append("rules_file", input.rulesFile);
+    if (input.templateFile) form.append("template_file", input.templateFile);
+    const result = await api.post(`/rubrics/import-sessions/${current.id}/reupload-confirm`, undefined, { formData: form });
+    activeImportSession.value = result;
+    return result;
+  }
+
+  /** @param {string} conflictId @param {"use_excel"|"use_word"} decision @param {string} reason */
+  async function resolveImportConflict(conflictId, decision, reason) {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    const result = await api.post(
+      `/rubrics/import-sessions/${current.id}/conflicts/${encodeURIComponent(conflictId)}/resolve`,
+      { expected_state_version: current.state_version, decision, reason },
+    );
+    activeImportSession.value = result;
+    return result;
+  }
+
+  async function cancelImportSession() {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    const result = await api.post(`/rubrics/import-sessions/${current.id}/cancel`, {
+      expected_state_version: current.state_version,
+    });
+    activeImportSession.value = null;
+    return result;
+  }
+
+  /** @param {string} rubricId @param {{rulesFile?: File|null, templateFile?: File|null}} input */
+  async function previewRubricReupload(rubricId, input) {
+    if (!input.rulesFile && !input.templateFile) throw new Error("请选择要重新上传的文件。");
+    const form = new FormData();
+    if (input.rulesFile) form.append("rules_file", input.rulesFile);
+    if (input.templateFile) form.append("template_file", input.templateFile);
+    return api.post(`/rubrics/${rubricId}/reupload-preview`, undefined, { formData: form });
+  }
+
+  /** @param {string} rubricId @param {{fingerprint: string, rulesFile?: File|null, templateFile?: File|null}} input */
+  async function confirmRubricReupload(rubricId, input) {
+    const form = new FormData();
+    form.append("fingerprint", input.fingerprint);
+    if (input.rulesFile) form.append("rules_file", input.rulesFile);
+    if (input.templateFile) form.append("template_file", input.templateFile);
+    return api.post(`/rubrics/${rubricId}/reupload-confirm`, undefined, { formData: form });
+  }
+
+  /** @param {string|null|undefined} connectionId @param {boolean} [dryRun] */
+  function requireConnection(connectionId, dryRun) {
+    if (!dryRun && !connectionId) throw new Error("请先选择用于识别的 AI 连接。");
+  }
+
+  /**
+   * 导入前结构预检（E1/E7）：`dryRun` 只估算发送规模，确认后再调用模型；不落库。
+   * @param {{rulesFile?: File|null, templateFile?: File|null, connectionId?: string|null, dryRun?: boolean}} input
+   */
+  async function previewImportStructure(input) {
+    requireConnection(input.connectionId, input.dryRun);
+    const form = new FormData();
+    if (input.rulesFile) form.append("rules_file", input.rulesFile);
+    if (input.templateFile) form.append("template_file", input.templateFile);
+    if (input.connectionId) form.append("ai_connection_id", input.connectionId);
+    form.append("dry_run", input.dryRun ? "true" : "false");
+    return api.post("/rubrics/import-files/structure-suggestions", undefined, { formData: form });
+  }
+
+  /** @param {string} rubricId */
+  async function loadParseCoverage(rubricId) {
+    return api.get(`/rubrics/${rubricId}/parse-coverage`);
+  }
+
+  /**
+   * 人工处理未认领单元：指派到已有评分项，或确认不是规则（单条也走批量接口）。
+   * @param {string} rubricId
+   * @param {{unitIds: string[], action: "assign"|"not_rule", reason: string, criterionCode?: string|null}} input
+   */
+  async function resolveUnits(rubricId, input) {
+    if (input.action === "assign" && !input.criterionCode) throw new Error("请选择评分项。");
+    /** @type {Record<string, unknown>} */
+    const body = { unit_ids: input.unitIds, action: input.action, reason: input.reason };
+    if (input.action === "assign") body.criterion_code = input.criterionCode;
+    return api.post(`/rubrics/${rubricId}/units/resolve-batch`, body);
+  }
+
+  /**
+   * 兜底分类器：结果只是建议，采纳仍走 resolveUnits。
+   * @param {string} rubricId
+   * @param {{unitIds?: string[]|null, connectionId: string|null}} input
+   */
+  async function classifyUnits(rubricId, input) {
+    requireConnection(input.connectionId);
+    return api.post(`/rubrics/${rubricId}/unit-classifications`, {
+      ...(input.unitIds ? { unit_ids: input.unitIds } : {}), ai_connection_id: input.connectionId,
+    });
+  }
+
+  /**
+   * 草稿结构建议（抽取器兜底）。
+   * @param {string} rubricId
+   * @param {{connectionId: string|null, dryRun?: boolean}} input
+   */
+  async function suggestStructure(rubricId, input) {
+    requireConnection(input.connectionId, input.dryRun);
+    return api.post(`/rubrics/${rubricId}/structure-suggestions`, input.dryRun
+      ? { dry_run: true } : { ai_connection_id: input.connectionId });
+  }
+
+  /**
+   * @param {string} rubricId
+   * @param {{fingerprint: string, confirm: string[], exclude: string[], reason: string}} input
+   */
+  async function mergeStructure(rubricId, input) {
+    return api.post(`/rubrics/${rubricId}/suggestions/merge`, {
+      fingerprint: input.fingerprint, confirm: input.confirm, exclude: input.exclude, reason: input.reason,
+    });
+  }
+
+  /** @param {string} rubricId @param {string} reason */
+  async function undoStructure(rubricId, reason) {
+    return api.post(`/rubrics/${rubricId}/suggestions/undo`, { reason });
+  }
+
+  /**
+   * 规则审查（第二部分结束后）：只报告问题，不修改规则；可跳过，发布时留痕。
+   * @param {string} rubricId
+   * @param {{connectionId: string|null, scope: "priority"|"all", dryRun?: boolean}} input
+   */
+  async function runRuleReview(rubricId, input) {
+    requireConnection(input.connectionId, input.dryRun);
+    return api.post(`/rubrics/${rubricId}/rule-review`, input.dryRun
+      ? { scope: input.scope, dry_run: true } : { scope: input.scope, ai_connection_id: input.connectionId });
+  }
+
+  /** @param {string} rubricId */
+  async function loadRuleReview(rubricId) {
+    return api.get(`/rubrics/${rubricId}/rule-review`);
+  }
+
+  /** @param {string} rubricId @param {string} findingId @param {string} reason */
+  async function dismissFinding(rubricId, findingId, reason) {
+    if (!reason?.trim()) throw new Error("请填写豁免原因。");
+    return api.post(`/rubrics/${rubricId}/rule-review/findings/${encodeURIComponent(findingId)}/dismiss`, { reason });
   }
 
   /**
@@ -210,10 +447,31 @@ export const useRubricsStore = defineStore("rubrics", () => {
     rubrics,
     error,
     loading,
+    activeImportSession,
     lastImport,
     reset,
     load,
     importFiles,
+    createImportSession,
+    updateImportSession,
+    confirmImportSession,
+    previewImportSource,
+    previewImportReupload,
+    confirmImportReupload,
+    resolveImportConflict,
+    cancelImportSession,
+    previewRubricReupload,
+    confirmRubricReupload,
+    previewImportStructure,
+    loadParseCoverage,
+    resolveUnits,
+    classifyUnits,
+    suggestStructure,
+    mergeStructure,
+    undoStructure,
+    runRuleReview,
+    loadRuleReview,
+    dismissFinding,
     clone,
     publish,
     loadExecutionDraft,

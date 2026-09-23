@@ -6,6 +6,7 @@ import httpx
 
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.llm.errors import project_provider_error
+from backend.app.services.scoring.core import engine as core_engine
 from backend.app.services.scoring.core.engine import score_submission
 from backend.app.tests.m3_contract_fixtures import CHECKER_KEY
 from backend.app.tests.m3_contract_fixtures import CHECKER_VERSION
@@ -67,3 +68,39 @@ def test_provider_failure_becomes_one_invalid_rule_and_sibling_result_survives()
         and item["rule_code"] == SEMANTIC_RULE_CODE
         for item in outcome["review_issues"]
     )
+
+
+class _UnexpectedRuntime:
+    def score(self, *, envelope):
+        raise TypeError("student text and provider secret must not be logged")
+
+
+def test_unknown_rule_failure_logs_only_safe_exception_identity(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(
+        core_engine.logger,
+        "warning",
+        lambda *args: warnings.append(args),
+    )
+
+    outcome = score_submission(
+        request=scoring_request_payload(),
+        checker_registry=_Registry(),
+        llm_runtime=_UnexpectedRuntime(),
+        profile=_Profile(),
+    ).to_mapping()
+
+    issue = next(
+        item
+        for item in outcome["review_issues"]
+        if item["rule_code"] == SEMANTIC_RULE_CODE
+    )
+    assert issue["code"] == "RULE_EXECUTION_FAILED"
+    assert issue["message"] == (
+        "rule execution failed (exception_type=TypeError)"
+    )
+    assert len(warnings) == 1
+    rendered = warnings[0][0] % warnings[0][1:]
+    assert "exception_type=TypeError" in rendered
+    assert "student text" not in rendered
+    assert "provider secret" not in rendered

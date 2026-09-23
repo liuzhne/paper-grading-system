@@ -1,11 +1,16 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, toRaw, watch } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
 import RuleReviewPanel from "@/components/RuleReviewPanel.vue";
 import AtomicRuleEditor from "@/components/AtomicRuleEditor.vue";
 import { canPublishRubric, canSubmitReview, compilationReady } from "@/lib/rubric-workflow.js";
 import AiRuleDraftPanel from "@/components/AiRuleDraftPanel.vue";
+import ParseCoveragePanel from "@/components/ParseCoveragePanel.vue";
+import RuleAuditPanel from "@/components/RuleAuditPanel.vue";
+import StructureSuggestionPanel from "@/components/StructureSuggestionPanel.vue";
+import RubricImportWorkspace from "@/components/RubricImportWorkspace.vue";
+import { importFilesError, stepOneGate } from "@/lib/parse-coverage.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
 import { draftRows, rowKey } from "@/lib/ai-draft.js";
@@ -17,8 +22,7 @@ import { RouterLink, onBeforeRouteLeave } from "vue-router";
  * 从模板库进入单个标准的详情：基本信息与评分项 / 扣分细则完整度 / 校验与
  * 发布状态。UI 只做重组——不修改授权规则、分值、冻结版本与评分政策。
  *
- * 「阻断项」在这里的含义是**发布后评分时没有判据可用**，所以它排在最前面，
- * 并且直接点得到对应的评分项。
+ * 第一步统一文件来源与评分项表格；规则完整度在第二步、发布校验在第三步。
  */
 const rubrics = ref([]);
 
@@ -31,41 +35,362 @@ const importError = ref(null);
 const importForm = ref({ name: "", version: "v1.0", description: "" });
 const rulesFile = ref(null);
 const templateFile = ref(null);
+const sourcePreview = ref(null);
+const reuploadPreview = ref(null);
+const pendingReupload = ref({ rulesFile: null, templateFile: null });
+const rubricReupload = ref({ preview: null, rulesFile: null, templateFile: null });
+const sourceWorkspace = ref(null);
+const nextEntryStep = ref(1);
+const importing = computed(() => importOpen.value || Boolean(store.activeImportSession));
+const initialImport = computed(() => ({ ...importForm.value, total_score: 0, criteria: [] }));
+const stepOneSession = computed(() => ({
+  ...sourceWorkspace.value,
+  ...editForm.value,
+  criteria: (editForm.value?.criteria || []).map(item => ({
+    ...(sourceWorkspace.value?.criteria || []).find(source => source.code === item.code),
+    ...item,
+  })),
+}));
 
-function pickRules(event) {
-  rulesFile.value = event.target.files?.[0] || null;
+function beginImport() {
+  if (operationBusy.value || importBusy.value) return;
+  if (dirty.value && !window.confirm("有未保存的修改，放弃修改并导入新的评分标准？")) return;
+  importOpen.value = true;
+  libraryOpen.value = false;
+  importError.value = null;
+  error.value = null; reviewError.value = null; reviewNotice.value = null;
+  applyError.value = null; applyNotice.value = null; parseError.value = null;
+  sourcePreview.value = null;
+  rulesFile.value = null;
+  templateFile.value = null;
+  importForm.value = { name: "", version: "v1.0", description: "" };
 }
 
-function pickTemplate(event) {
-  templateFile.value = event.target.files?.[0] || null;
+function updateFirstStep(changes) {
+  if (importOpen.value && !store.activeImportSession) Object.assign(importForm.value, changes);
+  else if (editForm.value) Object.assign(editForm.value, changes);
 }
 
-async function submitImport() {
-  if (!rulesFile.value) {
-    importError.value = "请先选择规则 Excel。";
+function updateExistingCriterion({ index, field, value }) {
+  if (editForm.value?.criteria[index]) editForm.value.criteria[index][field] = value;
+}
+
+function previewExistingSource(document) {
+  sourcePreview.value = { document, items: sourceWorkspace.value?.previews?.[document] || [] };
+}
+
+async function confirmFirstStep() {
+  if (current.value?.status === "draft" && canEdit.value) {
+    if (!(await saveAndValidate())) return;
+  }
+  await goStep(2);
+}
+
+async function pickRules(event) {
+  const file = event.target.files?.[0] || null;
+  if (!store.activeImportSession || !file) { rulesFile.value = file; return; }
+  await previewImportReupload({ rulesFile: file, templateFile: null });
+}
+
+async function pickTemplate(event) {
+  const file = event.target.files?.[0] || null;
+  if (!store.activeImportSession || !file) { templateFile.value = file; return; }
+  await previewImportReupload({ rulesFile: null, templateFile: file });
+}
+
+async function previewImportReupload(files) {
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    reuploadPreview.value = await store.previewImportReupload(files);
+    pendingReupload.value = files;
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "重新上传解析失败";
+  } finally { importBusy.value = false; }
+}
+
+async function confirmImportReupload() {
+  if (!reuploadPreview.value) return;
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    await store.confirmImportReupload({
+      ...pendingReupload.value,
+      fingerprint: reuploadPreview.value.fingerprint,
+    });
+    if (pendingReupload.value.rulesFile) rulesFile.value = pendingReupload.value.rulesFile;
+    if (pendingReupload.value.templateFile) templateFile.value = pendingReupload.value.templateFile;
+    reuploadPreview.value = null;
+    pendingReupload.value = { rulesFile: null, templateFile: null };
+    sourcePreview.value = null;
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "替换导入草稿失败";
+  } finally { importBusy.value = false; }
+}
+
+function cancelImportReupload() {
+  reuploadPreview.value = null;
+  pendingReupload.value = { rulesFile: null, templateFile: null };
+}
+
+async function previewImportSource(document) {
+  importBusy.value = true;
+  importError.value = null;
+  try { sourcePreview.value = await store.previewImportSource(document); }
+  catch (err) { importError.value = err instanceof Error ? err.message : "加载原文预览失败"; }
+  finally { importBusy.value = false; }
+}
+
+async function resolveImportConflict({ conflict, decision }) {
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    await store.resolveImportConflict(
+      conflict.anchor_unit_id,
+      decision,
+      decision === "use_excel" ? "用户确认以 Excel 为准" : "用户确认采用 Word 内容",
+    );
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "处理来源冲突失败";
+  } finally { importBusy.value = false; }
+}
+
+async function previewRubricReupload(kind, event) {
+  const file = event.target.files?.[0] || null;
+  if (!file || !selected.value) return;
+  if (dirty.value) {
+    importError.value = "请先保存当前评分项修改，再重新上传文件。";
+    return;
+  }
+  const files = {
+    rulesFile: kind === "rules" ? file : null,
+    templateFile: kind === "template" ? file : null,
+  };
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    const rubricId = selected.value;
+    const preview = await store.previewRubricReupload(rubricId, files);
+    if (rubricId !== selected.value) return;
+    rubricReupload.value = { preview, ...files };
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "重新上传评分模板失败";
+  } finally { importBusy.value = false; }
+}
+
+async function confirmRubricReupload() {
+  if (!selected.value || !rubricReupload.value.preview) return;
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    await store.confirmRubricReupload(selected.value, {
+      fingerprint: rubricReupload.value.preview.fingerprint,
+      rulesFile: rubricReupload.value.rulesFile,
+      templateFile: rubricReupload.value.templateFile,
+    });
+    rubricReupload.value = { preview: null, rulesFile: null, templateFile: null };
+    sourcePreview.value = null;
+    await refreshDetail(selected.value);
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "生成后继执行草稿失败";
+  } finally { importBusy.value = false; }
+}
+
+// 表格结构识别失败（E1/E7）时的 AI 预检：先估算、确认后才调用模型，结果由用户确认后再导入。
+const importStructure = ref({ available: false, estimate: null, result: null });
+
+async function submitImport(structureOverride = null) {
+  const invalid = importFilesError(rulesFile.value, templateFile.value);
+  if (invalid) {
+    importError.value = invalid;
     return;
   }
   importBusy.value = true;
   importError.value = null;
   try {
-    const result = await store.importFiles({
+    await store.createImportSession({
       name: importForm.value.name,
       version: importForm.value.version,
       description: importForm.value.description,
       rulesFile: rulesFile.value,
       templateFile: templateFile.value,
+      structureOverride,
     });
     importOpen.value = false;
-    await loadRubrics();
-    // 直接选中刚导入的那份，省去用户在列表里再找一次。
-    if (result.rubric?.id) selected.value = result.rubric.id;
-    step.value = 2;
+    importStructure.value = { available: false, estimate: null, result: null };
+    sourcePreview.value = null;
+    reuploadPreview.value = null;
   } catch (err) {
     // 服务端的说明比「导入失败」有用得多：它会指出是文件类型不对还是解析不了。
     importError.value = err instanceof Error ? err.message : "导入失败";
+    importStructure.value = { available: /未解析到有效评分项/.test(importError.value), estimate: null, result: null };
   } finally {
     importBusy.value = false;
   }
+}
+
+async function updateImportSession(changes) {
+  importBusy.value = true;
+  importError.value = null;
+  try { await store.updateImportSession(changes); }
+  catch (err) { importError.value = err instanceof Error ? err.message : "保存导入草稿失败"; }
+  finally { importBusy.value = false; }
+}
+
+function updateImportCriterion({ index, field, value }) {
+  const criteria = structuredClone(toRaw(store.activeImportSession?.criteria || []));
+  criteria[index] = { ...criteria[index], [field]: value };
+  return updateImportSession({ criteria });
+}
+
+function addImportCriterion() {
+  const criteria = structuredClone(toRaw(store.activeImportSession?.criteria || []));
+  const used = new Set(criteria.map((item) => item.code));
+  let ordinal = criteria.length + 1;
+  let code = `C${String(ordinal).padStart(2, "0")}`;
+  while (used.has(code)) { ordinal += 1; code = `C${String(ordinal).padStart(2, "0")}`; }
+  criteria.push({ code, name: "新评分项", max_score: 1, description: "", display_order: criteria.length,
+    source_refs: [], parse_status: "manual", deleted: false });
+  return updateImportSession({ criteria });
+}
+
+function deleteImportCriterion(index) {
+  const criteria = structuredClone(toRaw(store.activeImportSession?.criteria || []));
+  criteria[index] = { ...criteria[index], deleted: true };
+  return updateImportSession({ criteria });
+}
+
+async function confirmImportSession() {
+  if (importBusy.value || !store.activeImportSession?.id) return;
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    // 同一会话只有一个确认动作；响应丢失后的重试必须复用收据键。
+    const key = `confirm:${store.activeImportSession.id}`;
+    const result = await store.confirmImportSession(key);
+    nextEntryStep.value = 2;
+    rubrics.value = [...rubrics.value.filter(item => item.id !== result.rubric.id), result.rubric];
+    selected.value = result.rubric.id;
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "确认评分项失败";
+  } finally { importBusy.value = false; }
+}
+
+async function cancelImportSession() {
+  if (!window.confirm("取消后将退出当前导入草稿。确定继续？")) return;
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    await store.cancelImportSession();
+    rulesFile.value = null;
+    templateFile.value = null;
+    sourcePreview.value = null;
+    cancelImportReupload();
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "取消导入失败";
+  } finally { importBusy.value = false; }
+}
+
+async function previewImportStructure(dryRun) {
+  importBusy.value = true;
+  importError.value = null;
+  try {
+    const result = await store.previewImportStructure({
+      rulesFile: rulesFile.value, templateFile: templateFile.value,
+      connectionId: draftConnection.value || null, dryRun,
+    });
+    importStructure.value = dryRun
+      ? { ...importStructure.value, estimate: result.estimate }
+      : { ...importStructure.value, result };
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : "结构识别失败";
+  } finally {
+    importBusy.value = false;
+  }
+}
+
+// --- 原文识别情况（解析台账）与 AI 兜底（解析重构方案 §8）---------------------
+const parseState = ref(null);
+const parseBusy = ref(false);
+const parseError = ref(null);
+const structureEstimate = ref(null);
+const ruleReview = ref({ reviewed: false });
+const ruleEstimate = ref(null);
+const gate = computed(() => stepOneGate(parseState.value));
+
+async function parseAction(action) {
+  if (!selected.value) return;
+  parseBusy.value = true;
+  parseError.value = null;
+  try {
+    await action(selected.value);
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) parseError.value = err instanceof Error ? err.message : "操作失败";
+  } finally {
+    parseBusy.value = false;
+  }
+}
+
+const resolveUnits = (payload) => parseAction(async (id) => {
+  await store.resolveUnits(id, payload);
+  parseState.value = await store.loadParseCoverage(id);
+});
+const classifyUnits = ({ unitIds }) => parseAction(async (id) => {
+  await store.classifyUnits(id, { unitIds, connectionId: draftConnection.value || null });
+  parseState.value = await store.loadParseCoverage(id);
+});
+const suggestStructure = ({ dryRun }) => parseAction(async (id) => {
+  const result = await store.suggestStructure(id, { connectionId: draftConnection.value || null, dryRun });
+  if (dryRun) { structureEstimate.value = result.estimate; return; }
+  structureEstimate.value = null;
+  parseState.value = await store.loadParseCoverage(id);
+});
+const mergeStructure = (payload) => parseAction(async (id) => {
+  await store.mergeStructure(id, { ...payload, fingerprint: parseState.value?.structure_suggestions?.fingerprint,
+    reason: "确认合入 AI 识别的表格结构" });
+  await refreshDetail(id);
+});
+const undoStructure = () => parseAction(async (id) => {
+  await store.undoStructure(id, "撤销 AI 结构识别的合入");
+  await refreshDetail(id);
+});
+const estimateReview = ({ scope }) => parseAction(async (id) => {
+  ruleEstimate.value = await store.runRuleReview(id, { connectionId: null, scope, dryRun: true });
+});
+const runReview = ({ scope }) => parseAction(async (id) => {
+  await store.runRuleReview(id, { connectionId: draftConnection.value || null, scope });
+  ruleEstimate.value = null;
+  ruleReview.value = await store.loadRuleReview(id);
+});
+const dismissFinding = ({ id: findingId, reason }) => parseAction(async (id) => {
+  await store.dismissFinding(id, findingId, reason);
+  ruleReview.value = await store.loadRuleReview(id);
+});
+
+/** 第一步完成文件结构、来源冲突和未归属内容核对，第二步只处理评分规则。 */
+async function goStep(target) {
+  if (operationBusy.value || importBusy.value || loading.value) return;
+  if (!canEdit.value || current.value?.status !== "draft") {
+    step.value = target;
+    return;
+  }
+  if (target > 1 && rubricReupload.value.preview) {
+    importError.value = "请先确认或取消本次文件替换，再进入下一步。";
+    return;
+  }
+  if (target > 1 && step.value === 1 && dirty.value && !(await saveAndValidate())) return;
+  if (target > 1 && scoreFormError.value) {
+    reviewError.value = scoreFormError.value;
+    step.value = 1;
+    return;
+  }
+  if (target > 1 && gate.value.blocked) {
+    step.value = 1;
+    parseError.value = `请先在第 1 步处理 ${gate.value.blocking} 条疑似规则和 ${gate.value.conflicts} 个来源冲突，再进入评分规则拆分。`;
+    return;
+  }
+  parseError.value = null;
+  step.value = target;
 }
 
 // --- AI 起草缺失细则（D-027：必须绑自己的连接）--------------------------
@@ -116,7 +441,6 @@ async function applyDraft(excluded) {
   applyBusy.value = true;
   applyError.value = null;
   applyNotice.value = null;
-  let completed = 0;
   try {
     const full = await store.loadRubric(id);
     await store.applyDraftRules(id, {
@@ -136,27 +460,9 @@ async function applyDraft(excluded) {
       })).filter((group) => group.rules.length),
     } })).filter((item) => item.draft.rule_groups.length) };
     await refreshDetail(id);
-    // Confirm only the rules just reviewed; other rules in the successor need their own review.
-    const codes = new Set(items.map((item) => item.criterion_code));
-    const newRules = (workspace.value?.rules || []).filter((rule) => {
-      const criterion = editForm.value?.criteria.find((c) => c.id === rule.criterion_id);
-      if (!criterion || !codes.has(criterion.code)) return false;
-      const match = /\.deduct\.(\d+)\.v1$/.exec(rule.rule_code);
-      const structured = match ? criterion.deduction_rules_structured[Number(match[1]) - 1] : null;
-      return structured && appliedKeys.has(structured.draft_row_key);
-    });
-    if (newRules.length !== appliedKeys.size) throw new Error("新草稿中的规则与本次确认数量不一致，请重新核对。");
-    for (const rule of newRules) {
-      await api.post(`/rubrics/${id}/rules/${encodeURIComponent(rule.rule_code)}/confirm`, {
-        compilation_id: workspace.value.compilation_id, rule_id: rule.id,
-        content_token: rule.content_token, reason: "用户确认并应用 AI 起草条款",
-      });
-      completed += 1;
-    }
-    await refreshDetail(id);
-    applyNotice.value = `已应用并确认 ${newRules.length} 条建议，生成了新的执行草稿。请核对其余条款；模板尚未发布。`;
+    applyNotice.value = `已应用 ${appliedKeys.size} 条建议并形成最终规则草稿。请统一确认原文规则和 AI 规则；模板尚未发布。`;
   } catch (err) {
-    applyError.value = `已确认 ${completed} 条，后续操作已停止：${err instanceof Error ? err.message : "应用失败"}。请核对当前执行草稿后重试。`;
+    applyError.value = `AI 建议应用失败：${err instanceof Error ? err.message : "应用失败"}。请核对当前执行草稿后重试。`;
     await refreshDetail(id);
   } finally {
     applyBusy.value = false;
@@ -234,17 +540,17 @@ function visibilityLabel(value) {
   return { private: "仅自己", organization: "当前组织", system: "全平台" }[value] || value;
 }
 
-async function loadRubrics() {
+async function loadRubrics(preferredId = null) {
   try {
     rubrics.value = (await api.get("/rubrics")) || [];
-    selected.value = selected.value ?? rubrics.value[0]?.id ?? null;
+    selected.value = preferredId ?? selected.value ?? rubrics.value[0]?.id ?? null;
   } catch (err) {
     if (!(err instanceof StaleContextError)) error.value = err?.message || "加载失败";
   }
 }
 
 const libraryOpen = ref(false);
-const step = ref(2);
+const step = ref(1);
 const selectedCriterion = ref(null);
 const workspace = ref(null);
 const reviewBusy = ref(false);
@@ -258,6 +564,9 @@ const dirty = computed(() => editForm.value && JSON.stringify(editForm.value) !=
 const scoreFormError = computed(() => {
   const form = editForm.value;
   if (!form) return null;
+  if (!form.name?.trim()) return "请填写标准名称。";
+  if (!Number.isInteger(Number(form.total_score)) || form.criteria.some((c) => !Number.isInteger(Number(c.max_score)))) return "总分和各评分项满分必须为整数。";
+  if (form.criteria.some(c => !c.name?.trim())) return "请填写每个评分项的名称。";
   if (!(Number(form.total_score) > 0) || form.criteria.some((c) => !(Number(c.max_score) > 0))) return "总分和各评分项满分必须大于 0。";
   const weights = form.criteria.map((c) => c.weight);
   const sum = form.criteria.reduce((total, c) => total + Number(c.max_score), 0);
@@ -268,10 +577,11 @@ const scoreFormError = computed(() => {
 const canEdit = computed(() => !session.authEnforced || session.isPlatformAdmin ||
   ["teacher", "org_admin"].includes(session.organizationRole));
 const editable = computed(() => canEdit.value && current.value?.status === "draft" && !dirty.value);
-const operationBusy = computed(() => reviewBusy.value || applyBusy.value || saveBusy.value || publishBusy.value || draftBusy.value);
+const operationBusy = computed(() => importBusy.value || reviewBusy.value || applyBusy.value || saveBusy.value || publishBusy.value || draftBusy.value || parseBusy.value);
 const activeCriterion = computed(() => coverage.value?.criteria.find((c) => c.criterion_id === selectedCriterion.value));
 const activeCriterionCode = computed(() => activeCriterion.value?.code);
 const currentDraftItems = computed(() => store.lastDraft.items.filter((item) => item.criterion_code === activeCriterionCode.value));
+const hasPendingAiDraft = computed(() => currentDraftItems.value.some((item) => draftRows(item.draft).length));
 const criterionRules = computed(() => workspace.value?.rules.filter((r) => r.criterion_id === selectedCriterion.value) || []);
 const structuralMessages = {
   band_criterion_invalid: '同一评分项必须恰有一条计分分档规则，且不能混用扣分规则。请逐条核对评分方向与生效方式。',
@@ -291,9 +601,14 @@ const editableCriterion = computed(() => editForm.value?.criteria.find((c) => c.
 const pendingRules = computed(() => (workspace.value?.rules || []).filter(r => r.status !== 'approved'));
 const pendingMappings = computed(() => (workspace.value?.template_links || []).filter(link => link.review_status !== 'confirmed'));
 const validationReady = computed(() => compilationReady(draft.value, draft.value?.active_compilation?.id) && !activeIssues.value.length && !scoreFormError.value && !blocking.value.length);
+const completedSteps = computed(() => [
+  current.value?.status === "published" || Boolean(editForm.value && !dirty.value && !scoreFormError.value && !gate.value.conflicts),
+  current.value?.status === "published" || Boolean(reviewReady.value && !gate.value.blocked),
+  current.value?.status === "published",
+]);
 function goToPendingRules() {
   if (pendingRules.value.length) selectedCriterion.value = pendingRules.value[0].criterion_id;
-  step.value = 2;
+  goStep(2);
 }
 let loadSequence = 0;
 
@@ -303,15 +618,20 @@ async function refreshDetail(id = selected.value) {
   loading.value = true;
   error.value = null;
   try {
-    const [nextCoverage, nextDraft, nextWorkspace, full] = await Promise.all([
+    const [nextCoverage, nextDraft, nextWorkspace, full, nextParse, nextReview, nextSources] = await Promise.all([
       api.get(`/rubrics/${id}/rule-coverage`), store.loadExecutionDraft(id),
       api.get(`/rubrics/${id}/review-workspace`), store.loadRubric(id),
+      store.loadParseCoverage(id), store.loadRuleReview(id),
+      api.get(`/rubrics/${id}/source-workspace`),
     ]);
     if (sequence !== loadSequence || id !== selected.value) return;
     if (nextWorkspace.compilation_id !== nextDraft.active_compilation?.id && nextWorkspace.compilation_id) {
       throw new Error("执行草稿已变化，请重新加载后核对。");
     }
     coverage.value = nextCoverage;
+    sourceWorkspace.value = nextSources;
+    parseState.value = nextParse;
+    ruleReview.value = nextReview || { reviewed: false };
     draft.value = nextDraft;
     workspace.value = nextWorkspace;
     chosenCompilation.value = nextDraft.active_compilation?.id || null;
@@ -331,11 +651,13 @@ async function refreshDetail(id = selected.value) {
       ].map((key) => [key, structuredClone(rule[key])])),
     }));
     editBaseline.value = JSON.stringify(editForm.value);
+    return true;
   } catch (err) {
     if (sequence !== loadSequence || id !== selected.value) return;
     workspace.value = null;
     draft.value = null;
     error.value = err?.message || "加载条款失败，请重试。";
+    return false;
   } finally {
     if (sequence === loadSequence) loading.value = false;
   }
@@ -349,7 +671,7 @@ function selectRubric(id) {
 function locateIssue(issue) {
   const target = coverage.value?.criteria.find((c) => c.code === issue.criterion_code);
   if (target) selectedCriterion.value = target.criterion_id;
-  step.value = 2;
+  goStep(2);
 }
 function addDeduction() {
   editableCriterion.value.scoring_mode = "deductive";
@@ -399,7 +721,7 @@ async function submitReview() {
 }
 async function returnToDraft() {
   reviewBusy.value = true;
-  try { await api.post(`/rubrics/${selected.value}/return-to-draft`); await refreshDetail(); step.value = 2; }
+  try { await api.post(`/rubrics/${selected.value}/return-to-draft`); if (await refreshDetail()) step.value = 2; }
   catch (err) { reviewError.value = err?.message || "退回草稿失败"; }
   finally { reviewBusy.value = false; }
 }
@@ -415,15 +737,15 @@ async function confirmLink(link) {
   finally { reviewBusy.value = false; }
 }
 async function saveAndValidate() {
-  if (!canEdit.value || operationBusy.value || current.value?.status !== "draft") return;
+  if (!canEdit.value || operationBusy.value || current.value?.status !== "draft") return false;
   const invalidField = document.querySelector('.atomic-editor :invalid');
   if (invalidField instanceof HTMLInputElement || invalidField instanceof HTMLTextAreaElement) {
     invalidField.reportValidity();
     reviewError.value = "请先修正原子规则编辑中的无效输入。";
-    return;
+    return false;
   }
   reviewError.value = null;
-  if (scoreFormError.value) { reviewError.value = scoreFormError.value; step.value = 1; return; }
+  if (scoreFormError.value) { reviewError.value = scoreFormError.value; step.value = 1; return false; }
   saveBusy.value = true;
   try {
     if (dirty.value) {
@@ -440,9 +762,10 @@ async function saveAndValidate() {
       excluded.value = new Set();
       store.lastDraft = { items: [] };
     }
-    await refreshDetail();
-    reviewNotice.value = activeIssues.value.length ? `已保存，仍有 ${activeIssues.value.length} 个校验阻断，请逐项处理。` : "已保存并取得当前校验结果；条款确认与模板发布分别进行。";
-  } catch (err) { reviewError.value = err?.message || "保存失败，修改已保留。"; }
+    if (!(await refreshDetail())) return false;
+    reviewNotice.value = step.value === 1 ? "评分项已保存，请在下一步核对评分规则。" : activeIssues.value.length ? `已保存，仍有 ${activeIssues.value.length} 个校验阻断，请逐项处理。` : "已保存并取得当前校验结果；条款确认与模板发布分别进行。";
+    return true;
+  } catch (err) { reviewError.value = err?.message || "保存失败，修改已保留。"; return false; }
   finally { saveBusy.value = false; }
 }
 watch(selected, async (id) => {
@@ -450,8 +773,13 @@ watch(selected, async (id) => {
   selectedCriterion.value = null; chosenVisibility.value = null;
   excluded.value = new Set(); editForm.value = null; reviewError.value = null; reviewNotice.value = null;
   store.lastDraft = { items: [] }; applyNotice.value = null; applyError.value = null;
-  step.value = 2;
+  parseState.value = null; structureEstimate.value = null; ruleEstimate.value = null; parseError.value = null;
+  sourceWorkspace.value = null; sourcePreview.value = null;
+  rubricReupload.value = { preview: null, rulesFile: null, templateFile: null };
+  step.value = nextEntryStep.value;
+  nextEntryStep.value = 1;
   await refreshDetail(id);
+  if (gate.value.blocked || (parseState.value?.triggers || []).length) step.value = 1;
 });
 function beforeUnload(event) {
   if (!dirty.value && !store.lastDraft.items.length && !operationBusy.value) return;
@@ -475,69 +803,69 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
 <template>
   <div>
     <header class="page-head">
-      <p class="page-eyebrow">标准与输出 · 评分标准</p>
+      <p class="page-eyebrow">标准与输出</p>
       <div class="heading-row">
-        <div><h1 class="page-title">{{ current?.name || '评分标准' }}</h1>
-          <p class="page-sub"><span v-if="current" class="chip chip-warn">{{ draft?.active_compilation?.version?.version || current.version }} · {{ { draft: '草稿', review: '审核中', published: '已发布' }[current.status] || current.status }}</span>
-            {{ dirty ? '有未保存的修改 · 当前校验结果来自上一个执行草稿' : '条款确认即时保存；发布后版本不可变。' }}</p>
+        <div><h1 class="page-title">{{ importing ? store.activeImportSession?.name || importForm.name || '导入评分标准' : editForm?.name || current?.name || '评分标准' }}</h1>
+          <p class="page-sub" v-if="importing"><span class="chip chip-warn">待确认</span> 上传文件并核对评分项，确认后进入评分规则。</p>
+          <p v-else class="page-sub"><span v-if="current" class="chip chip-warn">{{ draft?.active_compilation?.version?.version || current.version }} · {{ { draft: '草稿', review: '审核中', published: '已发布' }[current.status] || current.status }}</span>
+            {{ dirty ? '有未保存的修改 · 保存后重新校验' : step === 1 ? '核对评分标准文档与评分项，再配置评分规则。' : '条款确认即时保存；发布后版本不可变。' }}</p>
         </div>
         <div class="head-actions">
-          <button class="btn" :disabled="operationBusy" @click="libraryOpen = !libraryOpen">模板库</button>
-          <button class="btn" :disabled="operationBusy || !canEdit" @click="importOpen = !importOpen">导入评分模板</button>
-          <button v-if="current?.status === 'draft'" class="btn" :disabled="operationBusy || loading || !canEdit" @click="saveAndValidate">{{ saveBusy ? '保存中…' : '保存并重新校验' }}</button>
-          <button v-if="current?.status === 'draft' && step !== 3" class="btn btn-primary" :disabled="operationBusy || loading" @click="step = 3">前往校验与发布</button>
+          <button v-if="!importing" class="btn" :disabled="operationBusy" @click="libraryOpen = !libraryOpen">模板库</button>
+          <button v-if="!importing" class="btn" :disabled="operationBusy || !canEdit" @click="beginImport">导入评分模板</button>
+          <button v-if="!importing && current?.status === 'draft'" class="btn" :disabled="operationBusy || loading || !canEdit" @click="saveAndValidate">{{ saveBusy ? '保存中…' : '保存并重新校验' }}</button>
+          <button v-if="!importing && current?.status === 'draft' && step === 1" class="btn" disabled>提交模板审核</button>
+          <button v-if="!importing && current?.status === 'draft' && step === 2" class="btn btn-primary" :disabled="operationBusy || loading" @click="goStep(3)">前往校验与发布</button>
         </div>
       </div>
     </header>
     <p v-if="error" class="notice notice-danger" role="alert">{{ error }} <button class="btn btn-sm" @click="refreshDetail()">重新加载</button></p>
-    <p v-if="reviewError" class="notice notice-danger" role="alert">{{ reviewError }}</p>
-    <p v-if="reviewNotice" class="notice" role="status">{{ reviewNotice }}</p>
+    <p v-if="reviewError && !importing" class="notice notice-danger" role="alert">{{ reviewError }}</p>
+    <p v-if="reviewNotice && !importing" class="notice" role="status">{{ reviewNotice }}</p>
     <p v-if="applyError" class="notice notice-danger" role="alert">{{ applyError }}</p>
     <p v-if="applyNotice" class="notice" role="status">{{ applyNotice }}</p>
-    <section v-if="importOpen" class="card card-pad import-panel">
-      <h2 class="card-title">导入评分模板</h2>
-      <p class="card-note">
-        上传规则 Excel；可选附带一份带批注的 Word 模板。导入后默认仅自己可见，
-        发布时再选择分享范围。
-      </p>
-
-      <form @submit.prevent="submitImport">
-        <div class="form-grid">
-          <label class="field">
-            <span class="field-label">标准名称</span>
-            <input v-model="importForm.name" class="input" type="text" required />
-          </label>
-          <label class="field">
-            <span class="field-label">版本</span>
-            <input v-model="importForm.version" class="input" type="text" required />
-          </label>
-        </div>
-
-        <label class="field">
-          <span class="field-label">规则 Excel（.xlsx / .xlsm）</span>
-          <input type="file" accept=".xlsx,.xlsm" required @change="pickRules" />
+    <p v-if="parseError" class="notice notice-danger" role="alert">{{ parseError }}</p>
+    <nav v-if="importing" class="card steps" aria-label="评分标准编辑步骤">
+      <button v-for="(label, index) in ['基本信息与评分项', '评分规则', '校验与发布']" :key="label" class="step" :class="{ active: index === 0 }" :aria-current="index === 0 ? 'step' : undefined" :disabled="index !== 0"><span class="step-number">{{ index + 1 }}</span>{{ label }}</button>
+    </nav>
+    <RubricImportWorkspace v-if="store.activeImportSession" :session="store.activeImportSession"
+      :busy="importBusy" :rules-file="rulesFile" :template-file="templateFile"
+      :source-preview="sourcePreview" :reupload-preview="reuploadPreview"
+      @pick-rules="pickRules" @pick-template="pickTemplate" @update-session="updateImportSession"
+      @update-criterion="updateImportCriterion" @add-criterion="addImportCriterion"
+      @delete-criterion="deleteImportCriterion" @confirm="confirmImportSession"
+      @preview-source="previewImportSource" @close-source-preview="sourcePreview = null"
+      @resolve-conflict="resolveImportConflict" @confirm-reupload="confirmImportReupload"
+      @cancel-reupload="cancelImportReupload" @cancel="cancelImportSession" />
+    <p v-if="store.activeImportSession && importError" class="notice notice-danger" role="alert">{{ importError }}</p>
+    <section v-if="importOpen && !store.activeImportSession" class="import-panel">
+      <RubricImportWorkspace :session="initialImport" initial :busy="importBusy"
+        :rules-file="rulesFile" :template-file="templateFile" @pick-rules="pickRules" @pick-template="pickTemplate"
+        @update-session="updateFirstStep" @confirm="submitImport()" @cancel="importOpen = false" />
+      <div v-if="importStructure.available" class="import-structure" data-test="import-structure">
+        <p class="faint">表格结构没有被自动识别。可以让 AI 识别表头与列用途（只识别结构、不改写原文），确认后再导入。</p>
+        <label class="field"><span class="field-label">用哪个 AI 连接</span>
+          <select v-model="draftConnection" class="select"><option value="">请选择</option><option v-for="item in connections" :key="item.id" :value="item.id">{{ item.name }} · {{ item.model_name }}</option></select>
         </label>
-
-        <label class="field">
-          <span class="field-label">Word 模板（可选，用于解析批注）</span>
-          <input type="file" accept=".docx" @change="pickTemplate" />
-          <span class="field-hint">带批注的模板可以把评语映射到评分项。</span>
-        </label>
-
-        <div class="form-actions">
-          <button class="btn btn-primary" type="submit" :disabled="importBusy">
-            {{ importBusy ? "导入中…" : "导入" }}
-          </button>
-          <button class="btn" type="button" @click="importOpen = false">取消</button>
-        </div>
-      </form>
+        <button v-if="!importStructure.estimate" class="btn" :disabled="importBusy" @click="previewImportStructure(true)">估算识别规模</button>
+        <template v-else-if="!importStructure.result">
+          <p class="notice">将发送约 {{ importStructure.estimate.chars }} 字符，调用 {{ importStructure.estimate.calls }} 次模型。</p>
+          <button class="btn btn-primary" :disabled="importBusy || !draftConnection" @click="previewImportStructure(false)">确认调用 AI 识别结构</button>
+        </template>
+        <template v-else>
+          <p>按识别出的结构，将导入 {{ importStructure.result.preview.length }} 个评分项：</p>
+          <ul><li v-for="item in importStructure.result.preview" :key="item.row_number">第 {{ item.row_number }} 行 · {{ item.name }}（{{ item.max_score }} 分）</li></ul>
+          <button class="btn btn-primary" :disabled="importBusy" @click="submitImport(importStructure.result.override)">按此结构导入</button>
+        </template>
+      </div>
 
       <p v-if="importError" class="notice notice-danger" role="alert">{{ importError }}</p>
     </section>
 
     <!-- 导入结果如实展示：warnings 是「你的 Excel 里哪几条没被识别」的唯一出口，
          吞掉它用户会以为全都导进去了，直到评分时才发现某项没有判据。 -->
-    <section v-if="store.lastImport.rubricId" class="card card-pad">
+    <details v-if="store.lastImport.rubricId === selected && !importing && step === 2 && store.lastImport.warnings.length" class="card card-pad">
+      <summary>查看导入提示</summary>
       <h2 class="card-title">上次导入结果</h2>
       <p v-if="!store.lastImport.warnings.length" class="faint">没有警告。</p>
       <ul v-else class="warnings">
@@ -549,21 +877,21 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
           <dd class="mono">{{ value }}</dd>
         </div>
       </dl>
-    </section>
+    </details>
 
 
-    <section v-if="libraryOpen || !current" class="card library-menu">
+    <section v-if="!importing && (libraryOpen || !current)" class="card library-menu">
       <div class="card-head"><h2 class="card-title">模板库</h2></div>
       <button v-for="rubric in rubrics" :key="rubric.id" class="lib-item" :class="{ active: rubric.id === selected }" :disabled="operationBusy" @click="selectRubric(rubric.id)">
         <strong>{{ rubric.name }}</strong> <span class="chip">{{ rubric.version }} · {{ {draft:'草稿',review:'审核中',published:'已发布'}[rubric.status] || rubric.status }}</span> <span class="faint">{{ visibilityLabel(rubric.visibility) }}</span>
       </button>
-      <p v-if="!rubrics.length" class="card-pad faint">还没有评分标准。请导入规则 Excel 开始。</p>
+      <p v-if="!rubrics.length" class="card-pad faint">还没有评分标准。请上传 Word 文档或 Excel 评分表开始。</p>
     </section>
-    <template v-if="current">
+    <template v-if="current && !importing">
       <nav class="card steps" aria-label="评分标准编辑步骤">
-        <button v-for="(label, index) in ['基本信息与评分项', '评分规则', '校验与发布']" :key="label" class="step" :class="{ active: step === index + 1 }" :aria-current="step === index + 1 ? 'step' : undefined" @click="step = index + 1"><span class="step-number">{{ index + 1 }}</span>{{ label }}</button>
+        <button v-for="(label, index) in ['基本信息与评分项', '评分规则', '校验与发布']" :key="label" class="step" :class="{ active: step === index + 1, complete: completedSteps[index] }" :disabled="operationBusy || loading" :aria-label="`${index + 1} ${label}`" :aria-current="step === index + 1 ? 'step' : undefined" @click="goStep(index + 1)"><span class="step-number" aria-hidden="true">{{ completedSteps[index] ? '✓' : index + 1 }}</span>{{ label }}</button>
       </nav>
-      <div v-if="activeIssues.length || draft?.ambiguity" class="notice notice-danger blockers" role="alert">
+      <div v-if="step === 3 && (activeIssues.length || draft?.ambiguity)" class="notice notice-danger blockers" role="alert">
         <strong>存在 {{ activeIssues.length }} 个校验阻断，处理后才能提交审核。</strong>
         <p v-if="draft?.ambiguity">当前存在多个执行草稿，请先恢复为唯一活动版本。</p>
         <div v-for="(issue, index) in activeIssues" :key="index" class="issue-row">
@@ -571,15 +899,35 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
           <button v-if="issue.criterion_code" class="btn btn-sm" @click="locateIssue(issue)">去修改 {{ issue.criterion_code }} →</button>
         </div>
       </div>
-      <div v-if="blocking.length" class="notice notice-danger">
+      <div v-if="step === 2 && blocking.length" class="notice notice-warn">
         <strong>存在 {{ blocking.length }} 个缺少规则的评分项</strong>
         <p>评分到该项时没有判据可用，请补齐细则并重新校验。</p>
         <button v-for="item in blocking" :key="item.criterion_id" class="btn btn-sm" @click="locateIssue({ criterion_code: item.code })">去修改 {{ item.code }} →</button>
       </div>
       <p v-if="scoreFormError && step !== 1" class="notice notice-warn">{{ scoreFormError }}</p>
       <p v-if="loading" class="notice" role="status">正在加载条款与校验结果…</p>
-      <div v-else class="editor-layout">
-        <aside class="card criteria-nav">
+      <template v-else-if="step === 1 && editForm">
+        <RubricImportWorkspace :session="stepOneSession" persisted :readonly="!canEdit || current.status !== 'draft'"
+          :busy="operationBusy || importBusy" :source-preview="sourcePreview" :reupload-preview="rubricReupload.preview"
+          :blocking-message="scoreFormError || (gate.blocked ? `请先核对下方 ${gate.blocking} 条疑似规则和 ${gate.conflicts} 个来源冲突。` : '')"
+          @update-session="updateFirstStep" @update-criterion="updateExistingCriterion" @confirm="confirmFirstStep"
+          @preview-source="previewExistingSource" @close-source-preview="sourcePreview = null"
+          @pick-rules="previewRubricReupload('rules', $event)" @pick-template="previewRubricReupload('template', $event)"
+          @confirm-reupload="confirmRubricReupload"
+          @cancel-reupload="rubricReupload = { preview: null, rulesFile: null, templateFile: null }">
+          <template #analysis>
+            <ParseCoveragePanel :state="parseState" :criteria="coverage?.criteria || []" :connections="connections"
+              v-model:connection-id="draftConnection" :busy="operationBusy" :editable="editable"
+              :structure-estimate="structureEstimate" @resolve="resolveUnits" @classify="classifyUnits"
+              @suggest-structure="suggestStructure" />
+            <StructureSuggestionPanel :suggestion="parseState?.structure_suggestions" :busy="operationBusy"
+              :editable="editable" @merge="mergeStructure" @undo="undoStructure" />
+          </template>
+          <template #issues><p v-if="importError" class="notice notice-danger" role="alert">{{ importError }}</p></template>
+        </RubricImportWorkspace>
+      </template>
+      <div v-else class="editor-layout" :class="{ 'release-layout': step === 3 }">
+        <aside v-if="step === 2" class="card criteria-nav">
           <div class="card-head"><h2 class="card-title">评分项 · {{ coverage?.total_criteria || 0 }}</h2></div>
           <button v-for="item in coverage?.criteria || []" :key="item.criterion_id" class="lib-item" :class="{ active: item.criterion_id === selectedCriterion, missing: item.status === 'missing' }" :disabled="operationBusy" @click="selectedCriterion = item.criterion_id">
             <div class="criterion-title"><span class="faint mono">{{ item.code }}</span><strong>{{ item.name }}</strong><span class="score">{{ item.max_score }} 分</span></div>
@@ -587,28 +935,11 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
           </button>
         </aside>
         <div class="detail">
-          <section v-if="step === 1 && editForm" class="card card-pad">
-            <h2 class="card-title">基本信息与评分项</h2>
-            <div class="form-grid">
-              <label class="field"><span class="field-label">标准名称</span><input v-model="editForm.name" class="input" :disabled="!canEdit || current.status !== 'draft' || operationBusy" /></label>
-              <label class="field"><span class="field-label">版本</span><input v-model="editForm.version" class="input" :disabled="!canEdit || current.status !== 'draft' || operationBusy" /></label>
-            </div>
-            <label class="field"><span class="field-label">总分</span><input v-model.number="editForm.total_score" type="number" min="0.01" step="0.01" class="input" :disabled="!canEdit || current.status !== 'draft' || operationBusy" /></label>
-            <p v-if="scoreFormError" class="notice notice-warn">{{ scoreFormError }}</p>
-            <label class="field"><span class="field-label">标准说明</span><textarea v-model="editForm.description" class="input" :disabled="!canEdit || current.status !== 'draft' || operationBusy" /></label>
-            <template v-if="editableCriterion">
-              <h3>{{ editableCriterion.code }} · {{ editableCriterion.name }}</h3>
-              <label class="field"><span class="field-label">评分项名称</span><input v-model="editableCriterion.name" class="input" :disabled="!canEdit || current.status !== 'draft' || operationBusy" /></label>
-              <label class="field"><span class="field-label">评分项满分</span><input v-model.number="editableCriterion.max_score" type="number" min="0.01" step="0.01" class="input" :disabled="!canEdit || current.status !== 'draft' || operationBusy" /></label>
-              <label class="field"><span class="field-label">评分项说明</span><textarea v-model="editableCriterion.description" class="input" :disabled="!canEdit || current.status !== 'draft' || operationBusy" /></label>
-              <p class="faint">满分 {{ editableCriterion.max_score }} 分；总分 {{ editForm.total_score }} 分。修改并保存后需要核对新草稿的条款。</p>
-            </template>
-          </section>
           <template v-if="step === 2">
             <section class="card card-pad coverage-panel">
-              <h2 class="card-title">扣分细则完整度</h2>
+              <h2 class="card-title">AI 规则拆分与细则完整度</h2>
               <p class="card-note">{{ coverage?.complete_count || 0 }} 项规则已确认，{{ coverage?.pending_review_count || 0 }} 项有待确认规则，{{ coverage?.blocking_count || 0 }} 项没有规则。</p>
-              <p class="faint">缺少规则的评分项数量与执行草稿校验阻断数量分别统计。AI 只补缺失部分，你的原文表述会保留。</p>
+              <p class="faint">本步骤只处理评分语义：把原文拆成独立扣分规则，或把不同等级拆成可执行的原子评分项。AI 只补缺失部分，原文表述和第 1 步确认的表结构不会被改写。</p>
               <div v-if="generationCandidates.length" class="draft-box">
                 <label class="field"><span class="field-label">用哪个 AI 连接起草</span><select v-model="draftConnection" class="select"><option value="">请选择</option><option v-for="item in connections" :key="item.id" :value="item.id">{{ item.name }} · {{ item.model_name }}</option></select></label>
                 <p v-if="!connections.length" class="notice notice-warn">你还没有可用的 AI 连接。请先在 <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink> 绑定一个。</p>
@@ -616,8 +947,9 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
                 <p v-if="draftError" class="notice notice-danger" role="alert">{{ draftError }}</p>
               </div>
             </section>
-            <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :excluded="excluded" :busy="operationBusy" :editable="editable" @confirm="confirmRules([$event])" @confirm-all="confirmRules" @exclude="toggleExcluded" />
             <AiRuleDraftPanel :items="currentDraftItems" :busy="operationBusy || !editable" @apply="applyDraft" @discard="discardDraft" />
+            <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :excluded="excluded" :busy="operationBusy" :editable="editable"
+              :defer-confirmation="hasPendingAiDraft" @confirm="confirmRules([$event])" @confirm-all="confirmRules" @exclude="toggleExcluded" />
             <AtomicRuleEditor v-if="editForm?.atomic_rules && current.status === 'draft'" :rules="editForm.atomic_rules.filter(r => r.criterion_id === selectedCriterion)" :disabled="!canEdit || operationBusy" />
             <details v-else-if="editableCriterion && current.status === 'draft'" class="card card-pad">
               <summary>修改 {{ activeCriterion?.code }} 的评分细则</summary>
@@ -659,7 +991,7 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
               <template v-if="current.status === 'draft'">
                 <button v-if="dirty" class="btn btn-primary" :disabled="operationBusy || !canEdit" @click="saveAndValidate">{{ saveBusy ? '保存中…' : '保存并重新校验' }}</button>
                 <button v-else-if="pendingRules.length" class="btn" :disabled="operationBusy" @click="goToPendingRules">去核对条款（{{ pendingRules.length }}）</button>
-                <button v-else-if="!validationReady" class="btn" :disabled="operationBusy" @click="scoreFormError ? step = 1 : step = 2">查看并处理校验问题</button>
+                <button v-else-if="!validationReady" class="btn" :disabled="operationBusy" @click="scoreFormError ? step = 1 : goStep(2)">查看并处理校验问题</button>
                 <button class="btn" :class="reviewReady ? 'btn-primary' : ''" :disabled="operationBusy || !reviewReady" @click="submitReview">{{ reviewBusy ? '提交中…' : '提交模板审核' }}</button>
               </template>
               <button v-if="current.status === 'review'" class="btn" :disabled="operationBusy || !canEdit" @click="returnToDraft">退回草稿</button>
@@ -668,6 +1000,9 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
             </div>
             <p v-if="publishError" class="notice notice-danger" role="alert">{{ publishError }}</p>
           </section>
+          <RuleAuditPanel v-if="step === 3 && current.status !== 'published'" :review="ruleReview" :estimate="ruleEstimate"
+            :busy="operationBusy" :editable="canEdit" :connection-id="draftConnection"
+            @estimate="estimateReview" @run="runReview" @dismiss="dismissFinding" />
         </div>
       </div>
     </template>
@@ -682,6 +1017,10 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
 .step.active { background: #f0f4f2; color: #185e52; font-weight: 600; }
 .step-number { border: 2px solid currentColor; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; }
 .editor-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 22px; align-items: start; }
+.editor-layout.release-layout { grid-template-columns: minmax(0, 1fr); }
+.step.complete .step-number { background: #175c50; border-color: #175c50; color: white; }
+.step:disabled { cursor: default; opacity: .65; }
+.head-actions { gap: 8px; }
 .criteria-nav { overflow: hidden; }
 .detail > .card { margin-bottom: 0; }
 .detail { min-width: 0; display: flex; flex-direction: column; gap: 20px; }

@@ -54,7 +54,7 @@ const MEASURE = (el) => {
 for (const [path, name] of PAGES) {
   test(`${name}：链接型按钮的文字在两个方向上都居中`, async ({ page }) => {
     await page.goto(path);
-      if (path === "/workbench/rubrics") await selectSeedRubric(page);
+    if (path === "/workbench/rubrics") await selectSeedRubric(page);
     // 等首屏请求落定再数：`h1` 出现只说明壳渲染了，复核页的「查看原文」是表格
     // 数据回来之后才有的。数早了得到空集合，用例会在**什么都没检查**的情况下
     // 跳过——比失败更难发现。
@@ -81,46 +81,67 @@ for (const [path, name] of PAGES) {
 }
 
 /**
- * 文件选择框要长得像设计系统的按钮（2026-09-10 生产走查）。
+ * 文件卡片采用设计稿的上传按钮与整块拖放区。
  *
- * 原生 `<input type="file">` 在 Chromium 上渲染成一个灰色系统按钮加一句
- * 「未选择任何文件」。它和同一张表单里的 `.btn` 并排时格外突兀——不同的圆角、
- * 不同的字重、不同的灰。`::file-selector-button` 可以直接改样式，不必藏掉输入框
- * 再用 label 冒充（那样会丢掉键盘可达性，除非另外补一整套焦点处理）。
+ * 真实文件输入覆盖在 label 内，保持原生文件选择能力；透明输入必须仍可通过
+ * 键盘到达，且焦点要显示在可见的 label 上。契约验证实际可见卡片与交互，
+ * 不再约束浏览器内部 ::file-selector-button 的绘制。
  */
-test("导入表单的文件选择框按设计系统渲染", async ({ page }) => {
+test("导入文件卡片的可见按钮按设计系统渲染并能选择文件", async ({ page }) => {
   await openSeedRubric(page);
   await page.getByRole("button", { name: "导入评分模板" }).click();
 
-  const input = page.locator('.import-panel input[type="file"]').first();
+  const panel = page.locator(".import-panel");
+  const input = panel.getByLabel("评分标准文档", { exact: true });
+  const button = panel.locator("label.file-button", { has: page.getByLabel("评分标准文档", { exact: true }) });
   await expect(input).toBeVisible();
+  await expect(button).toHaveText("选择文件");
+  await expect(panel.getByText("尚未上传评分标准文档")).toBeVisible();
+  await expect(panel.getByText("拖入 .xlsx 文件，或点击选择", { exact: true })).toBeVisible();
 
-  const style = await input.evaluate((el) => {
-    const button = getComputedStyle(el, "::file-selector-button");
+  const style = await button.evaluate((el) => {
+    const visibleButton = getComputedStyle(el);
     return {
-      radius: button.borderTopLeftRadius,
-      height: button.height,
-      weight: button.fontWeight,
-      cursor: button.cursor,
-      // 与 `.btn` 的次要样式同源：白底 + 描边，不是系统灰。
-      background: button.backgroundColor,
+      radius: visibleButton.borderTopLeftRadius,
+      height: el.getBoundingClientRect().height,
+      weight: visibleButton.fontWeight,
+      cursor: visibleButton.cursor,
+      background: visibleButton.backgroundColor,
     };
   });
 
   expect(style.radius).not.toBe("0px");
-  expect(style.height).toBe("30px");
+  expect(style.height).toBeGreaterThanOrEqual(30);
   expect(Number(style.weight)).toBeGreaterThanOrEqual(500);
   expect(style.cursor).toBe("pointer");
   expect(style.background).toBe("rgb(255, 255, 255)");
+  const chooser = page.waitForEvent("filechooser");
+  await button.click();
+  expect(await (await chooser).element().getAttribute("aria-label")).toBe("评分标准文档");
 });
 
-test("文件选择框的说明文字与表单其它文字同源，不是系统默认的黑", async ({ page }) => {
+test("上传输入可用键盘到达与激活，焦点显示在可见文件卡片上", async ({ page }) => {
   await openSeedRubric(page);
   await page.getByRole("button", { name: "导入评分模板" }).click();
 
-  const input = page.locator('.import-panel input[type="file"]').first();
-  // 「未选择任何文件」是浏览器画的，改不掉文案，但颜色与字号跟着输入框走。
-  const color = await input.evaluate((el) => getComputedStyle(el).color);
-
-  expect(color).not.toBe("rgb(0, 0, 0)");
+  const panel = page.locator(".import-panel");
+  for (const name of ["评分标准文档", "评分表"]) {
+    const input = panel.getByLabel(name, { exact: true });
+    await input.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(input).not.toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(input).toBeFocused();
+    const focusStyle = await input.evaluate((el) => {
+      const label = el.closest("label");
+      const style = getComputedStyle(label);
+      return { focused: label.matches(":focus-within"), outline: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+    });
+    expect(focusStyle.focused).toBe(true);
+    expect(focusStyle.outline).not.toBe("none");
+    expect(focusStyle.width).toBeGreaterThanOrEqual(2);
+    const chooser = page.waitForEvent("filechooser");
+    await input.press("Enter");
+    expect(await (await chooser).element().getAttribute("aria-label")).toBe(name);
+  }
 });

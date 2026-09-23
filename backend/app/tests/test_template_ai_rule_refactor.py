@@ -3,6 +3,7 @@ import pytest
 
 from backend.app.services.rubric_import.ai_rule_drafter import (
     AIRuleDraftValidationError,
+    AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
     draft_deduction_rules,
     validate_ai_rule_draft,
 )
@@ -568,7 +569,8 @@ def test_missing_mutex_is_repaired_once_without_relaxing_validation():
             return {"rule_groups": [{"group_code": "G1", "issue": "需求缺失",
                 "mutex_group": "G1-severity" if len(self.payloads) == 2 else "",
                 "cap_points": 2, "rules": [{"severity": "minor", "trigger": "需求缺失",
-                "points": 2, "reason": "需求不完整", "source_refs": ["/criterion/description"]}]}]}
+                "points": 2, "reason": "需求不完整", "repeat_policy": "once", "source": "ai_inferred",
+                "source_refs": ["/criterion/description"]}]}]}
     scorer = Scorer(None)
     result = draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
     assert len(scorer.payloads) == 2
@@ -577,8 +579,8 @@ def test_missing_mutex_is_repaired_once_without_relaxing_validation():
     assert not result["rule_groups"][0]["rules"][0]["confirmed"]
 
 
-@pytest.mark.parametrize("host,structured", [("openrouter.ai", True), ("example.com", False)])
-def test_drafting_schema_is_scoped_to_openrouter(host, structured):
+@pytest.mark.parametrize("host,openrouter", [("openrouter.ai", True), ("generativelanguage.googleapis.com", False)])
+def test_drafting_uses_strict_bounded_schema_for_compatible_providers(host, openrouter):
     import json
     from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
     calls = []
@@ -588,19 +590,104 @@ def test_drafting_schema_is_scoped_to_openrouter(host, structured):
             value = {"rule_groups": [{"group_code": "G1", "issue": "缺失",
                 "mutex_group": "G1", "cap_points": 2, "rules": [{"severity": "minor",
                 "trigger": "需求缺失", "points": 2, "reason": "不完整",
+                "repeat_policy": "once", "source": "ai_inferred",
                 "source_refs": ["/criterion/description"]}]}]}
             return httpx.Response(200, request=httpx.Request("POST", self.base_url),
                 json={"choices": [{"message": {"content": json.dumps(value)}}]})
     scorer = Scorer(api_key="test-key", base_url="https://" + host + "/api/v1", response_format_json=False)
     draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
     assert len(calls) == 1
-    if structured:
-        schema = calls[0]["response_format"]["json_schema"]
-        assert schema["strict"]
+    schema = calls[0]["response_format"]["json_schema"]
+    assert schema["strict"]
+    groups = schema["schema"]["properties"]["rule_groups"]
+    assert groups["maxItems"] == 2
+    assert groups["items"]["properties"]["rules"]["maxItems"] == 3
+    assert groups["items"]["properties"]["issue"]["maxLength"] == 320
+    assert "mutex_group" in groups["items"]["required"]
+    assert calls[0]["max_tokens"] == AI_RULE_DRAFT_MAX_OUTPUT_TOKENS
+    if openrouter:
         assert calls[0]["reasoning"] == {"enabled": False}
-        assert "mutex_group" in schema["schema"]["properties"]["rule_groups"]["items"]["required"]
     else:
-        assert "response_format" not in calls[0]
+        assert "reasoning" not in calls[0]
+
+
+def test_complex_criterion_is_generated_in_bounded_batches_and_merged():
+    class Scorer(_DraftScorer):
+        def complete_json(self, instructions, payload):
+            self.payloads.append((instructions, payload))
+            ref = payload["input_analysis"]["source_refs"][0]
+            index = payload["batch"]["index"]
+            return {"rule_groups": [{
+                "group_code": "G1", "issue": f"问题{index}", "mutex_group": "M1", "cap_points": 2,
+                "rules": [{"severity": "minor", "trigger": f"触发条件{index}", "points": 2,
+                           "reason": f"原因{index}", "repeat_policy": "once",
+                           "source": "ai_interpreted_user_text", "source_refs": [ref]}],
+            }]}
+
+    rules = [f"要求{chr(64 + index)}表达不清" for index in range(1, 5)]
+    criterion = _criterion(deduction_rules=rules)
+    analysis = analyze_rule_input(rules, criterion_code="T02")
+    scorer = Scorer(None)
+
+    result = draft_deduction_rules(
+        criterion=criterion, input_analysis=analysis, scorer=scorer, business_profile_key="thesis"
+    )
+
+    assert len(scorer.payloads) == 4
+    assert result["generation_metadata"]["batch_count"] == 4
+    assert result["generation_metadata"]["default_max_output_tokens"] == AI_RULE_DRAFT_MAX_OUTPUT_TOKENS
+    assert [group["group_code"] for group in result["rule_groups"]] == [
+        "T02-B01-G01", "T02-B02-G01", "T02-B03-G01", "T02-B04-G01",
+    ]
+    assert all(len(payload["batch"]["focus_units"]) == 1 for _, payload in scorer.payloads)
+
+
+def test_business_validation_rejects_more_than_three_severity_rules():
+    draft = {
+        "schema_version": "ai-deduction-draft@1", "criterion_code": "T02",
+        "input_assessment": {}, "requires_confirmation": True,
+        "rule_groups": [{
+            "group_code": "G1", "issue": "问题", "mutex_group": "M1", "cap_points": 4,
+            "rules": [
+                {"severity": "minor", "trigger": f"条件{index}", "points": index + 1,
+                 "reason": "原因", "repeat_policy": "once", "source": "ai_inferred",
+                 "source_refs": ["/criterion/description"]}
+                for index in range(4)
+            ],
+        }],
+    }
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        validate_ai_rule_draft(draft, criterion=_criterion())
+    assert caught.value.code == "AI_DRAFT_OUTPUT_TOO_LARGE"
+
+
+def test_openai_responses_drafting_uses_same_schema_and_dedicated_budget():
+    import json
+    from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
+
+    calls = []
+    value = {"rule_groups": [{
+        "group_code": "G1", "issue": "需求缺失", "mutex_group": "M1", "cap_points": 2,
+        "rules": [{"severity": "minor", "trigger": "需求描述不完整", "points": 2,
+                   "reason": "无法验证需求", "repeat_policy": "once", "source": "ai_inferred",
+                   "source_refs": ["/criterion/description"]}],
+    }]}
+
+    class Scorer(OpenAIResponsesScorer):
+        def _post_with_retry(self, body):
+            calls.append(body)
+            return httpx.Response(200, request=httpx.Request("POST", self.base_url),
+                                  json={"output_text": json.dumps(value, ensure_ascii=False)})
+
+    scorer = Scorer(api_key="test", base_url="https://api.openai.com/v1")
+    draft_deduction_rules(
+        criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis"
+    )
+
+    assert calls[0]["max_output_tokens"] == AI_RULE_DRAFT_MAX_OUTPUT_TOKENS
+    assert calls[0]["text"]["format"]["type"] == "json_schema"
+    assert calls[0]["text"]["format"]["strict"] is True
 
 
 @pytest.mark.parametrize("groups", [None, 4, {}, [4], [{"group_code": "G", "mutex_group": "M", "cap_points": 2, "rules": 4}]])

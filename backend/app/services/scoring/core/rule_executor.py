@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from decimal import Decimal
+import logging
 
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import (
@@ -24,6 +25,7 @@ from backend.app.services.scoring.core.failures import project_rule_execution_fa
 
 PROMPT_VERSION = "2026-09-03-1"
 OCCURRENCE_SCHEME = "occurrence-id-v1"
+logger = logging.getLogger(__name__)
 
 
 def _plain(value):
@@ -911,6 +913,14 @@ def execute_rule_plan(*, request, checker_registry, llm_runtime, profile):
         except Exception as exc:
             decision = _decision_skeleton(value["plan"], rule)
             error, message = project_rule_execution_failure(exc)
+            logger.warning(
+                "rule_execution_failed criterion_code=%s rule_code=%s "
+                "error_code=%s exception_type=%s",
+                criterion_code,
+                code,
+                error,
+                type(exc).__name__,
+            )
         if error:
             decision["status"] = "invalid"
             decision["evidence_refs"] = []

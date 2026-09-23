@@ -30,6 +30,7 @@ from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
 from backend.app.services.batches import state as batch_state
 from backend.app.db.models import Paper
+from backend.app.db.models import RuleScoringTask
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import utcnow
@@ -68,6 +69,15 @@ _RATE_THRESHOLDS = {
     for name in _THRESHOLD_DIRECTIONS
     if name.endswith("_rate")
 }
+
+
+class IncompleteScoringResultError(ValueError):
+    """Safe material-level projection of persisted rule execution failures."""
+
+    def __init__(self, code, message, *, failure_kind):
+        super().__init__(message)
+        self.code = code
+        self.failure_kind = failure_kind
 
 
 def default_observation_policy(*, sample_size=1):
@@ -637,6 +647,44 @@ def _run_has_complete_scores(session, run):
     )
 
 
+def _incomplete_scoring_error(rule_tasks):
+    """Prefer an actionable, non-sensitive rule checkpoint error."""
+
+    failed = [task for task in rule_tasks if task.status == "failed_exhausted"]
+    provider_codes = [
+        str(task.provider_error.get("code") or "").strip().upper()
+        for task in failed
+        if isinstance(task.provider_error, dict)
+    ]
+    provider_codes = [code for code in provider_codes if code]
+    if "TOKEN_BUDGET_UNSATISFIABLE" in provider_codes:
+        return IncompleteScoringResultError(
+            "TOKEN_BUDGET_UNSATISFIABLE",
+            (
+                "评分输入超过模型上下文预算；请检查评分上下文、输出预留和证据块大小后重试。"
+            ),
+            failure_kind="llm",
+        )
+    if provider_codes:
+        code = sorted(provider_codes)[0]
+        return IncompleteScoringResultError(
+            code,
+            f"评分模型调用失败（{code}）；请检查模型连接后重试。",
+            failure_kind="llm",
+        )
+    if failed:
+        return IncompleteScoringResultError(
+            "RULE_EXECUTION_FAILED",
+            "评分规则执行失败；请查看规则任务错误码或 Worker 安全日志后重试。",
+            failure_kind="checker",
+        )
+    return IncompleteScoringResultError(
+        "SCORING_RESULT_INCOMPLETE",
+        "评分结果不完整：模型未形成全部评分项的有效分数。",
+        failure_kind="checker",
+    )
+
+
 def _default_score_item(session, *, paper_id, job_id):
     from backend.app.services.scoring.engine import retry_score_paper
     from backend.app.services.scoring.engine import score_paper
@@ -685,7 +733,10 @@ def _default_score_item(session, *, paper_id, job_id):
     else:
         run = score_paper(session, paper.id)
     if not _run_has_complete_scores(session, run):
-        raise ValueError("评分结果不完整：模型未形成全部评分项的有效分数")
+        rule_tasks = session.scalars(
+            select(RuleScoringTask).where(RuleScoringTask.scoring_run_id == run.id)
+        ).all()
+        raise _incomplete_scoring_error(rule_tasks)
     latency_ms = max(0, int((monotonic() - started) * 1000))
     return {
         "status": "succeeded",
@@ -704,6 +755,18 @@ def _classify_failure(exc):
     seen = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        direct_code = getattr(current, "code", None)
+        failure_kind = getattr(current, "failure_kind", None)
+        # Only our explicit application projection owns both fields.  Several
+        # libraries expose an unrelated ``code`` attribute (SQLAlchemy uses
+        # short documentation-link codes such as ``gkpj``); those must not be
+        # mistaken for stable business/provider error codes.
+        if (
+            isinstance(direct_code, str)
+            and direct_code.strip()
+            and failure_kind in {"llm", "checker"}
+        ):
+            return direct_code.strip(), failure_kind
         if isinstance(current, ProviderCallError):
             return current.error.code, "llm"
         current = current.__cause__ or current.__context__
@@ -718,6 +781,15 @@ def _classify_failure(exc):
     if "checker" in text:
         return "checker_failure", "checker"
     return "scoring_failure", "checker"
+
+
+def _safe_failure_message(exc, code):
+    """Return a bounded public diagnostic without SQL, payloads or document text."""
+
+    if isinstance(exc, (IncompleteScoringResultError, ProviderCallError)):
+        return str(exc)[:1000]
+    exception_type = type(exc).__name__
+    return f"评分执行失败（{code}; exception_type={exception_type}）"
 
 
 def _checkpoint_started(session_factory, item_id):
@@ -786,7 +858,7 @@ def _checkpoint_result(session_factory, item_id, *, result=None, error=None):
             code, failure_kind = _classify_failure(error)
             item.status = "failed"
             item.error_code = code
-            item.error_message = str(error)[:4000]
+            item.error_message = _safe_failure_message(error, code)
             item.telemetry = {
                 "score_item_count": 0,
                 "invalid_evidence_count": 0,

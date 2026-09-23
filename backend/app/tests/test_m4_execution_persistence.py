@@ -24,6 +24,7 @@ from backend.app.tests.test_m4_rule_executor import (
     _TechnicalProposalProfile,
     _criterion,
     _deduct_rule,
+    _none_rule,
     _plain,
     _quote_occurrence,
     _request_for,
@@ -236,6 +237,49 @@ def test_core_persistence_round_trips_m4_rule_audit_and_retry_is_idempotent():
         )
         assert retried_item.rule_results == item.rule_results
         assert retried_item.aggregation == item.aggregation
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@requires_rule_executor
+def test_core_persistence_stores_scoreless_review_only_criterion_as_blocked():
+    _require_executor()
+    criterion_snapshot = _criterion(mode="review_only")
+    rule = _none_rule(code="proposal.review.v1", effect_type="review")
+    request = _request_for((criterion_snapshot, rule))
+    response = _semantic_response(
+        rule["rule_code"],
+        occurrences=[_quote_occurrence(request)],
+    )
+    outcome = core_engine.score_submission(
+        request=deepcopy(request),
+        checker_registry=_CheckerRegistry(),
+        llm_runtime=_SemanticRuntime({rule["rule_code"]: response}),
+        profile=_TechnicalProposalProfile(),
+    )
+    outcome_mapping = _plain(outcome)
+    assert outcome_mapping["status"] == "review_required"
+    assert outcome_mapping["criterion_outcomes"][0]["auto_score"] is None
+
+    engine, db, rubric, criterion, paper = _database_graph(request)
+    try:
+        store = _DocumentSnapshotStore()
+        persistence = CoreRunPersistence(db, document_snapshot_store=store)
+        run = persistence.persist(
+            request=deepcopy(request),
+            outcome=outcome,
+            paper_id=paper.id,
+            rubric_id=rubric.id,
+            criterion_id_by_code={criterion.code: criterion.id},
+            workflow_profile="template_driven",
+            document_snapshot_ref=store.put(request["document"]),
+        )
+
+        assert len(run.items) == 1
+        assert run.items[0].auto_score_status == "blocked"
+        assert run.items[0].ai_score is None
+        assert run.items[0].need_manual_review is True
     finally:
         db.close()
         engine.dispose()

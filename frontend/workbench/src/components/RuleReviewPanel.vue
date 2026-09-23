@@ -6,6 +6,7 @@ const props = defineProps({
   excluded: { type: Set, default: () => new Set() },
   busy: Boolean,
   editable: Boolean,
+  deferConfirmation: Boolean,
 });
 defineEmits(["confirm", "confirm-all", "exclude"]);
 const pending = computed(() => props.rules.filter((r) =>
@@ -17,6 +18,11 @@ const severities = { minor: "轻微", moderate: "中等", severe: "严重" };
 function displayPoints(rule) {
   if (rule.max_points == null) return "—";
   return `${rule.direction === "deduct" ? "−" : rule.direction === "bonus" ? "+" : ""}${Number(rule.max_points)}`;
+}
+function sourceLabel(rule) {
+  if (rule.origin?.source === "ai_interpreted_user_text") return "AI 解读原文";
+  if (["ai_inferred", "llm"].includes(rule.origin?.source)) return "AI 推断";
+  return sources[rule.creation_method] || rule.creation_method;
 }
 </script>
 
@@ -32,6 +38,9 @@ function displayPoints(rule) {
       </span>
     </div>
     <div class="table-wrap">
+      <p v-if="deferConfirmation" class="notice notice-warn" data-test="deferred-confirmation">
+        请先应用或丢弃上方 AI 建议；形成最终规则集合后，再统一确认原文规则和 AI 规则。
+      </p>
       <table class="table">
         <thead><tr><th>问题类型 / 条款</th><th>严重程度 / 方式</th><th>分值</th><th>触发条件与判据</th><th>来源</th><th>操作</th></tr></thead>
         <tbody>
@@ -52,7 +61,7 @@ function displayPoints(rule) {
               <details v-if="rule.reviewed_at"><summary class="faint">确认记录</summary><p class="faint">确认人 {{ rule.reviewed_by }} · {{ rule.reviewed_at }}</p></details>
             </td>
             <td class="rule-source">
-              <span>{{ ['ai_inferred','llm'].includes(rule.origin?.source) ? 'AI 建议' : sources[rule.creation_method] || rule.creation_method }}</span>
+              <span>{{ sourceLabel(rule) }}</span>
               <p v-for="ref in rule.origin?.source_refs || []" :key="String(ref)" class="faint">{{ ref }}</p>
               <details v-if="rule.origin?.generation_fingerprint"><summary>生成记录</summary><p>{{ rule.origin.generation_metadata?.model_name }}</p><p>{{ rule.origin.generation_fingerprint }}</p></details>
               <details v-for="(source, index) in rule.sources" :key="index">
@@ -63,8 +72,8 @@ function displayPoints(rule) {
             </td>
             <td>
               <div v-if="['draft', 'review'].includes(rule.status)" class="rule-actions">
-                <button class="btn btn-sm" :disabled="busy || !editable" @click="$emit('exclude', rule)">{{ excluded.has(rule.id) ? '撤销排除' : '排除' }}</button>
-                <button class="btn btn-sm confirm" :disabled="busy || !editable || excluded.has(rule.id)" @click="$emit('confirm', rule)">{{ busy ? '处理中…' : '确认' }}</button>
+                <button class="btn btn-sm" :disabled="busy || !editable || deferConfirmation" @click="$emit('exclude', rule)">{{ excluded.has(rule.id) ? '撤销排除' : '排除' }}</button>
+                <button class="btn btn-sm confirm" :disabled="busy || !editable || deferConfirmation || excluded.has(rule.id)" @click="$emit('confirm', rule)">{{ busy ? '处理中…' : '确认' }}</button>
               </div>
               <span v-else class="faint">{{ statuses[rule.status] || rule.status }}</span>
             </td>
@@ -74,10 +83,10 @@ function displayPoints(rule) {
       </table>
     </div>
     <div class="card-foot review-foot">
-      <div><p>未确认规则不会进入可执行评分版本。批量仅处理当前评分项，排除项保留待确认。</p>
+      <div><p>{{ deferConfirmation ? '当前规则集合尚未定稿，暂不记录确认。' : '未确认规则不会进入可执行评分版本。批量仅处理当前评分项，排除项保留待确认。' }}</p>
         <p v-if="!editable" class="faint">当前版本不可编辑或你没有确认权限。</p></div>
-      <button class="btn btn-primary" :disabled="busy || !editable || !pending.length" @click="$emit('confirm-all', pending)">
-        {{ busy ? '确认中…' : `确认并应用全部（${pending.length}）` }}
+      <button class="btn btn-primary" :disabled="busy || !editable || deferConfirmation || !pending.length" @click="$emit('confirm-all', pending)">
+        {{ busy ? '确认中…' : `统一确认最终规则（${pending.length}）` }}
       </button>
     </div>
   </section>

@@ -1,4 +1,5 @@
 from datetime import datetime
+from datetime import timezone
 from typing import Any
 from typing import Optional
 
@@ -72,6 +73,12 @@ class BatchScoringJobRead(BaseModel):
             return "inactive"
         if self.heartbeat_at is None:
             return "stale"
-        now = datetime.now(tz=self.heartbeat_at.tzinfo)
-        age = (now - self.heartbeat_at).total_seconds()
+        # PostgreSQL stores these timestamps as naive UTC.  ``datetime.now(None)``
+        # means local wall-clock time, so hosts outside UTC would otherwise mark
+        # a fresh heartbeat stale by their timezone offset (for example +08:00).
+        heartbeat = self.heartbeat_at
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        age = (now - heartbeat.astimezone(timezone.utc)).total_seconds()
         return "stale" if age > RUNNER_LEASE_SECONDS else "healthy"

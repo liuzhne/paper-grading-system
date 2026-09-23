@@ -292,6 +292,7 @@ def test_postgres_verifier_freezes_complete_migration_and_stable_order_contract(
         "0028_export_event_backfill",
         "0029_runtime_access_for_v2_tables",
         "0030_platform_llm_config",
+        "0031_rubric_import_sessions",
     )
     assert stable_ordering_clause() == ("created_at", "id")
     script = (ROOT / "backend/app/scripts/verify_postgres_ops.py").read_text(

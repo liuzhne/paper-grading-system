@@ -56,10 +56,10 @@ function mountPanel(items = DRAFT_ITEMS, props = {}) {
   });
 }
 
-describe("AI 起草确认面板", () => {
-  it("单条确认只选中这一条，不顺带确认其它建议", async () => {
+describe("AI 起草选择面板", () => {
+  it("单条应用只选中这一条，不顺带应用其它建议", async () => {
     const wrapper = mountPanel();
-    await wrapper.findAll('[data-test="confirm-one"]')[0].trigger("click");
+    await wrapper.findAll('[data-test="apply-one"]')[0].trigger("click");
     expect([...wrapper.emitted("apply")[0][0]]).toEqual(["T02::G1::1"]);
   });
   it("没有起草结果时整块不渲染", () => {
@@ -80,10 +80,10 @@ describe("AI 起草确认面板", () => {
     expect(text).toContain("AI 起草");
   });
 
-  it("标明这些规则未确认前不进入可执行版本", () => {
+  it("标明建议应用后仍需统一确认最终规则", () => {
     const wrapper = mountPanel();
 
-    expect(wrapper.text()).toContain("未确认");
+    expect(wrapper.text()).toContain("统一核对原文规则和 AI 规则");
   });
 
   it("公开模型与指纹——确认记录要追得回是哪一次生成", () => {

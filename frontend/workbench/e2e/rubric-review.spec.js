@@ -32,13 +32,19 @@ async function importTemplate(page) {
   await page.getByRole("button", { name: "导入评分模板", exact: true }).click();
   const panel = page.locator(".import-panel");
   await panel.getByLabel("标准名称", { exact: true }).fill(name);
-  await panel.getByLabel(/规则 Excel/).setInputFiles({ name: "review.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: workbook });
-  const imported = page.waitForResponse((r) => r.url().endsWith("/rubrics/import-files") && r.request().method() === "POST");
-  await panel.getByRole("button", { name: "导入", exact: true }).click();
+  await panel.getByLabel("评分表", { exact: true }).setInputFiles({ name: "review.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: workbook });
+  const imported = page.waitForResponse((r) => r.url().endsWith("/rubrics/import-sessions") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "解析文件", exact: true }).click();
   const response = await imported;
   expect(response.ok(), await response.text()).toBeTruthy();
-  const id = (await response.json()).rubric.id;
+  await expect(page.locator("[data-test=rubric-import-workspace]")).toBeVisible();
+  const confirmed = page.waitForResponse((r) => /\/rubrics\/import-sessions\/[^/]+\/confirm$/.test(r.url()) && r.request().method() === "POST");
+  await page.locator('[data-test="confirm-import-session"]').click();
+  const confirmResponse = await confirmed;
+  expect(confirmResponse.ok(), await confirmResponse.text()).toBeTruthy();
+  const id = (await confirmResponse.json()).rubric.id;
   await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
+  await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
   await expect(page.locator("[data-test=rule-review-panel] tbody tr")).toHaveCount(2);
   return { id, name };
 }
@@ -48,6 +54,7 @@ async function reopen(page, name) {
   await page.getByRole("button", { name: "模板库", exact: true }).click();
   await page.locator(".library-menu .lib-item", { hasText: name }).click();
   await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
+  await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
 }
 
 test("导入→原文核对→单条及当前评分项批量确认→刷新保留；不自动发布", async ({ page, request }) => {
@@ -66,7 +73,7 @@ test("导入→原文核对→单条及当前评分项批量确认→刷新保�
   await panel.getByRole("button", { name: "确认", exact: true }).first().click();
   await expect(page.getByRole("status").filter({ hasText: "已确认 1 条规则" })).toBeVisible();
   await expect(panel.getByRole("button", { name: "确认", exact: true })).toHaveCount(1);
-  await panel.getByRole("button", { name: /确认并应用全部/ }).click();
+  await panel.getByRole("button", { name: /统一确认最终规则/ }).click();
   await expect(panel.getByRole("button", { name: "确认", exact: true })).toHaveCount(0);
   const workspace = await (await request.get(`/api/rubrics/${id}/review-workspace`)).json();
   expect(workspace.rules.filter((r) => r.status === "approved")).toHaveLength(2);
@@ -86,7 +93,7 @@ test("批量确认失败立即停止、保留成功条款并支持核对后重�
     await route.continue();
   });
   const panel = page.locator("[data-test=rule-review-panel]");
-  await panel.getByRole("button", { name: /确认并应用全部/ }).click();
+  await panel.getByRole("button", { name: /统一确认最终规则/ }).click();
   await expect(page.getByRole("alert").filter({ hasText: "已完成 1 条，后续操作已停止" })).toBeVisible();
   expect(confirmations).toBe(2);
   const workspace = await (await request.get(`/api/rubrics/${id}/review-workspace`)).json();
@@ -99,8 +106,8 @@ test("排除可撤销且不进入当前评分项批量确认", async ({ page, re
   const { id } = await importTemplate(page);
   const panel = page.locator("[data-test=rule-review-panel]");
   await panel.getByRole("button", { name: "排除", exact: true }).first().click();
-  await expect(panel.getByRole("button", { name: /确认并应用全部/ })).toContainText("1");
-  await panel.getByRole("button", { name: /确认并应用全部/ }).click();
+  await expect(panel.getByRole("button", { name: /统一确认最终规则/ })).toContainText("1");
+  await panel.getByRole("button", { name: /统一确认最终规则/ }).click();
   await expect(panel.getByRole("button", { name: "撤销排除" })).toBeVisible();
   expect((await (await request.get(`/api/rubrics/${id}/review-workspace`)).json()).rules.filter((r) => r.status === "approved")).toHaveLength(1);
   await panel.getByRole("button", { name: "撤销排除" }).click();
@@ -141,6 +148,7 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   });
   await page.goto("/workbench/rubrics");
   await expect(page.getByRole("heading", { level: 1, name: rubric.name })).toBeVisible();
+  await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
   await page.getByLabel("用哪个 AI 连接起草").selectOption("synthetic");
   await page.getByRole("button", { name: /生成全部缺失细则/ }).click();
   await expect(page.getByRole("alert").filter({ hasText: "已保留 1 项结果" })).toContainText("缺少互斥标识。");
@@ -149,21 +157,27 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   expect(generatedCodes).toEqual(["T01", "T02", "T02"]);
   const panel = page.locator("[data-test=draft-panel]");
   await expect(panel.locator("tbody tr")).toHaveCount(2);
-  await panel.getByRole("button", { name: "确认", exact: true }).first().click();
-  await expect(page.getByRole("status").filter({ hasText: "已应用并确认 1 条建议" })).toBeVisible();
+  await panel.getByRole("button", { name: "仅应用此条", exact: true }).first().click();
+  await expect(page.getByRole("status").filter({ hasText: "已应用 1 条建议" })).toBeVisible();
   let full = await (await request.get(`/api/rubrics/${rubric.id}`)).json();
   expect(full.criteria.find((c) => c.code === "T01").deduction_rules_structured).toHaveLength(1);
   expect(full.criteria.find((c) => c.code === "T02").deduction_rules_structured).toHaveLength(0);
   await expect(panel.locator("tbody tr")).toHaveCount(1);
-  await panel.getByRole("button", { name: "确认", exact: true }).click();
+  await panel.getByRole("button", { name: "仅应用此条", exact: true }).click();
   await expect(panel).toHaveCount(0);
-  // Recompile removes the draft panel before the separate confirm request finishes.
-  await expect(page.getByRole("status").filter({ hasText: "已应用并确认 1 条建议" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "已应用 1 条建议" })).toBeVisible();
   full = await (await request.get(`/api/rubrics/${rubric.id}`)).json();
   expect(full.criteria.find((c) => c.code === "T01").deduction_rules_structured).toHaveLength(2);
   expect(full.criteria.find((c) => c.code === "T02").deduction_rules_structured).toHaveLength(0);
   const review = await (await request.get(`/api/rubrics/${rubric.id}/review-workspace`)).json();
-  expect(review.rules.filter((r) => r.status === "approved")).toHaveLength(2);
+  expect(review.rules.filter((r) => r.status === "approved")).toHaveLength(0);
+  const t01Id = full.criteria.find((criterion) => criterion.code === "T01").id;
+  const finalRuleCount = review.rules.filter((rule) => rule.criterion_id === t01Id).length;
+  const finalPanel = page.locator("[data-test=rule-review-panel]");
+  await finalPanel.getByRole("button", { name: /统一确认最终规则/ }).click();
+  await expect(page.getByRole("status").filter({ hasText: `已确认 ${finalRuleCount} 条规则` })).toBeVisible();
+  const confirmedReview = await (await request.get(`/api/rubrics/${rubric.id}/review-workspace`)).json();
+  expect(confirmedReview.rules.filter((r) => r.criterion_id === t01Id && r.status === "approved")).toHaveLength(finalRuleCount);
   expect(review.structural_blockers.filter((b) => b.code === "deduct_rule_invalid")).toEqual([]);
   for (const rule of review.rules.filter(r => r.direction === "deduct")) {
     expect(rule.cap_points).toBeNull();
@@ -184,8 +198,9 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   await second.getByRole("button", { name: "删除此档位" }).first().click();
   await second.getByRole("button", { name: "删除此档位" }).first().click();
   await page.getByRole("button", { name: /基本信息与评分项/ }).click();
+  await page.getByText("更多信息", { exact: true }).click();
   await page.getByLabel("标准说明", { exact: true }).fill("仅用于端到端验证的合成说明");
-  await page.getByLabel("总分", { exact: true }).fill("20");
+  await page.getByLabel("标准满分", { exact: true }).fill("20");
   await expect(page.getByText(/有未保存的修改/)).toBeVisible();
   await page.route(`**/api/rubrics/${id}/recompile`, (route) => route.fulfill({ status: 409, json: { detail: "合成保存冲突" } }));
   await page.getByRole("button", { name: "保存并重新校验" }).click();
@@ -200,10 +215,10 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   for (const rule of after.rules) expect(rule.sources).toEqual(before.rules.find(r => r.rule_code === rule.rule_code).sources);
   expect(after.rules.find(r => r.rule_code === 'thesis.method_reproducible.v1').rule_text).toContain('转人工复核');
   await page.getByRole("button", { name: /2 评分规则/ }).click();
-  await page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /确认并应用全部/ }).click();
+  await page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /统一确认最终规则/ }).click();
   await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: "确认", exact: true })).toHaveCount(0);
   await page.locator(".criteria-nav .lib-item", { hasText: "RESULT" }).click();
-  await page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /确认并应用全部/ }).click();
+  await page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /统一确认最终规则/ }).click();
   await page.getByRole("button", { name: "前往校验与发布" }).click();
   const release = page.locator('[data-test="release-panel"]');
   await expect(release).toContainText('下一步：提交模板审核');
@@ -227,7 +242,7 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   await expect(release).toContainText('评分标准已发布');
   await expect(release.getByLabel('分享给谁')).toBeDisabled();
   await page.getByRole("button", { name: /2 评分规则/ }).click();
-  await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /确认并应用全部/ })).toBeDisabled();
+  await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /统一确认最终规则/ })).toBeDisabled();
 });
 
 test("存量单次上限冲突可显式清除并保存新草稿，其它评分项保持原样", async ({ page, request }) => {
@@ -242,7 +257,9 @@ test("存量单次上限冲突可显式清除并保存新草稿，其它评分�
   } });
   expect(invalid.ok(), await invalid.text()).toBeTruthy();
   await reopen(page, name);
+  await page.getByRole("button", { name: "前往校验与发布" }).click();
   await expect(page.getByRole('alert').filter({hasText:'3 个校验阻断'})).toContainText('单条累计上限');
+  await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
   await page.getByText('编辑当前评分项的原子规则', {exact:true}).click();
   const editor = page.locator('.atomic-editor');
   await expect(editor).toHaveCount(2);

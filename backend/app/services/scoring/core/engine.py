@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from decimal import Decimal
+import logging
 
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3, ScoringRequest
@@ -24,6 +25,7 @@ from backend.app.services.scoring.core.rule_executor import execute_rule_plan
 # This value is deliberately mirrored by services.cache.llm_cache.  Importing
 # that adapter from Core would violate the M2 dependency boundary.
 PROMPT_VERSION = "2026-09-03-1"
+logger = logging.getLogger(__name__)
 
 
 def _plain(value):
@@ -379,6 +381,14 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
                 response = llm_runtime.score(envelope=envelope)
             except Exception as exc:
                 failure_code, failure_message = project_rule_execution_failure(exc)
+                logger.warning(
+                    "rule_execution_failed criterion_code=%s rule_code=%s "
+                    "error_code=%s exception_type=%s",
+                    criterion_code,
+                    rule_code,
+                    failure_code,
+                    type(exc).__name__,
+                )
                 decisions.append(
                     {
                         "rule_code": rule_code,

@@ -1332,6 +1332,167 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/import-files/structure-suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Import Structure
+         * @description 导入前结构预检：识别失败（E1/E7）时用 LLM 建议表格结构，不落库；
+         *     ``dry_run`` 只返回将发送的规模估算，供用户确认后再调用模型。
+         */
+        post: operations["preview_import_structure_api_rubrics_import_files_structure_suggestions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Rubric Import Session
+         * @description 确定性解析文件并保存临时草稿；确认前不创建 Rubric。
+         */
+        post: operations["create_rubric_import_session_api_rubrics_import_sessions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Rubric Import Session */
+        get: operations["get_rubric_import_session_api_rubrics_import_sessions__session_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Rubric Import Session */
+        patch: operations["update_rubric_import_session_api_rubrics_import_sessions__session_id__patch"];
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Rubric Import Session */
+        post: operations["cancel_rubric_import_session_api_rubrics_import_sessions__session_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Rubric Import Session */
+        post: operations["confirm_rubric_import_session_api_rubrics_import_sessions__session_id__confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}/conflicts/{conflict_id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resolve Rubric Import Session Conflict */
+        post: operations["resolve_rubric_import_session_conflict_api_rubrics_import_sessions__session_id__conflicts__conflict_id__resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}/reupload-confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Rubric Import Session Reupload */
+        post: operations["confirm_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}/reupload-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Rubric Import Session Reupload */
+        post: operations["preview_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}/source-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Preview Rubric Import Source */
+        get: operations["preview_rubric_import_source_api_rubrics_import_sessions__session_id__source_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/import-template.xlsx": {
         parameters: {
             query?: never;
@@ -1421,6 +1582,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/parse-coverage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Parse Coverage
+         * @description 解析台账覆盖率：哪些原文内容未被识别（解析重构方案 §4.3）。
+         */
+        get: operations["get_parse_coverage_api_rubrics__rubric_id__parse_coverage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/publish": {
         parameters: {
             query?: never;
@@ -1475,6 +1656,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/reupload-confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Confirmed Rubric Reupload */
+        post: operations["confirm_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/reupload-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Confirmed Rubric Reupload */
+        post: operations["preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/review-workspace": {
         parameters: {
             query?: never;
@@ -1509,6 +1724,47 @@ export interface paths {
         get: operations["get_rule_coverage_api_rubrics__rubric_id__rule_coverage_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/rule-review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Rubric Rule Review */
+        get: operations["get_rubric_rule_review_api_rubrics__rubric_id__rule_review_get"];
+        put?: never;
+        /**
+         * Run Rubric Rule Review
+         * @description 第二部分结束后的规则审查：代码前置检查 + LLM 审查（只报告，不修改规则）。
+         */
+        post: operations["run_rubric_rule_review_api_rubrics__rubric_id__rule_review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/rule-review/findings/{finding_id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss Rubric Rule Review Finding
+         * @description 豁免一条审查问题（写明原因并留痕）。
+         */
+        post: operations["dismiss_rubric_rule_review_finding_api_rubrics__rubric_id__rule_review_findings__finding_id__dismiss_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1637,6 +1893,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/source-workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Rubric Source Workspace */
+        get: operations["get_rubric_source_workspace_api_rubrics__rubric_id__source_workspace_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/structure-suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Suggest Rubric Structure
+         * @description 用户确认后运行 LLM 结构识别，返回与当前草稿的差异；建议带指纹持久化。
+         */
+        post: operations["suggest_rubric_structure_api_rubrics__rubric_id__structure_suggestions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/submit-review": {
         parameters: {
             query?: never;
@@ -1654,6 +1947,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/suggestions/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge Structure Suggestion
+         * @description 按确认后的结构重新解析并取代当前草稿：新增/补全直接合入，修改须在 confirm 中逐条列出。
+         */
+        post: operations["merge_structure_suggestion_api_rubrics__rubric_id__suggestions_merge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/suggestions/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Undo Structure Suggestion
+         * @description 撤销最近一次结构合入（发布前）：按合入前的结构重新解析；合入新增过评分项时无法撤销。
+         */
+        post: operations["undo_structure_suggestion_api_rubrics__rubric_id__suggestions_undo_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/template-links/{link_id}/review": {
         parameters: {
             query?: never;
@@ -1665,6 +1998,66 @@ export interface paths {
         put?: never;
         /** Review Atomic Rule Template Link */
         post: operations["review_atomic_rule_template_link_api_rubrics__rubric_id__template_links__link_id__review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/unit-classifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Classify Source Units
+         * @description 用户确认后运行兜底分类器；结果只是建议，持久化到当前编译记录并带指纹。
+         */
+        post: operations["classify_source_units_api_rubrics__rubric_id__unit_classifications_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/units/resolve-batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Source Units Batch
+         * @description 批量处理未认领的原文单元（批量忽略 / 标为上下文 / 指派到同一评分项）。
+         */
+        post: operations["resolve_source_units_batch_api_rubrics__rubric_id__units_resolve_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/units/{unit_id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Source Unit
+         * @description 人工处理未认领的原文单元：指派到已有评分项，或确认不是规则。
+         */
+        post: operations["resolve_source_unit_api_rubrics__rubric_id__units__unit_id__resolve_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2891,6 +3284,49 @@ export interface components {
             /** Files */
             files: string[];
         };
+        /** Body_confirm_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_confirm_post */
+        Body_confirm_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_confirm_post: {
+            /** Fingerprint */
+            fingerprint: string;
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
+        };
+        /** Body_confirm_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_confirm_post */
+        Body_confirm_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_confirm_post: {
+            /** Expected State Version */
+            expected_state_version: number;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
+        };
+        /** Body_create_rubric_import_session_api_rubrics_import_sessions_post */
+        Body_create_rubric_import_session_api_rubrics_import_sessions_post: {
+            /** Description */
+            description?: string | null;
+            /** Name */
+            name: string;
+            /** Rules File */
+            rules_file?: string | null;
+            /** Structure Override */
+            structure_override?: string | null;
+            /** Template File */
+            template_file?: string | null;
+            /**
+             * Version
+             * @default v1.0
+             */
+            version: string;
+            /**
+             * Visibility
+             * @default private
+             */
+            visibility: string;
+        };
         /** Body_import_rubric_from_files_api_rubrics_import_files_post */
         Body_import_rubric_from_files_api_rubrics_import_files_post: {
             /** Description */
@@ -2898,7 +3334,9 @@ export interface components {
             /** Name */
             name: string;
             /** Rules File */
-            rules_file: string;
+            rules_file?: string | null;
+            /** Structure Override */
+            structure_override?: string | null;
             /** Template File */
             template_file?: string | null;
             /**
@@ -2923,6 +3361,36 @@ export interface components {
              * @default {}
              */
             metadata_json: string;
+        };
+        /** Body_preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post */
+        Body_preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post: {
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
+        };
+        /** Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post */
+        Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
+        };
+        /** Body_preview_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_preview_post */
+        Body_preview_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_preview_post: {
+            /** Expected State Version */
+            expected_state_version: number;
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
         };
         /** Body_upload_paper_api_papers_upload_post */
         Body_upload_paper_api_papers_upload_post: {
@@ -3313,6 +3781,11 @@ export interface components {
             target_id?: string | null;
             /** Target Type */
             target_type: string;
+        };
+        /** FindingDismissRequest */
+        FindingDismissRequest: {
+            /** Reason */
+            reason: string;
         };
         /** GenericReviewSubmit */
         GenericReviewSubmit: {
@@ -3891,6 +4364,15 @@ export interface components {
             /** Weight */
             weight?: number | null;
         };
+        /** RubricCriterionSourceRead */
+        RubricCriterionSourceRead: {
+            /** Code */
+            code: string;
+            /** Parse Status */
+            parse_status: string;
+            /** Source Refs */
+            source_refs?: components["schemas"]["RubricSourceReference"][];
+        };
         /** RubricDraftRecompileRequest */
         RubricDraftRecompileRequest: {
             /** Atomic Rules */
@@ -3941,15 +4423,228 @@ export interface components {
             /** Rubric Status */
             rubric_status: string;
         };
+        /** RubricImportConflictResolve */
+        RubricImportConflictResolve: {
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "use_excel" | "use_word";
+            /** Expected State Version */
+            expected_state_version: number;
+            /** Reason */
+            reason: string;
+        };
+        /** RubricImportCriterionDraft */
+        RubricImportCriterionDraft: {
+            /** Code */
+            code: string;
+            /**
+             * Deleted
+             * @default false
+             */
+            deleted: boolean;
+            /** Description */
+            description?: string | null;
+            /**
+             * Display Order
+             * @default 0
+             */
+            display_order: number;
+            /** Max Score */
+            max_score: number;
+            /** Name */
+            name: string;
+            /**
+             * Parse Status
+             * @default parsed
+             */
+            parse_status: string;
+            /** Source Refs */
+            source_refs?: {
+                [key: string]: unknown;
+            }[];
+        };
         /** RubricImportResult */
         RubricImportResult: {
+            /** Artifacts */
+            artifacts?: {
+                [key: string]: unknown;
+            }[];
+            /** Conflicts */
+            conflicts?: {
+                [key: string]: unknown;
+            }[];
+            /** Coverage */
+            coverage?: {
+                [key: string]: unknown;
+            };
             rubric: components["schemas"]["RubricRead"];
             /** Template Summary */
             template_summary?: {
                 [key: string]: unknown;
             };
+            /** Triggers */
+            triggers?: {
+                [key: string]: unknown;
+            }[];
+            /** Unclaimed Summary */
+            unclaimed_summary?: {
+                [key: string]: unknown;
+            };
             /** Warnings */
             warnings?: string[];
+        };
+        /** RubricImportReuploadPreviewResponse */
+        RubricImportReuploadPreviewResponse: {
+            /**
+             * Added Count
+             * @default 0
+             */
+            added_count: number;
+            /** Criteria Diff */
+            criteria_diff?: components["schemas"]["RubricReuploadCriterionDiff"][];
+            /** Fingerprint */
+            fingerprint: string;
+            /**
+             * Modified Count
+             * @default 0
+             */
+            modified_count: number;
+            /**
+             * Removed Count
+             * @default 0
+             */
+            removed_count: number;
+            /** Score Adjustments */
+            score_adjustments?: components["schemas"]["RubricScoreAdjustment"][];
+            /**
+             * Unchanged Count
+             * @default 0
+             */
+            unchanged_count: number;
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** RubricImportSessionConfirm */
+        RubricImportSessionConfirm: {
+            /** Expected State Version */
+            expected_state_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** RubricImportSessionConfirmResult */
+        RubricImportSessionConfirmResult: {
+            /** Import Session Id */
+            import_session_id: string;
+            rubric: components["schemas"]["RubricRead"];
+            /** State Version */
+            state_version: number;
+            /**
+             * Status
+             * @constant
+             */
+            status: "confirmed";
+        };
+        /** RubricImportSessionRead */
+        RubricImportSessionRead: {
+            /** Conflicts */
+            conflicts?: {
+                [key: string]: unknown;
+            }[];
+            /** Coverage */
+            coverage?: {
+                [key: string]: unknown;
+            };
+            /** Criteria */
+            criteria?: components["schemas"]["RubricImportCriterionDraft"][];
+            /** Description */
+            description?: string | null;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Files */
+            files?: {
+                [key: string]: unknown;
+            };
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Rubric Id */
+            rubric_id?: string | null;
+            /** Score Adjustments */
+            score_adjustments?: components["schemas"]["RubricScoreAdjustment"][];
+            /** State Version */
+            state_version: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draft" | "confirmed" | "expired" | "cancelled";
+            /** Template Summary */
+            template_summary?: {
+                [key: string]: unknown;
+            };
+            /** Total Score */
+            total_score: number;
+            /** Version */
+            version: string;
+            /**
+             * Visibility
+             * @enum {string}
+             */
+            visibility: "system" | "organization" | "private";
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** RubricImportSessionStateRequest */
+        RubricImportSessionStateRequest: {
+            /** Expected State Version */
+            expected_state_version: number;
+        };
+        /** RubricImportSessionUpdate */
+        RubricImportSessionUpdate: {
+            /** Criteria */
+            criteria?: components["schemas"]["RubricImportCriterionDraft"][] | null;
+            /** Description */
+            description?: string | null;
+            /** Expected State Version */
+            expected_state_version: number;
+            /** Name */
+            name?: string | null;
+            /** Total Score */
+            total_score?: number | null;
+            /** Version */
+            version?: string | null;
+        };
+        /** RubricImportSourcePreview */
+        RubricImportSourcePreview: {
+            /**
+             * Document
+             * @enum {string}
+             */
+            document: "word" | "excel";
+            /** Items */
+            items?: components["schemas"]["RubricImportSourcePreviewItem"][];
+        };
+        /** RubricImportSourcePreviewItem */
+        RubricImportSourcePreviewItem: {
+            /** Kind */
+            kind?: string | null;
+            /** Locator */
+            locator?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+            /** Unit Id */
+            unit_id?: string | null;
         };
         /** RubricLifecycleReason */
         RubricLifecycleReason: {
@@ -4004,6 +4699,139 @@ export interface components {
              */
             visibility: string;
         };
+        /** RubricReuploadCriterionDiff */
+        RubricReuploadCriterionDiff: {
+            /**
+             * Change Type
+             * @enum {string}
+             */
+            change_type: "added" | "removed" | "modified" | "unchanged";
+            /** Code */
+            code: string;
+            /** Name */
+            name: string;
+            /** New Max Score */
+            new_max_score?: number | null;
+            /** New Name */
+            new_name?: string | null;
+            /** Old Max Score */
+            old_max_score?: number | null;
+            /** Old Name */
+            old_name?: string | null;
+        };
+        /** RubricReuploadPreviewResponse */
+        RubricReuploadPreviewResponse: {
+            /**
+             * Added Count
+             * @default 0
+             */
+            added_count: number;
+            /** Criteria Diff */
+            criteria_diff?: components["schemas"]["RubricReuploadCriterionDiff"][];
+            /**
+             * File Type
+             * @enum {string}
+             */
+            file_type: "rules" | "template";
+            /** Filename */
+            filename: string;
+            /** Fingerprint */
+            fingerprint: string;
+            /**
+             * Invalidated Rules Count
+             * @default 0
+             */
+            invalidated_rules_count: number;
+            /**
+             * Modified Count
+             * @default 0
+             */
+            modified_count: number;
+            /**
+             * Removed Count
+             * @default 0
+             */
+            removed_count: number;
+            /**
+             * Retained Rules Count
+             * @default 0
+             */
+            retained_rules_count: number;
+            /**
+             * Unchanged Count
+             * @default 0
+             */
+            unchanged_count: number;
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** RubricScoreAdjustment */
+        RubricScoreAdjustment: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+            /** Original */
+            original: string;
+            /** Rounded */
+            rounded: number;
+        };
+        /** RubricSourceFileMetadata */
+        RubricSourceFileMetadata: {
+            /** Size Bytes */
+            size_bytes: number;
+            /**
+             * Uploaded At
+             * Format: date-time
+             */
+            uploaded_at: string;
+        };
+        /** RubricSourceFiles */
+        RubricSourceFiles: {
+            /** Rules */
+            rules?: string | null;
+            /** Template */
+            template?: string | null;
+        };
+        /** RubricSourceFilesMetadata */
+        RubricSourceFilesMetadata: {
+            rules?: components["schemas"]["RubricSourceFileMetadata"] | null;
+            template?: components["schemas"]["RubricSourceFileMetadata"] | null;
+        };
+        /** RubricSourcePreviews */
+        RubricSourcePreviews: {
+            /** Excel */
+            excel?: components["schemas"]["RubricImportSourcePreviewItem"][];
+            /** Word */
+            word?: components["schemas"]["RubricImportSourcePreviewItem"][];
+        };
+        /** RubricSourceReference */
+        RubricSourceReference: {
+            /** Kind */
+            kind?: ("word" | "excel") | null;
+            /** Locator */
+            locator?: string | null;
+            /** Row Number */
+            row_number?: number | null;
+            /** Sheet Name */
+            sheet_name?: string | null;
+            /** Text */
+            text?: string | null;
+        };
+        /** RubricSourceWorkspaceRead */
+        RubricSourceWorkspaceRead: {
+            /** Compilation Id */
+            compilation_id?: string | null;
+            /** Criteria */
+            criteria?: components["schemas"]["RubricCriterionSourceRead"][];
+            file_metadata: components["schemas"]["RubricSourceFilesMetadata"];
+            files: components["schemas"]["RubricSourceFiles"];
+            previews: components["schemas"]["RubricSourcePreviews"];
+            /** Rubric Id */
+            rubric_id: string;
+            /** Score Adjustments */
+            score_adjustments?: components["schemas"]["RubricScoreAdjustment"][];
+        };
         /** RubricUpdate */
         RubricUpdate: {
             /** Criteria */
@@ -4016,6 +4844,22 @@ export interface components {
             total_score?: number | null;
             /** Version */
             version?: string | null;
+        };
+        /** RuleReviewRequest */
+        RuleReviewRequest: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /**
+             * Scope
+             * @default priority
+             * @enum {string}
+             */
+            scope: "priority" | "all";
         };
         /** RuleScoringTaskRead */
         RuleScoringTaskRead: {
@@ -4217,6 +5061,58 @@ export interface components {
             /** Total Tokens */
             total_tokens?: number | null;
         };
+        /** SourceUnitBatchResolveRequest */
+        SourceUnitBatchResolveRequest: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "assign" | "not_rule";
+            /** Criterion Code */
+            criterion_code?: string | null;
+            /** Reason */
+            reason: string;
+            /** Unit Ids */
+            unit_ids: string[];
+        };
+        /** SourceUnitResolveRequest */
+        SourceUnitResolveRequest: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "assign" | "not_rule";
+            /** Criterion Code */
+            criterion_code?: string | null;
+            /** Reason */
+            reason: string;
+        };
+        /** StructureMergeRequest */
+        StructureMergeRequest: {
+            /** Confirm */
+            confirm?: string[];
+            /** Exclude */
+            exclude?: string[];
+            /** Fingerprint */
+            fingerprint: string;
+            /** Reason */
+            reason: string;
+        };
+        /** StructureSuggestionRequest */
+        StructureSuggestionRequest: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+        };
+        /** StructureUndoRequest */
+        StructureUndoRequest: {
+            /** Reason */
+            reason: string;
+        };
         /** SubmissionRead */
         SubmissionRead: {
             /** Business Profile Key */
@@ -4267,6 +5163,13 @@ export interface components {
              * @default 人工生命周期操作
              */
             reason: string;
+        };
+        /** UnitClassificationRequest */
+        UnitClassificationRequest: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /** Unit Ids */
+            unit_ids?: string[] | null;
         };
         /**
          * UploadPrecheckRequest
@@ -7354,6 +8257,387 @@ export interface operations {
             };
         };
     };
+    preview_import_structure_api_rubrics_import_files_structure_suggestions_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_rubric_import_session_api_rubrics_import_sessions_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_create_rubric_import_session_api_rubrics_import_sessions_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_rubric_import_session_api_rubrics_import_sessions__session_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_rubric_import_session_api_rubrics_import_sessions__session_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RubricImportSessionUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_rubric_import_session_api_rubrics_import_sessions__session_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RubricImportSessionStateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_rubric_import_session_api_rubrics_import_sessions__session_id__confirm_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RubricImportSessionConfirm"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionConfirmResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_rubric_import_session_conflict_api_rubrics_import_sessions__session_id__conflicts__conflict_id__resolve_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+                conflict_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RubricImportConflictResolve"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_confirm_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_confirm_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_confirm_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_preview_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_preview_rubric_import_session_reupload_api_rubrics_import_sessions__session_id__reupload_preview_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportReuploadPreviewResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_rubric_import_source_api_rubrics_import_sessions__session_id__source_preview_get: {
+        parameters: {
+            query: {
+                document: string;
+            };
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSourcePreview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     download_rubric_import_template_api_rubrics_import_template_xlsx_get: {
         parameters: {
             query?: never;
@@ -7574,6 +8858,41 @@ export interface operations {
             };
         };
     };
+    get_parse_coverage_api_rubrics__rubric_id__parse_coverage_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     publish_rubric_api_rubrics__rubric_id__publish_post: {
         parameters: {
             query?: never;
@@ -7687,6 +9006,84 @@ export interface operations {
             };
         };
     };
+    confirm_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_confirm_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_confirm_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_confirm_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricReuploadPreviewResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_rubric_review_workspace_api_rubrics__rubric_id__review_workspace_get: {
         parameters: {
             query?: never;
@@ -7736,6 +9133,120 @@ export interface operations {
             };
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_rubric_rule_review_api_rubrics__rubric_id__rule_review_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_rubric_rule_review_api_rubrics__rubric_id__rule_review_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuleReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dismiss_rubric_rule_review_finding_api_rubrics__rubric_id__rule_review_findings__finding_id__dismiss_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+                finding_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FindingDismissRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -8032,6 +9543,80 @@ export interface operations {
             };
         };
     };
+    get_rubric_source_workspace_api_rubrics__rubric_id__source_workspace_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricSourceWorkspaceRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    suggest_rubric_structure_api_rubrics__rubric_id__structure_suggestions_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StructureSuggestionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     submit_rubric_review_api_rubrics__rubric_id__submit_review_post: {
         parameters: {
             query?: never;
@@ -8067,6 +9652,84 @@ export interface operations {
             };
         };
     };
+    merge_structure_suggestion_api_rubrics__rubric_id__suggestions_merge_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StructureMergeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    undo_structure_suggestion_api_rubrics__rubric_id__suggestions_undo_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StructureUndoRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     review_atomic_rule_template_link_api_rubrics__rubric_id__template_links__link_id__review_post: {
         parameters: {
             query?: never;
@@ -8084,6 +9747,124 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TemplateLinkReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    classify_source_units_api_rubrics__rubric_id__unit_classifications_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnitClassificationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_source_units_batch_api_rubrics__rubric_id__units_resolve_batch_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceUnitBatchResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_source_unit_api_rubrics__rubric_id__units__unit_id__resolve_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+                unit_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceUnitResolveRequest"];
             };
         };
         responses: {

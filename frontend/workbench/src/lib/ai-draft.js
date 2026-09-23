@@ -101,6 +101,8 @@ export function confirmedStructuredRules(draft, excluded) {
       generation_fingerprint: row.fingerprint,
       generation_metadata: draft.generation_metadata || null,
       draft_row_key: rowKey(row),
+      // 这里只表示用户允许建议进入后继 compilation；AtomicRule 仍以 draft
+      // 状态创建，必须与原文规则一起在最终规则面板完成一次正式确认。
       confirmed: true,
       display_order: order,
     }));

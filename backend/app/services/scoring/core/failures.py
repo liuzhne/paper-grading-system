@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import re
+
+
+_SAFE_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
+
 
 def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
     """Use duck-typed safe error contracts without importing adapters."""
@@ -16,7 +21,13 @@ def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
         if not normalized.startswith("PROVIDER_"):
             normalized = "PROVIDER_" + normalized
         return normalized, "semantic provider request failed"
-    return "RULE_EXECUTION_FAILED", "rule execution failed"
+    exception_type = type(exc).__name__
+    if not _SAFE_EXCEPTION_TYPE.fullmatch(exception_type):
+        exception_type = "Exception"
+    return (
+        "RULE_EXECUTION_FAILED",
+        f"rule execution failed (exception_type={exception_type})",
+    )
 
 
 __all__ = ["project_rule_execution_failure"]

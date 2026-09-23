@@ -2,6 +2,9 @@
 import re
 
 
+AI_RULE_SOURCES = frozenset({"ai_interpreted_user_text", "ai_inferred", "llm"})
+
+
 def rule_origin(rule, criterion):
     entries = criterion.deduction_rules_structured or []
     explicit = next((item for item in entries if item.get("rule_code") == rule.rule_code), None)
@@ -17,4 +20,4 @@ def rule_origin(rule, criterion):
 
 def is_ai_rule(rule, criterion):
     origin = rule_origin(rule, criterion)
-    return origin.get("source") in {"ai_inferred", "llm"} or rule.creation_method == "llm"
+    return origin.get("source") in AI_RULE_SOURCES or rule.creation_method == "llm"

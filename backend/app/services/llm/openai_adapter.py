@@ -42,6 +42,7 @@ class OpenAIResponsesScorer(LLMScorer):
         self.base_url = self.base_url.rstrip("/")
         self.model_name = model_name or settings.OPENAI_MODEL
         self.timeout_seconds = float(timeout_seconds or settings.OPENAI_TIMEOUT_SECONDS)
+        self.max_output_tokens_explicit = max_output_tokens is not None
         self.max_output_tokens = int(max_output_tokens or settings.OPENAI_MAX_OUTPUT_TOKENS)
         self.temperature = float(temperature if temperature is not None else settings.OPENAI_TEMPERATURE)
         self._owns_client = client is None
@@ -173,14 +174,25 @@ class OpenAIResponsesScorer(LLMScorer):
             _parse_json_output(data),
         )
 
-    def complete_json(self, instructions, payload):
+    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None):
         body = {
             "model": self.model_name,
             "temperature": settings.OPENAI_TEMPERATURE,
             "instructions": instructions,
             "input": json.dumps(payload, ensure_ascii=False),
-            "max_output_tokens": settings.OPENAI_MAX_OUTPUT_TOKENS,
+            "max_output_tokens": (
+                self.max_output_tokens
+                if self.max_output_tokens_explicit or default_max_tokens is None
+                else max(self.max_output_tokens, default_max_tokens)
+            ),
         }
+        if response_schema is not None:
+            body["text"] = {"format": {
+                "type": "json_schema",
+                "name": "rubric_rule_draft",
+                "strict": True,
+                "schema": response_schema,
+            }}
         response = self._post_with_retry(body)
         response.raise_for_status()
         return _parse_json_output(response.json())

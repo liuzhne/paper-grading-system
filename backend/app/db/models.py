@@ -1,8 +1,10 @@
 import uuid
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 
 from sqlalchemy import Boolean
+from sqlalchemy import LargeBinary
 from sqlalchemy import CheckConstraint
 from sqlalchemy import Column
 from sqlalchemy import DateTime
@@ -342,6 +344,76 @@ class Rubric(Base):
     # 建立 ORM flush 依赖顺序；只填写 created_by ID 且 User 同批新增时，
     # SQLite 外键开启后也必须先 INSERT users，再 INSERT rubrics。
     creator: Mapped["User | None"] = relationship(foreign_keys=[created_by])
+
+
+class RubricImportSession(Base):
+    """上传文件解析后的临时草稿；确认前绝不进入正式 Rubric 生命周期。"""
+
+    __tablename__ = "rubric_import_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'confirmed', 'expired', 'cancelled')",
+            name="ck_rubric_import_sessions_status",
+        ),
+        CheckConstraint(
+            "state_version >= 1",
+            name="ck_rubric_import_sessions_positive_version",
+        ),
+        CheckConstraint(
+            "total_score >= 0",
+            name="ck_rubric_import_sessions_nonnegative_total",
+        ),
+        UniqueConstraint(
+            "owner_id",
+            "confirmation_key",
+            name="uq_rubric_import_sessions_owner_confirmation_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="private")
+    total_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prepared_graph: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+    draft_data: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+    warnings: Mapped[list] = mapped_column(
+        MutableList.as_mutable(JSON), nullable=False, default=list
+    )
+    score_adjustments: Mapped[list] = mapped_column(
+        MutableList.as_mutable(JSON), nullable=False, default=list
+    )
+    rules_file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    template_file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    template_file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    confirmation_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    rubric_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("rubrics.id"), nullable=True, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: utcnow() + timedelta(hours=24)
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    rubric: Mapped["Rubric | None"] = relationship()
 
 
 class RubricCriterion(Base):

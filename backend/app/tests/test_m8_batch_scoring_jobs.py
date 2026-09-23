@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from threading import Event
 from threading import Lock
@@ -18,10 +19,20 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.app.core.config import settings
 from backend.app.db import models
+from backend.app.schemas.batch_job import BatchScoringJobRead
 from backend.app.services.dev_user import ensure_dev_user
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_naive_utc_heartbeat_is_healthy_outside_utc_hosts():
+    job = BatchScoringJobRead.model_construct(
+        status="running",
+        heartbeat_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+
+    assert job.heartbeat_state == "healthy"
 
 
 def _policy(*, minimum_sample_size: int = 1):
@@ -104,6 +115,52 @@ def test_queue_rejects_persisted_run_with_blocked_scores():
 
     assert jobs._run_has_complete_scores(Session(invalid), invalid) is False
     assert jobs._run_has_complete_scores(Session(valid), valid) is True
+
+
+def test_incomplete_run_surfaces_token_budget_as_llm_failure():
+    jobs = _jobs_module()
+    error = jobs._incomplete_scoring_error(
+        [
+            SimpleNamespace(
+                status="failed_exhausted",
+                provider_error={"code": "TOKEN_BUDGET_UNSATISFIABLE"},
+            )
+        ]
+    )
+
+    assert error.code == "TOKEN_BUDGET_UNSATISFIABLE"
+    assert "上下文预算" in str(error)
+    assert jobs._classify_failure(error) == (
+        "TOKEN_BUDGET_UNSATISFIABLE",
+        "llm",
+    )
+
+
+def test_incomplete_run_keeps_unknown_rule_failure_safe():
+    jobs = _jobs_module()
+    error = jobs._incomplete_scoring_error(
+        [SimpleNamespace(status="failed_exhausted", provider_error=None)]
+    )
+
+    assert error.code == "RULE_EXECUTION_FAILED"
+    assert jobs._classify_failure(error) == ("RULE_EXECUTION_FAILED", "checker")
+    assert "sensitive" not in str(error)
+
+
+def test_library_error_code_and_message_are_not_exposed_as_business_diagnostics():
+    jobs = _jobs_module()
+
+    class DatabaseFailure(RuntimeError):
+        code = "gkpj"
+
+    error = DatabaseFailure("sensitive SQL parameters and document text")
+
+    assert jobs._classify_failure(error) == ("scoring_failure", "checker")
+    message = jobs._safe_failure_message(error, "scoring_failure")
+    assert message == (
+        "评分执行失败（scoring_failure; exception_type=DatabaseFailure）"
+    )
+    assert "sensitive" not in message
 
 
 def test_0017_migration_and_models_define_durable_job_item_relationships(

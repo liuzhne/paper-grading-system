@@ -321,12 +321,19 @@ test.describe("V09 评分标准", () => {
   test("没有扣分细则的评分项显示为阻断并说明后果", async ({ page }) => {
     await openSeedRubric(page);
 
+    // 重开标准先核对文件与评分项；扣分细则的问题在下一步出现。
+    await expect(page.locator('[data-test="rubric-import-workspace"]')).toBeVisible();
+    await expect(page.locator(".coverage-panel")).toHaveCount(0);
+    await expect(page.locator(".blockers")).toHaveCount(0);
+    await page.getByRole("button", { name: "2 评分规则", exact: true }).click();
+
     await expect(page.getByText(/存在 1 个缺少规则的评分项/)).toBeVisible();
     await expect(page.getByText(/评分到该项时没有判据可用/)).toBeVisible();
   });
 
   test("规则来源分列原文与 AI", async ({ page }) => {
     await openSeedRubric(page);
+    await page.getByRole("button", { name: "2 评分规则", exact: true }).click();
 
     const row = page.locator(".criteria-nav .lib-item", { hasText: "研究方法与技术方案" });
     await expect(row).toContainText("原文");
@@ -415,22 +422,30 @@ test.describe("V3-1 评分标准导入", () => {
     await expect(page.getByRole("button", { name: /新建评分标准/ })).toHaveCount(0);
   });
 
-  test("导入面板要求规则 Excel，并说明可见范围", async ({ page }) => {
+  test("导入面板提供 Word 与 Excel 两个上传框，并说明可见范围", async ({ page }) => {
     await openSeedRubric(page);
     await page.getByRole("button", { name: "导入评分模板" }).click();
 
-    await expect(page.getByLabel(/规则 Excel/)).toBeVisible();
+    await expect(page.getByLabel(/评分标准文档/)).toBeVisible();
+    await expect(page.getByLabel("评分表", { exact: true })).toBeVisible();
     // 用户要知道导进来之后谁能看见。
     await expect(page.getByText(/默认仅自己可见/)).toBeVisible();
   });
 
-  test("Word 模板是可选的，不选也能提交", async ({ page }) => {
+  test("Word 与 Excel 都不是必填，至少上传一份由提交时校验", async ({ page }) => {
     await openSeedRubric(page);
     await page.getByRole("button", { name: "导入评分模板" }).click();
 
-    const template = page.getByLabel(/Word 模板/);
+    // 解析重构方案 §4.2：只上传 Word 或只上传 Excel 都可以导入。
+    const template = page.getByLabel(/评分标准文档/);
     await expect(template).toBeVisible();
     await expect(template).not.toHaveAttribute("required", "");
+    await expect(page.getByLabel("评分表", { exact: true })).not.toHaveAttribute("required", "");
+    const panel = page.locator(".import-panel");
+    await panel.getByLabel("标准名称", { exact: true }).fill("空文件校验");
+    await panel.getByLabel("标准名称", { exact: true }).press("Tab");
+    await expect(panel.getByRole("button", { name: "解析文件", exact: true })).toBeDisabled();
+    await expect(panel.getByRole("status")).toContainText("请选择评分标准文档或评分表");
   });
 });
 
@@ -464,6 +479,7 @@ test.describe("V3-4 新建任务入口", () => {
 test.describe("V3-2 AI 起草缺失细则", () => {
   test("有阻断项时给出起草入口，且必须先选连接", async ({ page }) => {
     await openSeedRubric(page);
+    await page.getByRole("button", { name: "2 评分规则", exact: true }).click();
 
     const button = page.getByRole("button", { name: /生成全部缺失细则/ });
     await expect(button).toBeVisible();
@@ -474,6 +490,7 @@ test.describe("V3-2 AI 起草缺失细则", () => {
 
   test("说明 AI 只补缺失部分，用户原文保留", async ({ page }) => {
     await openSeedRubric(page);
+    await page.getByRole("button", { name: "2 评分规则", exact: true }).click();
 
     await expect(page.getByText(/AI 只补缺失部分/)).toBeVisible();
   });

@@ -365,6 +365,16 @@ def validate_publishable_rubric(
             criterion_code=criterion_code,
         )
 
+    from backend.app.services.rubric_import.parse_state import unresolved_blocking_units
+
+    unresolved_units = unresolved_blocking_units(compilation)
+    if unresolved_units:
+        add(
+            "unresolved_source_units",
+            "/compilation/raw_parse_output/coverage",
+            f"{len(unresolved_units)} 条疑似评分规则的原文内容尚未处理（指派到评分项或确认不是规则）",
+        )
+
     events = list(compilation.human_changes or [])
     for rule in rules:
         criterion = criterion_by_id.get(rule.criterion_id)

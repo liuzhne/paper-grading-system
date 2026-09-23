@@ -9,6 +9,7 @@
 """
 
 from backend.app.db import models
+from backend.app.services.rubrics.rule_origin import is_ai_rule
 
 
 def _seed(client, *, criteria):
@@ -104,6 +105,22 @@ def test_ai_drafted_rules_pending_review_do_not_count_as_complete(client):
     assert entry["status"] == "pending_review"
     assert entry["ai_pending_count"] == 1
     assert body["complete_count"] == 0
+
+
+def test_ai_interpreted_user_text_is_still_classified_as_ai():
+    criterion = models.RubricCriterion(
+        code="C01", name="论证", max_score=10,
+        deduction_rules_structured=[{
+            "rule_code": "manual.c01.deduct.1.v1",
+            "source": "ai_interpreted_user_text",
+        }],
+    )
+    rule = models.AtomicRule(
+        rule_code="manual.c01.deduct.1.v1",
+        creation_method="manual",
+    )
+
+    assert is_ai_rule(rule, criterion) is True
 
 
 def test_sources_are_counted_separately(client):

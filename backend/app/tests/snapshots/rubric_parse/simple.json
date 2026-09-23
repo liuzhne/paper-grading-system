@@ -1,0 +1,167 @@
+{
+ "atomic_rules": [
+  {
+   "applies_to": "global",
+   "boundary_example": null,
+   "cap_points": null,
+   "checker_key": null,
+   "checker_params": {},
+   "creation_method": "compiler",
+   "criterion_code": "C01",
+   "depends_on_rule_codes": [],
+   "direction": "deduct",
+   "effect_type": "score",
+   "evidence_policy": {
+    "minimum_coverage": "1",
+    "mode": "source_quote",
+    "requirement": "required"
+   },
+   "judge_type": "semantic",
+   "levels": [],
+   "max_points": "3",
+   "mutex_group": null,
+   "name": "研究方法",
+   "negative_example": null,
+   "positive_example": null,
+   "repeat_policy": "once",
+   "reviewed_at": null,
+   "reviewed_by": null,
+   "rule_code": "c01.v1",
+   "rule_text": "方法合理，数据来源清楚。",
+   "source_rule_codes": [
+    "C01"
+   ],
+   "status": "draft",
+   "strictness": "required"
+  },
+  {
+   "applies_to": "global",
+   "boundary_example": null,
+   "cap_points": null,
+   "checker_key": null,
+   "checker_params": {},
+   "creation_method": "compiler",
+   "criterion_code": "C02",
+   "depends_on_rule_codes": [],
+   "direction": "none",
+   "effect_type": "review",
+   "evidence_policy": {
+    "minimum_coverage": "1",
+    "mode": "source_quote",
+    "requirement": "required"
+   },
+   "judge_type": "semantic",
+   "levels": [],
+   "max_points": null,
+   "mutex_group": null,
+   "name": "文献综述",
+   "negative_example": null,
+   "positive_example": null,
+   "repeat_policy": null,
+   "reviewed_at": null,
+   "reviewed_by": null,
+   "rule_code": "c02.v1",
+   "rule_text": "综述覆盖充分。",
+   "source_rule_codes": [
+    "C02"
+   ],
+   "status": "draft",
+   "strictness": "required"
+  }
+ ],
+ "blockers": [
+  {
+   "code": "MISSING_EXECUTABLE_SCORING_MODE",
+   "criterion_code": "C02",
+   "message": "评分项必须明确配置分档评分、扣分评分或仅人工复核"
+  }
+ ],
+ "criteria": [
+  {
+   "applies_to": "global",
+   "code": "C01",
+   "criterion_type": "llm_judgment",
+   "deduction_rules": [
+    "方法说明不足扣3分"
+   ],
+   "deduction_rules_structured": [
+    {
+     "match": "方法说明不足",
+     "points": "3",
+     "reason": "方法说明不足扣3分",
+     "source": "excel"
+    }
+   ],
+   "description": "方法合理，数据来源清楚。",
+   "dimension": null,
+   "display_order": 0,
+   "evidence_hints": [
+    "研究方法",
+    "实验设计"
+   ],
+   "max_score": "20",
+   "name": "研究方法",
+   "rubric_levels": [],
+   "scoring_mode": "deductive",
+   "sub_checks": [],
+   "weight": null
+  },
+  {
+   "applies_to": "global",
+   "code": "C02",
+   "criterion_type": "llm_judgment",
+   "deduction_rules": [
+    "文献覆盖不足扣分"
+   ],
+   "deduction_rules_structured": [],
+   "description": "综述覆盖充分。",
+   "dimension": null,
+   "display_order": 1,
+   "evidence_hints": [
+    "文献综述"
+   ],
+   "max_score": "15",
+   "name": "文献综述",
+   "rubric_levels": [],
+   "scoring_mode": "review_only",
+   "sub_checks": [],
+   "weight": null
+  }
+ ],
+ "legacy_criteria": [
+  {
+   "code": "C01",
+   "deduction_rules": [
+    "方法说明不足扣3分"
+   ],
+   "max_score": 20.0,
+   "name": "研究方法"
+  },
+  {
+   "code": "C02",
+   "deduction_rules": [
+    "文献覆盖不足扣分"
+   ],
+   "max_score": 15.0,
+   "name": "文献综述"
+  }
+ ],
+ "source_rules": [
+  {
+   "artifact_token": "excel",
+   "raw_text": "{\"分值\": 20.0, \"扣分规则\": \"方法说明不足扣3分\", \"编号\": \"C01\", \"证据提示\": \"研究方法；实验设计\", \"评分说明\": \"方法合理，数据来源清楚。\", \"评分项\": \"研究方法\"}",
+   "row_number": 2,
+   "sheet_name": "评分规则",
+   "source_rule_code": "C01"
+  },
+  {
+   "artifact_token": "excel",
+   "raw_text": "{\"分值\": 15.0, \"扣分规则\": \"文献覆盖不足扣分\", \"编号\": \"C02\", \"证据提示\": \"文献综述\", \"评分说明\": \"综述覆盖充分。\", \"评分项\": \"文献综述\"}",
+   "row_number": 3,
+   "sheet_name": "评分规则",
+   "source_rule_code": "C02"
+  }
+ ],
+ "template_items": [],
+ "template_links": []
+}

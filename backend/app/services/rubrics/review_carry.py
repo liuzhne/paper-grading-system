@@ -1,4 +1,4 @@
-"""Keep confirmed generated rows only when their content and scoring context match."""
+"""Keep confirmed rules only when their content and scoring context match."""
 import json
 from decimal import Decimal
 
@@ -11,11 +11,9 @@ from backend.app.services.rubrics.review_workspace import rule_content, number_t
 
 def signature(rule):
     content = rule_content(rule)
-    origin = content.get("origin") or {}
-    if not origin.get("generation_fingerprint") or not origin.get("draft_row_key"):
-        return None
-    # New graph IDs and the whole source row necessarily change when a sibling
-    # suggestion is appended. The row's own origin and all executable fields do not.
+    # New graph IDs and source row IDs necessarily change between compilations.
+    # The executable content, stable AI origin (when present) and criterion context
+    # are sufficient to decide whether the prior human confirmation is still valid.
     for field in ("id", "criterion_id", "sources"):
         content.pop(field)
     criterion = rule.criterion
@@ -48,3 +46,51 @@ def carry_confirmed_rows(session, rubric_id, rules, previous, predecessor_id, ac
         reason = f"复用内容与评分上下文均未改变的既有确认；前序编译 {predecessor_id}，规则 {accepted[1]}"
         lifecycle.submit_atomic_rule_for_review(session, rubric_id, rule.rule_code, actor_id, reason)
         lifecycle.approve_atomic_rule(session, rubric_id, rule.rule_code, actor_id, reason)
+
+
+def calculate_carry_diff(
+    session,
+    predecessor,
+    next_criteria: list,
+    next_profile: str | None = None,
+) -> tuple[int, int]:
+    """Calculate how many approved rules will be retained vs invalidated.
+    Returns (retained_count, invalidated_count)."""
+    if predecessor is None:
+        return 0, 0
+    confirmed = snapshot_confirmed_rows(session, predecessor)
+    if not confirmed:
+        return 0, 0
+    total_approved = len(confirmed)
+
+    next_crit_map: dict[str, tuple[str, float | None]] = {}
+    for c in next_criteria:
+        code = getattr(c, "code", None) if not isinstance(c, dict) else c.get("code")
+        name = getattr(c, "name", None) if not isinstance(c, dict) else c.get("name")
+        max_score = getattr(c, "max_score", None) if not isinstance(c, dict) else c.get("max_score")
+        if code:
+            next_crit_map[code] = (name, float(max_score) if max_score is not None else None)
+
+    prev_version = session.scalar(
+        select(models.RubricVersion).where(models.RubricVersion.compilation_id == predecessor.id)
+    )
+    if prev_version is None:
+        return 0, total_approved
+
+    if next_profile and next_profile != prev_version.business_profile_key:
+        return 0, total_approved
+
+    rules = session.scalars(select(models.AtomicRule).join(models.RubricVersion).where(
+        models.RubricVersion.compilation_id == predecessor.id,
+        models.AtomicRule.status == "approved",
+    )).all()
+
+    retained = 0
+    for rule in rules:
+        crit = rule.criterion
+        if crit and crit.code in next_crit_map:
+            target_name, target_score = next_crit_map[crit.code]
+            if crit.name == target_name and (target_score is None or float(crit.max_score) == target_score):
+                retained += 1
+    invalidated = total_approved - retained
+    return retained, invalidated

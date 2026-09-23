@@ -1,6 +1,6 @@
 # 开发、排错与发布 Runbook
 
-> 当前操作基线：2026-09-09；Python 3.10+，推荐/CI 为 3.12；Alembic head `0030_platform_llm_config`；默认 `SCORING_ENGINE_MODE=legacy`。以下命令默认在仓库根目录执行，不要把真实 Secret、论文原文或学生 PII 写入终端记录、Git、CI artifact 或工单。
+> 当前操作基线：2026-09-20；Python 3.10+，推荐/CI 为 3.12；Alembic head `0031_rubric_import_sessions`；默认 `SCORING_ENGINE_MODE=legacy`。以下命令默认在仓库根目录执行，不要把真实 Secret、论文原文或学生 PII 写入终端记录、Git、CI artifact 或工单。
 
 ## 1. 先判断运行形态
 
@@ -883,3 +883,226 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 维护记录：2026-09-15 · 持久化后台评分：补充 worker 启动、心跳诊断、租约恢复、用户动作、验收与回滚步骤；迁移 head 不变。
 
 维护记录：2026-09-15 · Vercel-only 后台评分：生产操作改为 Queues Python subscriber，补充投递、函数超时恢复、日志、验收与回滚；删除 Render 步骤。
+
+### 2026-09-17 评分模板与评分项导入方案（待实施验证）
+
+当前访问 `/workbench/rubrics`，导入要求规则 Excel，Word 用于可选批注，成功后进入第二步；这与目标流程不同。实施时按 [方案及验证入口](docs/评分模板与评分项导入改进方案.md) 执行，使用合成无 PII 的 Word/Excel 测试文件覆盖单文件、双文件、分值冲突、名称歧义、重新上传、权限与审核状态。浏览器验收应确认两个固定上传框、无组合选择、导入留在第一步、冲突可定位及修改后旧校验失效。
+
+本次无代码、迁移或部署，无需数据回滚。后续发布前完成上线清单、全套测试及真实 CI 门禁；若新增迁移，应先验证备份和恢复，禁止将含数据的拒绝降级迁移强行 downgrade。代码回滚需同时保持导入数据合同可读，不得删除人工确认或来源记录；具体回滚步骤在实施确定迁移后补全。
+
+维护记录：2026-09-17 · 评分模板与评分项导入方案：记录当前行为、待实施验收和发布回滚约束；本次仅文档。
+
+### 2026-09-18 评分规则解析模块重构（待实施验证）
+
+当前行为：`POST /rubrics/import-files` 对同一文件先 `parse_rubric_files` 再 `prepare_file_import`，返回的 warnings 来自前者而非落库结果；多工作表只取第一张有结果的表，未映射列、无满分的行（含表尾备注中的全局规则）被静默丢弃。排查“规则明明在 Excel 里却没导入”时，报错通常不会出现，真正原因在 `parser._find_header` 的别名未命中或 `_criterion_from_row` 返回 `None`。实施后以覆盖率报告定位未认领单元。实施按 [方案](docs/评分规则解析模块重构方案.md) §11 分阶段执行，先建真实模板（合成/脱敏）快照测试；LLM 准确率评估使用独立注入错误测试集离线运行，不进入默认 pytest。本次无代码、迁移或部署，无需回滚。
+
+维护记录：2026-09-18 · 评分规则解析模块重构方案：记录当前静默丢弃的排查指向与待实施验证步骤；本次仅文档。
+维护记录：2026-09-18 · 规则解析方案澄清：补充两级门禁阻断与单元处理（/resolve）、规则审查错误豁免、输入指纹过期的验证指引与回滚考虑。
+
+### 2026-09-18 评分规则解析模块重构（已实施）
+
+**验证**：`.venv/bin/python -m pytest -q`（新增 `test_rubric_*`、`test_ai_draft_source_refs`、`test_rubric_llm_eval` 等）；前端 `npm run test:unit`、`npm run typecheck`、`npm run api:dump && npm run api:generate`、`npx playwright test`（新增 `e2e/rubric-parse.spec.js`）。解析结果快照在 `backend/app/tests/snapshots/rubric_parse/`；有意改变解析结果时用 `UPDATE_RUBRIC_PARSE_SNAPSHOTS=1` 重新生成，并先在 DECISIONS 记录。
+
+**LLM 能力离线评估**（不进入默认 pytest，需要真实连接，Mock 会被拒绝并退出码 2）：
+
+```bash
+LLM_PROVIDER=openai_compatible OPENAI_COMPATIBLE_API_KEY=... .venv/bin/python -m backend.app.scripts.run_rubric_llm_eval --suite all
+```
+
+**排错**：
+
+- 发布报 `评分标准尚不可发布：unresolved_source_units`，但第 2、3 步都已确认——原因不在条款，而在第 1 步“原文识别情况”：还有未处理的疑似规则单元或 Word/Excel 冲突。用 `GET /api/rubrics/{id}/parse-coverage` 查看 `coverage.unclaimed[].blocking` 与 `conflicts[].resolved`，逐条指派或确认不是规则（`POST /units/resolve-batch`）。
+- 导入后评分项比 Excel 少一行，报错里没有任何提示——看 `parse-coverage` 的 `extraction.dropped_rows`：`未找到满分` 是分值列为空或不是数字；`整行合并的说明行` 是合并单元格同时覆盖名称列与分值列。
+- 某评分项导入后是“仅人工复核”且带阻断 `DEDUCTION_RULE_NEEDS_SPLIT`——不是分值解析失败，而是扣分文本含多个判断（顿号/分号/“各扣”），请在第 2 步拆分或用 AI 起草。
+- 合入 AI 结构建议返回 `SUGGESTION_STALE`——建议生成后评分项或台账变化了（包括另一个人刚保存），重新识别即可；`SUGGESTION_BLOCKED` 列出的 `removed:*` 表示该结构会删除已有评分项，无法合入，需重新导入文件；`STRUCTURE_REPARSE_AFTER_EDIT` 表示草稿已人工编辑，只能重新导入。
+- LLM 类端点返回 503 `AI_CONNECTION_MISSING`——当前平台连接是 Mock 或未选择 AI 连接，这是有意拒绝，不是服务故障。
+
+**回滚**：无迁移。代码回滚后，新写入的 `raw_parse_output`/`raw_model_output` 附加键会被旧代码忽略，不影响已发布版本；但回滚前以 `structure_reparse` 模式生成的新增评分项会保留在草稿中。
+
+维护记录：2026-09-18 · 评分规则解析模块重构实施：记录验证命令、离线评估、门禁/丢行/拆分/合入冲突的排错指向与回滚说明。
+
+### 2026-09-20 评分模板临时导入会话
+
+症状与诊断：
+
+- 上传成功但模板库没有新 Rubric：这是预期；先查 `POST /api/rubrics/import-sessions` 返回的 `status=draft` 和 `state_version`，用户点击“确认评分项，下一步”后才会创建 Rubric。
+- 确认返回 409：会话版本陈旧、已取消/过期，或幂等键不同。重新 `GET /api/rubrics/import-sessions/{id}`；不得用旧版本覆盖新编辑。
+- 确认返回 422：检查分值合计、重复/空编号及未解决来源冲突。双文件冲突必须显式选 Excel 或 Word；不得直接改数据库绕过。
+- 小数分值：接口应返回 `score_adjustments`，例如 10.4→10、10.5→11；页面必须显示提示。没有提示却发生取整属于回归。
+- 同一评分项有多条规则却出现重复行：检查临时草稿是否按 code 折叠；同 code 的名称/分值若不一致应报错，不能静默取第一条。
+- 重新上传预览后原草稿变化：属于事务边界回归。preview 只读；只有携带相同 fingerprint 的 confirm 才能替换。正式 Rubric 仅 draft 可重传，review/published 返回 409。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_rubric_import_sessions.py \
+  backend/app/tests/test_rubric_review_workspace.py \
+  backend/app/tests/test_migrations.py \
+  backend/app/tests/test_migration_sequence_is_current.py
+cd frontend/workbench
+npm run test:unit
+npm run typecheck
+npm run api:dump && npm run api:generate
+npx playwright test e2e/rubric-import-session.spec.js e2e/rubric-parse.spec.js e2e/rubric-review.spec.js --project=chromium
+cd ../..
+.venv/bin/python scripts/build_web_static.py --with-workbench
+```
+
+发布：先备份数据库和私有存储，执行 `alembic upgrade head` 到 `0031_rubric_import_sessions`，再运行 PostgreSQL verifier；确认 `pgs_app` 可读写 `rubric_import_sessions` 且 RLS 已启用。之后按既有 CI/上线清单发布静态产物与 API。日志只记录会话/Rubric/compilation ID 和固定错误，不记录上传文档正文或文件二进制。
+
+回滚：业务代码可用 revert 回退，但只要 `rubric_import_sessions` 有数据，0031 downgrade 会拒绝。先保留/归档草稿并确认恢复目标，不能强行删表；已确认 Rubric 和历史 compilation 永不因会话清理回滚。正式重新上传失败时原活动 compilation 必须仍有效，若已生成后继则按生命周期处理新草稿，不把已 supersede 的历史记录改写回去。
+
+维护记录：2026-09-20 · 评分模板临时导入会话：新增解析/确认/冲突/重新上传诊断、0031 发布和拒绝有损降级的回滚步骤。
+
+### 2026-09-20 评分标准原型对齐与分步工作流（已实施）
+
+复现与诊断：在 `/workbench/rubrics` 分别打开首次导入、已解析未确认会话、正式草稿的第一步。若仅第二种状态显示 Word/Excel 卡片与评分项表，而其余出现原生文件输入或规则评分项侧栏，检查 `RubricsView` 是否仍把 `RubricImportWorkspace` 限制在 `activeImportSession` 分支。第一步出现「缺少规则」「校验阻断」时，检查告警是否置于步骤条件之外；疑似规则应在第二步能被指派/确认，但服务端发布门禁仍须拒绝未处理项。
+
+来源诊断：`GET /api/rubrics/{id}/source-workspace` 先执行评分标准可见性检查，再调用 `services/rubric_import/source_workspace.py` 投影来源，响应须带 `private, no-store`。返回第一步时文件卡片空白，核对该响应、当前活动 compilation、原文件哈希和确认会话的对应关系；不能仅凭浏览器中上一次 `File` 对象恢复文件名。历史标准缺失来源返回 `unknown` 并显示待补充，不能显示虚构的解析成功、时间或文件大小。请求 403/404 时按组织权限排查，不通过前端隐藏按钮代替授权。
+
+临时编辑无效时先看浏览器是否发出 `PATCH /api/rubrics/import-sessions/{id}`。若控制台是 `DataCloneError` 且没有 PATCH，核对更新、新增、删除是否全部使用 `structuredClone(toRaw(criteria))`；不要通过增加后端重试排查尚未发出的请求。确认显示网络失败时，先核对服务端可能已提交的会话状态；再次点击必须携带同一 `confirm:<session_id>`，成功返回原 Rubric。若因重新生成随机键收到 409，应修复客户端收据键，不清会话或重传文件重建标准。浏览器回归需模拟确认 POST 在服务端完成后丢失响应，再次点击应进入同一个标准且无重复创建。
+
+验证使用合成无 PII 的文件，依次执行：选择文件→解析→修改整数分值/核对舍入→查看来源→处理来源冲突→确认→第二步→返回第一步→重新上传预览→取消/确认→第三步。额外检查审核中/已发布只读、只读角色和跨组织访问、未保存修改、非法文件和接口失败保留输入。桌面和窄屏需实点文件选择、拖放、问题定位、来源关闭和下一步，不能以元素可见代替可用。
+
+已取得最新后端全量 `2197 passed, 48 warnings`（116.69 秒）、来源专项 `18 passed`、前端单元 `238 passed`、评分标准/响应式综合 E2E `21 passed`、工作流/按钮 `75 passed, 3 skipped`，类型检查、OpenAPI/schema 和构建通过。本轮受影响 E2E 合计 `96 passed, 3 skipped`，并非全项目 E2E 全量；3 项不适用跳过不计为通过。最后 21 项综合回归已覆盖响应式复制/确认重试修复、桌面及 390px 窄屏，静态重建后已核对本地实际页面；截图输出名为 `rubric-step-one-desktop.png`、`rubric-step-one-mobile.png`。详情见 [执行计划](docs/评分标准原型差异与改造执行计划.md)，未执行生产发布。
+
+复验入口：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_rubric_source_workspace.py backend/app/tests/test_rubric_import_sessions.py backend/app/tests/test_rubric_write_gating.py backend/app/tests/test_frontend_api_contract.py backend/app/tests/test_three_doc_contract.py
+cd frontend/workbench
+npm run test:unit
+npm run typecheck
+npm run api:dump
+npm run api:generate
+npm run test:e2e -- e2e/rubric-import-session.spec.js e2e/rubric-parse.spec.js e2e/rubric-review.spec.js e2e/rubric-design.spec.js e2e/responsive.spec.js --project=chromium
+cd ../..
+.venv/bin/python scripts/build_web_static.py --with-workbench
+```
+
+发布与回滚：本轮只新增读取投影和工作台交互，不新增数据库结构，head 保持 `0031_rubric_import_sessions`。重建静态产物后按现有 main 完整 CI 和上线清单发布，不将本地浏览器通过视为生产已发布。回滚需同步回退前端源代码、生成类型和读取投影并重建产物，保留临时会话、Rubric、来源与 compilation 数据，不执行数据库 downgrade。若界面仍显示旧布局，先核对运行服务实际使用的 `public/workbench` 构建版本，再判断交互回归。
+
+维护记录：2026-09-20 · 评分标准原型对齐与分步工作流：同步统一工作区、来源诊断、代理复制异常和确认响应丢失的复现/复验入口；记录后端全量 2197、前端 238、受影响 E2E 96 通过及 3 项不适用跳过、实际页面与截图核对，未执行全项目 E2E 全量或生产发布。
+
+### 2026-09-21 合并父级评分项名称解析修复
+
+症状：导入 Excel 后，多个 code、分值和说明均独立的评分项显示成同一名称。先在 `raw_parse_output.extraction.mapping` 核对“评价项目”是否映射为 `name`，再查 `source_ledger`：若多行 name 指向同一 `xlsx:<sheet>!R<row>C<col>`，这是纵向合并父级的信号；若 unit_id 不同，只是合法同名，不应自动重映射。
+
+修复后，无冲突结构应显示该列映射为 `dimension`，各评分项名称来自独立打分项且去掉末尾分值，父单元的 `claimed_by` 为各 code 的 `.dimension`。缺少稳定 `item_label` 或已有 dimension 列时，应保留原解析并出现 E9；不得手工去重、补序号或直接改数据库。E9 可进入既有结构建议流程，最终仍需用户确认。
+
+验证使用无 PII 的合成表格：
+
+```bash
+.venv/bin/python -m pytest -q \
+  backend/app/tests/test_rubric_table_extractor.py \
+  backend/app/tests/test_rubric_parse_triggers.py \
+  backend/app/tests/test_rubric_structure_override.py \
+  backend/app/tests/test_rubric_parse_baseline.py \
+  backend/app/tests/test_rubric_import_ledger.py
+.venv/bin/python -m pytest -q
+```
+
+验收同时核对：评分项数量、code、分值合计、说明和来源行不变；共享父单元改为 dimension 认领；独立同名不改；无 item_label 和已有 dimension 均触发 E9。发布不含迁移，Alembic head 保持 `0031_rubric_import_sessions`；按现有 CI/上线清单发布。回滚只回退抽取器、触发器、解析投影及对应测试/文档，不执行数据库 downgrade；已保存 compilation 保留原始台账，可通过重新上传或重新解析生成新草稿，不原地改写历史记录。
+
+维护记录：2026-09-21 · 合并父级评分项名称解析修复：补充共享 `unit_id` 诊断、自动重映射/E9 验收、无迁移发布及历史数据保留回滚步骤。
+
+### 2026-09-21 合并父级评分项层级展示修正
+
+症状：解析数据中已经有 dimension，但“解析出的评分项”仍只显示“成绩项1～6”。先检查浏览器拿到的 `session.criteria[*].dimension` 和 `description`；字段存在而页面未显示属于前端投影问题，不要重新上传、修改数据库或回退解析映射。修复后，有 dimension 的行必须依次显示父维度、子项和具体要求摘要；无 dimension 行仍保持单层名称。
+
+验证：在 `frontend/workbench` 运行 `npm run test:unit -- RubricImportWorkspace.test.js`，再运行完整 `npm run test:unit` 和 `npm run typecheck`。浏览器分别核对桌面与窄屏：长说明省略不撑破表格，点击摘要可展开编辑，保存仍只更新原 name/description，不把组合展示文本写回后端。发布前重建静态产物；回滚只回退组件、样式和测试，不回退解析代码、数据库或历史 compilation。
+
+维护记录：2026-09-21 · 合并父级评分项层级展示修正：补充分层展示诊断、组件测试、响应式验收和仅前端回滚步骤。
+
+### 2026-09-21 解析辅助与规则拆分步骤归位
+
+验收第一步“基本信息与评分项”：应看到原文识别情况、未认领内容、来源冲突和可选 AI 结构辅助；触发结构识别后，差异与合入操作仍留在第一步。存在阻断单元或冲突时点击第二步，应停留在第一步并给出数量提示。处理完成后进入“评分规则”，页面不得再出现 `ParseCoveragePanel`、AI 结构辅助或结构建议，应显示“AI 规则拆分与细则完整度”、逐项规则核对和原子规则编辑。
+
+验证运行 `npm run test:unit`、`npm run typecheck`，并执行 `npx playwright test e2e/rubric-parse.spec.js --project=chromium`；覆盖 Excel 未认领规则、Word 单文件、第一步门禁和第二步无结构面板。发布前重建静态产物。该修正无迁移；回滚只回退前端挂载、门禁和文案，保留解析台账、结构建议及规则草稿数据。
+
+维护记录：2026-09-21 · 解析辅助与规则拆分步骤归位：补充第一步结构核对、第二步规则拆分、门禁、E2E 与无迁移回滚步骤。
+
+### 2026-09-21 AI 扣分细则有界输出与分批生成
+
+症状：第二步生成扣分细则时显示 `AI_DRAFT_OUTPUT_TRUNCATED` 或“模型输出达到长度上限”，该评分项保留 0 项结果，先前评分项的已生成建议仍在。先检查连接是否显式配置了低于 6144 的 `max_tokens`/`max_output_tokens`；再核对模型是否支持严格 JSON Schema。日志只应包含批次、预算、固定原因码、HTTP 状态和异常类型，不得记录评分原文或模型正文。
+
+修复后，一个复杂评分项应按待处理片段拆成最多 6 批；单批请求最多 2 个规则组、每组最多 3 个严重程度，并带有限来源枚举和字符串长度上限。任一批截断不得返回部分规则；结构或业务校验错误最多纠正一次。全部成功后响应中的 `generation_metadata` 应包含 `batch_count`、`default_max_output_tokens=6144` 和实际请求预算（兼容路径），合并组编号稳定且最终仍为待人工确认。
+
+验证使用合成、无 PII 数据：
+
+```bash
+.venv/bin/python -m pytest -q \
+  backend/app/tests/test_template_ai_rule_refactor.py \
+  backend/app/tests/test_ai_draft_source_refs.py \
+  backend/app/tests/test_mock_and_validator.py
+.venv/bin/python -m pytest -q backend/app/tests/test_three_doc_contract.py
+.venv/bin/python -m pytest -q
+```
+
+连接验收应分别覆盖：未显式配置时采用 6144；显式较低值不被代码覆盖并返回明确诊断；OpenRouter 携带其专属 reasoning 参数；其他兼容厂商不携带该参数；OpenAI Responses 与兼容接口都发送严格 schema。若真实厂商拒绝 schema，先在账户连接页测试模型能力，不得回退成自由 JSON 并跳过校验。
+
+发布无数据库迁移，Alembic head 保持 `0031_rubric_import_sessions`。按现有 CI 和上线清单发布；实际厂商验证只使用合成评分项。回滚可同步回退起草器、两个模型适配器、prompt/cache 版本和对应测试，不执行数据库 downgrade，不删除既有规则、草稿、审核记录或已确认版本；回滚前已生成但未确认的建议仍按现有人工确认边界处理。
+
+维护记录：2026-09-21 · AI 扣分细则有界输出与分批生成：补充截断诊断、严格 schema/6144 预算/最多 6 批的验收、无迁移发布和保留历史数据的回滚步骤。
+
+### 2026-09-22 最终规则集合统一确认
+
+症状：第二步先确认原文解析规则，再应用 AI 建议后，原文规则重新显示待确认。先核对 AI 应用是否产生了新的 `compilation_id`，以及评分项的 `scoring_mode`、说明或分值是否变化；这是旧确认按安全签名失效，不应直接修改数据库为 approved。若 `ai_interpreted_user_text` 显示为“用户录入”或计入“原文”，则是来源分类回归。
+
+修复后操作顺序：生成 AI 建议 → 排除不采用项 → 点击“应用到最终草稿” → 等待后继草稿刷新 → 在同一评分项点击“统一确认最终规则”。有待处理 AI 建议时，原文规则确认按钮必须禁用并提示先定稿；丢弃建议后可直接确认原文规则。AI 应用完成时所有新增规则仍为 draft，统一确认后当前评分项的最终规则才全部为 approved；审核记录仍逐条存在。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q \
+  backend/app/tests/test_rule_coverage_api.py \
+  backend/app/tests/test_rubric_review_workspace.py
+cd frontend/workbench
+npm run test:unit -- \
+  src/components/AiRuleDraftPanel.test.js \
+  src/components/RuleReviewPanel.test.js \
+  src/lib/ai-draft.test.js
+npm run typecheck
+PGS_PYTHON=../../.venv/bin/python npm run test:e2e -- \
+  e2e/rubric-review.spec.js --project=chromium
+```
+
+验收还需核对：应用建议前不能确认暂态原文规则；应用后一次批量请求完成当前评分项最终集合确认；响应丢失后刷新不会重复审计；真实原文规则显示“原文解析/用户录入”，`ai_interpreted_user_text` 显示“AI 解读原文”，`ai_inferred` 显示“AI 推断”。发布无迁移，按现有 CI 和上线清单重建静态产物。回滚需同步回退组件、编排、来源分类、测试和静态构建；不回退数据库、不删除已生成 compilation 或审核记录。
+
+维护记录：2026-09-22 · 最终规则集合统一确认：补充重复确认诊断、先定稿后统一确认的验收、AI 来源分类及无迁移回滚步骤。
+
+### 2026-09-22 本地 PostgreSQL 评分 Worker 随 Web 启动
+
+使用 `./scripts/start-web-pg.sh` 启动时，日志必须依次出现“启动本地评分 Worker”和“启动 Web API”。在工作台创建评分任务后，任务应从 `queued` 进入 `running`，材料尝试次数由 0 增加并出现 heartbeat；无需另开终端或调用 `/batch-scoring-jobs/{id}/run`。退出脚本后，API 与 worker 都应结束，不应遗留继续领取任务的后台进程。
+
+若任务持续显示“等待执行”、全部尝试次数为 0 且无 heartbeat：先检查启动终端是否仍有 worker 日志，再用 `lsof -nP -iTCP:8000 -sTCP:LISTEN` 确认 API；若仅手工启动了 Uvicorn，应停止后改用 `./scripts/start-web-pg.sh`。若 worker 已退出，脚本会同步关闭 API 并打印退出状态码，应从同一终端向上查数据库、模型配置或导入异常；不要取消并重建尚未被领取的任务，worker 恢复后会自动领取原 `queued` 记录。
+
+验证：运行 `bash -n scripts/start-web-pg.sh`；在合成本地批次创建任务，确认 queued→running→终态、heartbeat、逐材料尝试次数和结果持久化；按 Ctrl-C 后确认 8000 端口释放且无 `run_batch_worker` 进程。生产仍以 Vercel 构建发现 Queue subscriber、逐材料投递和平台重试为验收依据，本地通过不能替代该门禁。本变更无迁移；回滚只恢复脚本为单独启动 API，并在本地另行启动 `run_batch_worker`，不得删除现有 job/item 或评分结果。
+
+维护记录：2026-09-22 · 本地评分 Worker 随 Web 启动：增加启动日志、queued/heartbeat 诊断、联动退出验收和无数据回滚步骤。
+
+### 2026-09-22 本地评分预算与规则错误诊断修复
+
+复现特征：批任务已被 Worker 领取，所有材料 `attempt_count=1`，但材料显示“评分结果不完整”；规则任务大量出现 `TOKEN_BUDGET_UNSATISFIABLE`。先查看 `start-web-pg.sh` 启动摘要，应显示 `.env.intranet` 的 `context / margin / top-k`，当前本地基线为 `32768 / 1024 / 12`。若摘要是 8192、字段缺失或脚本直接退出，不要重试材料；检查 `.env.intranet` 是否可被 Bash source、三个字段是否为非负整数，并确认服务是通过该脚本重新启动而非单独运行 Uvicorn。
+
+启动后可用不含正文的规则检查点诊断：材料级 `error_code=TOKEN_BUDGET_UNSATISFIABLE` 应计为 LLM failure；`RULE_EXECUTION_FAILED` 的 Worker warning 和人工复核消息只显示 `criterion_code`、`rule_code`、稳定 code 与 `exception_type`。不得开启 `LLM_DEBUG_LOG_ENABLED` 处理真实论文，也不得把异常消息、raw payload 或证据正文复制到工单。若需保存控制台，使用 `./scripts/start-web-pg.sh 2>&1 | tee -a /tmp/pgs-local.log`，文件由 tee 创建且只应保存在受控本机。
+
+验证顺序：运行 `bash -n scripts/start-web-pg.sh` 与 `bash -n .env.intranet`；运行 `backend/app/tests/test_local_startup_script.py`、`test_p1_evidence_selection.py`、`test_p2_rule_failure_isolation.py`、`test_m8_batch_scoring_jobs.py` 和三文档契约。随后重启脚本，先用一份授权的合成或测试材料确认规则不再出现 token 预算错误、形成 6 个有效评分项和最终总分，再由用户明确触发“重试失败项”；不要自动重跑现有四份真实材料。若 32768 下仍预算不足，先降低 `SCORING_EVIDENCE_TOP_K` 或细化过大的完整 EvidenceUnit，并核对 Provider 请求体限制，禁止截断证据放行。
+
+发布无迁移，生产 Vercel 仍从平台环境读取配置并由 Queue subscriber 消费，不依赖本地脚本。回滚代码时恢复独立导出等效评分环境变量后再启动旧脚本，否则会重新落回默认值；保留失败 run、规则任务、人工复核任务及审计记录，不删除或改写历史结果。
+
+维护记录：2026-09-22 · 本地评分预算与规则错误诊断修复：补充有效配置摘要、数据库/安全日志诊断、单份复验、真实材料重试授权和无迁移回滚步骤。
+
+### 2026-09-22 评分心跳时区与复核项持久化修复
+
+症状一：Worker 与 API 进程仍存活、模型请求继续返回，但页面显示“执行中断，等待后台自动恢复”。核对任务 `heartbeat_at` 与数据库 `now()`；若心跳刚写入却由 API 判为 stale，检查宿主机时区与响应模型是否把 naive 数据库时间按本地时间比较。修复后，naive heartbeat 按 UTC 解释，活动任务在 120 秒租约内必须显示 healthy。
+
+症状二：材料结束时报 `ck_score_items_aggregation_state`，失败行显示 `criterion_outcome.status=review_required`、`auto_score_status=calculated` 且 `ai_score=null`。这是 review-only 无分结果的状态投影错误，不应删除约束或补 0 分。修复后该行应保存为 `auto_score_status=blocked`、`ai_score=null`、`need_manual_review=true`，原始 aggregation 仍显示 review_required；材料按既有完整性规则进入需处理状态。
+
+若旧失败项显示 `error_code=gkpj` 或说明中包含 SQL/parameters，这是修复前把 SQLAlchemy 内部链接码和异常正文错误投影到了材料记录。新失败应显示稳定 `scoring_failure` 与 `exception_type`，不含 SQL、参数或材料内容；旧审计记录保留，不原地清洗，重试后的新 attempt 才使用安全投影。
+
+若 Worker 日志出现 HTTP 200 后的 `ChatJSONOutputError`，检查启动摘要应为 `context 32768 / output 2400 / margin 1024 / top-k 12 / json true`。平台连接 `provider_options={}` 时会采用这组本地默认；若数据库显式设置了 `max_tokens` 或 `response_format_json`，则以显式值为准。不要开启正文调试来观察原始响应；先确认模型端支持 OpenAI-compatible `response_format.type=json_object`。
+
+验证：运行 `bash -n scripts/start-web-pg.sh`、`bash -n .env.intranet`，再运行 `.venv/bin/python -m pytest -q backend/app/tests/test_local_startup_script.py backend/app/tests/test_m4_execution_persistence.py backend/app/tests/test_m8_batch_scoring_jobs.py backend/app/tests/test_three_doc_contract.py`，然后重启本地脚本。用一份合成材料观察 heartbeat 持续 healthy；若包含 review-only 项，确认数据库不再报约束错误且页面显示需要人工处理。已有失败任务不会被代码自动重跑，修复生效后由用户点击重试。发布无迁移；回滚仅回退响应时间归一化、持久化映射、本地模型默认、测试与三文档，不修改或删除历史 job、run、rule task 和审计记录。
+
+维护记录：2026-09-22 · 评分心跳时区与复核项持久化修复：增加心跳误报和数据库约束失败的诊断、专项验证、显式重试及无迁移回滚步骤。
