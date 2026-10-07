@@ -20,6 +20,8 @@ def test_postgres_web_start_exports_scoring_runtime_before_disabling_env_files()
     ):
         assert name in script
 
-    env = (ROOT / ".env.intranet").read_text(encoding="utf-8")
+    # The private .env.intranet is gitignored and absent in CI; the committed
+    # example is what operators copy, so it must satisfy the script's checks.
+    env = (ROOT / ".env.intranet.example").read_text(encoding="utf-8")
     assert "OPENAI_COMPATIBLE_MAX_TOKENS=2400" in env
     assert "OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON=true" in env

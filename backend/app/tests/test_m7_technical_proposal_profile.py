@@ -542,9 +542,16 @@ def test_excel_hybrid_import_can_be_reviewed_published_and_planned(db):
         TEXT_LENGTH_KEY,
         HYBRID_REQUIRED_KEY,
     }
+    # @3 (2026-10-05) carries each rule's published wording for the judge.
     assert all(
         node["atomic_rule_snapshot"]["schema_version"]
-        == "atomic-rule-snapshot@2"
+        == "atomic-rule-snapshot@3"
+        for node in plan["nodes"]
+    )
+    rule_text_by_code = {rule.rule_code: rule.rule_text for rule in rules}
+    assert all(
+        node["atomic_rule_snapshot"]["rule_text"]
+        == rule_text_by_code[node["rule_code"]]
         for node in plan["nodes"]
     )
     assert all(rule.status == "approved" for rule in rules)

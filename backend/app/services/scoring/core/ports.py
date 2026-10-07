@@ -45,6 +45,41 @@ class CacheLedger(Protocol):
 
 
 @runtime_checkable
+class DecisionLedger(Protocol):
+    """Reuse validated semantic decisions with an identical decision identity.
+
+    The scope (organization and AI connection) is bound by the adapter.  Core
+    reads before calling the provider and writes only after the executor has
+    accepted the decision; both operations must fail soft (a broken ledger
+    degrades to "no reuse", never to a failed rule).
+    """
+
+    def get(self, *, decision_identity: str) -> Mapping[str, object] | None: ...
+
+    def put(
+        self,
+        *,
+        decision_identity: str,
+        rule_code: str,
+        response: Mapping[str, object],
+        usage: Mapping[str, object] | None = None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class ExecutionJournal(Protocol):
+    """Audit facts the result DTO does not carry (no I/O in Core).
+
+    ``reused`` marks a decision replayed from the ledger; ``group_call_id``
+    links the tiers of a mutex group judged by one provider call.
+    """
+
+    def record_semantic_decision(
+        self, *, rule_code: str, reused: bool, group_call_id: str | None
+    ) -> None: ...
+
+
+@runtime_checkable
 class EvidenceRetriever(Protocol):
     """Select detached evidence from an immutable document projection."""
 
@@ -80,6 +115,8 @@ class Clock(Protocol):
 
 __all__ = [
     "CacheLedger",
+    "DecisionLedger",
+    "ExecutionJournal",
     "CheckerRegistry",
     "Clock",
     "EvidenceRetriever",

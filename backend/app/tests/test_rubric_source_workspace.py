@@ -245,3 +245,19 @@ def test_source_workspace_requires_login_when_auth_is_enabled(client, monkeypatc
     response = client.get(f"/api/rubrics/{imported['rubric']['id']}/source-workspace")
 
     assert response.status_code == 401
+
+
+def test_source_workspace_projects_human_review_without_changing_original_text(client):
+    imported = _post(client, rules=fx.simple_rules_xlsx(), template=fx.template_docx_with_comments()).json()
+    base = f"/api/rubrics/{imported['rubric']['id']}"
+    before = client.get(base + '/source-workspace').json()['previews']['word']
+    unit = before[0]
+    result = client.post(base + '/units/resolve-batch', json={
+        'unit_ids':[unit['unit_id']], 'action':'not_rule', 'reason':'合成校对验证',
+    })
+    assert result.status_code == 200, result.text
+    after = client.get(base + '/source-workspace').json()['previews']['word']
+    updated = next(u for u in after if u['unit_id'] == unit['unit_id'])
+    assert updated['text'] == unit['text']
+    assert updated['locator']['review']['extracted_by'] == 'human'
+    assert updated['locator']['review']['status'] == 'context'

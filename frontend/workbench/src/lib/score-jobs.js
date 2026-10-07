@@ -36,3 +36,19 @@ export function finishedCount(job) {
 export function jobPercent(job) {
   return job?.total_items ? Math.round((finishedCount(job) / job.total_items) * 100) : 0;
 }
+
+// token 数的紧凑写法；缺值显示「—」而不是 0。
+export function compactTokens(value) {
+  if (value == null) return "—";
+  return value >= 10000 ? `${(value / 10000).toFixed(1)} 万` : String(value);
+}
+
+// 一份材料本次实际付费的用量，以及复用了多少条已有判定。旧任务没有这些字段时返回「—」，
+// 不能显示成 0——0 表示「确实没花」，和「没有记录」不是一回事。
+export function itemUsageText(item) {
+  const telemetry = item?.telemetry || {};
+  if (telemetry.prompt_tokens == null) return "—";
+  const parts = [`输入 ${compactTokens(telemetry.prompt_tokens)} / 输出 ${compactTokens(telemetry.completion_tokens || 0)}`];
+  if (telemetry.decision_ledger_reused) parts.push(`复用 ${telemetry.decision_ledger_reused} 条`);
+  return parts.join(" · ");
+}

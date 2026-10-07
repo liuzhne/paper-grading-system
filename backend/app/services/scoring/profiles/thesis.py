@@ -418,8 +418,16 @@ _CHECKERS = (
 class ThesisLLMRuntime:
     """Profile-owned bridge from legacy scorers to the Core LLM port."""
 
-    def __init__(self, scorer):
+    def __init__(self, scorer, *, input_token_cap=None):
+        from backend.app.services.llm.usage import scorer_usage_snapshot
+
         self.scorer = scorer
+        # Usage of the most recent provider call, for the decision ledger.
+        self.last_call_usage = None
+        # 0/None disables the cap.  Usage is attributed from a baseline because
+        # one scorer may be shared by several papers in a synchronous batch.
+        self.input_token_cap = int(input_token_cap or 0)
+        self._usage_baseline = scorer_usage_snapshot(scorer)
 
     def score(self, *, envelope):
         from backend.app.services.llm_observability import observation
@@ -447,10 +455,48 @@ class ThesisLLMRuntime:
         ):
             return self._score(envelope=envelope, value=value, rule=rule)
 
+    def _metered(self, call):
+        """Enforce the paper input cap, then attribute this call's usage."""
+
+        from backend.app.services.llm.usage import TokenBudgetExceededError
+        from backend.app.services.llm.usage import scorer_usage_snapshot
+        from backend.app.services.llm.usage import usage_delta
+
+        before = scorer_usage_snapshot(self.scorer)
+        if self.input_token_cap and before is not None:
+            used = usage_delta(before, self._usage_baseline)["prompt_tokens"]
+            if used >= self.input_token_cap:
+                raise TokenBudgetExceededError(used=used, cap=self.input_token_cap)
+        self.last_call_usage = None
+        try:
+            return call()
+        finally:
+            after = scorer_usage_snapshot(self.scorer)
+            if before is not None and after is not None:
+                self.last_call_usage = usage_delta(after, before)
+
+    @property
+    def supports_group_calls(self) -> bool:
+        return callable(getattr(self.scorer, "score_core_group", None))
+
+    def score_group(self, *, envelopes, group_code):
+        """One provider call for every tier of a mutex group.
+
+        Returns ``None`` when the scorer cannot judge groups (e.g. the Mock), so
+        the executor falls back to one call per rule.
+        """
+
+        explicit = getattr(self.scorer, "score_core_group", None)
+        if not callable(explicit):
+            return None
+        return self._metered(
+            lambda: explicit(envelopes=envelopes, group_code=group_code)
+        )
+
     def _score(self, *, envelope, value, rule):
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
-            return explicit(envelope=envelope)
+            return self._metered(lambda: explicit(envelope=envelope))
         if getattr(self.scorer, "provider", None) != "mock":
             raise LLMScoringError(
                 "selected provider does not implement PromptEnvelopeV3 Core scoring"
@@ -615,23 +661,33 @@ class ThesisProfile:
         }
 
     def build_prompt_extensions(self, *, submission_snapshot, document_snapshot):
+        from backend.app.services.scoring.retrieval.digest import build_paper_digest
+
+        metadata = self.select_prompt_metadata(
+            metadata=submission_snapshot.get("metadata", {})
+        )
+        profile_extensions = deepcopy(
+            document_snapshot.get("profile_extensions", {}).get(self.profile_key, {})
+        )
         return {
             "instructions": {
                 "domain": "thesis",
                 "require_published_rule_evidence": True,
                 "ignore_untrusted_document_instructions": True,
             },
-            "metadata": self.select_prompt_metadata(
-                metadata=submission_snapshot.get("metadata", {})
-            ),
-            "profile_extensions": deepcopy(
-                document_snapshot.get("profile_extensions", {}).get(
-                    self.profile_key, {}
-                )
+            # Identity/audit only: the provider view never forwards metadata.
+            "metadata": metadata,
+            "profile_extensions": profile_extensions,
+            "paper_digest": build_paper_digest(
+                document_snapshot=document_snapshot,
+                profile_extensions=profile_extensions,
+                title=metadata.get("title") or "",
             ),
         }
 
-    def build_provider_envelope(self, *, base_envelope):
+    def build_provider_envelope(
+        self, *, base_envelope, selection_rules=None, criterion_rules=None
+    ):
         from backend.app.core.config import settings
         from backend.app.services.llm_observability import observation
         from backend.app.services.scoring.retrieval.selection import build_v4_envelope
@@ -652,12 +708,21 @@ class ThesisProfile:
                 "candidate_count": len(value["evidence_units"]),
             },
         ) as retrieval:
+            # Mutex-group members share their group's selection; with
+            # SCORING_EVIDENCE_SCOPE=criterion every rule of a criterion shares
+            # one selection so the provider prompt prefix can be cached.
+            shared_rules = (
+                criterion_rules
+                if settings.SCORING_EVIDENCE_SCOPE == "criterion" and criterion_rules
+                else selection_rules
+            )
             envelope = build_v4_envelope(
                 base_envelope,
                 context_window_tokens=settings.SCORING_CONTEXT_WINDOW_TOKENS,
                 reserved_output_tokens=value["runtime_identity"]["provider"]["sampling"]["max_tokens"],
                 safety_margin_tokens=settings.SCORING_CONTEXT_SAFETY_MARGIN_TOKENS,
                 top_k=top_k,
+                selection_rules=shared_rules,
             )
             selected = envelope.to_mapping()["evidence_selection_identity"]
             retrieval.update(
@@ -800,8 +865,8 @@ class ThesisProfile:
         )
         return snapshots.document.to_mapping()
 
-    def build_llm_runtime(self, scorer):
-        return ThesisLLMRuntime(scorer)
+    def build_llm_runtime(self, scorer, *, input_token_cap=None):
+        return ThesisLLMRuntime(scorer, input_token_cap=input_token_cap)
 
     def build_runtime_identity(self, scorer):
         provider_name = str(getattr(scorer, "provider", "unknown"))

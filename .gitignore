@@ -19,6 +19,8 @@ storage/reports/*
 storage/exports/*
 storage/eval/*
 storage/*.sqlite
+# Document snapshots hold full paper text and student PII; never commit them.
+storage/document_snapshots/
 !storage/uploads/.gitkeep
 !storage/parsed/.gitkeep
 !storage/reports/.gitkeep

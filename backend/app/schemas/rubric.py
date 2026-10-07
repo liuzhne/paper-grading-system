@@ -416,12 +416,12 @@ class UnitClassificationRequest(BaseModel):
 
 class SourceUnitBatchResolveRequest(BaseModel):
     unit_ids: list[str] = Field(min_length=1, max_length=500)
-    action: Literal["assign", "not_rule"]
+    action: Literal["assign", "not_rule", "restore"]
     reason: str = Field(min_length=1)
     criterion_code: Optional[str] = None
 
 
 class SourceUnitResolveRequest(BaseModel):
-    action: Literal["assign", "not_rule"]
+    action: Literal["assign", "not_rule", "restore"]
     reason: str = Field(min_length=1)
     criterion_code: Optional[str] = None

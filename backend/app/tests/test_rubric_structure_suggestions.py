@@ -141,3 +141,18 @@ def test_reparse_keeps_word_template_items_and_conflicts():
     new_ledger = SourceLedger.from_mapping(reparsed["compilation"]["raw_parse_output"]["source_ledger"])
     comment = next(u for u in new_ledger.units(doc_id="word") if u.kind == "comment")
     assert new_ledger.status(comment.unit_id).status == "consumed"
+
+
+def test_source_row_identity_survives_changed_names_and_generated_codes():
+    current = [{**CURRENT[0], "row_number": 2}]
+    proposed = [{**CURRENT[0], "code": "GENERATED", "name": "新的列名称", "row_number": 2}]
+    items = diff_criteria(current, proposed)
+    assert [(i["kind"], i["code"], i["field"]) for i in items] == [("modify", current[0]["code"], "name")]
+    assert merge_plan(items)["keep_values"] == [{"row_number": 2, "field": "name", "value": current[0]["name"]}]
+    assert merge_plan(items, confirm={items[0]["id"]})["blocked"] == []
+
+
+def test_ambiguous_source_rows_do_not_silently_match():
+    current = [{**c, "row_number": 2} for c in CURRENT[:2]]
+    proposed = [{**PROPOSED[2], "name": "未知评分项", "row_number": 2}]
+    assert len([i for i in diff_criteria(current, proposed) if i["kind"] == "removed"]) == 2

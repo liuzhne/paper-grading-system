@@ -11,6 +11,8 @@ from backend.app.db import models
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import CompiledRubricSnapshot
+from backend.app.services.scoring.core.contracts import M4_ATOMIC_RULE_SCHEMAS
+from backend.app.services.scoring.core.rule_context import derive_context_needs
 
 
 _GRAPH_FIELDS = {
@@ -59,15 +61,32 @@ def _assessment_mode(scoring_mode: object) -> object:
 
 
 def _atomic_rule_schema_version(compiler_version: object) -> str:
+    # @3 = @2 + the rule's published wording.  Without it the semantic judge
+    # only saw a rule code and answered "not_applicable" for every rule.
     if compiler_version in _M4_COMPILER_VERSIONS:
-        return "atomic-rule-snapshot@2"
+        return "atomic-rule-snapshot@3"
     return "atomic-rule-snapshot@1"
+
+
+def _rule_text_fields(source: Mapping[str, object], schema_version: str) -> dict:
+    if schema_version != "atomic-rule-snapshot@3":
+        return {}
+    name = str(source.get("name") or source["rule_code"])
+    rule_text = str(source.get("rule_text") or name)
+    return {
+        "name": name,
+        "rule_text": rule_text,
+        "positive_example": source.get("positive_example") or None,
+        "negative_example": source.get("negative_example") or None,
+        "boundary_example": source.get("boundary_example") or None,
+        "context_needs": derive_context_needs(name, rule_text),
+    }
 
 
 def _rule_evidence_policy(source: Mapping[str, object], schema_version: str) -> dict:
     policy = deepcopy(source["evidence_policy"])
     if (
-        schema_version == "atomic-rule-snapshot@2"
+        schema_version in M4_ATOMIC_RULE_SCHEMAS
         and source["judge_type"] == "semantic"
         and not policy.get("allowed_finding_codes")
     ):
@@ -123,6 +142,7 @@ def _compiled_from_version_content(
                 "cap_points": source["cap_points"],
                 "depends_on_rule_codes": deepcopy(source["depends_on_rule_codes"]),
                 "mutex_group": source["mutex_group"],
+                **_rule_text_fields(source, atomic_rule_schema_version),
                 "levels": [
                     {
                         "level_code": level["level_code"],
@@ -358,6 +378,17 @@ class CompiledRubricSnapshotLoader:
                     "cap_points": item.cap_points,
                     "depends_on_rule_codes": deepcopy(item.depends_on_rule_codes),
                     "mutex_group": item.mutex_group,
+                    **_rule_text_fields(
+                        {
+                            "rule_code": item.rule_code,
+                            "name": item.name,
+                            "rule_text": item.rule_text,
+                            "positive_example": item.positive_example,
+                            "negative_example": item.negative_example,
+                            "boundary_example": item.boundary_example,
+                        },
+                        atomic_rule_schema_version,
+                    ),
                     "levels": [
                         {
                             "level_code": level.level_code,

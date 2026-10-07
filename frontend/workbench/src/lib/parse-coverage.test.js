@@ -21,8 +21,9 @@ const coverage = (overrides = {}) => ({
 });
 
 describe("第一级门禁", () => {
-  it("有未处理的阻断单元或冲突时不能进入第 2 步", () => {
+  it("来源冲突阻止进入第 2 步，疑似规则在第 2 步处理", () => {
     expect(stepOneGate(coverage())).toEqual({ blocked: true, blocking: 1, conflicts: 1 });
+    expect(stepOneGate(coverage({conflicts:[]}))).toEqual({blocked:false, blocking:1, conflicts:0});
   });
 
   it("全部处理后放行；没有台账的草稿不受影响", () => {

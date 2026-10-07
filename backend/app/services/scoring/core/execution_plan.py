@@ -7,6 +7,7 @@ from copy import deepcopy
 
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import (
+    M4_ATOMIC_RULE_SCHEMAS,
     CompiledRubricSnapshot,
     RuleExecutionPlan,
 )
@@ -155,7 +156,7 @@ class RuleExecutionPlanBuilder:
             if rule["criterion_code"] not in criteria:
                 raise ValueError("atomic rule references an unknown criterion")
             if (
-                rule["schema_version"] == "atomic-rule-snapshot@2"
+                rule["schema_version"] in M4_ATOMIC_RULE_SCHEMAS
                 and rule["judge_type"] == "semantic"
                 and not rule["evidence_policy"].get("allowed_finding_codes")
             ):

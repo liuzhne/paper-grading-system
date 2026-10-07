@@ -1,8 +1,11 @@
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { apiUrl } from "@/api/client";
 
 const props = defineProps({
   session: { type: Object, required: true },
+  recognition: { type: Boolean, default: false },
+  parseState: { type: Object, default: null },
   busy: { type: Boolean, default: false },
   rulesFile: { type: Object, default: null },
   templateFile: { type: Object, default: null },
@@ -16,10 +19,24 @@ const props = defineProps({
 const emit = defineEmits([
   "pick-rules", "pick-template", "preview-source", "reupload", "update-session",
   "update-criterion", "add-criterion", "delete-criterion", "resolve-conflict", "confirm", "cancel",
-  "confirm-reupload", "cancel-reupload", "close-source-preview",
+  "confirm-reupload", "cancel-reupload", "close-source-preview", "save", "score-check",
 ]);
 
+const activeTab = ref('table');
+const metadataOpen = ref(false);
+const checkedScores = ref(new Set());
+const scoreSignature = computed(() => (props.session.criteria || []).map(c => `${c.code}:${c.max_score}`).join('|'));
+watch(scoreSignature, () => { checkedScores.value = new Set(); });
+const needsScoreCheck = computed(() => props.recognition && !props.readonly && props.parseState?.extraction && !props.parseState.extraction.mapping?.max_score);
+const pendingScores = computed(() => needsScoreCheck.value ? activeCriteria.value.filter(c => !checkedScores.value.has(c.code)).length : 0);
+function checkScore(code) { checkedScores.value = new Set([...checkedScores.value, code]); }
+function toggleScore(code) {
+  const next = new Set(checkedScores.value);
+  next.has(code) ? next.delete(code) : next.add(code);
+  checkedScores.value = next;
+}
 const activeCriteria = computed(() => (props.session.criteria || []).filter((item) => !item.deleted));
+watch(pendingScores, value => emit("score-check", value), { immediate: true });
 const scoreSum = computed(() => activeCriteria.value.reduce((sum, item) => sum + Number(item.max_score || 0), 0));
 const unresolvedConflicts = computed(() => (props.session.conflicts || []).filter((item) => !item.resolved));
 const scoreMismatch = computed(() => !props.initial && scoreSum.value !== Number(props.session.total_score));
@@ -42,6 +59,7 @@ const positiveInteger = (value) => Number.isSafeInteger(Number(value)) && Number
 const validationMessage = computed(() => {
   if (props.readonly) return "";
   if (props.blockingMessage) return props.blockingMessage;
+  if (pendingScores.value) return `请核对 ${pendingScores.value} 个从文字提取的分值。`;
   if (props.reuploadPreview) return "请先确认或取消文件替换，再继续下一步。";
   if (!String(props.session.name || "").trim()) return "请填写标准名称。";
   if (props.initial) return rulesName.value || templateName.value ? "" : "请选择评分标准文档或评分表。";
@@ -72,10 +90,16 @@ function statusLabel(item) {
     || (item.source_refs?.length ? "按原文解析" : "出处待补充");
 }
 
+function hasLegacyItemLabel(item) {
+  return !!item.dimension && item.name !== item.dimension
+    && !(String(item.name || "").startsWith(item.dimension)
+      && /^\d+$/.test(String(item.name).slice(item.dimension.length)));
+}
+
 function formatLocator(locator) {
   if (locator == null) return "";
   if (typeof locator !== "object") return String(locator);
-  return [...new Set(Object.values(locator).flatMap((value) => {
+  return [...new Set(Object.entries(locator).filter(([key]) => key !== "review").map(([,value]) => value).flatMap((value) => {
     const text = formatLocator(value);
     return text ? [text] : [];
   }))].join(" · ");
@@ -85,6 +109,15 @@ function sourceLabel(item) {
   const source = item.source_refs?.[0];
   return formatLocator(source?.locator) || source?.sheet_name || source?.section_path?.join?.(" · ")
     || (item.parse_status === "manual" ? "人工新增" : "来源待补充");
+}
+
+function scoreEvidence(item) {
+  const ref = item.source_refs?.find(source => source.kind === 'excel');
+  const mapping = props.parseState?.extraction?.mapping || {};
+  const column = mapping.max_score || mapping.item_label || mapping.name;
+  if (!ref?.row_number || !column) return '';
+  const unit = props.session.previews?.excel?.find(u => u.locator?.row === ref.row_number && u.locator?.col === column && (!ref.sheet_name || u.locator?.sheet === ref.sheet_name));
+  return unit ? `原单元格：${unit.text}` : '';
 }
 
 function fileNote(kind) {
@@ -132,12 +165,15 @@ function updateCriterion(index, field, event) {
 </script>
 
 <template>
-  <section ref="root" class="import-workspace" data-test="rubric-import-workspace">
+  <section ref="root" class="import-workspace" :class="{ recognition }" data-test="rubric-import-workspace">
+    <template v-if="recognition">
+      <p class="source-policy">{{ rulesName ? '评分项以评分表为准；文档中的要求只归入已有评分项，不会新增评分项。' : '评分项来自上传文档；先核对评分项，再把原文要求归入已有评分项。' }} <button class="metadata-toggle" @click="metadataOpen = !metadataOpen">{{ metadataOpen ? '收起基本信息' : '编辑基本信息' }}</button></p>
+    </template>
     <div class="workspace-main">
-      <section class="card upload-card">
+      <section class="card upload-card word-source">
         <div class="card-head-line">
-          <div><h2 class="card-title">评分标准文档 <span class="file-kind">docx</span></h2>
-            <p class="card-note">上传评分标准原文，提取评分项、分值与文字描述，保留原文出处。</p></div>
+          <div><h2 class="card-title">评分标准文档 <span v-if="recognition" class="chip chip-ok">规则来源 · 第 2 步使用</span> <span class="file-kind">docx</span></h2>
+            <p class="card-note">{{ recognition && rulesName ? '已接收的规则原文在第 2 步归类；本步仅核对评分项与分值。' : '上传评分标准原文，提取评分项、分值与文字描述，保留原文出处。' }}</p></div>
         </div>
         <div class="file-row" :class="{ 'drop-active': dragging === 'word' }" data-test="word-dropzone"
           @dragover.prevent="!editingDisabled && (dragging = 'word')" @dragleave.prevent="dragging = ''" @drop.prevent="dropFile('word', $event)">
@@ -153,9 +189,10 @@ function updateCriterion(index, field, event) {
         </div>
       </section>
 
-      <section class="card upload-card">
-        <div class="card-head-line"><div><h2 class="card-title">评分表 <span class="file-kind">xlsx</span><span class="faint optional">可选</span></h2>
-          <p class="card-note">已有评分项和分值的表格。与文档内容不一致时，会列出差异供你确认。</p></div></div>
+      <section class="card upload-card excel-source">
+        <div class="card-head-line"><div><h2 class="card-title">评分表 <span v-if="recognition" class="chip chip-ok">评分项来源 · 本步使用</span> <span class="file-kind">xlsx</span><span class="faint optional">可选</span></h2>
+          <p class="card-note">已有评分项和分值的表格。与文档内容不一致时，会列出差异供你确认。</p></div>
+          <a class="btn btn-sm" :href="apiUrl('/rubrics/import-template.xlsx')" download="rubric_import_template.xlsx">下载模板</a></div>
         <div class="file-row" :class="{ empty: !rulesName, 'drop-active': dragging === 'excel' }" data-test="excel-dropzone"
           @dragover.prevent="!editingDisabled && (dragging = 'excel')" @dragleave.prevent="dragging = ''" @drop.prevent="dropFile('excel', $event)">
           <div><strong>{{ rulesName || (readonly ? "未提供评分表" : "拖入 .xlsx 文件，或点击选择") }}</strong>
@@ -188,34 +225,37 @@ function updateCriterion(index, field, event) {
           <button data-test="confirm-reupload" class="btn btn-primary" type="button" :disabled="busy || readonly" @click="emit('confirm-reupload')">确认替换草稿</button></div>
       </section>
 
-      <section class="card criteria-card">
+      <div v-if="recognition && activeTab === 'table'"><slot name="table-analysis" /></div>
+      <section v-show="!recognition || activeTab === 'table'" class="card criteria-card">
         <div class="criteria-head"><div><h2 class="card-title">解析出的评分项</h2>
           <p class="card-note">共 {{ activeCriteria.length }} 项 · 合计 {{ Number.isFinite(scoreSum) ? scoreSum : '—' }} 分</p></div>
           <button v-if="!readonly && !persisted && !initial" class="btn btn-sm" type="button" :disabled="editingDisabled" @click="emit('add-criterion')">新增评分项</button>
           <span v-else-if="persisted && !readonly" class="faint criteria-hint">增删评分项请重新上传文件</span></div>
+        <div v-if="pendingScores" class="score-check"><span>没有独立满分列，请核对文字中提取的分值。</span><button class="btn btn-sm" :disabled="editingDisabled" @click="activeCriteria.forEach(c => checkScore(c.code))">分值无误，全部确认</button></div>
         <div class="criteria-table-wrap">
           <table class="criteria-table">
-            <thead><tr><th class="code-col">编号</th><th>评分项名称</th><th class="score-col">满分</th><th>文档出处</th><th>解析结果</th><th v-if="!persisted && !readonly && !initial">操作</th></tr></thead>
+            <thead><tr><th class="code-col">编号</th><th>评分项名称</th><th class="score-col">满分</th><th>{{ recognition ? '分值来源' : '文档出处' }}</th><th>解析结果</th><th v-if="!persisted && !readonly && !initial">操作</th></tr></thead>
             <tbody>
               <tr v-if="!activeCriteria.length"><td :colspan="persisted || readonly || initial ? 5 : 6" class="empty-criteria">{{ initial ? '上传文件后，解析出的评分项会显示在这里' : '暂无评分项，可添加评分项或重新上传文件。' }}</td></tr>
               <tr v-for="(item, index) in session.criteria" v-show="!item.deleted" :key="`${item.code}-${index}`" :data-criterion-code="item.code" :class="{ highlighted: highlightedCode === item.code }">
                 <td><input class="input cell-input code" :aria-label="`${item.code || index + 1} 评分项编号`" :value="item.code" :disabled="editingDisabled || persisted" @change="updateCriterion(index, 'code', $event)" /></td>
-                <td><div v-if="item.dimension" class="criterion-dimension">{{ item.dimension }}</div>
-                  <label class="criterion-name-row" :class="{ hierarchical: item.dimension }"><span v-if="item.dimension">子项</span><input class="input cell-input name" :aria-label="`${item.code || index + 1} 评分项名称`" :value="item.name" :disabled="editingDisabled" @change="updateCriterion(index, 'name', $event)" /></label>
+                <td><div v-if="hasLegacyItemLabel(item)" class="criterion-dimension">{{ item.dimension }}</div>
+                  <label class="criterion-name-row" :class="{ hierarchical: hasLegacyItemLabel(item) }"><span v-if="hasLegacyItemLabel(item)">原评分项标识</span><input class="input cell-input name" :aria-label="`${item.code || index + 1} 评分项名称`" :value="item.name" :disabled="editingDisabled" @change="updateCriterion(index, 'name', $event)" /></label>
                   <details class="criterion-description"><summary>{{ item.description || '评分项说明' }}</summary><textarea class="input" rows="3" :aria-label="`${item.code || index + 1} 评分项说明`" :value="item.description || ''" :disabled="editingDisabled" @change="updateCriterion(index, 'description', $event)" /></details></td>
                 <td><input class="input cell-input score-input" :aria-label="`${item.code || index + 1} 满分`" type="number" min="1" step="1" :value="item.max_score" :disabled="editingDisabled" @change="updateCriterion(index, 'max_score', $event)" /></td>
-                <td class="source-cell faint" :aria-label="`${item.code || index + 1} 文档出处`">{{ sourceLabel(item) }}</td>
-                <td><span class="chip" :class="['rounded', 'changed_requires_confirmation', 'added_requires_confirmation'].includes(item.parse_status) ? 'chip-warn' : 'chip-ok'">{{ statusLabel(item) }}</span></td>
+                <td class="source-cell faint" :aria-label="`${item.code || index + 1} 文档出处`">{{ sourceLabel(item) }}<p v-if="recognition && scoreEvidence(item)" class="score-evidence">{{ scoreEvidence(item) }}</p></td>
+                <td><span class="status-cell"><span class="chip" :class="['rounded', 'changed_requires_confirmation', 'added_requires_confirmation'].includes(item.parse_status) ? 'chip-warn' : 'chip-ok'">{{ statusLabel(item) }}</span><button v-if="needsScoreCheck" class="btn btn-sm score-toggle" :class="{ checked: checkedScores.has(item.code) }" type="button" :aria-pressed="checkedScores.has(item.code)" :title="checkedScores.has(item.code) ? '再次点击取消核对' : ''" :disabled="editingDisabled" :data-test="`score-check-${item.code}`" @click="toggleScore(item.code)">{{ checkedScores.has(item.code) ? '已核对' : '核对' }}</button></span></td>
                 <td v-if="!persisted && !readonly && !initial"><button class="link-danger" type="button" :aria-label="`删除 ${item.code || index + 1}`" :disabled="editingDisabled" @click="emit('delete-criterion', index)">删除</button></td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
-      <slot name="analysis" />
+      <div v-show="!recognition || activeTab === 'table'"><slot name="analysis" /></div>
+      <div v-if="recognition"><slot name="source-analysis" /></div>
     </div>
 
-    <aside class="workspace-side">
+    <aside v-show="!recognition || metadataOpen" class="workspace-side">
       <section class="card side-card">
         <h2 class="card-title">基本信息</h2>
         <label class="field"><span class="field-label">标准名称</span><input aria-label="标准名称" class="input" placeholder="填写评分标准名称" :value="session.name" :disabled="editingDisabled" @input="(initial || persisted) && updateMeta('name', $event)" @change="!initial && !persisted && updateMeta('name', $event)" /></label>
@@ -247,10 +287,16 @@ function updateCriterion(index, field, event) {
       </button>
       <button v-if="!persisted && !readonly" class="btn cancel-button" type="button" :disabled="busy" @click="emit('cancel')">取消导入</button>
     </aside>
+    <footer v-if="recognition" class="recognition-footer"><div class="footer-issues"><span>进入下一步前需处理</span><button v-if="pendingScores" class="btn btn-sm" @click="activeTab = 'table'">表格结构 · {{ pendingScores }} 个分值待核对</button><span v-if="parseState?.has_ledger" class="faint">来源冲突 {{ parseState?.conflicts?.filter(c => !c.resolved).length || 0 }}</span><span v-if="!pendingScores && !blockingMessage" class="faint">已完成必要核对</span><span v-if="validationMessage" class="faint">{{ validationMessage }}</span></div><button class="btn" :disabled="busy || readonly || !!reuploadPreview" @click="emit('save')">保存草稿</button><button class="btn btn-primary" :disabled="confirmDisabled" @click="emit('confirm')">{{ confirmLabel }}</button></footer>
   </section>
 </template>
 
 <style scoped>
+.recognition .excel-source{order:-2}.recognition .word-source{order:-1}
+.score-evidence{font:12px/1.7 inherit;color:#88692e;max-width:260px;overflow-wrap:anywhere}
+.status-cell{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}.score-toggle.checked{background:#e9efec;border-color:#e9efec;color:#175c50}
+.import-workspace.recognition{display:flex;flex-direction:column;gap:16px;padding-bottom:20px}.recognition > *{width:100%}.recognition-tabs{display:grid;grid-template-columns:1fr 1fr;gap:14px}.recognition-tabs button{display:flex;align-items:center;gap:15px;text-align:left;border:1px solid #e0e3dc;background:#faf9f6;border-radius:12px;padding:20px;color:#303b32;cursor:pointer}.recognition-tabs button.active{border:2px solid #175c50;background:white;padding:19px}.recognition-tabs strong{display:block;font-size:16px}.recognition-tabs small{display:block;color:#8d9587;margin:9px 0;font-size:12px}.recognition-tabs span{font-size:13px}.file-badge{padding:18px 10px;background:#edf2ee;border-radius:8px;font:12px monospace}.source-policy{font-size:12px;color:#87907f;margin:0}.metadata-toggle{border:0;background:none;color:#175c50;cursor:pointer;margin-left:12px}.recognition .workspace-main{width:100%}.recognition .workspace-side{order:-1}.recognition-footer{position:sticky;bottom:0;z-index:5;background:#fff;border:1px solid #e2e5de;border-radius:10px;padding:16px;display:flex;align-items:center;gap:12px;box-shadow:0 -5px 20px #18291b08}.footer-issues{flex:1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}.score-check{display:flex;justify-content:space-between;align-items:center;padding:15px 22px;background:#fffbf1;color:#956624;font-size:12px}.recognition .workspace-side .confirm-button,.recognition .workspace-side .cancel-button{display:none}@media(max-width:700px){.recognition-tabs{grid-template-columns:1fr}.recognition-footer{flex-wrap:wrap;position:static}.footer-issues{flex-basis:100%}.recognition-tabs button{padding:14px}}
+
 .import-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 20px; align-items: start; }
 .preview-empty { margin: 0 22px 18px; }
 .highlighted { background: #fff8e9; }

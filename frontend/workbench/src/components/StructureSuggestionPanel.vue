@@ -27,7 +27,7 @@ const pending = computed(() => props.suggestion?.status === "pending");
 const canMerge = computed(() => pending.value && !props.suggestion?.stale && !plan.value.blocked.length &&
   props.editable && !props.busy && (props.suggestion?.items || []).length > 0);
 
-const FIELD = { max_score: "满分", description: "评分说明", deduction_rules: "扣分规则" };
+const FIELD = { name: "评分项名称", max_score: "满分", description: "评分说明", deduction_rules: "扣分规则" };
 
 /** 模板中 ref 会被自动解包，所以按名称选择集合，而不是把集合本身传进来。 */
 function toggle(name, id, checked) {
@@ -57,7 +57,7 @@ function show(value) {
       </div>
       <div v-for="item in groups.confirmable" :key="item.id" class="diff-row" :data-test="`item-${item.id}`">
         <label><input type="checkbox" :checked="confirm.has(item.id)" :disabled="busy" @change="toggle('confirm', item.id, $event.target.checked)" />
-          确认修改 {{ item.code }} 的{{ FIELD[item.field] || item.field }}：{{ show(item.before) }} → {{ show(item.after) }}</label>
+          第 {{ item.row_number || '—' }} 行 · 确认修改 {{ item.code }} 的{{ FIELD[item.field] || item.field }}：{{ show(item.before) }} → {{ show(item.after) }}</label>
       </div>
       <div v-for="item in groups.conflicts" :key="item.id" class="diff-row conflict" :data-test="`item-${item.id}`">
         <label><input type="checkbox" :checked="exclude.has(item.id)" :disabled="busy" @change="toggle('exclude', item.id, $event.target.checked)" />

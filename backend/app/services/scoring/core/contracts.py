@@ -1039,6 +1039,20 @@ def _normalize_rule_level(value, path):
     }
 
 
+# M4 semantics (closed finding-code authorization) apply from @2 on.  @3 adds
+# the rule's published wording so a semantic judge can see what it judges.
+M4_ATOMIC_RULE_SCHEMAS = frozenset({"atomic-rule-snapshot@2", "atomic-rule-snapshot@3"})
+RULE_CONTEXT_NEEDS = ("coherence", "references", "structure")
+_ATOMIC_RULE_TEXT_FIELDS = {
+    "name",
+    "rule_text",
+    "positive_example",
+    "negative_example",
+    "boundary_example",
+    "context_needs",
+}
+
+
 def _normalize_atomic_rule_snapshot(value):
     fields = {
         "schema_version",
@@ -1058,11 +1072,14 @@ def _normalize_atomic_rule_snapshot(value):
         "mutex_group",
         "levels",
     }
+    if isinstance(value, Mapping) and value.get("schema_version") == "atomic-rule-snapshot@3":
+        fields = fields | _ATOMIC_RULE_TEXT_FIELDS
     _assert_closed_mapping(value, fields=fields, path="AtomicRuleSnapshot")
     schema_version = value["schema_version"]
     if schema_version not in {
         "atomic-rule-snapshot@1",
         "atomic-rule-snapshot@2",
+        "atomic-rule-snapshot@3",
     }:
         raise ValueError("unsupported AtomicRuleSnapshot schema_version")
     checker_params = _assert_json_value(
@@ -1095,7 +1112,7 @@ def _normalize_atomic_rule_snapshot(value):
         raise ValueError("AtomicRuleSnapshot deterministic rule requires checker_key")
     if judge_type == "semantic" and checker_key is not None:
         raise ValueError("AtomicRuleSnapshot semantic rule must not declare checker_key")
-    return {
+    result = {
         "schema_version": schema_version,
         "rule_code": _assert_text(value["rule_code"], "AtomicRuleSnapshot.rule_code"),
         "criterion_code": _assert_text(
@@ -1123,6 +1140,36 @@ def _normalize_atomic_rule_snapshot(value):
         ),
         "levels": levels,
     }
+    if schema_version == "atomic-rule-snapshot@3":
+        context_needs = _assert_text_array_preserving_order(
+            value["context_needs"], "AtomicRuleSnapshot.context_needs"
+        )
+        if (
+            list(context_needs) != sorted(set(context_needs))
+            or not set(context_needs) <= set(RULE_CONTEXT_NEEDS)
+        ):
+            raise ValueError(
+                "AtomicRuleSnapshot.context_needs must be sorted, unique and known"
+            )
+        result.update(
+            {
+                "name": _assert_text(value["name"], "AtomicRuleSnapshot.name"),
+                "rule_text": _assert_text(
+                    value["rule_text"], "AtomicRuleSnapshot.rule_text"
+                ),
+                "positive_example": _assert_optional_text(
+                    value["positive_example"], "AtomicRuleSnapshot.positive_example"
+                ),
+                "negative_example": _assert_optional_text(
+                    value["negative_example"], "AtomicRuleSnapshot.negative_example"
+                ),
+                "boundary_example": _assert_optional_text(
+                    value["boundary_example"], "AtomicRuleSnapshot.boundary_example"
+                ),
+                "context_needs": list(context_needs),
+            }
+        )
+    return result
 
 
 def _normalize_semantic_rule_response_v2(value):

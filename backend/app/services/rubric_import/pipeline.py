@@ -872,6 +872,8 @@ def prepare_structure_reparse(
                 if keep["field"] == "deduction_rules" and isinstance(kept, list):
                     kept = "；".join(kept)
                 record[RECORD_KEYS[keep["field"]]] = kept
+                if keep["field"] == "code":
+                    record["编号"] = kept
     template_items = deepcopy(raw.get("template_items") or [])
     template_summary = deepcopy(raw.get("template_summary") or {})
     if documents.get("word") == "template":

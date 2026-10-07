@@ -62,7 +62,7 @@ def test_classifier_metrics_count_rule_labels():
         return {"items": [{"unit_id": u["unit_id"], "label": gold[u["unit_id"]], "suggested_criterion": None,
                            "reason": "r", "confidence": "high"} for u in payload["units"]]}
 
-    report = evaluate_classifier(FakeScorer(perfect), cases)
+    report = evaluate_classifier(FakeScorer(perfect, perfect, perfect), cases)
     assert report["accuracy"] == 1.0 and report["rule_recall"] == 1.0 and report["rule_precision"] == 1.0
 
     def all_rule(payload):

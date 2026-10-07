@@ -10,10 +10,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from decimal import Decimal
+import inspect
 import logging
 
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import (
+    M4_ATOMIC_RULE_SCHEMAS,
     DeterministicCheckerResultV1,
     PromptEnvelopeV3,
     ScoringRequest,
@@ -21,6 +23,7 @@ from backend.app.services.scoring.core.contracts import (
 )
 from backend.app.services.scoring.core.results import RuleExecutionResult
 from backend.app.services.scoring.core.failures import project_rule_execution_failure
+from backend.app.services.scoring.core.decision_identity import rule_decision_identity
 
 
 PROMPT_VERSION = "2026-09-03-1"
@@ -85,7 +88,7 @@ def _validate_profile(profile, request):
         raise ValueError("profile version does not match scoring request")
 
 
-def _prompt_envelope(*, request, node, profile):
+def _prompt_envelope(*, request, node, profile, selection_rules=None, criterion_rules=None):
     build_extensions = getattr(profile, "build_prompt_extensions", None)
     if not callable(build_extensions):
         raise TypeError("profile must implement build_prompt_extensions")
@@ -130,7 +133,13 @@ def _prompt_envelope(*, request, node, profile):
     )
     build_provider_envelope = getattr(profile, "build_provider_envelope", None)
     if callable(build_provider_envelope):
-        return build_provider_envelope(base_envelope=envelope)
+        kwargs = {}
+        parameters = inspect.signature(build_provider_envelope).parameters
+        if selection_rules is not None and "selection_rules" in parameters:
+            kwargs["selection_rules"] = _plain(selection_rules)
+        if criterion_rules is not None and "criterion_rules" in parameters:
+            kwargs["criterion_rules"] = _plain(criterion_rules)
+        return build_provider_envelope(base_envelope=envelope, **kwargs)
     return envelope
 
 
@@ -385,13 +394,255 @@ def _adapt_legacy_semantic_response(*, response, request, rule):
     }
 
 
+def _validated_decision(*, request, rule, response, occurrence_payloads):
+    """Validate on a trial copy; registrations commit only if accepted.
+
+    A rejected attempt (e.g. a stale ledger entry) must not leave occurrence
+    registrations behind that would flag the accepted retry as a duplicate.
+    """
+
+    trial = dict(occurrence_payloads)
+    decision, error, message = _semantic_decision_from_response(
+        request=request,
+        rule=rule,
+        response=response,
+        occurrence_payloads=trial,
+    )
+    if error is None:
+        occurrence_payloads.update(trial)
+    return decision, error, message
+
+
+def _record(execution_journal, **values):
+    if execution_journal is not None:
+        execution_journal.record_semantic_decision(**values)
+
+
 def _semantic_decision(
-    *, request, node, llm_runtime, profile, occurrence_payloads
+    *,
+    request,
+    node,
+    llm_runtime,
+    profile,
+    occurrence_payloads,
+    decision_ledger=None,
+    execution_journal=None,
+    criterion_rules=None,
 ):
     rule = node["atomic_rule_snapshot"]
-    decision = _decision_skeleton(request["plan"], rule)
-    envelope = _prompt_envelope(request=request, node=node, profile=profile)
+    envelope = _prompt_envelope(
+        request=request, node=node, profile=profile, criterion_rules=criterion_rules
+    )
+    identity = None
+    response = None
+    if decision_ledger is not None:
+        identity = rule_decision_identity(envelope)
+        response = decision_ledger.get(decision_identity=identity)
+    if response is not None:
+        decision, error, message = _validated_decision(
+            request=request,
+            rule=rule,
+            response=response,
+            occurrence_payloads=occurrence_payloads,
+        )
+        if error is None:
+            _record(execution_journal, rule_code=rule["rule_code"], reused=True, group_call_id=None)
+            return decision, error, message
+        # A stored decision that no longer validates (e.g. after an executor
+        # change) must not pin the rule to a failure: judge it again.
+        logger.warning(
+            "rule_decision_ledger_entry_rejected rule_code=%s error_code=%s",
+            rule["rule_code"],
+            error,
+        )
     response = llm_runtime.score(envelope=envelope)
+    decision, error, message = _validated_decision(
+        request=request,
+        rule=rule,
+        response=response,
+        occurrence_payloads=occurrence_payloads,
+    )
+    if error is None and identity is not None:
+        # Written immediately, not at run end, so a crash, timeout or a later
+        # provider failure does not discard decisions already paid for.
+        decision_ledger.put(
+            decision_identity=identity,
+            rule_code=rule["rule_code"],
+            response=response,
+            usage=getattr(llm_runtime, "last_call_usage", None),
+        )
+    _record(execution_journal, rule_code=rule["rule_code"], reused=False, group_call_id=None)
+    return decision, error, message
+
+
+def eligible_rule_groups(nodes_by_code, order):
+    """Mutex groups judged in one call: rule_code -> (group key, ordered members).
+
+    Eligible only when every member of the mutex group is a semantic, deduct,
+    M4 rule of the same criterion without dependencies.  Members are ordered
+    from the lightest to the heaviest tier.
+    """
+
+    members_by_key = {}
+    for code in order:
+        node = nodes_by_code[code]
+        rule = node["atomic_rule_snapshot"]
+        if rule["mutex_group"]:
+            key = (node["criterion_code"], rule["mutex_group"])
+            members_by_key.setdefault(key, []).append(code)
+    groups = {}
+    for key, members in members_by_key.items():
+        rules = [nodes_by_code[code]["atomic_rule_snapshot"] for code in members]
+        if len(members) < 2 or not all(
+            rule["judge_type"] == "semantic"
+            and rule["direction"] == "deduct"
+            and not rule["depends_on_rule_codes"]
+            and rule["schema_version"] in M4_ATOMIC_RULE_SCHEMAS
+            for rule in rules
+        ):
+            continue
+        ordered = sorted(
+            members,
+            key=lambda code: (
+                Decimal(nodes_by_code[code]["atomic_rule_snapshot"]["max_points"] or "0"),
+                code,
+            ),
+        )
+        for code in members:
+            groups[code] = (key, ordered)
+    return groups
+
+
+def _group_identity(group_code, member_identities):
+    return canonical_sha256(
+        {
+            "schema_version": "rule-group-decision-identity@1",
+            "group_code": group_code,
+            "members": list(member_identities),
+        }
+    )
+
+
+def _semantic_group_decisions(
+    *,
+    request,
+    nodes,
+    group_code,
+    llm_runtime,
+    profile,
+    occurrence_payloads,
+    decision_ledger=None,
+    execution_journal=None,
+    criterion_rules=None,
+):
+    """Judge all tiers of one mutex group in one provider call.
+
+    Returns ``{rule_code: (decision, error, message)}``, or ``None`` when the
+    group cannot be judged as a unit (no group-capable runtime, or members did
+    not get one shared evidence selection); the caller then judges per rule.
+    """
+
+    rules = [node["atomic_rule_snapshot"] for node in nodes]
+    envelopes = [
+        _prompt_envelope(
+            request=request,
+            node=node,
+            profile=profile,
+            selection_rules=rules,
+            criterion_rules=criterion_rules,
+        )
+        for node in nodes
+    ]
+    first_units = envelopes[0].to_mapping()["evidence_units"]
+    if any(envelope.to_mapping()["evidence_units"] != first_units for envelope in envelopes[1:]):
+        return None
+    identity = _group_identity(
+        group_code, [rule_decision_identity(envelope) for envelope in envelopes]
+    )
+
+    def validate(responses):
+        if not isinstance(responses, Mapping):
+            return None
+        trial = dict(occurrence_payloads)
+        results = {}
+        for rule in rules:
+            results[rule["rule_code"]] = _semantic_decision_from_response(
+                request=request,
+                rule=rule,
+                response=responses.get(rule["rule_code"]),
+                occurrence_payloads=trial,
+            )
+        if all(error is None for _decision, error, _message in results.values()):
+            occurrence_payloads.update(trial)
+        return results
+
+    def accepted(results):
+        return results is not None and all(
+            error is None for _decision, error, _message in results.values()
+        )
+
+    if decision_ledger is not None:
+        stored = decision_ledger.get(decision_identity=identity)
+        if isinstance(stored, Mapping):
+            results = validate(stored.get("responses"))
+            if accepted(results):
+                for rule in rules:
+                    _record(
+                        execution_journal,
+                        rule_code=rule["rule_code"],
+                        reused=True,
+                        group_call_id=identity,
+                    )
+                return results
+            logger.warning(
+                "rule_decision_ledger_group_entry_rejected group_code=%s", group_code
+            )
+
+    try:
+        responses = llm_runtime.score_group(envelopes=envelopes, group_code=group_code)
+    except Exception as exc:  # noqa: BLE001 - projected to a stable rule issue
+        error, message = project_rule_execution_failure(exc)
+        logger.warning(
+            "rule_group_execution_failed group_code=%s error_code=%s exception_type=%s",
+            group_code,
+            error,
+            type(exc).__name__,
+        )
+        return {
+            rule["rule_code"]: (_decision_skeleton(request["plan"], rule), error, message)
+            for rule in rules
+        }
+    if responses is None:
+        return None
+    results = validate(responses)
+    if results is None:
+        return {
+            rule["rule_code"]: (
+                _decision_skeleton(request["plan"], rule),
+                "UNKNOWN_RULE",
+                "semantic group response must be an object",
+            )
+            for rule in rules
+        }
+    if accepted(results) and decision_ledger is not None:
+        decision_ledger.put(
+            decision_identity=identity,
+            rule_code=group_code,
+            response={"schema_version": "rule-group-ledger@1", "responses": responses},
+            usage=getattr(llm_runtime, "last_call_usage", None),
+        )
+    for rule in rules:
+        _record(
+            execution_journal,
+            rule_code=rule["rule_code"],
+            reused=False,
+            group_call_id=identity,
+        )
+    return results
+
+
+def _semantic_decision_from_response(*, request, rule, response, occurrence_payloads):
+    decision = _decision_skeleton(request["plan"], rule)
     if not isinstance(response, Mapping):
         return decision, "UNKNOWN_RULE", "semantic response must be an object"
     if response.get("schema_version") == "semantic-rule-response@1":
@@ -501,7 +752,7 @@ def _deterministic_decision(
             "expected_value": _plain(result["expected_value"]),
             "locator": _plain(result["locator"]),
         }
-        if rule["schema_version"] == "atomic-rule-snapshot@2":
+        if rule["schema_version"] in M4_ATOMIC_RULE_SCHEMAS:
             observation["finding_code"] = result["observation_code"]
         result = {
             "schema_version": "deterministic-checker-result@1",
@@ -832,7 +1083,15 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
     return outcomes, contributions
 
 
-def execute_rule_plan(*, request, checker_registry, llm_runtime, profile):
+def execute_rule_plan(
+    *,
+    request,
+    checker_registry,
+    llm_runtime,
+    profile,
+    decision_ledger=None,
+    execution_journal=None,
+):
     """Execute a frozen rule plan without database, filesystem or network I/O."""
 
     dto = ScoringRequest.from_mapping(_plain(request))
@@ -861,6 +1120,20 @@ def execute_rule_plan(*, request, checker_registry, llm_runtime, profile):
     issues = []
     occurrence_payloads = {}
     blocking_rules = set()
+    groups = (
+        eligible_rule_groups(nodes_by_code, order)
+        if callable(getattr(llm_runtime, "score_group", None))
+        and getattr(llm_runtime, "supports_group_calls", True)
+        else {}
+    )
+    group_results = {}
+    semantic_rules_by_criterion = {}
+    for code in order:
+        node = nodes_by_code[code]
+        if node["atomic_rule_snapshot"]["judge_type"] == "semantic":
+            semantic_rules_by_criterion.setdefault(node["criterion_code"], []).append(
+                node["atomic_rule_snapshot"]
+            )
 
     for code in order:
         node = nodes_by_code[code]
@@ -900,13 +1173,37 @@ def execute_rule_plan(*, request, checker_registry, llm_runtime, profile):
                     occurrence_payloads=occurrence_payloads,
                 )
             elif rule["judge_type"] == "semantic":
-                decision, error, message = _semantic_decision(
-                    request=value,
-                    node=node,
-                    llm_runtime=llm_runtime,
-                    profile=profile,
-                    occurrence_payloads=occurrence_payloads,
-                )
+                criterion_rules = semantic_rules_by_criterion.get(criterion_code)
+                result = None
+                group = groups.get(code)
+                if group is not None:
+                    key, members = group
+                    if key not in group_results:
+                        group_results[key] = _semantic_group_decisions(
+                            request=value,
+                            nodes=[nodes_by_code[member] for member in members],
+                            group_code=key[1],
+                            llm_runtime=llm_runtime,
+                            profile=profile,
+                            occurrence_payloads=occurrence_payloads,
+                            decision_ledger=decision_ledger,
+                            execution_journal=execution_journal,
+                            criterion_rules=criterion_rules,
+                        )
+                    if group_results[key] is not None:
+                        result = group_results[key][code]
+                if result is None:
+                    result = _semantic_decision(
+                        request=value,
+                        node=node,
+                        llm_runtime=llm_runtime,
+                        profile=profile,
+                        occurrence_payloads=occurrence_payloads,
+                        decision_ledger=decision_ledger,
+                        execution_journal=execution_journal,
+                        criterion_rules=criterion_rules,
+                    )
+                decision, error, message = result
             else:
                 decision = _decision_skeleton(value["plan"], rule)
                 error, message = "RULE_DECISION_INVALID", "judge_type is unsupported"
@@ -987,4 +1284,43 @@ def execute_rule_plan(*, request, checker_registry, llm_runtime, profile):
     )
 
 
-__all__ = ["OCCURRENCE_SCHEME", "PROMPT_VERSION", "execute_rule_plan"]
+def prompt_envelope_for_rule(
+    *, request, node, profile, selection_rules=None, criterion_rules=None
+):
+    """Build exactly the envelope execution would send, for local estimation."""
+
+    return _prompt_envelope(
+        request=request,
+        node=node,
+        profile=profile,
+        selection_rules=selection_rules,
+        criterion_rules=criterion_rules,
+    )
+
+
+def group_decision_identity(group_code, member_envelopes):
+    return _group_identity(
+        group_code, [rule_decision_identity(envelope) for envelope in member_envelopes]
+    )
+
+
+def plan_rule_order(request_value):
+    """Execution order and atomic nodes of a request (for local estimation)."""
+
+    nodes_by_code = {
+        node["rule_code"]: node
+        for node in request_value["plan"]["nodes"]
+        if node["node_kind"] == "atomic_rule"
+    }
+    return nodes_by_code, _topological_order(nodes_by_code)
+
+
+__all__ = [
+    "OCCURRENCE_SCHEME",
+    "PROMPT_VERSION",
+    "eligible_rule_groups",
+    "execute_rule_plan",
+    "group_decision_identity",
+    "plan_rule_order",
+    "prompt_envelope_for_rule",
+]

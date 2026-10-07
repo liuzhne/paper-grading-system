@@ -57,6 +57,7 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None, *, sessi
                 timeout_seconds=options.get("timeout_seconds"),
                 max_output_tokens=options.get("max_output_tokens"),
                 temperature=options.get("temperature"),
+                top_p=options.get("top_p"),
             )
         elif connection_runtime.provider_type == "openai_compatible":
             scorer = OpenAICompatibleChatScorer(
@@ -67,6 +68,7 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None, *, sessi
                 timeout_seconds=options.get("timeout_seconds"),
                 max_tokens=options.get("max_tokens"),
                 temperature=options.get("temperature"),
+                top_p=options.get("top_p"),
                 response_format_json=options.get("response_format_json"),
                 # BYOK endpoints are only protocol-compatible, not guaranteed
                 # to accept the platform provider's non-standard `thinking`

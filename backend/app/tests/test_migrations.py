@@ -973,3 +973,99 @@ def test_0030_downgrades_cleanly_when_nothing_is_configured(monkeypatch, tmp_pat
         assert "platform_llm_config" not in set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
+
+
+def test_0032_normalizes_old_active_connections_and_preserves_status_on_downgrade(monkeypatch, tmp_path):
+    from sqlalchemy.orm import Session
+    from sqlalchemy.exc import IntegrityError
+    from backend.app.db import models
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "single-active.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0031_rubric_import_sessions")
+    engine = create_engine(url)
+    with Session(engine) as db:
+        user = models.User(username="migration-fixture", display_name="Fixture")
+        db.add(user)
+        db.flush()
+        org = models.Organization(name="migration fixture", created_by=user.id)
+        db.add(org)
+        db.flush()
+        for name, verified in (("old", None), ("verified", datetime(2026, 9, 20)), ("disabled", None)):
+            db.add(models.AIConnection(
+                id=name, owner_id=user.id, organization_id=org.id, name=name,
+                provider_type="openai_compatible", base_url="https://example.test/v1", model_name="fixture",
+                api_key_ciphertext="fixture", api_key_nonce="fixture", api_key_tag="fixture", key_last4="test",
+                status="disabled" if name == "disabled" else "active", last_verified_at=verified,
+            ))
+        db.commit()
+    command.upgrade(config, "head")
+    with engine.connect() as db:
+        assert dict(db.execute(text("SELECT id, status FROM ai_connections")).all()) == {
+            "old": "disabled", "verified": "active", "disabled": "disabled",
+        }
+        assert "uq_ai_connections_one_active" in {i["name"] for i in inspect(engine).get_indexes("ai_connections")}
+        with pytest.raises(IntegrityError):
+            db.execute(text("UPDATE ai_connections SET status='active' WHERE id='old'"))
+        db.rollback()
+    command.downgrade(config, "0031_rubric_import_sessions")
+    with engine.connect() as db:
+        assert db.execute(text("SELECT status FROM ai_connections WHERE id='old'")).scalar_one() == "disabled"
+    engine.dispose()
+
+
+def test_0033_adds_the_decision_ledger_and_guards_the_reuse_audit_flag(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "decision-ledger.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "head")
+    engine = create_engine(url)
+    inspector = inspect(engine)
+    assert "rule_decision_ledger" in inspector.get_table_names()
+    task_columns = {column["name"] for column in inspector.get_columns("rule_scoring_tasks")}
+    assert {"decision_reused", "group_call_id"} <= task_columns
+    assert "uq_rule_decision_ledger_scope_identity" in {
+        item["name"] for item in inspector.get_unique_constraints("rule_decision_ledger")
+    }
+
+    # An empty reuse flag and a cache-only ledger downgrade cleanly ...
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO rule_decision_ledger (id, scope_key, decision_identity_hash, "
+                "rule_code, response, prompt_tokens, completion_tokens, created_at, expires_at) "
+                "VALUES ('l1', 'no-organization|x', :hash, 'R', '{}', 0, 0, :now, :now)"
+            ),
+            {"hash": "e" * 64, "now": datetime(2026, 10, 5)},
+        )
+    command.downgrade(config, "0032_single_active_ai_connection")
+    assert "rule_decision_ledger" not in inspect(engine).get_table_names()
+    command.upgrade(config, "head")
+
+    # ... but the audit fact "this decision was replayed" cannot be rebuilt.
+    with engine.begin() as connection:
+        connection.execute(text("PRAGMA foreign_keys=OFF"))
+        connection.execute(
+            text(
+                "INSERT INTO rule_scoring_tasks (id, organization_id, scoring_run_id, "
+                "criterion_code, rule_code, judge_type, dependency_rule_codes, status, "
+                "blocking_final_total, decision_reused, attempt_count, max_attempts, "
+                "created_at, updated_at) VALUES ('t1', 'org', 'run', 'C', 'R', 'semantic', "
+                "'[]', 'succeeded', 0, 1, 1, 3, :now, :now)"
+            ),
+            {"now": datetime(2026, 10, 5)},
+        )
+    with pytest.raises(RuntimeError, match="reuse audit flag"):
+        command.downgrade(config, "0032_single_active_ai_connection")
+
+    # A group-call link alone is the same kind of unrebuildable audit fact.
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE rule_scoring_tasks SET decision_reused = 0, group_call_id = :id"),
+            {"id": "f" * 64},
+        )
+    with pytest.raises(RuntimeError, match="reuse audit flag"):
+        command.downgrade(config, "0032_single_active_ai_connection")
+    engine.dispose()

@@ -19,9 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import settings
+from backend.app.db.models import User
 from backend.app.db.models import AIConnection
 from backend.app.db.models import AIUsageLedger
 from backend.app.db.models import utcnow
+from backend.app.services.ai_connection_protocol import ProtocolEndpointMissing
 
 
 _ALLOWED_OPTION_KEYS = {
@@ -50,6 +52,20 @@ def enforce_connection_rate_limit(user_id: str) -> None:
         if len(window) >= limit:
             raise ValueError("AI connection request rate limit exceeded")
         window.append(now)
+
+
+class AIConnectionBindingError(ValueError):
+    """A batch-pinned connection no longer matches its snapshot.
+
+    Carries a stable code so batch items report the actionable cause instead
+    of a generic ``scoring_failure (ValueError)``.
+    """
+
+    failure_kind = "checker"
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -191,9 +207,10 @@ def validate_provider_options(options: dict | None) -> dict:
     for key in ("max_output_tokens", "max_tokens"):
         if key in normalized and not 1 <= int(normalized[key]) <= 100_000:
             raise ValueError("%s must be between 1 and 100000" % key)
-    for key in ("temperature", "top_p"):
-        if key in normalized and not 0 <= float(normalized[key]) <= 2:
-            raise ValueError("%s must be between 0 and 2" % key)
+    if "temperature" in normalized and not 0 <= float(normalized["temperature"]) <= 2:
+        raise ValueError("temperature must be between 0 and 2")
+    if "top_p" in normalized and not 0 < float(normalized["top_p"]) <= 1:
+        raise ValueError("top_p must be greater than 0 and at most 1")
     if "response_format_json" in normalized and not isinstance(normalized["response_format_json"], bool):
         raise ValueError("response_format_json must be boolean")
     if "thinking_type" in normalized and not isinstance(normalized["thinking_type"], str):
@@ -206,6 +223,36 @@ def validate_provider_options(options: dict | None) -> dict:
     }:
         raise ValueError("service_tier is unsupported")
     return normalized
+
+
+def active_connection_id(db: Session, *, owner_id: str, organization_id: str) -> str | None:
+    return db.scalar(select(AIConnection.id).where(
+        AIConnection.owner_id == owner_id,
+        AIConnection.organization_id == organization_id,
+        AIConnection.status == "active",
+    ))
+
+
+def lock_connection_owner(db: Session, owner_id: str) -> None:
+    # PostgreSQL serializes concurrent creates/switches even when no connection exists.
+    db.execute(select(User.id).where(User.id == owner_id).with_for_update())
+
+
+def activate_connection(db: Session, connection: AIConnection) -> None:
+    lock_connection_owner(db, connection.owner_id)
+    others = db.scalars(select(AIConnection).where(
+        AIConnection.owner_id == connection.owner_id,
+        AIConnection.organization_id == connection.organization_id,
+        AIConnection.status == "active",
+        AIConnection.id != connection.id,
+    )).all()
+    for other in others:
+        disable_connection(other)
+    # Release the partial unique index slot before enabling the chosen connection.
+    db.flush()
+    connection.status = "active"
+    connection.disabled_at = None
+    db.flush()
 
 
 def create_connection(
@@ -227,6 +274,7 @@ def create_connection(
     secret = api_key.strip()
     if len(secret) < 4:
         raise ValueError("API key must contain at least four characters")
+    lock_connection_owner(db, owner_id)
     existing = db.scalar(
         select(AIConnection).where(
             AIConnection.owner_id == owner_id,
@@ -243,7 +291,14 @@ def create_connection(
         owner_id=owner_id,
         key_version=key_version,
     )
+    has_connection = db.scalar(select(AIConnection.id).where(
+        AIConnection.owner_id == owner_id,
+        AIConnection.organization_id == organization_id,
+        AIConnection.status != "deleted",
+    ).limit(1)) is not None
     connection = AIConnection(
+        status="disabled" if has_connection else "active",
+        disabled_at=utcnow() if has_connection else None,
         organization_id=organization_id,
         owner_id=owner_id,
         name=name.strip(),
@@ -269,6 +324,7 @@ def resolve_connection_runtime(
     connection_id: str,
     owner_id: str,
     organization_id: str,
+    allow_disabled: bool = False,
 ) -> ConnectionRuntime:
     connection = db.scalar(
         select(AIConnection).where(
@@ -279,9 +335,9 @@ def resolve_connection_runtime(
     )
     if connection is None:
         raise ValueError("AI connection not found")
-    if connection.status == "disabled":
+    if connection.status == "disabled" and not allow_disabled:
         raise ValueError("AI connection is disabled")
-    if connection.status != "active":
+    if connection.status != "active" and not (allow_disabled and connection.status == "disabled"):
         raise ValueError("AI connection is unavailable")
     return ConnectionRuntime(
         connection_id=connection.id,
@@ -345,8 +401,6 @@ def rotate_connection_key(connection: AIConnection, api_key: str) -> None:
     connection.api_key_tag = tag
     connection.key_version = next_version
     connection.key_last4 = secret[-4:]
-    connection.status = "active"
-    connection.disabled_at = None
     connection.last_error_code = None
 
 
@@ -384,6 +438,12 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
                 headers={"Authorization": "Bearer %s" % runtime.api_key},
             )
             response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # 404/405 只说明这个协议的接口不在该地址下，协议识别据此改试另一种协议；
+        # 其它状态照常按测试失败处理。两者对调用方都是 ValueError，行为不变。
+        if exc.response.status_code in (404, 405):
+            raise ProtocolEndpointMissing("AI connection test failed") from exc
+        raise ValueError("AI connection test failed") from exc
     except httpx.HTTPError as exc:
         # The caller records only a stable code; provider bodies may include
         # customer or key-adjacent diagnostics and must never leave this layer.
@@ -397,8 +457,12 @@ def usage_connection_id(snapshot) -> str | None:
     return None if connection_id == "platform" else connection_id
 
 
-def record_usage_ledger(db: Session, scoring_run) -> None:
-    """Append a non-secret usage projection for a BYOK scoring run."""
+def record_usage_ledger(db: Session, scoring_run, usage=None) -> None:
+    """Append a non-secret usage projection for a BYOK scoring run.
+
+    ``usage`` carries metered request/failure counts; without it the row keeps
+    the historical one-request projection.
+    """
 
     snapshot = getattr(scoring_run, "ai_connection_snapshot", None) or {}
     connection_id = usage_connection_id(snapshot)
@@ -416,6 +480,11 @@ def record_usage_ledger(db: Session, scoring_run) -> None:
             prompt_tokens=int(scoring_run.prompt_tokens or 0),
             completion_tokens=int(scoring_run.completion_tokens or 0),
             total_tokens=int(scoring_run.total_tokens or 0),
-            request_count=1,
+            request_count=(
+                1 if usage is None else int(usage.get("request_count") or 0)
+            ),
+            failure_count=(
+                0 if usage is None else int(usage.get("failure_count") or 0)
+            ),
         )
     )

@@ -66,7 +66,9 @@ def _previews(compilation, artifacts) -> dict:
     units = ((compilation.raw_parse_output or {}).get("source_ledger") or {}).get("units") or []
     previews = {kind: [
         {"unit_id": item.get("unit_id"), "kind": item.get("kind"),
-         "locator": deepcopy(item.get("context") or {}), "text": item.get("text") or ""}
+         "locator": {**deepcopy(item.get("context") or {}), "review": {
+             key: deepcopy(item.get(key)) for key in ("status", "claimed_by", "reason", "extracted_by")}},
+         "text": item.get("text") or ""}
         for item in units if item.get("doc_id") == kind
     ] for kind in ("word", "excel")}
     for kind in ("word", "excel"):

@@ -121,6 +121,18 @@ def current_criteria(session: Session, rubric_id: str) -> list[dict]:
     ]
 
 
+def _criteria_with_rows(session, rubric_id, raw, *, sheet=None):
+    criteria = current_criteria(session, rubric_id)
+    # SourceRule codes are authoritative only for simple one-row criteria.
+    sources = raw.get("source_rules") or []
+    for criterion in criteria:
+        matches = [s for s in sources if s.get("source_rule_code") == criterion["code"]
+                   and (sheet is None or s.get("sheet_name") == sheet)]
+        if len(matches) == 1:
+            criterion["row_number"] = matches[0].get("row_number")
+    return criteria
+
+
 def _artifacts(compilation) -> list[dict]:
     return [
         {"artifact_type": a.artifact_type, "file_name": a.file_name, "file_hash": a.file_hash,
@@ -192,7 +204,7 @@ def suggest_structure(session: Session, rubric_id: str, scorer, *, dry_run: bool
     rows = {item["name"]: item["row_number"]
             for item in reparsed["compilation"]["raw_parse_output"]["extraction"]["records"]}
     proposed = [{**item, "row_number": rows.get(item["name"])} for item in reparsed["criteria"]]
-    current = current_criteria(session, rubric_id)
+    current = _criteria_with_rows(session, rubric_id, raw, sheet=result["override"].get("sheet"))
     items = diff_criteria(current, proposed)
     stored = {
         **result,
@@ -240,10 +252,15 @@ def prepare_merge(session: Session, rubric_id: str, *, fingerprint: str, confirm
     override.setdefault("row_types", {})
     for row in plan["exclude_rows"]:
         override["row_types"][str(row)] = "note"
+    # Keep existing identifiers even if the structure extractor emits new codes.
+    # Name changes remain individually confirmable through keep_values.
+    identities = [{"row_number": c["row_number"], "field": "code", "value": c["code"]}
+                  for c in _criteria_with_rows(session, rubric_id, raw, sheet=override.get("sheet"))
+                  if c.get("row_number") is not None]
     try:
         prepared = pipeline.prepare_structure_reparse(
             command=_command(session, rubric_id, compilation, model=stored.get("model")), raw_parse_output=raw,
-            artifacts=_artifacts(compilation), structure_override=override, keep_values=plan["keep_values"],
+            artifacts=_artifacts(compilation), structure_override=override, keep_values=[*identities, *plan["keep_values"]],
         )
     except StructureOverrideError as exc:
         raise _structure_problem(exc) from exc

@@ -113,12 +113,27 @@ class Settings(BaseSettings):
     SCORING_PROMPT_ENVELOPE_VERSION: Literal["v3", "v4"] = "v4"
     SCORING_EVIDENCE_SELECTION_MODE: Literal["all", "scoped"] = "scoped"
     SCORING_EVIDENCE_TOP_K: int = Field(default=12, ge=1, le=100)
+    # ``criterion`` ranks evidence once per criterion so all its rules share
+    # one selection (a long shared prompt prefix for provider caches) at the
+    # cost of less rule-targeted evidence.  Keep ``rule`` until metered usage
+    # shows the cache discount outweighs the larger evidence set.
+    SCORING_EVIDENCE_SCOPE: Literal["rule", "criterion"] = "rule"
     # Keep the serialized chat request below providers' HTTP body limit as well
     # as the model context window.  16k leaves room for JSON/chat framing on
     # providers such as Groq that reject an otherwise token-valid body with 413.
     SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=8192, ge=1024)
     SCORING_CONTEXT_SAFETY_MARGIN_TOKENS: int = Field(default=1024, ge=0)
     SCORING_RULE_TASKS_ENABLED: bool = True
+    # Rule-level decision ledger: reuse a validated semantic decision whose full
+    # decision identity is unchanged, so retries only pay for failed rules.
+    # Explicit rescoring bypasses reads.  Mock scorers are never cached.
+    SCORING_DECISION_LEDGER_ENABLED: bool = True
+    SCORING_DECISION_LEDGER_TTL_DAYS: int = Field(default=30, ge=1, le=365)
+    # Input-token caps for Core semantic scoring; 0 disables a cap.  The batch
+    # cap and the per-paper estimate are checked before a job starts; the
+    # per-paper cap is also enforced on actual usage while a paper is scored.
+    SCORING_MAX_INPUT_TOKENS_PER_PAPER: int = Field(default=0, ge=0)
+    SCORING_MAX_INPUT_TOKENS_PER_BATCH: int = Field(default=0, ge=0)
     MANUAL_REVIEW_QUEUE_ENABLED: bool = True
     PROVIDER_CIRCUIT_BREAKER_ENABLED: bool = True
     PROVIDER_GLOBAL_CONCURRENCY: int = Field(default=4, ge=1, le=32)

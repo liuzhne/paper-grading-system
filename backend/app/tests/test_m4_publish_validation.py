@@ -317,11 +317,13 @@ def test_default_thesis_checker_params_match_runtime_contract():
 
 
 @requires_publish_validator
-def test_legal_review_only_criterion_with_none_review_rule_is_publishable(
+@pytest.mark.parametrize("mode", ["review_only", "deductive", "banded"])
+def test_review_rules_cannot_supply_a_criterion_score(
     m4_publish_db,
+    mode,
 ):
     graph = _valid_graph(m4_publish_db, "valid-review-only")
-    graph.criterion.scoring_mode = "review_only"
+    graph.criterion.scoring_mode = mode
     graph.deterministic.direction = "none"
     graph.deterministic.effect_type = "review"
     graph.deterministic.max_points = None
@@ -329,7 +331,36 @@ def test_legal_review_only_criterion_with_none_review_rule_is_publishable(
     graph.deterministic.cap_points = None
     m4_publish_db.commit()
 
-    assert _validate(m4_publish_db, graph) == []
+    blockers = _validate(m4_publish_db, graph)
+    missing = next(item for item in blockers if item["code"] == "criterion_numeric_scoring_missing")
+    assert missing["identity"]["criterion_code"] == graph.criterion.code
+    assert "AI" in missing["message"] and "第 2 步" in missing["message"]
+
+
+def test_pre_m4_compatibility_does_not_bypass_scoring_completeness(m4_publish_db):
+    graph = _valid_graph(m4_publish_db, "old-review-only")
+    _review_only_with_only_non_review_effect(graph, "review")
+    m4_publish_db.commit()
+    blockers = _require_validator()(
+        m4_publish_db, graph.rubric.id, graph.compilation.id,
+        allow_pre_m4_provenance=True,
+    )
+    assert "criterion_numeric_scoring_missing" in {item["code"] for item in blockers}
+
+
+@pytest.mark.parametrize("field", ["rule_text", "descriptor", "level_code", "same_points"])
+def test_scoring_details_must_be_nonempty_and_levels_distinguishable(m4_publish_db, field):
+    graph = _valid_graph(m4_publish_db, f"incomplete-{field}")
+    if field == "rule_text":
+        graph.semantic.rule_text = "  "
+    elif field == "same_points":
+        for level in graph.semantic.levels:
+            level.points = 1
+    else:
+        setattr(graph.semantic.levels[0], field, "  ")
+    m4_publish_db.commit()
+    expected = "rule_text_missing" if field == "rule_text" else "band_levels_invalid"
+    assert expected in {item["code"] for item in _validate(m4_publish_db, graph)}
 
 
 @requires_publish_validator

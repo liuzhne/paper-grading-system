@@ -646,11 +646,14 @@ def test_cli_eval_pins_unique_version_and_reports_policy_identity(
     from backend.app.services.scoring.core.policy import (
         build_corrected_thesis_policy,
     )
-    from backend.app.tests.test_atomic_rule_models import _make_p1_graph
+    from backend.app.tests.test_atomic_rule_models import _make_p1_graph, _new_atomic
 
     cli_main._bootstrap(Path(local[1]), Path(local[3]))
     with cli_db.cli_session() as session:
         graph = _make_p1_graph(session, "cli-eval")
+        # Version pinning still needs a publishable scoring rule, even on the
+        # pre-M4 compatibility path.
+        session.add(_new_atomic(models.AtomicRule, graph, status="approved"))
         now = graph.compilation.created_at + timedelta(hours=1)
         session.execute(
             update(models.RubricVersion)

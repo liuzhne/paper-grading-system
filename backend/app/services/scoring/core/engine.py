@@ -12,6 +12,7 @@ from decimal import Decimal
 import logging
 
 from backend.app.services.scoring.core.canonical import canonical_sha256
+from backend.app.services.scoring.core.contracts import M4_ATOMIC_RULE_SCHEMAS
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3, ScoringRequest
 from backend.app.services.scoring.core.policy import aggregate_scores, compile_scoring_policy
 from backend.app.services.scoring.core.results import ScoringOutcome
@@ -226,12 +227,30 @@ def _blocked_outcome(
     )
 
 
-def score_submission(*, request, checker_registry, llm_runtime, profile) -> ScoringOutcome:
+def score_submission(
+    *,
+    request,
+    checker_registry,
+    llm_runtime,
+    profile,
+    decision_ledger=None,
+    execution_journal=None,
+) -> ScoringOutcome:
     """Score a frozen request without database, filesystem, or wall-clock I/O."""
 
     dto = ScoringRequest.from_mapping(_plain(request))
     value = dto.to_mapping()
     _validate_profile(profile, value)
+    # Forward the optional port only when present, so injected executors that
+    # predate it keep their keyword contract.
+    ledger_kwargs = {
+        name: port
+        for name, port in (
+            ("decision_ledger", decision_ledger),
+            ("execution_journal", execution_journal),
+        )
+        if port is not None
+    }
 
     plan = value["plan"]
     if plan["schema_version"] == "rule-execution-plan@3":
@@ -240,10 +259,10 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
             checker_registry=checker_registry,
             llm_runtime=llm_runtime,
             profile=profile,
+            **ledger_kwargs,
         )
     if any(
-        node["atomic_rule_snapshot"]["schema_version"]
-        == "atomic-rule-snapshot@2"
+        node["atomic_rule_snapshot"]["schema_version"] in M4_ATOMIC_RULE_SCHEMAS
         for node in plan["nodes"]
     ):
         execution = execute_rule_plan(
@@ -251,6 +270,7 @@ def score_submission(*, request, checker_registry, llm_runtime, profile) -> Scor
             checker_registry=checker_registry,
             llm_runtime=llm_runtime,
             profile=profile,
+            **ledger_kwargs,
         )
         executed = execution.to_mapping()
         unrounded_total = None

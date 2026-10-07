@@ -136,6 +136,51 @@ def test_incomplete_run_surfaces_token_budget_as_llm_failure():
     )
 
 
+def test_incomplete_run_reports_root_cause_instead_of_circuit_open():
+    jobs = _jobs_module()
+
+    def task(code):
+        return SimpleNamespace(
+            status="failed_exhausted",
+            provider_error={"code": code},
+        )
+
+    # Alphabetical order used to surface the derived CIRCUIT_OPEN symptom.
+    error = jobs._incomplete_scoring_error(
+        [task("PROVIDER_CIRCUIT_OPEN")] * 51
+        + [task("PROVIDER_NETWORK_ERROR")]
+        + [task("PROVIDER_INVALID_REQUEST")] * 83
+    )
+    assert error.code == "PROVIDER_INVALID_REQUEST"
+
+    only_circuit = jobs._incomplete_scoring_error([task("PROVIDER_CIRCUIT_OPEN")])
+    assert only_circuit.code == "PROVIDER_CIRCUIT_OPEN"
+
+    truncated = jobs._incomplete_scoring_error([task("PROVIDER_OUTPUT_TRUNCATED")])
+    assert truncated.code == "PROVIDER_OUTPUT_TRUNCATED"
+    assert "max_output_tokens" in str(truncated)
+    assert jobs._classify_failure(truncated) == ("PROVIDER_OUTPUT_TRUNCATED", "llm")
+
+
+def test_connection_binding_change_is_reported_with_its_cause():
+    from backend.app.services.ai_connections import AIConnectionBindingError
+
+    jobs = _jobs_module()
+    error = AIConnectionBindingError(
+        "AI_CONNECTION_CONFIG_CHANGED",
+        "AI connection configuration has changed; recreate the scoring task",
+    )
+
+    # Used to surface as "scoring_failure; exception_type=ValueError".
+    assert jobs._classify_failure(error) == (
+        "AI_CONNECTION_CONFIG_CHANGED",
+        "checker",
+    )
+    message = jobs._safe_failure_message(error, "AI_CONNECTION_CONFIG_CHANGED")
+    assert "配置已变更" in message
+    assert "重新创建评分任务" in message
+
+
 def test_incomplete_run_keeps_unknown_rule_failure_safe():
     jobs = _jobs_module()
     error = jobs._incomplete_scoring_error(

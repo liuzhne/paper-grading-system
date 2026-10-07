@@ -14,7 +14,12 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 
 
-SELECTOR_VERSION = "section-bm25-diverse@1"
+# @2 ranks with the rules' published wording (snapshot @3) and may rank for a
+# set of rules at once (a mutex group or a whole criterion) so they share one
+# evidence selection.  Coverage mode is still decided by the structural query:
+# rule wording is full of "缺少/缺失", which would flip most rules to an
+# exhaustive (whole-paper) selection.
+SELECTOR_VERSION = "section-bm25-diverse@2"
 TOKEN_POLICY_VERSION = "provider-context-budget@1"
 TOKEN_ESTIMATOR_VERSION = "utf8-conservative@1"
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u9fff]")
@@ -65,6 +70,12 @@ def _tokens(value: str) -> list[str]:
     return raw + bigrams
 
 
+def query_terms(text: str) -> list[str]:
+    """Public tokenizer used by evidence compression to score fragments."""
+
+    return _tokens(text)
+
+
 def _query_text(value: dict) -> str:
     criterion = value["criterion_snapshot"]
     rule = value["atomic_rule_snapshot"]
@@ -85,6 +96,52 @@ def _query_text(value: dict) -> str:
             if item
         )
     return "\n".join(str(item) for item in parts if item)
+
+
+def _rule_wording(rule: dict) -> list[str]:
+    return [
+        str(rule[field])
+        for field in ("name", "rule_text", "positive_example", "negative_example", "boundary_example")
+        if rule.get(field)
+    ]
+
+
+def _structural_query(value: dict, selection_rules=None) -> str:
+    """Structural query; for a shared selection it must not depend on the member.
+
+    Every member of a shared selection (mutex group or criterion scope) builds
+    the identical query from the criterion and the whole rule set, so they rank
+    and therefore select the identical evidence.
+    """
+
+    if not selection_rules:
+        return _query_text(value)
+    criterion = value["criterion_snapshot"]
+    parts = [criterion["criterion_code"], criterion["name"]]
+    for rule in selection_rules:
+        parts.append(rule["rule_code"])
+        parts.append(" ".join(rule["evidence_policy"].get("allowed_finding_codes", ()) or ()))
+        for level in rule.get("levels", ()) or ():
+            parts.extend(
+                str(item)
+                for item in (
+                    level.get("descriptor"),
+                    level.get("positive_example"),
+                    level.get("negative_example"),
+                )
+                if item
+            )
+    return "\n".join(part for part in parts if part)
+
+
+def _ranking_query(value: dict, selection_rules=None) -> str:
+    """Structural query plus the wording of every rule the selection serves."""
+
+    rules = list(selection_rules or [value["atomic_rule_snapshot"]])
+    parts = [_structural_query(value, selection_rules)]
+    for rule in rules:
+        parts.extend(_rule_wording(rule))
+    return "\n".join(part for part in parts if part)
 
 
 def _coverage_mode(value: dict, query: str) -> str:
@@ -172,10 +229,9 @@ def _section_coverage(all_units, selected):
     ]
 
 
-def _build_mapping(base, selected, *, coverage_mode, context_window_tokens, reserved_output_tokens, safety_margin_tokens, estimated_input_tokens):
+def _build_mapping(base, selected, *, query, coverage_mode, context_window_tokens, reserved_output_tokens, safety_margin_tokens, estimated_input_tokens):
     criterion = base["criterion_snapshot"]
     rule = base["atomic_rule_snapshot"]
-    query = _query_text(base)
     selection_projection = {
         "schema_version": "evidence-selection-snapshot@1",
         "selector_version": SELECTOR_VERSION,
@@ -223,8 +279,14 @@ def build_v4_envelope(
     reserved_output_tokens: int,
     safety_margin_tokens: int,
     top_k: int,
+    selection_rules=None,
 ):
-    """Select whole authoritative units and prove the final request fits."""
+    """Select whole authoritative units and prove the final request fits.
+
+    ``selection_rules`` ranks for several rules at once (all members of a
+    mutex group, or every rule of a criterion) so their envelopes share the
+    same evidence and a provider can serve them from one prompt prefix.
+    """
 
     base = PromptEnvelopeV3.from_mapping(envelope).to_mapping()
     for name, value, minimum in (
@@ -235,8 +297,8 @@ def build_v4_envelope(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f"{name} must be an integer >= {minimum}")
-    query = _query_text(base)
-    coverage_mode = _coverage_mode(base, query)
+    coverage_mode = _coverage_mode(base, _structural_query(base, selection_rules))
+    query = _ranking_query(base, selection_rules)
     ranked = _diversify(_rank(list(base["evidence_units"]), query))
     selected = ranked if coverage_mode == "exhaustive" else ranked[:top_k]
     if not selected:
@@ -251,6 +313,7 @@ def build_v4_envelope(
             candidate = _build_mapping(
                 base,
                 selected,
+                query=query,
                 coverage_mode=coverage_mode,
                 context_window_tokens=context_window_tokens,
                 reserved_output_tokens=reserved_output_tokens,
@@ -266,6 +329,7 @@ def build_v4_envelope(
         candidate = _build_mapping(
             base,
             selected,
+            query=query,
             coverage_mode=coverage_mode,
             context_window_tokens=context_window_tokens,
             reserved_output_tokens=reserved_output_tokens,
@@ -309,4 +373,5 @@ __all__ = [
     "build_v4_envelope",
     "conservative_token_estimate",
     "preflight_v4_provider_payload",
+    "query_terms",
 ]

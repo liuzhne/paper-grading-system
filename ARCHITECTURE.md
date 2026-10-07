@@ -1,6 +1,6 @@
 # 系统架构
 
-> 当前事实快照：2026-09-20。运行时为 Python 3.10+（CI/锁文件使用 3.12），Alembic head 为 `0031_rubric_import_sessions`。本文描述已实现代码，不代替 Accepted ADR、数据库迁移或发布门禁。
+> 当前事实快照：2026-09-28。运行时为 Python 3.10+（CI/锁文件使用 3.12），Alembic head 为 `0032_single_active_ai_connection`。本文描述已实现代码，不代替 Accepted ADR、数据库迁移或发布门禁。
 
 ## 1. 系统边界
 
@@ -711,7 +711,7 @@ XLSX 适配器继续以 `unit_id` 保留合并单元格来源；确定性表格�
 
 ### 2026-09-21 合并父级评分项层级展示修正
 
-解析结果继续以 `dimension` 保存父级评价项目、以 `name` 保存稳定子项标识，不为缺失的短标题生成模型文本。导入工作区不再只显示 `name`：存在 dimension 时按“父维度主标题 → 可编辑子项标识 → 可见的具体要求摘要”呈现；无 dimension 的评分项保持原单层名称显示。该修正只改变前端投影，不改导入数据、规则来源、评分语义、数据库或迁移。
+此段记录当时的展示实现；新解析的名称来源已由 2026-09-24 条目更新。导入工作区显示维度、名称和具体要求；当维度与名称相同，只显示一次语义标题。数据库和迁移边界不变。
 
 维护记录：2026-09-21 · 合并父级评分项层级展示修正：核对导入工作区的 dimension/name/description 投影，补齐层级展示；解析和评分边界不变。
 
@@ -764,3 +764,232 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 本地 `.env.intranet` 为缺省选项为空的平台 OpenAI-compatible 连接提供 `max_tokens=2400` 与 JSON object 响应约束；启动脚本验证 context 大于输出预算与安全余量之和，并显示非敏感预算摘要。当前 32768/2400/1024 组合保留约 29344 token 的理论输入空间。该设置不覆盖数据库中显式保存的连接选项，生产平台配置边界不变。
 
 维护记录：2026-09-22 · 评分心跳时区与复核项持久化修复：修正 naive UTC 心跳在非 UTC 主机上的展示误报，并使无自动分的 review-only 结果符合既有数据库状态约束。
+
+### 2026-09-23 发布前评分细则完整性门禁
+
+`review_workspace` 与 `lifecycle.publish_rubric` 共用只读 `validate_publishable_rubric`。每个评分项必须有 AtomicRule，且至少一条为 deduct/score 或 band/score；只有 review/report/block 提示不能提供该项分数，返回带 criterion_code 的 `criterion_numeric_scoring_missing`。此项检查及细则正文非空检查也适用于 pre-M4 发布兼容入口。现代版本继续检查扣分数值、重复策略、封顶与满分；分档至少两档，编号唯一非空、分值不同且在范围内、判定说明非空。两种计分方式按模式校验，原有禁止同项混合分档与扣分的约束不变。
+
+工作台第 3 步展示具体缺口，阻止审核/发布按钮并提供返回第 2 步入口；review 状态需退回草稿后补全。第 2 步的缺失细则生成候选也读取结构校验结果，避免已确认的 review-only 提示被覆盖率误认为完整。AI 仍只生成建议，应用后统一确认；发布请求在状态冻结前再次校验，失败时整笔事务回滚并返回可操作提示。评分算法、已发布版本、prompt、数据库字段、Alembic head `0031_rubric_import_sessions` 和生产 Core 门禁不变。
+
+维护记录：2026-09-23 · 发布前评分细则完整性门禁：拦截只有复核提示的评分项，完善正文与等级校验，将 AI 补全引导前置到发布准备阶段。
+### 2026-09-24 评价内容作为评分项标题
+
+`table_extractor` 对纵向合并的“评价内容”完成来源识别后，将该列同时保存为 `dimension` 和各计分行的 `name`。独立的“打分项”仍提供 T01～T06 稳定 code；分值、具体要求及来源行不变。导入工作区在两字段相同时只显示一次语义标题；旧草稿若两字段不同，仍显示父标题和原标识。数据库、评分调用链与 Alembic head `0031_rubric_import_sessions` 不变。已保存的旧解析结果不会被自动改写，需要重新解析来源文件。
+
+维护记录：2026-09-24 · 评价内容作为评分项标题：核对 XLSX 抽取、导入工作区和持久化边界；除名称投影外边界不变。
+### 2026-09-24 评分表模板下载入口恢复
+
+导入工作区的评分表区通过 `apiUrl` 生成与 API 客户端一致的地址，链接到现有 `GET /api/rubrics/import-template.xlsx`。浏览器携带同源登录 Cookie 下载后端生成的 XLSX；文件内容、解析服务、数据库和 Alembic head `0031_rubric_import_sessions` 不变。
+
+维护记录：2026-09-24 · 评分表模板下载入口恢复：核对前端入口、API 地址配置及现有模板响应；后端和数据边界不变。
+### 2026-09-24 同名评价内容逐项编号
+
+`table_extractor` 对合并父级“评价内容”完成确定性重映射后，按原表行序统计同名评价内容。重复标题的各计分行从 1 起追加序号；唯一标题保持原文。`dimension` 继续保留未编号的评价内容，code、分值、说明及来源单元不变。导入工作区对这种编号名称只显示一次主标题；旧草稿的数字标识仍按历史层级显示。数据库及 Alembic head `0031_rubric_import_sessions` 不变。
+
+维护记录：2026-09-24 · 同名评价内容逐项编号：核对抽取顺序、名称投影及旧草稿兼容展示；评分和数据边界不变。
+
+### 2026-09-28 BYOK 单选启用
+
+个人连接在 `(owner_id, organization_id)` 内最多一个 `active`；`0032_single_active_ai_connection` 的部分唯一索引在 SQLite/PostgreSQL 上共同保证该不变量。创建首个未删除连接时自动启用，后续新增连接保存为 `disabled`；`POST /api/ai-connections/{id}/activate` 在事务内先停用同范围旧连接，再启用目标连接，并记录审计。PostgreSQL 通过用户行锁串行化创建/切换；唯一索引兜底，冲突返回 409。测试连接与轮换 Key 不改变启用状态。停用/删除不自动选用其他连接。
+
+账户页显示“已启用/未启用”和“启用”按钮；v1/v2 创建任务未显式传连接时解析当前启用的个人连接并冻结快照，优先于平台模型。评分标准 AI 起草/解析也优先使用当前启用的个人连接。运行中的既有任务不重绑；旧连接被停用后，后续运行时解析拒绝继续，已发出的外部请求可能完成。模型评分、prompt、缓存版本和 Core 发布门禁不变。
+
+迁移对历史多个 active 按“最近验证成功、最早创建、ID”保留一个，不启用历史 disabled/deleted 连接，不改任务快照。下迁只删除唯一索引，保留状态，不能恢复迁移前的多启用状态。
+
+维护记录：2026-09-28 · BYOK 单选启用：核对连接生命周期、租户隔离、v1/v2 绑定与 AI 起草；迁移 head 更新为 `0032_single_active_ai_connection`，评分内核与 Secret 存储边界不变。
+
+### 2026-09-28 结构识别 JSON 错误诊断与恢复
+
+结构建议链路为 `structure-suggestions → structure_state → recognize_structure → complete_json`。Responses 的 `complete_json` 新增安全的输出错误分类，区分响应截断、非法 JSON 与错误信封；不改变评分用的 `score_*` 解析和计分路径。结构识别对非法 JSON 最多修复一次，输出错误映射为 422，传输/鉴权错误保留 503 并按受控分类提示；日志只记录类别与次数，不记录原文、密钥或厂商原始错误正文。
+
+结构识别使用独立默认输出预算 8192 Token，尊重连接显式输出上限。修复指令与预算变化更新 `rubric-structure@2` 和 `PROMPT_VERSION=2026-09-28-1`。真实本机复现证实上游 HTTP 200 可携带无法解析的 JSON，旧实现把该错误伪装成服务不可用；随后同配置的一次调用成功，故不把故障归因于固定协议/IP 限制，也不把推测的 Token 截断写成确定事实。
+
+维护记录：2026-09-28 · 结构识别 JSON 错误诊断与恢复：核对适配器、结构识别修复循环及 HTTP 错误映射；数据库 head `0032_single_active_ai_connection`、评分内核与模板确认边界不变。
+
+### 2026-09-28 评分标准识别校对双标签（历史布局，已由 09-29 分步改造取代）
+
+第 1 步由 `RubricImportWorkspace` 组织表格/原文两个标签；`TableRecognitionPanel` 读取现有 extraction 和单元预览，`SourceReviewPanel` 组织章节列表、上下文、批量归类和局部快捷键。`RubricsView` 统一请求及错误处理，仍调用既有导入、重编译、结构建议、归类、resolve-batch 和发布接口。详情来源的现有 `locator` JSON 字典附带台账 `review` 投影，不新增数据库列、端点或持久化格式，无数据迁移；head 保持 `0032_single_active_ai_connection`。
+
+结构差异匹配优先采用同工作表唯一来源行，名称作为兼容回退；字段修改仍显式确认。合入保留评分项 code 和数据库 ID，歧义行及真正缺失项仍受阻断。来源原文、评分政策、租户权限、人工审计与 Core 发布门禁不变。完整 UI/API 对应与原型差异见 `docs/评分标准识别校对接口映射.md`。
+
+维护记录：2026-09-28 · 评分标准识别校对双标签：核对前端状态、来源台账、结构重解析、字段确认及现有 API 边界；数据库结构和评分内核不变。
+
+维护记录：2026-09-29 · 表格视图分段切换样式：核对 TableRecognitionPanel 展示边界：识别结果/原表对照改为浅灰底槽、白色选中块的分段切换；切换状态、接口、数据和数据库结构不变。
+
+维护记录：2026-09-29 · DOCX AI 归类诊断：核对 `unit-classifications → parse_state → llm_classifier → complete_json` 与 `resolve-batch` 调用链。实际分类器未使用结构识别的独立输出预算；异常转 failed 列表，前端未显示失败。人工归入只更新来源台账，下一步起草未消费 `<code>.manual` 文本。详见 `docs/AI归类功能检测-2026-09-29.md`。本次仅诊断与文档更新，业务代码、数据库 head 和发布边界不变。
+
+### 2026-09-29 评分项与评分规则分步改造
+
+取代 09-28 双标签：评分项页保留双文件上传与评分/表格核对；规则页左侧以待归类来源和真实评分项导航，右侧展示规则材料及细则。`source-workspace → locator.review → 规则来源` 复用现有台账投影。`resolve-batch(assign) → <code>.manual → draft-deduction-rules → input_analysis → AI 建议 → recompile → confirm` 补齐手工归类到起草的数据流；归类本身不新增评分项、不改变分值或自动批准规则。restore 只撤销人工归属，自动抽取引用保留。
+
+分类器独立默认 8192 输出预算，失败原因只记录安全枚举到既有 rejected 列表；选中范围/失败重试在 UI 可见，部分重试保留其它有效建议。指纹包括评分项说明及来源 context；规则来源变更清除未应用建议。来源冲突仍在第一步，疑似规则处理在第二步，发布仍由既有后端 unresolved_source_units 及执行规则校验兜底。无新表、列、端点，复用现有 JSON 与动作枚举；head 保持 0032，评分内核、默认 legacy 与生产门禁不变。
+
+维护记录：2026-09-29 · 评分项与评分规则分步改造：核对 Safari 设计、UI/API 映射、人工来源流、失败反馈和发布边界；完整映射见 `docs/评分标准识别校对接口映射.md`。
+
+维护记录：2026-09-29 · 评分规则 AI 归类复测：核对新版 unit-classifications → llm_classifier → Responses 调用链；本机两次记录均 44 输入/0 成功/44 provider_error。分类器未保留适配器安全细分错误；同步分批等待无进度。业务实现、数据库 head 0032、连接配置及评分边界不变。详见 `docs/AI归类复测-2026-09-29.md`。
+
+### 2026-09-29 AI 归类小批次与超时修复
+
+归类默认每批 3 个单元；工作台通过既有 unit-classifications 接口逐批请求，每批提交后的累计建议立即投影到页面。后端遇到失败停止后续批次，已完成结果保留、未发送内容保持未归类。Responses/Chat 的 complete_json 新增内部 attempts_limit 参数，分类器传 1，其它调用保持原重试策略；归类另传 default_timeout_seconds=120，仅在连接未显式指定超时时使用，不改变其它调用。JSON 格式修复仍最多一次。ProviderCallError 通过统一投影只保存安全错误枚举，不保存上游正文。前端切换标准/组织后丢弃迟到结果并停止下一批，批量采纳限定于当前筛选或显式选择。prompt 版本为 rubric-unit-classify@3，缓存版本 2026-09-29-2。
+
+维护记录：2026-09-29 · AI 归类小批次与超时修复：核对调用、持久化、错误投影和页面范围。复用已有端点及 JSON 字段，无数据库结构变化；head 0032、人工确认和评分内核不变。
+
+### 2026-09-29 AI 归类有限并发
+
+取代上一节浏览器串行调度：classifyInBatches 使用最多 3 个异步执行循环，每批仍为 3 条、同一轮单元去重分配，不另建线程池或后台队列。并发请求由既有同步 API 处理，供应商调用仍受进程内连接并发限制（默认 4）约束。批次失败停止补发，等待所有在途请求结束，已完成结果保留。响应按服务端 created_at 防止乱序回退，结束后重新读取 parse-coverage。
+
+持久化链：模型调用 → compilation 无值变化 UPDATE 取得写锁 → 刷新 Session 旧快照 → 检查当前编译与输入指纹 → 合并最新建议 → 外层路由提交。PostgreSQL 锁单行、SQLite 使用写锁，模型等待期间不持有该合并写锁。已有 JSON/端点复用，无结构迁移，head 0032 不变。它防止不同批次覆盖，但不提供跨标签页同一输入的调用幂等或任务领取；关闭页面也不会后台续跑。
+
+维护记录：2026-09-29 · AI 归类有限并发：核对并发调度、失败收敛、乱序显示和结果合并；评分内核、人工确认、输出预算与归类专用超时不变。
+
+### 2026-09-29 识别校对原型细节对齐
+
+依据 Claude Design「评分标准-识别与校对」原型补齐四处细节，分步结构不变（原文归类仍在第 2 步），只改前端，不改接口与数据库。
+
+- 第 1 步分值核对：`RubricImportWorkspace` 的核对状态仍只存在于页面会话。每行的「核对 / 已核对」按钮可以来回切换，取消后通过 `score-check` 事件重新计入待核对数。
+- 原表对照「识别为」：`TableRecognitionPanel` 只读 `parse-coverage.extraction`（`header_row / records / total_row / dropped_rows`）和 `source-workspace.previews.excel[].locator.review.claimed_by`，按 `<编号>.<字段>` 取出评分项编号；工作表以 `extraction.sheet_title` 为准。
+- 直接采纳 AI 建议：`SourceReviewPanel` 把 `unit_classifications.results` 投影成可执行动作（`assign` 或 `not_rule`），单条采纳仍走既有 `POST /rubrics/{id}/units/resolve-batch`，和人工归入走同一条持久化与审计链。
+- 第 2 步阻断项：`RubricsView.stepTwoBlockers` 用「保存规则，下一步」的禁用条件（疑似规则、缺细则、未应用 AI 草稿、待确认规则、对不上评分项的完整性问题）生成胶囊。原文筛选状态从面板内部移到 `RubricsView`，通过 `v-model:filter` 传入，这样底栏可以直接打开「疑似规则」；离开原文视图时重置为「待处理」。
+
+维护记录：2026-09-29 · 识别校对原型细节对齐：核对了前端组件边界和数据来源；接口、数据库、Alembic head `0032_single_active_ai_connection`、评分内核、发布门禁均不变。
+
+### 2026-09-30 规则来源默认折叠
+
+第 2 步评分项的「归入的原文要求」默认只显示第一条，其余用「展开其余 N 个单元 / 收起」切换。计数仍显示全部单元数。折叠状态只保存在 `RubricsView` 的页面状态里，切换评分项后重新折叠；AI 起草读取的是后端台账里全部 `.manual` 归属，和页面上展开了多少条无关。
+
+维护记录：2026-09-30 · 规则来源默认折叠：只改前端展示；接口、数据库、head `0032_single_active_ai_connection` 不变。
+
+### 2026-09-30 工作台基准字号与评分标准页间距
+
+`frontend/workbench/src/styles/tokens.css` 的 `body` 设了基准字号 13.5px，取自原型正文字号。组件里没写字号的文字从此继承 13.5px，不再落到浏览器默认的 16px。基准只设在 `body` 上，`html` 仍是 16px，所以 rem 尺寸不变。
+
+评分标准页（`RubricsView.vue` scoped 样式）按原型收紧了步骤条、左侧评分项导航（列宽 252px）、评分项标题（18px）、规则来源两栏和卡片内边距。其它页面只受基准字号影响，间距没有改。
+
+维护记录：2026-09-30 · 工作台基准字号与评分标准页间距：只改前端样式；接口、数据库、head `0032_single_active_ai_connection` 不变。
+
+### 2026-09-30 AI 起草超时与熔断修复
+
+`ai_rule_drafter.draft_deduction_rules` 的调用链改为：切批 → `_run_draft_batches` 在请求内用线程池并发，最多同时 3 批，合并时按批次原顺序 → 每批 `complete_json(attempts_limit=1, default_timeout_seconds=120)`，Responses 与 OpenAI-compatible 两种适配器一致 → 单批业务校验 → 合并后的全局校验。
+
+- 任一批失败后不再发出新批次，等已发出的批次结束，再抛出序号最小的失败。
+- 各批共用同一个 scorer 和 `httpx.Client`（连接池有线程锁），经 `provider_request_slot` 受连接并发上限（默认 4）和熔断器约束。
+- 每批复制一份 `contextvars`，让观测链路挂在当前请求下。
+
+维护记录：2026-09-30 · AI 起草超时与熔断修复：接口、数据库、prompt 与缓存版本均不变（`rubric-rule-draft@7`），head `0032_single_active_ai_connection` 不变。
+
+### 2026-09-30 AI 连接协议自动识别
+
+新增 `backend/app/services/ai_connection_protocol.py`，负责判断私有 AI 连接用 Chat Completions（`openai_compatible`）还是 Responses（`openai_responses`）。
+
+判断顺序：
+1. 手动选择（`manual`）；
+2. 地址后缀：粘贴了 `/chat/completions` 或 `/responses` 的完整地址时，按后缀定协议，并去掉后缀（`url_suffix`）；
+3. 已知平台表（`known_host`）：OpenAI 官方首选 Responses，表中其它平台用 Chat；
+4. 探测请求（`probe`）：先 Chat，后 Responses。
+
+只有 404/405（`ProtocolEndpointMissing`，是 `ValueError` 的子类）才改试另一种协议。探测复用 `ai_connections.verify_connection_runtime` 的最小请求，出站前照旧做 DNS 校验。
+
+各接口的行为：
+- **`POST /ai-connections`**：`provider_type` 可省略，默认 `auto`。后缀或已知平台能定时不联网；未知平台需要探测，探测成功会顺带写入 `last_verified_at`。识别结果写进原有的 `provider_type` 列，审计记录写入 `protocol_detection`。
+- **`POST /ai-connections/test-draft`**：始终联网验证，返回 `detection` 和规范化后的 `base_url`。
+- **`POST /ai-connections/{id}/test`**：按已保存的协议测试，不重新识别，`detection=stored`。
+
+调用模型时不切换协议，适配器由已保存的 `provider_type` 决定。
+
+前端「账户与连接」：原来的「厂商协议」下拉改为只读的「接口协议」，显示识别结果和依据；手动选择放在「高级设置」里；连接列表显示每个连接的协议。
+
+维护记录：2026-09-30 · AI 连接协议自动识别：没有新增表或列，head 保持 `0032_single_active_ai_connection`；OpenAPI 与前端类型已重新生成。
+
+### 2026-09-30 AI 起草来源引用归一化
+
+`ai_rule_drafter._draft_deduction_rules_once` 拿到模型输出后、业务校验前，会先调用 `_normalize_source_refs`：
+- 把批内位置指针（`/batch|input_analysis/focus_units|unresolved_segments|raw_segments/<i>[/...]`）改写为该单元自己的来源，例如 `docx:p[101]`、`/criterion/description`；
+- 缺少文档前缀的编号（如 `p[117]`），只有本批内恰好一个来源与之匹配时才补全；
+- 其它值原样交给 `validate_ai_rule_draft`，由它拒绝。
+
+每批请求的 `payload.batch.allowed_source_refs` 会列出本批允许的来源：本批原文单元的编号，加上 `/criterion/name|description|evidence_hints`。JSON Schema 仍然枚举同一组值。
+
+合并后的规则只引用真实原文编号或评分项字段，不再残留只在单批内部有意义的位置指针。
+
+维护记录：2026-09-30 · AI 起草来源引用归一化：起草 prompt 升为 `rubric-rule-draft@8`，全局缓存版本升为 `2026-09-30-1`；接口和数据库不变，head `0032_single_active_ai_connection` 不变。
+
+### 2026-10-01 AI 起草厂商错误的提示细化
+
+`ai_rule_drafter` 处理 `ProviderCallError` 时，提示里会写出受控的错误码、HTTP 状态码和本批等待的秒数，例如「AI 服务限流，请求被拒绝（rate_limited，HTTP 429，等待 0 秒后失败）」。日志 `rubric_ai_draft_failed` 也增加 `waited_seconds`。超时和熔断仍沿用各自的专门提示。
+
+维护记录：2026-10-01 · AI 起草厂商错误的提示细化：只改提示文本和日志字段；接口、数据库和 prompt 版本都不变。
+
+### 2026-10-04 评分请求采样参数与熔断状态修复
+
+采样参数的调用链：`llm/factory.get_llm_scorer` 把连接选项 `top_p` 传给两种适配器，缺省为 1 → `core_adapter.core_runtime_provider_contract`（Core）和 `base._provider_contract`（v1 信封）冻结 `scorer.top_p` → 发请求：
+- Responses：`openai_adapter._sampling_controls` 在 `top_p=1` 时不发送；
+- Chat：照发冻结值。
+
+`llm/rate_limit.ConnectionCircuitBreaker` 的状态机：
+- `closed`：连续瞬时失败达到阈值后转 `open`；
+- `open`：冷却结束后转 `half_open`，同一时刻只放行一个探测；
+- 探测成功，或收到非瞬时、非鉴权错误（例如 400）→ `closed`，计数清零；
+- 探测收到瞬时错误，或没有 HTTP 响应的未知异常（`unknown`）→ 重新 `open`，再等一个冷却期；
+- 鉴权错误 → 永久 `open`，直到显式重置。
+
+熔断和并发信号量的键是 `rate_limit.provider_circuit_key(snapshot)`，由 `连接ID|key-v<版本>|<模型>` 组成；没有连接快照时用 `base_url|模型`。换模型或轮换密钥后，自动使用新的熔断状态。
+
+以前探测收到非瞬时错误会停在 `half_open`，并发请求因此一直被拒。状态只存在当前进程内存里，worker 重启后清空。
+
+错误投影：
+- `openai_adapter._raise_if_incomplete` 覆盖 Responses 的三条 JSON 路径（v1 信封、Core 信封、`complete_json`）；
+- `scoring/core/failures.project_rule_execution_failure` 把 `reason=output_truncated` 投影为 `PROVIDER_OUTPUT_TRUNCATED`，`CircuitOpenError` 标为请求被熔断推迟，不再写成“规则输入无法安全准备”；
+- `batch_scoring/jobs._incomplete_scoring_error` 先排除 `PROVIDER_CIRCUIT_OPEN`，再按出现次数选根因码。
+- `scoring/engine._scorer_for_batch` 发现快照不一致时，抛出 `ai_connections.AIConnectionBindingError`（`ValueError` 的子类，带 `code` 和 `failure_kind`）；`jobs._classify_failure` 和 `_safe_failure_message` 会直接给出错误码和中文原因。
+
+维护记录：2026-10-04 · 评分请求采样参数与熔断状态修复：没有新增表或列，head 保持 `0032_single_active_ai_connection`。prompt 与 `PROMPT_VERSION` 不变；未设置 `top_p` 的连接，信封与缓存身份不变。
+
+### 2026-10-05 评分用量计量、预估上限与规则级决策账本
+
+调用链（论文 Core 路径，`scoring/engine._score_paper_core`）：
+1. 取 scorer 用量快照（`llm/usage.scorer_usage_snapshot`）。适配器的 `_post_with_retry` 每次请求都记入 `UsageMeter`：成功请求累加厂商回报的 token，失败请求只计次数。
+2. `scoring/decision_ledger.build_decision_ledger` 按“组织 + AI 连接”构造 `DatabaseDecisionLedger`。账本未启用或 scorer 是 Mock 时为 `None`；处于 `bypass_ledger_reads()` 上下文时只写不读。
+3. `ThesisProfile.build_llm_runtime(scorer, input_token_cap=SCORING_MAX_INPUT_TOKENS_PER_PAPER)`：运行时记录每次调用的用量增量（`last_call_usage`）；本篇用量达到上限后抛出 `TokenBudgetExceededError`（`TOKEN_BUDGET_EXCEEDED`），不再发出请求。
+4. `score_submission_observed(..., decision_ledger=...)` → `score_submission` / `execute_legacy_compatibility_plan` → `execute_rule_plan`。语义规则在 `_semantic_decision` 中：
+   - 先算 `core/decision_identity.rule_decision_identity(envelope)`，按身份查账本；命中且通过校验就直接采用，不调用模型；
+   - 否则调用模型，判定通过校验后立即写入账本。
+5. 用量增量和账本的 `reused_rule_codes` 交给 `CoreRunPersistence.persist(usage=..., reused_rule_codes=...)`：写入 `scoring_runs.*_tokens`、`rule_scoring_tasks.decision_reused`，并调用 `ai_connections.record_usage_ledger(usage=...)`。
+
+账本的边界：
+- Core 只依赖 `core/ports.DecisionLedger`（`get` / `put`），数据库访问全部在 `scoring/decision_ledger.py`；
+- 读写各用独立会话、立即提交，与外层评分事务无关；
+- 失败只记日志，降级为“不复用”。
+
+批次任务：
+- `batch_scoring/jobs._default_score_item` 在 `job.rescore=true` 时用 `bypass_ledger_reads()` 包住评分调用；
+- `_telemetry_for_run` 新增 `decision_ledger_reused`、`decision_ledger_judged`、`prompt_tokens`、`completion_tokens`。
+
+预估与上限：
+- `scoring/usage_estimate`：
+  - `estimate_paper` 只处理 Core 路径，用 `rule_executor.prompt_envelope_for_rule` 组装信封，按 `envelope_input_estimate` 估算（与 `preflight_v4_provider_payload` 相同的算法），并用 `known_identities` 扣除可以复用的规则；
+  - `estimate_batch` 与任务执行保持一致：非 rescore 时跳过已有完整结果的论文。
+- 路由 `api/routes/batch_jobs.py`：
+  - 新增 `GET /batches/{batch_id}/score-estimate`；
+  - `POST /batches/{id}/score-jobs`（没有进行中的任务时）和 `POST /batch-scoring-jobs/{id}/retry`，在配置了上限时先调用 `assert_within_token_caps`，超出则返回 409。
+- 前端：`NewTaskView` 在预检之后不阻塞地加载估算；`TaskRunView` 的“用量”列使用 `lib/score-jobs.itemUsageText`。
+
+持久化：迁移 `0033_rule_decision_ledger` 新增表 `rule_decision_ledger`（`scope_key` + `decision_identity_hash` 唯一，按 `expires_at` 建索引，含 `pgs_app` 授权与 RLS），以及 `rule_scoring_tasks.decision_reused`。Postgres 校验器的必需表和运行角色检查已加入新表。
+
+维护记录：2026-10-05 · 评分用量计量、预估上限与规则级决策账本：head 升为 `0033_rule_decision_ledger`；新增端点后 OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
+
+### 2026-10-05 判断用视图、互斥组合并、证据压缩与论文概况卡
+
+身份与发送内容分离：`PromptEnvelopeV3/V4` 仍是身份和审计对象；发给模型的内容由 `llm/core_view.py` 从信封派生。
+
+- 快照：`adapters/rubric_snapshot` 对 M4 编译器产出 `atomic-rule-snapshot@3`（带 `name`、`rule_text`、示例和 `context_needs`；`context_needs` 由 `core/rule_context.derive_context_needs` 推导）。`core/contracts.M4_ATOMIC_RULE_SCHEMAS` 统一 @2 / @3 的 M4 语义。
+- 选证：`retrieval/selection.build_v4_envelope(..., selection_rules=...)`：
+  - `_structural_query` 决定覆盖模式；给定一组规则时，它与具体成员无关；
+  - `_ranking_query` 在结构化查询之上加入规则原文。
+  - `ThesisProfile.build_provider_envelope(base_envelope, selection_rules, criterion_rules)` 按 `SCORING_EVIDENCE_SCOPE` 选择共用范围。
+- 概况卡：`ThesisProfile.build_prompt_extensions` 调用 `retrieval/digest.build_paper_digest`，结果写入 `profile_prompt_extensions.paper_digest`。
+- 视图：`core_view.build_core_request` / `build_core_group_request` 生成 `CoreProviderRequest`（system、user 视图、schema、别名表、压缩决定）。证据经 `retrieval/compression.compress_evidence` 压缩（只保留原文连续片段，丢弃个人信息和图表标题）。
+- 适配器：`OpenAIResponsesScorer` / `OpenAICompatibleChatScorer` 提供 `score_core_envelope` 和 `score_core_group`，都会先 `preflight_core_request`；回包经 `decode_core_response` / `decode_core_group_response` 把别名映射回原 ID，再交给 `normalize_core_provider_response`。
+- 执行器：`execute_rule_plan` 用 `eligible_rule_groups` 找出可合并的互斥组；运行时声明 `supports_group_calls` 时调用 `llm_runtime.score_group`，否则逐条判断。判定先在副本上试算，被接受后才合并 occurrence 登记。组判定通过 `DecisionLedger` 按组身份复用；`ExecutionJournal`（引擎侧实现为 `RuleCallJournal`）记录复用和 `group_call_id`，持久化时写入 `rule_scoring_tasks.decision_reused` / `group_call_id`。
+- 预估：`usage_estimate.estimate_paper` 用 `plan_rule_order`、`eligible_rule_groups`、`group_decision_identity` 复现执行时的分组，并用 `request_input_estimate` 按视图计数。
+
+维护记录：2026-10-05 · 判断用视图、互斥组合并、证据压缩与论文概况卡：迁移 0033 增加 `rule_scoring_tasks.group_call_id`，head 不变；`core-semantic-provider@3`、`section-bm25-diverse@2`、`provider-view@1`、`evidence-compressor@1`、`paper-digest@1`，`llm_cache.PROMPT_VERSION=2026-10-05-1`。

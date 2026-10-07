@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import inspect
+import logging
 import math
 import re
 
@@ -18,7 +20,13 @@ from backend.app.services.rubric_import.extraction.structure_override import Str
 from backend.app.services.rubric_import.extraction.structure_override import normalize_override
 from backend.app.services.rubric_import.sources.xlsx_adapter import SheetView
 
-STRUCTURE_PROMPT_VERSION = "rubric-structure@1"
+from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
+from backend.app.services.llm.openai_compatible_adapter import ChatJSONOutputError
+from backend.app.services.llm.errors import ProviderCallError
+
+logger = logging.getLogger(__name__)
+STRUCTURE_PROMPT_VERSION = "rubric-structure@2"
+STRUCTURE_MAX_OUTPUT_TOKENS = 8192
 DEFAULT_BUDGET_CHARS = 24_000
 _NUMERIC_RE = re.compile(r"^\d+(?:\.\d+)?$")
 _ROW_RE = re.compile(r"^R(\d+)$")
@@ -187,7 +195,32 @@ def recognize_structure(sheets: list[SheetView], scorer, *, failure_codes, known
         if repair_code:
             instructions += f"\n上次输出未通过校验，错误码：{repair_code}。请修正后重新输出完整 JSON。"
         try:
-            raw = scorer.complete_json(instructions, request["payload"])
+            options = {}
+            if "default_max_tokens" in inspect.signature(scorer.complete_json).parameters:
+                options["default_max_tokens"] = STRUCTURE_MAX_OUTPUT_TOKENS
+            raw = scorer.complete_json(instructions, request["payload"], **options)
+        except (ResponsesJSONOutputError, ChatJSONOutputError) as exc:
+            logger.warning("rubric_structure_output_failed reason=%s attempt=%s", exc.reason, attempt + 1)
+            if exc.reason == "output_truncated":
+                raise StructureError("STRUCTURE_OUTPUT_TRUNCATED",
+                    "模型输出达到长度上限，结构 JSON 未生成完整；请提高连接的输出 Token 上限或缩小表格范围后重试。") from exc
+            if exc.reason == "error_envelope":
+                raise StructureError("AI_PROVIDER_ERROR", "AI 接口在成功状态中返回错误，请测试当前连接后重试。") from exc
+            repair_code = "STRUCTURE_OUTPUT_INVALID"
+            continue
+        except ProviderCallError as exc:
+            # Log controlled classification only, not vendor messages or uploaded text.
+            logger.warning("rubric_structure_provider_failed code=%s status=%s", exc.error.code, exc.error.http_status)
+            hints = {
+                "authentication_failed": "AI 连接鉴权失败，请检查 API Key 与地域是否匹配。",
+                "permission_denied": "AI 连接没有调用权限，请检查模型授权。",
+                "rate_limited": "AI 调用受到限流或额度限制，请检查平台额度后重试。",
+                "request_timeout": "AI 请求超时，请稍后重试或调整连接超时。",
+                "model_or_endpoint_not_found": "AI 模型或接口地址不存在，请检查连接配置。",
+                "invalid_request": "AI 接口拒绝了请求参数，请检查模型与协议兼容性。",
+            }
+            raise StructureError("AI_PROVIDER_ERROR", hints.get(exc.error.code,
+                "AI 请求失败，请测试当前连接后重试。")) from exc
         except Exception as exc:  # 传输/鉴权失败不在此层重试
             raise StructureError("AI_PROVIDER_ERROR", "AI 服务暂时不可用，请稍后重试。") from exc
         try:

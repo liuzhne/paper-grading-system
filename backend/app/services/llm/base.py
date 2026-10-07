@@ -212,7 +212,7 @@ def _provider_contract(scorer):
         "model_version": str(getattr(scorer, "model_version", "v1")),
         "sampling": {
             "temperature": _decimal_text(temperature),
-            "top_p": "1",
+            "top_p": _decimal_text(getattr(scorer, "top_p", 1)),
             "seed": None,
             "max_tokens": int(max_tokens),
         },

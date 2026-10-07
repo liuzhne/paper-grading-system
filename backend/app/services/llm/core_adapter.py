@@ -17,7 +17,9 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 
 
-CORE_PROVIDER_PROMPT_VERSION = "core-semantic-provider@2"
+# @3: provider-view@1 (judgment view, evidence aliases, verbatim compression,
+# paper digest, rule wording) and mutex-group requests.
+CORE_PROVIDER_PROMPT_VERSION = "core-semantic-provider@3"
 CORE_RESPONSE_SCHEMA = "atomic-rule-decisions@1"
 
 
@@ -88,7 +90,7 @@ def core_runtime_provider_contract(scorer, *, artifact_hash: str) -> dict:
         "model_version": model_version,
         "sampling": {
             "temperature": _decimal_text(temperature),
-            "top_p": "1",
+            "top_p": _decimal_text(getattr(scorer, "top_p", 1)),
             # Neither production adapter currently sends a seed.  Recording
             # zero here would claim reproducibility that the request lacks and
             # is rejected by the OpenAI Responses API.

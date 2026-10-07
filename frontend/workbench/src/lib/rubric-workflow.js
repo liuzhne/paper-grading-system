@@ -1,4 +1,9 @@
 /** State guards mirror the strict publication lifecycle; coverage is not validation. */
+export function isScoringCompletenessIssue(issue) {
+  return ["criterion_rules_missing", "criterion_numeric_scoring_missing", "rule_text_missing",
+    "deduct_rule_invalid", "band_levels_invalid", "llm_direct_not_publishable"].includes(issue.code);
+}
+
 export function compilationReady(execution, compilationId) {
   const active = execution?.active_compilation;
   return Boolean(active && active.id === compilationId &&

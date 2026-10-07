@@ -7,6 +7,8 @@ production thresholds and never authorizes the final Core default switch.
 
 from __future__ import annotations
 
+from collections import Counter
+from contextlib import nullcontext
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
@@ -34,7 +36,9 @@ from backend.app.db.models import RuleScoringTask
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import utcnow
+from backend.app.services.ai_connections import AIConnectionBindingError
 from backend.app.services.llm.errors import ProviderCallError
+from backend.app.services.scoring.decision_ledger import bypass_ledger_reads
 from backend.app.services.scoring.core.canonical import canonical_sha256
 
 
@@ -603,6 +607,12 @@ def _telemetry_for_run(session, run, *, latency_ms):
         hits, misses = _count_cache_observations(item.raw_model_output)
         cache_hits += hits
         cache_misses += misses
+    semantic_tasks = session.scalars(
+        select(RuleScoringTask).where(
+            RuleScoringTask.scoring_run_id == run.id,
+            RuleScoringTask.judge_type == "semantic",
+        )
+    ).all()
     return {
         "score_item_count": len(score_items),
         "invalid_evidence_count": sum(
@@ -618,6 +628,18 @@ def _telemetry_for_run(session, run, *, latency_ms):
         "manual_review": bool(run.need_manual_review),
         "cache_hits": cache_hits,
         "cache_misses": cache_misses,
+        # Rule decision ledger: replayed vs freshly judged semantic rules, and
+        # the provider usage this run actually paid for.
+        "decision_ledger_reused": sum(
+            1 for task in semantic_tasks if task.decision_reused
+        ),
+        "decision_ledger_judged": sum(
+            1
+            for task in semantic_tasks
+            if not task.decision_reused and task.status != "skipped"
+        ),
+        "prompt_tokens": int(run.prompt_tokens or 0),
+        "completion_tokens": int(run.completion_tokens or 0),
         "checker_failures": 0,
         "llm_failures": 0,
         "latency_ms": int(latency_ms),
@@ -666,12 +688,28 @@ def _incomplete_scoring_error(rule_tasks):
             failure_kind="llm",
         )
     if provider_codes:
-        code = sorted(provider_codes)[0]
-        return IncompleteScoringResultError(
-            code,
-            f"评分模型调用失败（{code}）；请检查模型连接后重试。",
-            failure_kind="llm",
-        )
+        # PROVIDER_CIRCUIT_OPEN is a consequence of earlier failures, never
+        # their cause.  Alphabetical order used to pick it over the real
+        # PROVIDER_INVALID_REQUEST and sent operators to check connectivity.
+        # Prefer the most frequent root-cause code; ties stay deterministic.
+        root_codes = [
+            code for code in provider_codes if code != "PROVIDER_CIRCUIT_OPEN"
+        ] or provider_codes
+        counts = Counter(root_codes)
+        code = min(counts, key=lambda value: (-counts[value], value))
+        if code == "TOKEN_BUDGET_EXCEEDED":
+            message = (
+                "本篇实际输入 token 已达到单篇上限（SCORING_MAX_INPUT_TOKENS_PER_PAPER），"
+                "其余规则未发送；调高上限后重试，已成功的规则会直接复用。"
+            )
+        elif code == "PROVIDER_OUTPUT_TRUNCATED":
+            message = (
+                "模型输出达到输出 token 上限被截断（推理模型的思考过程可能耗尽了额度）；"
+                "请调大该 AI 连接的 max_output_tokens 或关闭思考后重试。"
+            )
+        else:
+            message = f"评分模型调用失败（{code}）；请检查模型连接后重试。"
+        return IncompleteScoringResultError(code, message, failure_kind="llm")
     if failed:
         return IncompleteScoringResultError(
             "RULE_EXECUTION_FAILED",
@@ -728,10 +766,13 @@ def _default_score_item(session, *, paper_id, job_id):
             "telemetry": _telemetry_for_run(session, previous, latency_ms=0),
         }
     started = monotonic()
-    if previous is not None:
-        run = retry_score_paper(session, previous.id)
-    else:
-        run = score_paper(session, paper.id)
+    # Explicit rescoring must judge every rule again; ordinary first runs and
+    # failure retries reuse validated decisions from the rule decision ledger.
+    with bypass_ledger_reads() if job.rescore else nullcontext():
+        if previous is not None:
+            run = retry_score_paper(session, previous.id)
+        else:
+            run = score_paper(session, paper.id)
     if not _run_has_complete_scores(session, run):
         rule_tasks = session.scalars(
             select(RuleScoringTask).where(RuleScoringTask.scoring_run_id == run.id)
@@ -788,6 +829,9 @@ def _safe_failure_message(exc, code):
 
     if isinstance(exc, (IncompleteScoringResultError, ProviderCallError)):
         return str(exc)[:1000]
+    if isinstance(exc, AIConnectionBindingError):
+        changed = "密钥" if exc.code == "AI_CONNECTION_KEY_CHANGED" else "配置"
+        return f"评分任务创建后，绑定的 AI 连接{changed}已变更；请重新创建评分任务后再评分。"
     exception_type = type(exc).__name__
     return f"评分执行失败（{code}; exception_type={exception_type}）"
 
