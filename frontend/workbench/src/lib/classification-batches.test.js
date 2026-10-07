@@ -20,15 +20,55 @@ describe('AI 归类有限并发', () => {
     expect(sent.flat()).toEqual(ids);
     expect(sent.map(b => b.length)).toEqual([3,3,3,3,1]);
   });
-  it('失败停止新批次，但等待已发请求完成并保留成功结果', async () => {
+  it('单批内容级失败只记入失败，其它批次继续，全部单元都会送出', async () => {
     const pending=[], onProgress=vi.fn(), onResult=vi.fn();
     const request=vi.fn(batch => new Promise(resolve => pending.push(result => resolve(result || success(batch)))));
     const run=classifyInBatches(ids,{request,onProgress,onResult});
-    pending[0]({results:[],failed_unit_ids:['0']}); await tick();
+    pending[0]({results:[],failed_unit_ids:['0','1','2'],rejected:['0','1','2'].map(unit_id => ({unit_id,error:'invalid_json'}))}); await tick();
+    expect(request).toHaveBeenCalledTimes(4);
+    for (let i = 1; i < 5; i++) { pending[i](); await tick(); }
+    const summary = await run;
+    expect(request.mock.calls.flatMap(([batch]) => batch)).toEqual(ids);
+    expect(summary).toEqual({completed:10,failed:3,total:13,stopped:null});
+    expect(onProgress).toHaveBeenLastCalledWith({completed:10,failed:3,total:13,running:false,stopped:null});
+  });
+  it('连续两批内容级失败视为模型不可用：停止新批次，但等待已发请求完成并保留成功结果', async () => {
+    const pending=[], onProgress=vi.fn(), onResult=vi.fn();
+    const bad = batch => ({results:[],failed_unit_ids:batch,rejected:batch.map(unit_id => ({unit_id,error:'invalid_json'}))});
+    const request=vi.fn(batch => new Promise(resolve => pending.push(result => resolve(result || success(batch)))));
+    const run=classifyInBatches(ids,{request,onProgress,onResult});
+    pending[0](bad(['0','1','2'])); await tick();
+    pending[1](bad(['3','4','5'])); await tick();
+    expect(request).toHaveBeenCalledTimes(4);
+    pending[2](); pending[3](); const summary = await run;
+    expect(onResult).toHaveBeenCalledTimes(4);
+    expect(summary).toEqual({completed:6,failed:6,total:13,stopped:'repeated'});
+    expect(onProgress).toHaveBeenLastCalledWith({completed:6,failed:6,total:13,running:false,stopped:'repeated'});
+  });
+  it('成功批次清零连续失败计数', async () => {
+    const bad = batch => ({results:[],failed_unit_ids:batch,rejected:batch.map(unit_id => ({unit_id,error:'output_truncated'}))});
+    let call = 0;
+    // 失败、成功交替：从未连续两批失败，所以全部送完。
+    const summary = await classifyInBatches(ids,{request: async batch => (++call % 2 ? bad(batch) : success(batch)),onProgress:vi.fn(),onResult:vi.fn()});
+    expect(call).toBe(5);
+    expect(summary.stopped).toBeNull();
+  });
+  it('回包里出现限流、鉴权、熔断等系统级错误码时立即停止派发', async () => {
+    const pending=[], onProgress=vi.fn();
+    const request=vi.fn(batch => new Promise(resolve => pending.push(result => resolve(result || success(batch)))));
+    const run=classifyInBatches(ids,{request,onProgress,onResult:vi.fn()});
+    pending[0]({results:[],failed_unit_ids:['0','1','2'],rejected:[{unit_id:'0',error:'rate_limited'},{unit_id:'1',error:'rate_limited'},{unit_id:'2',error:'rate_limited'}]}); await tick();
     expect(request).toHaveBeenCalledTimes(3);
-    pending[1](); pending[2](); await run;
-    expect(onResult).toHaveBeenCalledTimes(3);
-    expect(onProgress).toHaveBeenLastCalledWith({completed:6,total:13,running:false});
+    pending[1](); pending[2](); const summary = await run;
+    expect(summary).toEqual({completed:6,failed:3,total:13,stopped:'provider'});
+  });
+  it('累计视图里其它单元的旧错误码不影响本批判断', async () => {
+    const request=vi.fn(async batch => batch[0] === '0'
+      ? {results:[],failed_unit_ids:batch,rejected:[{unit_id:'old',error:'rate_limited'},...batch.map(unit_id => ({unit_id,error:'invalid_json'}))]}
+      : success(batch));
+    const summary = await classifyInBatches(ids,{request,onProgress:vi.fn(),onResult:vi.fn()});
+    expect(request).toHaveBeenCalledTimes(5);
+    expect(summary).toEqual({completed:10,failed:3,total:13,stopped:null});
   });
   it('HTTP 异常也等待在途请求，最终抛出错误', async () => {
     let finish;

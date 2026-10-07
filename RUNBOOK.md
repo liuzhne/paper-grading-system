@@ -1520,3 +1520,22 @@ npm --prefix frontend/workbench run test:unit -- src/lib/score-jobs.test.js src/
 - **迁移报 `tenant/user postgres.<ref> not found`**：报错看起来像连接串或密码错了，真正原因是 Supabase 项目闲置被暂停（INACTIVE）。在 Supabase 控制台恢复项目，等到 ACTIVE_HEALTHY（约 3–5 分钟）再从试运行重来；不要去改 `MIGRATION_DATABASE_URL`。
 
 维护记录：2026-10-07 · token 压缩发布与 QWK 豁免：新增先迁移后合并的原因、新代码上线的判断方法、0032 的影响、Supabase 暂停导致迁移报 tenant not found 的排查，以及浏览器验收拦下部署的排查。
+
+### 2026-10-07 AI 归类跑到一半停下
+
+排错：
+- **现象**：“用 AI 给出归类建议（60 条）”只得到十几条，提示“本轮已停止”，下方显示“模型未返回有效 JSON”，失败条数是 3 的倍数。
+  - 报错指向：模型输出不合格，看起来像整个连接不可用。
+  - 真正原因：通常只有一批（3 条）的输出两次都解析失败，旧调度器遇到任何失败就停。新版只在系统级错误（限流、鉴权、超时、熔断、请求报错）或连续两批失败时停止，单批失败会继续跑其它批次。
+  - 如果新版仍然频繁“连续两批没有拿到有效结果”：看连接的模型。`openrouter/free` 每次请求随机路由到不同的免费模型，JSON 遵从度不稳定，换成固定的、支持结构化输出的模型。
+- **续跑**：停下后直接再点主按钮。未勾选时它会跳过已有有效建议的条目（按钮显示“继续为剩余 N 条…”），不会重复付费；失败的条目也可以用“重试失败或未返回内容”单独重试。要重新判断已有建议的条目，先勾选它们。
+
+验证：
+
+```bash
+npm --prefix frontend/workbench run test:unit -- src/lib/classification-batches.test.js src/components/SourceReviewPanel.test.js
+```
+
+发布：纯前端改动，重建 `public/` 后走现有 CI；无后端、提示词或迁移变化。回滚：revert 本次提交并重建静态产物。
+
+维护记录：2026-10-07 · AI 归类续跑：新增“跑到一半停下”的排查、续跑方法与验证命令。

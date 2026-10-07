@@ -108,3 +108,41 @@ it('父组件可以通过 v-model:filter 直接打开疑似规则筛选', async 
   expect(w.props('filter')).toBe('pending');
   expect(w.findAll('.paragraph-row')).toHaveLength(2);
 });
+
+it('未勾选时跳过已有有效建议的单元，作为「继续剩余」入口；勾选后照勾选重新判断', async () => {
+  const w = setup();
+  const button = w.get('[data-test=classify]');
+  expect(button.text()).toBe('继续为剩余 1 条给出归类建议');
+  expect(w.get('[data-test=classify-skipped]').text()).toContain('已有建议的 1 条不再重复调用');
+  await button.trigger('click');
+  expect(w.emitted('classify')[0][0].unitIds).toEqual(['docx:p[2]']);
+  await w.find('input[type=checkbox]').setValue(true);
+  expect(w.get('[data-test=classify]').text()).toBe('用 AI 给出归类建议（1 条）');
+  expect(w.find('[data-test=classify-skipped]').exists()).toBe(false);
+  await w.get('[data-test=classify]').trigger('click');
+  expect(w.emitted('classify')[1][0].unitIds).toEqual(['docx:p[1]']);
+  // 建议过期后不再算「已有建议」，全部重新送出。
+  await w.find('input[type=checkbox]').setValue(false);
+  await w.setProps({ state:{ ...state, unit_classifications:{ ...state.unit_classifications, stale:true } } });
+  expect(w.get('[data-test=classify]').text()).toBe('用 AI 给出归类建议（2 条）');
+});
+
+it('全部单元都已有建议时，未勾选不能再次整轮调用', () => {
+  const results = units.map(u => ({ unit_id:u.unit_id, label:'requirement', confidence:'medium', suggested_criterion:'C1', reason:'要求' }));
+  const w = setup({ state:{ ...state, unit_classifications:{ stale:false, results } } });
+  expect(w.get('[data-test=classify]').text()).toBe('均已有 AI 建议');
+  expect(w.get('[data-test=classify]').attributes('disabled')).toBeDefined();
+});
+
+it('进度按停止原因说明：单批失败继续、连续失败或厂商出错才停止', async () => {
+  const w = setup({ progress:{ completed:9, failed:3, total:60, running:true, stopped:null } });
+  expect(w.text()).toContain('已有 3 条未获得建议，其余批次继续');
+  await w.setProps({ progress:{ completed:57, failed:3, total:60, running:false, stopped:null } });
+  expect(w.text()).toContain('本轮处理完成，3 条未获得建议，可重试失败内容');
+  await w.setProps({ progress:{ completed:15, failed:6, total:60, running:false, stopped:'repeated' } });
+  expect(w.text()).toContain('连续两批都没有拿到有效结果，本轮已停止');
+  await w.setProps({ progress:{ completed:15, failed:3, total:60, running:false, stopped:'provider' } });
+  expect(w.text()).toContain('模型服务出错，本轮已停止');
+  await w.setProps({ progress:{ completed:60, failed:0, total:60, running:false, stopped:null } });
+  expect(w.text()).toContain('本轮处理完成。');
+});

@@ -999,3 +999,13 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 生产库 head 升为 `0033_rule_decision_ledger`。模块边界、调用链与数据流和 2026-10-05 两条记录一致，本次发布没有结构变化。
 
 维护记录：2026-10-07 · token 压缩发布与 QWK 豁免：无结构变化，生产库 head 升为 `0033_rule_decision_ledger`；只更新了浏览器验收用例。
+
+### 2026-10-07 AI 归类：失败分类与续跑范围
+
+`classifyInBatches` 仍是最多 3 路、每批 3 条，变化在于停止条件和返回值：
+- 每批回包的缺失单元按错误码分类：错误码都在 `CONTENT_FAILURES` 内，就记入 `failed` 并继续；出现其它错误码，或请求本身抛错，就停止派发新批次；连续 `CONTENT_FAILURE_STREAK_LIMIT`（2）批内容级失败也停止。
+- 进度与返回值从 `{completed,total,running}` 扩为 `{completed,failed,total,running,stopped}`，其中 `stopped` 取 `null | 'repeated' | 'provider' | 'request'`。
+
+`SourceReviewPanel` 的送出范围从 `classifyScope`（勾选项，或当前筛选下的待处理项）改为 `classifyTargets`：未勾选时排除 `suggestionFor` 能返回有效建议的单元，勾选时不变。批量采纳仍使用 `classifyScope`。后端端点、结果合并与指纹不变。
+
+维护记录：2026-10-07 · AI 归类续跑：只改前端调度与送出范围；后端、提示词版本与迁移不变。
