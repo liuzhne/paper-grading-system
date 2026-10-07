@@ -22,7 +22,7 @@ sys.stdout.buffer.write(out.getvalue())
 test("确定性解析停在临时会话；换算、原文预览和重新上传均需用户确认", async ({ page }) => {
   const name = `临时导入会话-${Date.now()}`;
   await page.goto("/workbench/rubrics");
-  await page.getByRole("button", { name: "导入评分模板", exact: true }).click();
+  await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
   const panel = page.locator(".import-panel");
   await panel.getByLabel("标准名称", { exact: true }).fill(name);
   await panel.getByLabel("评分表", { exact: true }).setInputFiles({

@@ -44,6 +44,8 @@ test("确认后返回第一步仍为原型工作区，保存成功才进入评�
   await page.screenshot({ path: test.info().outputPath("rubric-step-one-mobile.png"), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 720 });
 
+  // 已保存标准的基本信息默认收起，先展开再改名。
+  await workspace.getByRole("button", { name: "编辑基本信息", exact: true }).click();
   await workspace.getByLabel("标准名称", { exact: true }).fill(`${name}-修改`);
   // 保存失败必须保留输入，不能跳到下一步。
   await page.route(`**/rubrics/${rubricId}/recompile`, route => route.fulfill({

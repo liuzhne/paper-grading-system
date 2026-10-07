@@ -993,3 +993,9 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 - 预估：`usage_estimate.estimate_paper` 用 `plan_rule_order`、`eligible_rule_groups`、`group_decision_identity` 复现执行时的分组，并用 `request_input_estimate` 按视图计数。
 
 维护记录：2026-10-05 · 判断用视图、互斥组合并、证据压缩与论文概况卡：迁移 0033 增加 `rule_scoring_tasks.group_call_id`，head 不变；`core-semantic-provider@3`、`section-bm25-diverse@2`、`provider-view@1`、`evidence-compressor@1`、`paper-digest@1`，`llm_cache.PROMPT_VERSION=2026-10-05-1`。
+
+### 2026-10-07 token 压缩发布
+
+生产库 head 升为 `0033_rule_decision_ledger`。模块边界、调用链与数据流和 2026-10-05 两条记录一致，本次发布没有结构变化。
+
+维护记录：2026-10-07 · token 压缩发布与 QWK 豁免：无结构变化，生产库 head 升为 `0033_rule_decision_ledger`；只更新了浏览器验收用例。
