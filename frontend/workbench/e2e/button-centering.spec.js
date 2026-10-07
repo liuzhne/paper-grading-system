@@ -89,7 +89,7 @@ for (const [path, name] of PAGES) {
  */
 test("导入文件卡片的可见按钮按设计系统渲染并能选择文件", async ({ page }) => {
   await openSeedRubric(page);
-  await page.getByRole("button", { name: "导入评分模板" }).click();
+  await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
 
   const panel = page.locator(".import-panel");
   const input = panel.getByLabel("评分标准文档", { exact: true });
@@ -122,7 +122,7 @@ test("导入文件卡片的可见按钮按设计系统渲染并能选择文件",
 
 test("上传输入可用键盘到达与激活，焦点显示在可见文件卡片上", async ({ page }) => {
   await openSeedRubric(page);
-  await page.getByRole("button", { name: "导入评分模板" }).click();
+  await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
 
   const panel = page.locator(".import-panel");
   for (const name of ["评分标准文档", "评分表"]) {

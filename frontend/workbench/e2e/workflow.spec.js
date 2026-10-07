@@ -338,7 +338,8 @@ test.describe("V09 评分标准", () => {
     const row = page.locator(".criteria-nav .lib-item", { hasText: "研究方法与技术方案" });
     await expect(row).toContainText("原文");
     await expect(row).toContainText("AI");
-    await expect(row).toContainText("待确认");
+    // 缺少完整计分细则是阻断项，导航先显示它，规则确认状态汇总在页脚。
+    await expect(row).toContainText("缺少完整计分细则");
   });
 });
 
@@ -417,14 +418,19 @@ test.describe("V3-1 评分标准导入", () => {
   test("列表页有导入入口，且没有空白新建", async ({ page }) => {
     await openSeedRubric(page);
 
-    await expect(page.getByRole("button", { name: "导入评分模板" })).toBeVisible();
-    // D-026：标准只能由导入产生。留一个「新建」按钮会让人建出没有模板溯源的标准。
-    await expect(page.getByRole("button", { name: /新建评分标准/ })).toHaveCount(0);
+    // D-026：标准只能由导入产生。入口叫「新建评分标准」，打开的必须是导入面板，
+    // 不能直接建出没有模板溯源的空白标准。
+    const entry = page.getByRole("button", { name: "新建评分标准", exact: true });
+    await expect(entry).toBeVisible();
+    await entry.click();
+    const panel = page.locator(".import-panel");
+    await expect(panel.getByLabel(/评分标准文档/)).toBeVisible();
+    await expect(panel.getByLabel("评分表", { exact: true })).toBeVisible();
   });
 
   test("导入面板提供 Word 与 Excel 两个上传框，并说明可见范围", async ({ page }) => {
     await openSeedRubric(page);
-    await page.getByRole("button", { name: "导入评分模板" }).click();
+    await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
 
     await expect(page.getByLabel(/评分标准文档/)).toBeVisible();
     await expect(page.getByLabel("评分表", { exact: true })).toBeVisible();
@@ -434,7 +440,7 @@ test.describe("V3-1 评分标准导入", () => {
 
   test("Word 与 Excel 都不是必填，至少上传一份由提交时校验", async ({ page }) => {
     await openSeedRubric(page);
-    await page.getByRole("button", { name: "导入评分模板" }).click();
+    await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
 
     // 解析重构方案 §4.2：只上传 Word 或只上传 Excel 都可以导入。
     const template = page.getByLabel(/评分标准文档/);
@@ -470,8 +476,12 @@ test.describe("V3-4 新建任务入口", () => {
   test("平台已配模型时不强制选连接", async ({ page }) => {
     await page.goto("/workbench/tasks/new");
 
-    // 非鉴权后端走环境变量，等同「平台有模型」，不该出现连接必选区。
-    await expect(page.getByRole("heading", { name: "AI 连接" })).toHaveCount(0);
+    // 非鉴权后端走环境变量，等同「平台有模型」。D-027：连接区只展示本任务用哪个模型，
+    // 启停统一在账户页；这里不能要求用户选择，也不该提示缺少连接。
+    const select = page.getByLabel(/本任务使用的连接/);
+    await expect(select).toBeDisabled();
+    await expect(select.locator("option").first()).toHaveText("平台默认模型");
+    await expect(page.getByText(/未启用个人连接/)).toHaveCount(0);
   });
 });
 
@@ -488,11 +498,13 @@ test.describe("V3-2 AI 起草缺失细则", () => {
     await expect(button).toBeDisabled();
   });
 
-  test("说明 AI 只补缺失部分，用户原文保留", async ({ page }) => {
+  test("说明 AI 建议须人工核对后才应用", async ({ page }) => {
     await openSeedRubric(page);
     await page.getByRole("button", { name: "2 评分规则", exact: true }).click();
 
-    await expect(page.getByText(/AI 只补缺失部分/)).toBeVisible();
+    // 「保留原文、单条应用不覆盖」的行为由 rubric-review.spec.js 端到端验证；
+    // 这里只确认界面向用户说明了 AI 建议不会自动生效。
+    await expect(page.getByText(/AI 建议须人工核对后应用与确认/)).toBeVisible();
   });
 });
 

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 /**
  * 解析台账与第一级门禁（解析重构方案 §8）：
- * 未识别的疑似规则在第 1 步处理，处理前不能进入规则拆分；
+ * 未识别的疑似规则在第 2 步「待归类原文」处理，处理前不能进入校验与发布；
  * 只上传 Word 也能导入；第 3 步提供可跳过的规则审查。合成数据，不含真实 PII。
  */
 const root = resolve(process.cwd(), "../..");
@@ -21,7 +21,7 @@ const wordRules = build("fx.rules_docx()");
 async function importFiles(page, files) {
   const name = `解析台账合成模板-${Date.now()}`;
   await page.goto("/workbench/rubrics");
-  await page.getByRole("button", { name: "导入评分模板", exact: true }).click();
+  await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
   const panel = page.locator(".import-panel");
   await panel.getByLabel("标准名称", { exact: true }).fill(name);
   if (files.word) await panel.getByLabel(/评分标准文档/).setInputFiles({ name: "rules.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", buffer: files.word });
@@ -39,33 +39,37 @@ async function importFiles(page, files) {
   return { id: (await confirmResponse.json()).rubric.id, name };
 }
 
-test("未识别的疑似规则和 AI 结构辅助在第 1 步处理，第二步只处理评分规则", async ({ page, request }) => {
-  const { id } = await importFiles(page, { excel: blockingWorkbook });
+// 09-29 分步改造：第 1 步只核对评分项；未归入的原文在第 2 步「待归类原文」里处理。
+async function saveStepOne(page) {
   const steps = page.getByRole("navigation", { name: "评分标准编辑步骤" });
   await expect(steps.getByRole("button", { name: /基本信息与评分项/ })).toHaveAttribute("aria-current", "step");
-  const coveragePanel = page.locator("[data-test=parse-coverage]");
-  await expect(coveragePanel).toBeVisible();
-  await expect(coveragePanel).toContainText("还有 1 条疑似规则、0 个冲突未处理");
-  await expect(coveragePanel).toContainText("错别字每处扣1分");
-  await expect(coveragePanel).toContainText("AI 结构辅助");
+  await expect(page.locator(".source-review")).toHaveCount(0);
+  await page.locator("[data-test=rubric-import-workspace]").getByRole("button", { name: "保存评分项，下一步", exact: true }).click();
+  await expect(steps.getByRole("button", { name: /评分规则/ })).toHaveAttribute("aria-current", "step");
+  return steps;
+}
 
-  await steps.getByRole("button", { name: /评分规则/ }).click();
-  await expect(coveragePanel).toBeVisible();
-  await expect(steps.getByRole("button", { name: /基本信息与评分项/ })).toHaveAttribute("aria-current", "step");
+test("未识别的疑似规则在第 2 步待归类原文中处理，处理前不能进入校验与发布", async ({ page, request }) => {
+  const { id } = await importFiles(page, { excel: blockingWorkbook });
+  const steps = await saveStepOne(page);
+  const ruleBlocker = page.locator("[data-test=step-two-blockers]").getByRole("button", { name: "待归类 · 1 条疑似规则", exact: true });
+  await expect(ruleBlocker).toBeVisible();
 
-  const row = coveragePanel.locator("[data-test='unit-xlsx:评分规则!R4C4']");
-  await row.getByRole("button", { name: "不是规则", exact: true }).click();
-  await expect(coveragePanel).toContainText("原文中的疑似规则已全部处理");
+  await page.getByRole("button", { name: "前往校验与发布", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "请先处理疑似规则" })).toBeVisible();
+  await expect(steps.getByRole("button", { name: /评分规则/ })).toHaveAttribute("aria-current", "step");
+
+  await ruleBlocker.click();
+  await expect(page.getByRole("tab", { name: "疑似规则", exact: true })).toHaveAttribute("aria-selected", "true");
+  const context = page.locator(".source-review .context-panel");
+  await expect(context).toContainText("错别字每处扣1分");
+  await context.getByRole("button", { name: /^不是规则/ }).click();
+  await expect(ruleBlocker).toHaveCount(0);
   const state = await (await request.get(`/api/rubrics/${id}/parse-coverage`)).json();
   expect(state.coverage.blocking_count).toBe(0);
-
-  await steps.getByRole("button", { name: /评分规则/ }).click();
-  await expect(coveragePanel).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "AI 规则拆分与细则完整度" })).toBeVisible();
-  await expect(page.locator("[data-test=rule-review-panel]")).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("rubric-parse-gate.png"), fullPage: true });
 
-  await page.getByRole("button", { name: "前往校验与发布" }).click();
+  await page.getByRole("button", { name: "前往校验与发布", exact: true }).click();
   const audit = page.locator("[data-test=rule-audit]");
   await audit.getByLabel("审查范围").selectOption("all");
   await audit.getByRole("button", { name: "估算审查规模" }).click();
@@ -74,14 +78,15 @@ test("未识别的疑似规则和 AI 结构辅助在第 1 步处理，第二步�
 
 test("只上传 Word 也能导入；没有扣分规则时审查如实说明", async ({ page }) => {
   await importFiles(page, { word: wordRules });
-  const coveragePanel = page.locator("[data-test=parse-coverage]");
-  await expect(coveragePanel).toContainText("迟交一天扣5分");
-  await expect(coveragePanel.locator("[data-test=batch-not-rule]")).toBeDisabled();
-  await coveragePanel.locator("input[type=checkbox]").first().check();
-  await coveragePanel.locator("[data-test=batch-not-rule]").click();
-  await expect(coveragePanel).toContainText("原文中的疑似规则已全部处理");
-  await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
-  await page.getByRole("button", { name: "前往校验与发布" }).click();
+  await saveStepOne(page);
+  await page.locator("[data-test=step-two-blockers]").getByRole("button", { name: /^待归类 · \d+ 条疑似规则$/ }).click();
+  const review = page.locator(".source-review");
+  await expect(review.locator(".paragraph-list")).toContainText("迟交一天扣5分");
+  await expect(review.locator("[data-test=batch-not-rule]")).toHaveCount(0);
+  await review.locator(".paragraph-list input[type=checkbox]").first().check();
+  await review.locator("[data-test=batch-not-rule]").click();
+  await expect(page.locator("[data-test=step-two-blockers]").getByRole("button", { name: /条疑似规则$/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "前往校验与发布", exact: true }).click();
   const audit = page.locator("[data-test=rule-audit]");
   await expect(audit).toContainText("发布时会记录“未经审查即发布”");
   await audit.getByLabel("审查范围").selectOption("all");

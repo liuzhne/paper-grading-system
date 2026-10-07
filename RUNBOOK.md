@@ -224,6 +224,7 @@ export LANGFUSE_RELEASE=<deployment-commit>
 | 登录后资源 404 | 当前 organization、member role、资源 organization_id | 以组织隔离为准核对身份；不要改成 403 泄露资源存在性，也不要移除过滤 |
 | LLM 自检失败 | provider、base URL、模型名、Key、timeout、离线模式、BYOK snapshot | 先用 Mock 确认管线；本地模型检查进程；云模型检查批准的 endpoint。受保护批次连接变更后重建任务 |
 | 规则显示 `CONTEXT_LENGTH_EXCEEDED` / `TOKEN_BUDGET_UNSATISFIABLE` | PromptEnvelope schema、selection/budget identity、context window、输出预留、完整 EvidenceUnit 大小 | 保持 V4，检查规则 coverage 与证据块粒度；不要退回发送全文或截断引用。必需规则转人工复核 |
+| 生产迁移工作流报 `tenant/user postgres.<ref> not found` | Supabase 项目状态（控制台或 `get_project`） | 不是连接串或密码错误：免费项目闲置会被暂停（INACTIVE）。恢复项目并等到 ACTIVE_HEALTHY 后，从试运行重来；不要改 `MIGRATION_DATABASE_URL` |
 | 多个规则出现 429/498/5xx 或 `PROVIDER_CIRCUIT_OPEN` | AI connection、service tier、批并发、熔断阈值、Provider 状态 | 暂停新批次并降低外层并发；遵守 Retry-After。401/403 先重认证连接；实例重启只清进程内 circuit，不代表故障已恢复 |
 | 评分返回部分结果但总分/等级为空 | `RuleScoringTask` failed/review_required 与 open/claimed blocking `ManualReviewTask` | 这是 fail-closed 预期；由授权教师领取并依据冻结原文解决，不要用普通整体复核强行发布总分 |
 | 结果意外来自 Mock | `LLM_PROVIDER`、`LLM_FALLBACK_TO_MOCK`、集成状态 | 正式评估设 fallback=false；检查日志中的 provider identity，不要把 Mock 结果当质量证据 |
@@ -1237,7 +1238,7 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js
   - 真正原因：筛选状态现在由 `RubricsView` 持有，可能还停在上次选的「已处理」等筛选。正常情况下离开原文视图时会重置为「待处理」；如果重置失效，先查 `watch(sourceMode)`，不要查后端。
 - **现象**：Playwright 全量有 11 项失败，都在找「导入评分模板」按钮、第 1 步可编辑的「标准名称」、「AI 只补缺失部分」文案，或导航里的「待确认」。
   - 报错指向：按钮或文字找不到，看起来像界面回归。
-  - 真正原因：这些用例写于 09-29 分步改造之前，改造删除或移动了这些入口，用例没有更新，不是本轮改动引起的。修用例时对照当前流程（「新建评分标准」「模板库」、先点「编辑基本信息」），不要为了让旧用例通过去恢复旧界面。
+  - 真正原因：这些用例写于 09-29 分步改造之前，改造删除或移动了这些入口，用例没有更新，不是本轮改动引起的。修用例时对照当前流程（「新建评分标准」「模板库」、先点「编辑基本信息」），不要为了让旧用例通过去恢复旧界面。（2026-10-07 已按当前流程更新这些用例。）
 
 验证：
 
@@ -1507,3 +1508,15 @@ npm --prefix frontend/workbench run test:unit -- src/lib/score-jobs.test.js src/
 发布：没有新增迁移；0033 增加了 `rule_scoring_tasks.group_call_id`（0033 尚未发布）。只有生产或本地已经跑过旧版 0033 时，才需要先降级到 0032 再升级。改动会让评分结果变化，发布前需要按 §15 用 QWK 留出集重新锚定（需要真实模型，先取得授权和 token 预算）。
 
 维护记录：2026-10-05 · 判断用视图与互斥组合并：新增证据范围配置、视图查看方法、满分 / 未合并 / 引用不合法的排查。
+
+### 2026-10-07 发布 0031–0033
+
+- **先迁移、后合并**：`deploy-vercel-production` 在 main 门禁通过后自动部署，不检查数据库 head。合并早于迁移时，新代码会访问还不存在的列（如 `rule_scoring_tasks.decision_reused`）而报错。
+- **判断新代码是否已上线**：未登录访问 `/api/batches/<任意 id>/score-estimate`。404 是旧代码（路由不存在）；401 是新代码（路由存在，被鉴权守卫拦下）。
+- **0032 会停用多余的 AI 连接**：同一 owner + 组织只保留一个启用的连接（最近验证过的优先）。迁移后到设置页确认在用的连接仍是启用状态。
+- **现象**：main CI 只有 frontend-workbench 的浏览器验收失败，`deploy-vercel-production` 显示跳过，线上新路由仍是 404。
+  - 报错指向：找不到「导入评分模板」按钮、「标准名称」不可编辑等，看起来像界面回归。
+  - 真正原因：用例落后于 09-29 分步改造（见 09-29 条目）；发布前本地只跑单元测试和类型检查发现不了。发布前必须本地跑一次 `npm --prefix frontend/workbench run test:e2e` 全量。
+- **迁移报 `tenant/user postgres.<ref> not found`**：报错看起来像连接串或密码错了，真正原因是 Supabase 项目闲置被暂停（INACTIVE）。在 Supabase 控制台恢复项目，等到 ACTIVE_HEALTHY（约 3–5 分钟）再从试运行重来；不要去改 `MIGRATION_DATABASE_URL`。
+
+维护记录：2026-10-07 · token 压缩发布与 QWK 豁免：新增先迁移后合并的原因、新代码上线的判断方法、0032 的影响、Supabase 暂停导致迁移报 tenant not found 的排查，以及浏览器验收拦下部署的排查。
