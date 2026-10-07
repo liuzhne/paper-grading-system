@@ -84,6 +84,21 @@ function keydown(event) {
 const classification = computed(() => props.state?.unit_classifications);
 const retryIds = computed(() => [...new Set([...(classification.value?.failed_unit_ids || []), ...(classification.value?.unclassified_unit_ids || [])])].filter(id => pending.value.some(u => u.unit_id === id)));
 const classifyScope = computed(() => selected.value.size ? pending.value.filter(u => selected.value.has(u.unit_id)) : filtered.value.filter(u => u.pending));
+// 送去 AI 归类的范围：显式勾选时照勾选重新判断；否则跳过已有有效建议的单元，
+// 这样一轮中途停下后再点就是「继续剩余」，不会把已拿到建议的单元再付费跑一遍。
+const skippedSuggested = computed(() => selected.value.size ? 0 : classifyScope.value.filter(u => suggestionFor(props.state, u.unit_id)).length);
+const classifyTargets = computed(() => selected.value.size ? classifyScope.value : classifyScope.value.filter(u => !suggestionFor(props.state, u.unit_id)));
+const classifyLabel = computed(() => props.busy ? '正在处理…' : !skippedSuggested.value ? `用 AI 给出归类建议（${classifyTargets.value.length} 条）` : classifyTargets.value.length ? `继续为剩余 ${classifyTargets.value.length} 条给出归类建议` : '均已有 AI 建议');
+const progressNote = computed(() => {
+  const p = props.progress;
+  if (!p) return '';
+  const failedNote = p.failed ? `${p.failed} 条未获得建议` : '';
+  if (p.running) return `每批最多 3 条，最多 3 批并行处理中…${failedNote ? `已有 ${failedNote}，其余批次继续。` : ''}`;
+  if (p.stopped === 'repeated') return '连续两批都没有拿到有效结果，本轮已停止，以免继续消耗额度；已完成的建议已保留，可稍后继续处理剩余内容。';
+  if (p.stopped) return '模型服务出错，本轮已停止；已完成的建议已保留，可稍后继续处理剩余内容。';
+  if (p.completed + (p.failed || 0) < p.total) return '本轮已停止，已发出的批次处理完毕，剩余内容可继续处理。';
+  return failedNote ? `本轮处理完成，${failedNote}，可重试失败内容。` : '本轮处理完成。';
+});
 const failureLabels = { output_truncated: '模型输出达到长度上限，请检查连接的输出 token 配置', invalid_json: '模型未返回有效 JSON', invalid_output: '模型返回格式不完整', error_envelope: '模型服务返回错误', provider_error: '模型调用失败，请测试当前连接', request_timeout: '模型响应超时，本轮已停止；已完成的建议已保留，可缩小选择范围后重试', authentication_failed: 'API Key 验证失败，请在账户与连接中检查密钥', permission_denied: '当前连接没有模型访问权限', model_or_endpoint_not_found: '模型或接口地址不存在，请检查连接配置', rate_limited: '模型调用受到限流，请稍后重试', network_error: '连接模型服务失败，请检查服务端网络', provider_unavailable: '模型服务暂不可用，请稍后重试', capacity_unavailable: '模型服务容量不足，请稍后重试', circuit_open: '模型服务连续失败，已暂停调用，请稍后重试', invalid_request: '模型请求参数不兼容，请检查连接协议与模型配置', context_length_exceeded: '输入超出模型上下文限制，请减少选中的内容', request_too_large: '请求内容过大，请减少选中的内容', unprocessable_request: '模型无法处理当前请求，请检查连接配置', conflict: '模型请求冲突，请稍后重试', canceled: '模型调用已取消', unknown: '模型调用出现未知错误，请测试当前连接', invalid_envelope: '模型返回格式不完整', incomplete_output: '模型未完成输出' };
 const failureMessages = computed(() => [...new Set((classification.value?.rejected || []).map(r => failureLabels[r.error]).filter(Boolean))]);
 const signalLabels = { comment: '文档批注', score: '分值表述', verb: '扣分或评分动词', normative: '规范要求', profile: '领域关键词' };
@@ -92,8 +107,8 @@ const signalLabels = { comment: '文档批注', score: '分值表述', verb: '�
 <section class="card source-review" tabindex="0" aria-label="原文识别校对工作区" @keydown="keydown">
   <div class="progress-summary"><span>已排除或作为上下文 {{ counts.excluded }} 个单元</span><span>已归入 {{ counts.assigned }} 个单元</span><strong>待处理 {{ pending.length }} 个单元</strong><button class="btn btn-sm" @click="filter = 'excluded'">查看已排除内容</button></div>
   <div class="progress-track" aria-hidden="true"><span v-for="(value,i) in [counts.excluded, counts.assigned, pending.length]" :key="i" :class="`segment-${i}`" :style="{flex: value}" /></div>
-  <div class="review-toolbar"><div class="filters" role="tablist" aria-label="原文处理状态"><button v-for="[value,label] in [['pending','待处理'],['blocking','疑似规则'],['requirements','疑似要求 / 其他'],['processed','已处理']]" :key="value" role="tab" :aria-selected="filter === value" :class="{ active: filter === value }" @click="filter = value">{{ label }} <span v-if="value === 'pending'">{{ pending.length }}</span></button></div><span class="faint">AI 连接：{{ connection ? `${connection.name} · ${connection.model_name}` : '未启用' }}</span><button class="btn btn-sm" data-test="classify" :disabled="locked || !connection || !classifyScope.length" @click="emit('classify', { unitIds: classifyScope.map(u => u.unit_id) })">{{ busy ? '正在处理…' : `用 AI 给出归类建议（${classifyScope.length} 条）` }}</button></div>
-  <p v-if="progress" class="review-help" role="status">本轮已获得 {{ progress.completed }} / {{ progress.total }} 条建议。{{ progress.running ? "每批最多 3 条，最多 3 批并行处理中…" : progress.completed < progress.total ? "本轮已停止，已发出的批次处理完毕，剩余内容可重新选择后重试。" : "本轮处理完成。" }}</p>
+  <div class="review-toolbar"><div class="filters" role="tablist" aria-label="原文处理状态"><button v-for="[value,label] in [['pending','待处理'],['blocking','疑似规则'],['requirements','疑似要求 / 其他'],['processed','已处理']]" :key="value" role="tab" :aria-selected="filter === value" :class="{ active: filter === value }" @click="filter = value">{{ label }} <span v-if="value === 'pending'">{{ pending.length }}</span></button></div><span class="faint">AI 连接：{{ connection ? `${connection.name} · ${connection.model_name}` : '未启用' }}</span><button class="btn btn-sm" data-test="classify" :disabled="locked || !connection || !classifyTargets.length" @click="emit('classify', { unitIds: classifyTargets.map(u => u.unit_id) })">{{ classifyLabel }}</button><span v-if="skippedSuggested" class="faint" data-test="classify-skipped">已有建议的 {{ skippedSuggested }} 条不再重复调用；需要重新判断时请先勾选。</span></div>
+  <p v-if="progress" class="review-help" role="status">本轮已获得 {{ progress.completed }} / {{ progress.total }} 条建议。{{ progressNote }}</p>
   <div v-if="classification && !classification.stale" class="classification-result" role="status"><span>当前归类结果：成功 {{ classification.results?.length || 0 }} 条 · 失败 {{ classification.failed_unit_ids?.length || 0 }} 条 · 未返回 {{ classification.unclassified_unit_ids?.length || 0 }} 条</span><p v-for="message in failureMessages" :key="message">{{ message }}</p><button v-if="retryIds.length" class="btn btn-sm" :disabled="locked || !connection" @click="emit('classify', { unitIds: retryIds })">重试失败或未返回内容（{{ retryIds.length }}）</button></div>
   <p class="review-help">疑似规则必须处理；其余未归入的内容不作为新增评分依据。AI 建议需由你确认采纳。</p>
   <p v-if="state?.unit_classifications?.stale" class="notice notice-warn">评分项已变化，之前的 AI 建议已过期，请重新判断。</p>
