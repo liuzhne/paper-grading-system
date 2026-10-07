@@ -6,6 +6,8 @@ from fastapi import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.services.ai_connections import active_connection_id
+
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
@@ -155,12 +157,15 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
     rubric_version = _resolve_batch_version(
         db, rubric, payload.rubric_version_id
     )
+    connection_id = payload.ai_connection_id or active_connection_id(
+        db, owner_id=user_id, organization_id=principal.organization_id or "",
+    )
     connection_snapshot = None
-    if payload.ai_connection_id is not None:
+    if connection_id is not None:
         try:
             connection_snapshot = connection_snapshot_for_owner(
                 db,
-                connection_id=payload.ai_connection_id,
+                connection_id=connection_id,
                 owner_id=user_id,
                 organization_id=principal.organization_id or "",
             )
@@ -174,7 +179,7 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
         paper_type=payload.paper_type,
         rubric_id=payload.rubric_id,
         rubric_version_id=(rubric_version.id if rubric_version else None),
-        ai_connection_id=payload.ai_connection_id,
+        ai_connection_id=connection_id,
         ai_connection_key_version=(
             connection_snapshot["key_version"] if connection_snapshot else None
         ),

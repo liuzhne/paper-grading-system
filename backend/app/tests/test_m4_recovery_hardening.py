@@ -348,7 +348,7 @@ def test_rebuild_projection_uses_current_atomic_rule_not_raw_parse_output(recove
 def test_clone_copies_only_signed_active_graph_not_superseded_history(recovery_db):
     session, actor, reviewer = recovery_db
     blocked = _initial_blocked(session, actor)
-    recovered = _recompile(session, actor, blocked)
+    recovered = _recompile(session, actor, blocked, mode="banded")
     compilation = session.get(models.RubricCompilation, recovered.compilation_id)
     rule = session.scalar(
         select(models.AtomicRule).where(

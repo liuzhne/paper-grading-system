@@ -73,7 +73,7 @@ def test_classify_accepts_valid_items_and_rejects_invalid_ones():
         {"unit_id": "r2", "label": "banana", "suggested_criterion": None, "reason": "x", "confidence": "high"},
         {"unit_id": "r1", "label": "noise", "suggested_criterion": None, "reason": "重复", "confidence": "low"},
     ]})
-    result = classify_units(units, CRITERIA, scorer)
+    result = classify_units(units, CRITERIA, scorer, batch_size=15)
     assert [(r["unit_id"], r["label"], r["needs_review"]) for r in result["results"]] == [
         ("r1", "rule", False), ("t3", "context", False)]
     assert {r["unit_id"]: r["error"] for r in result["rejected"]} == {
@@ -125,3 +125,52 @@ def test_fingerprint_changes_when_criteria_or_units_change():
     assert base == classification_fingerprint(units, CRITERIA)
     assert base != classification_fingerprint(units, [{**CRITERIA[0], "name": "研究设计"}])
     assert base != classification_fingerprint([{**units[0], "text": "扣2分"}], CRITERIA)
+
+
+def test_budget_and_safe_truncation_diagnostic():
+    from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
+
+    class Truncated:
+        provider = 'openai'
+        def complete_json(self, instructions, payload, *, default_max_tokens=None):
+            assert default_max_tokens == 8192
+            raise ResponsesJSONOutputError('output_truncated')
+
+    result = classify_units([{'unit_id': 'u', 'text': '合成', 'context': {}}], CRITERIA, Truncated())
+    assert result['failed_unit_ids'] == ['u']
+    assert result['rejected'] == [{'unit_id': 'u', 'error': 'output_truncated'}]
+
+
+def test_fingerprint_includes_description_and_context():
+    units = [{'unit_id': 'u', 'text': '合成', 'context': {'heading_path': ['一']}}]
+    base = classification_fingerprint(units, CRITERIA)
+    assert base != classification_fingerprint(units, [{**CRITERIA[0], 'description': '修改要求'}])
+    assert base != classification_fingerprint([{**units[0], 'context': {'heading_path': ['二']}}], CRITERIA)
+
+
+def test_small_batches_preserve_success_and_stop_on_timeout():
+    import httpx
+    from backend.app.services.llm.errors import ProviderCallError, project_provider_error
+
+    class SlowScorer:
+        provider = "openai"
+        calls = 0
+
+        def complete_json(self, instructions, payload, *, default_max_tokens=None, attempts_limit=None):
+            assert attempts_limit == 1
+            assert default_max_tokens == 8192
+            assert len(payload["units"]) <= 3
+            self.calls += 1
+            if self.calls == 2:
+                raise ProviderCallError("openai", project_provider_error(httpx.ReadTimeout("secret upstream text")))
+            return _label_all()(payload)
+
+    scorer = SlowScorer()
+    units = [{"unit_id": str(i), "text": "合成测试", "context": {}} for i in range(8)]
+    result = classify_units(units, CRITERIA, scorer)
+    assert scorer.calls == 2
+    assert [r["unit_id"] for r in result["results"]] == ["0", "1", "2"]
+    assert result["failed_unit_ids"] == ["3", "4", "5"]
+    assert result["unclassified_unit_ids"] == ["6", "7"]
+    assert {r["error"] for r in result["rejected"]} == {"request_timeout"}
+    assert "secret" not in str(result)

@@ -3,7 +3,9 @@ import pytest
 
 from backend.app.services.rubric_import.ai_rule_drafter import (
     AIRuleDraftValidationError,
+    AI_RULE_DRAFT_MAX_CONCURRENCY,
     AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
+    AI_RULE_DRAFT_TIMEOUT_SECONDS,
     draft_deduction_rules,
     validate_ai_rule_draft,
 )
@@ -674,9 +676,12 @@ def test_openai_responses_drafting_uses_same_schema_and_dedicated_budget():
                    "source_refs": ["/criterion/description"]}],
     }]}
 
+    options = []
+
     class Scorer(OpenAIResponsesScorer):
-        def _post_with_retry(self, body):
+        def _post_with_retry(self, body, **kwargs):
             calls.append(body)
+            options.append(kwargs)
             return httpx.Response(200, request=httpx.Request("POST", self.base_url),
                                   json={"output_text": json.dumps(value, ensure_ascii=False)})
 
@@ -688,6 +693,7 @@ def test_openai_responses_drafting_uses_same_schema_and_dedicated_budget():
     assert calls[0]["max_output_tokens"] == AI_RULE_DRAFT_MAX_OUTPUT_TOKENS
     assert calls[0]["text"]["format"]["type"] == "json_schema"
     assert calls[0]["text"]["format"]["strict"] is True
+    assert options[0] == {"attempts_limit": 1, "timeout_seconds": AI_RULE_DRAFT_TIMEOUT_SECONDS}
 
 
 @pytest.mark.parametrize("groups", [None, 4, {}, [4], [{"group_code": "G", "mutex_group": "M", "cap_points": 2, "rules": 4}]])
@@ -757,3 +763,173 @@ def test_nested_provider_error_fields_are_not_reflected():
     error = project_provider_error(caught.value)
     assert error.provider_error_code is None
     assert "secret" not in str(error.to_mapping())
+
+
+def _timeout_client(calls):
+    class Client:
+        def post(self, url, **kwargs):
+            calls.append(kwargs)
+            raise httpx.ReadTimeout("synthetic timeout")
+    return Client()
+
+
+def test_responses_drafting_timeout_is_one_attempt_with_draft_wait_and_one_breaker_failure(monkeypatch):
+    """百炼 Responses 连接：一次超时只等一轮、只计一次熔断，提示实际等待秒数。"""
+    from backend.app.core.config import settings
+    from backend.app.services.llm import rate_limit
+    from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
+    monkeypatch.setattr(settings, "OPENAI_MAX_RETRIES", 2)
+    rate_limit.reset_provider_runtime_for_tests()
+    calls = []
+    scorer = OpenAIResponsesScorer(api_key="test", base_url="https://example.invalid/v1", client=_timeout_client(calls))
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
+
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == AI_RULE_DRAFT_TIMEOUT_SECONDS
+    assert caught.value.code == "AI_DRAFT_PROVIDER_ERROR"
+    assert f"{AI_RULE_DRAFT_TIMEOUT_SECONDS} 秒" in caught.value.message
+    breaker = rate_limit._runtime(
+        (
+            scorer.provider,
+            rate_limit.provider_circuit_key(
+                None, base_url=scorer.base_url, model_name=scorer.model_name
+            ),
+        )
+    ).breaker.snapshot()
+    assert breaker["transient_failures"] == 1
+    assert breaker["state"] == "closed"
+    rate_limit.reset_provider_runtime_for_tests()
+
+
+def test_explicit_connection_timeout_wins_over_draft_default():
+    from backend.app.services.llm import rate_limit
+    from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
+    rate_limit.reset_provider_runtime_for_tests()
+    calls = []
+    scorer = OpenAIResponsesScorer(api_key="test", base_url="https://example.invalid/v1",
+                                   client=_timeout_client(calls), timeout_seconds=45)
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
+
+    assert len(calls) == 1
+    assert "timeout" not in calls[0]  # 使用连接自己的客户端超时
+    assert "45 秒" in caught.value.message
+    rate_limit.reset_provider_runtime_for_tests()
+
+
+def test_open_circuit_is_reported_as_a_pause_not_a_generic_failure():
+    from backend.app.services.llm.rate_limit import CircuitOpenError
+
+    class Scorer(_DraftScorer):
+        def complete_json(self, instructions, payload):
+            raise CircuitOpenError()
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(None), business_profile_key="thesis")
+
+    assert caught.value.code == "AI_DRAFT_PROVIDER_ERROR"
+    assert "暂停调用" in caught.value.message
+    assert "账户与连接" in caught.value.user_action
+
+
+def _batch_group(payload):
+    ref = payload["input_analysis"]["source_refs"][0]
+    index = payload["batch"]["index"]
+    return {"rule_groups": [{
+        "group_code": "G1", "issue": f"问题{index}", "mutex_group": "M1", "cap_points": 2,
+        "rules": [{"severity": "minor", "trigger": f"触发条件{index}", "points": 2,
+                   "reason": f"原因{index}", "repeat_policy": "once",
+                   "source": "ai_interpreted_user_text", "source_refs": [ref]}],
+    }]}
+
+
+def test_batches_run_with_bounded_concurrency_and_keep_batch_order():
+    import threading
+    import time
+
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+
+    class Scorer(_DraftScorer):
+        def complete_json(self, instructions, payload):
+            with lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            try:
+                # 后发的批次先返回，验证合并仍按批次顺序。
+                time.sleep(0.02 * (7 - payload["batch"]["index"]))
+                return _batch_group(payload)
+            finally:
+                with lock:
+                    state["active"] -= 1
+
+    rules = [f"要求{chr(64 + index)}表达不清" for index in range(1, 7)]
+    analysis = analyze_rule_input(rules, criterion_code="T02")
+    scorer = Scorer(None)
+
+    result = draft_deduction_rules(criterion=_criterion(deduction_rules=rules), input_analysis=analysis,
+                                   scorer=scorer, business_profile_key="thesis")
+
+    assert result["generation_metadata"]["batch_count"] == 6
+    assert state["peak"] == AI_RULE_DRAFT_MAX_CONCURRENCY
+    assert [group["issue"] for group in result["rule_groups"]] == [f"问题{index}" for index in range(1, 7)]
+
+
+def test_failed_batch_stops_new_batches_and_reports_the_first_failure():
+    import threading
+    from backend.app.services.llm.rate_limit import CircuitOpenError
+
+    release = threading.Event()
+    started = []
+
+    class Scorer(_DraftScorer):
+        def complete_json(self, instructions, payload):
+            index = payload["batch"]["index"]
+            started.append(index)
+            if index == 1:
+                raise CircuitOpenError()
+            release.wait(timeout=5)
+            return _batch_group(payload)
+
+    rules = [f"要求{chr(64 + index)}表达不清" for index in range(1, 7)]
+    analysis = analyze_rule_input(rules, criterion_code="T02")
+    timer = threading.Timer(0.2, release.set)
+    timer.start()
+    try:
+        with pytest.raises(AIRuleDraftValidationError) as caught:
+            draft_deduction_rules(criterion=_criterion(deduction_rules=rules), input_analysis=analysis,
+                                  scorer=Scorer(None), business_profile_key="thesis")
+    finally:
+        timer.cancel()
+        release.set()
+
+    assert "暂停调用" in caught.value.message
+    assert sorted(started) == [1, 2, 3]
+
+
+@pytest.mark.parametrize("failure,expected", [
+    (httpx.Response(429, request=httpx.Request("POST", "https://x.example/v1/responses")), "AI 服务限流，请求被拒绝（rate_limited，HTTP 429，等待"),
+    (httpx.Response(504, request=httpx.Request("POST", "https://x.example/v1/responses")), "AI 服务端出错或网关超时（provider_unavailable，HTTP 504，等待"),
+    (httpx.RemoteProtocolError("Server disconnected without sending a response."), "与 AI 服务的连接中断（network_error，等待"),
+])
+def test_provider_failures_name_the_safe_error_code_status_and_wait(failure, expected):
+    from backend.app.services.llm.errors import raise_provider_call_error
+
+    class Scorer(_DraftScorer):
+        def complete_json(self, instructions, payload):
+            if isinstance(failure, httpx.Response):
+                try:
+                    failure.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise_provider_call_error("openai_responses", exc)
+            raise_provider_call_error("openai_responses", failure)
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(None), business_profile_key="thesis")
+
+    assert caught.value.code == "AI_DRAFT_PROVIDER_ERROR"
+    assert caught.value.message.startswith(expected)
+    assert caught.value.message.endswith("秒后失败）。")

@@ -101,7 +101,7 @@ def test_merged_parent_name_is_reinterpreted_as_dimension():
     assert result.mapping == {"item_label": 0, "description": 2, "dimension": 1}
     assert [row.criterion.code for row in result.records] == ["T02", "T03", "T04", "T05"]
     assert [row.criterion.name for row in result.records] == [
-        "指导教师成绩项2", "指导教师成绩项3", "指导教师成绩项4", "指导教师成绩项5",
+        "分析与解决问题1", "分析与解决问题2", "分析与解决问题3", "分析与解决问题4",
     ]
     assert {row.criterion.dimension for row in result.records} == {"分析与解决问题"}
     assert [row.criterion.max_score for row in result.records] == [20.0, 20.0, 10.0, 10.0]

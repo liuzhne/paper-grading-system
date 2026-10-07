@@ -13,6 +13,7 @@ from backend.app.core.config import settings
 from backend.app.db import models
 from backend.app.services.document_parser.extractor import extract_document
 from backend.app.services.llm.factory import get_llm_scorer
+from backend.app.services.ai_connections import active_connection_id
 from backend.app.services.ai_connections import connection_snapshot_for_owner
 from backend.app.services.ai_connections import resolve_connection_runtime
 from backend.app.services.ai_connections import validate_outbound_base_url
@@ -91,12 +92,15 @@ def create_evaluation_batch(db, payload, *, creator_id: str, organization_id: st
         raise ResourceConflictError(str(exc)) from exc
     except ValueError as exc:
         raise ResourceConflictError(str(exc)) from exc
+    connection_id = payload.ai_connection_id or active_connection_id(
+        db, owner_id=creator_id, organization_id=organization_id or "",
+    )
     connection_snapshot = None
-    if payload.ai_connection_id is not None:
+    if connection_id is not None:
         try:
             connection_snapshot = connection_snapshot_for_owner(
                 db,
-                connection_id=payload.ai_connection_id,
+                connection_id=connection_id,
                 owner_id=creator_id,
                 organization_id=organization_id or "",
             )
@@ -108,7 +112,7 @@ def create_evaluation_batch(db, payload, *, creator_id: str, organization_id: st
         name=payload.name.strip(),
         rubric_id=rubric.id,
         rubric_version_id=version.id,
-        ai_connection_id=payload.ai_connection_id,
+        ai_connection_id=connection_id,
         ai_connection_key_version=(connection_snapshot["key_version"] if connection_snapshot else None),
         ai_connection_snapshot=connection_snapshot,
         business_profile_key=payload.business_profile_key,

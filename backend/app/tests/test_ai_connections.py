@@ -458,6 +458,8 @@ def test_draft_probe_uses_key_only_server_side_without_persisting_it(client, mon
         "provider_type": "openai_responses",
         "model_name": "gpt-4.1-mini",
         "status": "verified",
+        "detection": "manual",
+        "base_url": "https://api.openai.com/v1",
     }
     assert "secret-key" not in response.text
     with client.session_factory() as session:
@@ -571,3 +573,83 @@ def test_connection_probe_never_follows_provider_redirects(monkeypatch):
     )
     assert verify_connection_runtime(runtime)["provider_type"] == "openai_responses"
     assert captured["follow_redirects"] is False
+
+
+def test_single_active_connection_switch_rotation_and_probe(client, monkeypatch):
+    _login(client, monkeypatch, "single-active")
+    first = client.post("/api/ai-connections", json=_connection_payload("first")).json()
+    second = client.post("/api/ai-connections", json=_connection_payload("second")).json()
+    assert first["status"] == "active"
+    assert second["status"] == "disabled"
+    monkeypatch.setattr(
+        "backend.app.api.routes.ai_connections.verify_connection_runtime",
+        lambda runtime: {"provider_type": runtime.provider_type, "model_name": runtime.model_name},
+    )
+    assert client.post(f"/api/ai-connections/{second['id']}/test").status_code == 200
+    rotated = client.post(f"/api/ai-connections/{second['id']}/rotate-key", json={"api_key": "test-rotated-key"})
+    assert rotated.json()["status"] == "disabled"
+    assert client.post(f"/api/ai-connections/{second['id']}/activate").status_code == 200
+    rows = {row["id"]: row for row in client.get("/api/ai-connections").json()}
+    assert rows[first["id"]]["status"] == "disabled"
+    assert rows[second["id"]]["status"] == "active"
+    assert client.post(f"/api/ai-connections/{second['id']}/activate").status_code == 200
+    assert client.post(f"/api/ai-connections/{first['id']}/activate").status_code == 200
+    assert sum(row["status"] == "active" for row in client.get("/api/ai-connections").json()) == 1
+    assert client.delete(f"/api/ai-connections/{second['id']}").status_code == 204
+    assert client.post(f"/api/ai-connections/{second['id']}/activate").status_code == 404
+
+
+def test_activation_is_private_and_database_enforces_one_active(client, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+    _login(client, monkeypatch, "single-owner")
+    first = client.post("/api/ai-connections", json=_connection_payload("first")).json()
+    second = client.post("/api/ai-connections", json=_connection_payload("second")).json()
+    with client.session_factory() as db:
+        db.get(models.AIConnection, second["id"]).status = "active"
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+    _login(client, monkeypatch, "single-intruder")
+    assert client.post(f"/api/ai-connections/{first['id']}/activate").status_code == 404
+
+
+def test_new_batch_automatically_binds_active_connection_and_old_batch_fails_closed(client, monkeypatch):
+    from backend.app.services.scoring.engine import _scorer_for_batch
+    owner = _login(client, monkeypatch, "auto-binding")
+    first = client.post("/api/ai-connections", json=_connection_payload("first")).json()
+    second = client.post("/api/ai-connections", json=_connection_payload("second")).json()
+    with client.session_factory() as db:
+        rubric = models.Rubric(name="test", version="v1", total_score=100,
+                               owner_id=owner.id, organization_id=first["organization_id"], visibility="private")
+        db.add(rubric)
+        db.commit()
+        rubric_id = rubric.id
+    batch = client.post("/api/batches", json={"name": "first batch", "rubric_id": rubric_id})
+    assert batch.status_code == 200, batch.text
+    assert batch.json()["ai_connection_id"] == first["id"]
+    assert client.post(f"/api/ai-connections/{second['id']}/activate").status_code == 200
+    next_batch = client.post("/api/batches", json={"name": "next batch", "rubric_id": rubric_id})
+    assert next_batch.json()["ai_connection_id"] == second["id"]
+    with client.session_factory() as db:
+        old = db.get(models.GradingBatch, batch.json()["id"])
+        assert old.ai_connection_id == first["id"]
+        with pytest.raises(ValueError, match="disabled"):
+            _scorer_for_batch(db, old)
+    rejected = client.post("/api/batches", json={"name": "disabled batch", "rubric_id": rubric_id, "ai_connection_id": first["id"]})
+    assert rejected.status_code == 404
+
+
+def test_ai_drafting_prefers_enabled_personal_connection(client, monkeypatch):
+    from types import SimpleNamespace
+    from backend.app.api.routes.rubrics import _rubric_ai_scorer
+    owner = _login(client, monkeypatch, "draft-selection")
+    first = client.post("/api/ai-connections", json=_connection_payload("first")).json()
+    second = client.post("/api/ai-connections", json=_connection_payload("second")).json()
+    assert client.post(f"/api/ai-connections/{second['id']}/activate").status_code == 200
+    principal = SimpleNamespace(user_id=owner.id, organization_id=first["organization_id"])
+    with client.session_factory() as db:
+        scorer = _rubric_ai_scorer(db, principal, None)
+        try:
+            assert scorer._ai_connection_snapshot["ai_connection_id"] == second["id"]
+        finally:
+            scorer.close()

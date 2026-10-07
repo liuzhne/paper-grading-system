@@ -411,7 +411,16 @@ def _score_items(
     return items
 
 
-def _persist_rule_task_checkpoints(*, db, run, request, outcome, criterion_id_by_code):
+def _persist_rule_task_checkpoints(
+    *,
+    db,
+    run,
+    request,
+    outcome,
+    criterion_id_by_code,
+    reused_rule_codes=(),
+    group_call_ids=None,
+):
     if not settings.SCORING_RULE_TASKS_ENABLED:
         return
     organization_id = run.organization_id
@@ -495,6 +504,10 @@ def _persist_rule_task_checkpoints(*, db, run, request, outcome, criterion_id_by
             dependency_rule_codes=deepcopy(rule["depends_on_rule_codes"]),
             status=status,
             blocking_final_total=blocking,
+            decision_reused=(
+                node["rule_code"] in reused_rule_codes and status != "failed_exhausted"
+            ),
+            group_call_id=(group_call_ids or {}).get(node["rule_code"]),
             attempt_count=1,
             max_attempts=3 if rule["judge_type"] == "semantic" else 1,
             provider_error=(
@@ -555,6 +568,9 @@ class CoreRunPersistence:
         coherence_findings=None,
         format_findings=None,
         ai_connection_snapshot=None,
+        usage=None,
+        reused_rule_codes=(),
+        group_call_ids=None,
     ) -> ScoringRun:
         request_mapping = _request_mapping(request)
         outcome_mapping = _outcome_mapping(outcome)
@@ -723,9 +739,9 @@ class CoreRunPersistence:
             status="scored",
             started_at=now,
             finished_at=now,
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
+            prompt_tokens=int((usage or {}).get("prompt_tokens") or 0),
+            completion_tokens=int((usage or {}).get("completion_tokens") or 0),
+            total_tokens=int((usage or {}).get("total_tokens") or 0),
             coherence_findings=stored_coherence_findings,
             format_findings=stored_format_findings,
             ai_total_score=(
@@ -784,8 +800,10 @@ class CoreRunPersistence:
             request=request_mapping,
             outcome=outcome_mapping,
             criterion_id_by_code=criterion_id_by_code,
+            reused_rule_codes=frozenset(reused_rule_codes or ()),
+            group_call_ids=dict(group_call_ids or {}),
         )
-        record_usage_ledger(self.db, run)
+        record_usage_ledger(self.db, run, usage=usage)
         target = paper if paper is not None else stored_submission
         target.status = "pending_review" if run.need_manual_review else "scored"
         try:

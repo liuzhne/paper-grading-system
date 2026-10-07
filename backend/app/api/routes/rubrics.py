@@ -1299,8 +1299,13 @@ def _parse_state_problem(exc) -> HTTPException:
 
 
 def _rubric_ai_scorer(db, principal, ai_connection_id: str | None):
-    """与 AI 起草共用的连接选择：显式连接走用户/组织的私有连接，否则用平台默认模型。"""
+    """与 AI 起草共用的连接选择：显式或当前启用的私有连接优先，否则用平台默认模型。"""
 
+    from backend.app.services.ai_connections import active_connection_id
+
+    ai_connection_id = ai_connection_id or active_connection_id(
+        db, owner_id=principal.user_id, organization_id=principal.organization_id or "",
+    )
     if ai_connection_id:
         if not principal.organization_id:
             raise parse_state.ParseStateError(503, "AI_CONNECTION_MISSING", "当前上下文不能使用私有 AI 连接。")
@@ -1579,22 +1584,7 @@ def draft_rubric_deduction_rules(
     active = execution.get("active_compilation") or {}
     version = active.get("version") or {}
     try:
-        if payload.ai_connection_id:
-            if not principal.organization_id:
-                raise AIRuleDraftValidationError(
-                    "AI_DRAFT_CONNECTION_MISSING",
-                    "当前上下文不能使用私有 AI 连接。",
-                    "请选择组织后重试，或使用平台已授权的真实模型。",
-                )
-            runtime = resolve_connection_runtime(
-                db,
-                connection_id=payload.ai_connection_id,
-                owner_id=principal.user_id,
-                organization_id=principal.organization_id,
-            )
-            scorer = get_llm_scorer(runtime)
-        else:
-            scorer = get_llm_scorer(session=db)
+        scorer = _rubric_ai_scorer(db, principal, payload.ai_connection_id)
 
         items = []
         for criterion in payload.criteria:
@@ -1603,6 +1593,19 @@ def draft_rubric_deduction_rules(
                 criterion_value.get("deduction_rules") or [],
                 criterion_code=criterion.code,
             )
+            # A resolved paragraph is rule material, not a new criterion or an
+            # automatically authorized deduction. Feed its original locator to
+            # the existing non-persistent, human-confirmable draft pipeline.
+            assigned = parse_state.assigned_rule_sources(db, rubric_id, criterion.code)
+            if assigned:
+                if analysis["input_state"] == "absent" and criterion_value.get("description"):
+                    analysis["unresolved_segments"].append({
+                        "text": criterion_value["description"],
+                        "source_refs": ["/criterion/description"],
+                    })
+                analysis["unresolved_segments"].extend(assigned)
+                analysis["source_refs"].extend(ref for item in assigned for ref in item["source_refs"])
+                analysis["needs_ai_draft"] = True
             if not (
                 analysis["needs_ai_draft"]
                 or analysis["needs_severity_expansion"]

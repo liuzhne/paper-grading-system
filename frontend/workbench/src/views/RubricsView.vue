@@ -1,14 +1,17 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, toRaw, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch } from "vue";
 
-import { api, StaleContextError } from "@/api/client.js";
+import { classifyInBatches } from "@/lib/classification-batches.js";
+import { api, currentContextVersion, StaleContextError } from "@/api/client.js";
 import RuleReviewPanel from "@/components/RuleReviewPanel.vue";
 import AtomicRuleEditor from "@/components/AtomicRuleEditor.vue";
-import { canPublishRubric, canSubmitReview, compilationReady } from "@/lib/rubric-workflow.js";
+import { canPublishRubric, canSubmitReview, compilationReady, isScoringCompletenessIssue } from "@/lib/rubric-workflow.js";
 import AiRuleDraftPanel from "@/components/AiRuleDraftPanel.vue";
 import ParseCoveragePanel from "@/components/ParseCoveragePanel.vue";
 import RuleAuditPanel from "@/components/RuleAuditPanel.vue";
 import StructureSuggestionPanel from "@/components/StructureSuggestionPanel.vue";
+import SourceReviewPanel from '@/components/SourceReviewPanel.vue';
+import TableRecognitionPanel from '@/components/TableRecognitionPanel.vue';
 import RubricImportWorkspace from "@/components/RubricImportWorkspace.vue";
 import { importFilesError, stepOneGate } from "@/lib/parse-coverage.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
@@ -41,6 +44,7 @@ const pendingReupload = ref({ rulesFile: null, templateFile: null });
 const rubricReupload = ref({ preview: null, rulesFile: null, templateFile: null });
 const sourceWorkspace = ref(null);
 const nextEntryStep = ref(1);
+const pendingScoreChecks = ref(0);
 const importing = computed(() => importOpen.value || Boolean(store.activeImportSession));
 const initialImport = computed(() => ({ ...importForm.value, total_score: 0, criteria: [] }));
 const stepOneSession = computed(() => ({
@@ -312,6 +316,7 @@ async function previewImportStructure(dryRun) {
 // --- 原文识别情况（解析台账）与 AI 兜底（解析重构方案 §8）---------------------
 const parseState = ref(null);
 const parseBusy = ref(false);
+const classificationProgress = ref(null);
 const parseError = ref(null);
 const structureEstimate = ref(null);
 const ruleReview = ref({ reviewed: false });
@@ -333,11 +338,38 @@ async function parseAction(action) {
 
 const resolveUnits = (payload) => parseAction(async (id) => {
   await store.resolveUnits(id, payload);
+  store.lastDraft = { items: [] };
   parseState.value = await store.loadParseCoverage(id);
+  sourceWorkspace.value = await api.get(`/rubrics/${id}/source-workspace`);
+});
+const acceptSuggestions = (actions) => parseAction(async (id) => {
+  const groups = new Map();
+  for (const action of actions) {
+    const key = `${action.action}:${action.criterionCode || ''}`;
+    if (!groups.has(key)) groups.set(key, { ...action, unitIds: [] });
+    groups.get(key).unitIds.push(...action.unitIds);
+  }
+  try { for (const action of groups.values()) await store.resolveUnits(id, action); }
+  finally { store.lastDraft = { items: [] }; parseState.value = await store.loadParseCoverage(id); sourceWorkspace.value = await api.get(`/rubrics/${id}/source-workspace`); }
 });
 const classifyUnits = ({ unitIds }) => parseAction(async (id) => {
-  await store.classifyUnits(id, { unitIds, connectionId: draftConnection.value || null });
-  parseState.value = await store.loadParseCoverage(id);
+  const contextVersion = currentContextVersion();
+  const connectionId = draftConnection.value || null;
+  const isCurrent = () => selected.value === id && currentContextVersion() === contextVersion;
+  try {
+    await classifyInBatches(unitIds, {
+      request: batch => store.classifyUnits(id, { unitIds: batch, connectionId }),
+      isCurrent,
+      onResult: result => { parseState.value = { ...parseState.value, unit_classifications: result }; },
+      onProgress: progress => { classificationProgress.value = progress; },
+    });
+  } finally {
+    if (isCurrent()) {
+      if (classificationProgress.value) classificationProgress.value = { ...classificationProgress.value, running: false };
+      const latest = await store.loadParseCoverage(id);
+      if (isCurrent()) parseState.value = latest;
+    }
+  }
 });
 const suggestStructure = ({ dryRun }) => parseAction(async (id) => {
   const result = await store.suggestStructure(id, { connectionId: draftConnection.value || null, dryRun });
@@ -367,11 +399,15 @@ const dismissFinding = ({ id: findingId, reason }) => parseAction(async (id) => 
   ruleReview.value = await store.loadRuleReview(id);
 });
 
-/** 第一步完成文件结构、来源冲突和未归属内容核对，第二步只处理评分规则。 */
+/** 第一步核对评分项与来源冲突，第二步归类原文并确认评分规则。 */
 async function goStep(target) {
   if (operationBusy.value || importBusy.value || loading.value) return;
   if (!canEdit.value || current.value?.status !== "draft") {
     step.value = target;
+    return;
+  }
+  if (target > 1 && pendingScoreChecks.value) {
+    parseError.value = `请先核对 ${pendingScoreChecks.value} 个从文字提取的分值。`;
     return;
   }
   if (target > 1 && rubricReupload.value.preview) {
@@ -384,10 +420,19 @@ async function goStep(target) {
     step.value = 1;
     return;
   }
-  if (target > 1 && gate.value.blocked) {
+  if (target > 1 && gate.value.conflicts) {
     step.value = 1;
-    parseError.value = `请先在第 1 步处理 ${gate.value.blocking} 条疑似规则和 ${gate.value.conflicts} 个来源冲突，再进入评分规则拆分。`;
+    parseError.value = `请先在第 1 步处理 ${gate.value.conflicts} 个来源冲突。`;
     return;
+  }
+  if (target === 3 && (gate.value.blocking || store.lastDraft.items.some(item => draftRows(item.draft).length))) {
+    step.value = 2;
+    parseError.value = "请先处理疑似规则，并应用或丢弃待确认的 AI 建议。";
+    return;
+  }
+  if (target === 2 && step.value === 1) {
+    sourceMode.value = Boolean(parseState.value?.coverage?.unclaimed?.length);
+    sourceFilter.value = "pending";
   }
   parseError.value = null;
   step.value = target;
@@ -401,19 +446,21 @@ const draftError = ref(null);
 
 async function loadConnections() {
   try {
-    connections.value = (await api.get("/ai-connections")) || [];
+    connections.value = ((await api.get("/ai-connections")) || []).filter((item) => item.status === "active");
+    draftConnection.value = connections.value[0]?.id || "";
   } catch (err) {
     if (!(err instanceof StaleContextError)) connections.value = [];
   }
 }
 
-async function generateMissingRules() {
+async function generateMissingRules(candidates = generationCandidates.value) {
+  if (!Array.isArray(candidates)) candidates = generationCandidates.value;
   draftBusy.value = true;
   draftError.value = null;
   try {
     await store.draftRules(selected.value, {
       // 只给缺规则的那些评分项：AI 补缺失部分，用户原文表述保留。
-      criteria: JSON.parse(JSON.stringify(generationCandidates.value)),
+      criteria: JSON.parse(JSON.stringify(candidates)),
       connectionId: draftConnection.value || null,
     });
     if (!store.lastDraft.items.some((item) => item.draft)) draftError.value = "所选评分项的原文细则已可解析，请直接核对或修改规则，无需 AI 补全。";
@@ -552,6 +599,21 @@ async function loadRubrics(preferredId = null) {
 const libraryOpen = ref(false);
 const step = ref(1);
 const selectedCriterion = ref(null);
+const sourceMode = ref(true);
+const sourceFilter = ref("pending");
+const stepDetail = ref(null);
+const assignedSources = computed(() => [...(sourceWorkspace.value?.previews?.word || []), ...(sourceWorkspace.value?.previews?.excel || [])].filter(u => (u.locator?.review?.claimed_by || []).includes(`${activeCriterion.value?.code}.manual`)));
+// 归入的原文默认只展示第一条，其余折叠，避免来源多时页面过长；切换评分项后重新折叠。
+const sourcesExpanded = ref(false);
+const visibleAssignedSources = computed(() => sourcesExpanded.value ? assignedSources.value : assignedSources.value.slice(0, 1));
+watch(selectedCriterion, () => { sourcesExpanded.value = false; });
+function selectRuleCriterion(id) { selectedCriterion.value = id; sourceMode.value = false; }
+function adjacentCriterion(delta) {
+  const list = coverage.value?.criteria || [];
+  const index = list.findIndex(c => c.criterion_id === selectedCriterion.value);
+  if (list[index + delta]) selectRuleCriterion(list[index + delta].criterion_id);
+}
+
 const workspace = ref(null);
 const reviewBusy = ref(false);
 const reviewNotice = ref(null);
@@ -591,23 +653,71 @@ const structuralMessages = {
 };
 const activeIssues = computed(() => [...(draft.value?.active_compilation?.blockers || []),
   ...(workspace.value?.structural_blockers || []).map(issue => ({ ...issue, message: structuralMessages[issue.code] || issue.message, criterion_code: issue.identity?.criterion_code }))]);
+const incompleteScoringIssues = computed(() => activeIssues.value.filter(isScoringCompletenessIssue));
+const missingRuleCodes = computed(() => new Set([
+  ...blocking.value.map(c => c.code),
+  ...incompleteScoringIssues.value.map(issue => issue.criterion_code).filter(Boolean),
+]));
 const generationCandidates = computed(() => (editForm.value?.criteria || []).filter((criterion) =>
   !store.lastDraft.items.some((item) => item.criterion_code === criterion.code && item.draft) &&
   !(criterion.deduction_rules_structured || []).length && (
     blocking.value.some((item) => item.code === criterion.code) ||
+    incompleteScoringIssues.value.some((issue) => issue.criterion_code === criterion.code &&
+      ['criterion_rules_missing', 'criterion_numeric_scoring_missing'].includes(issue.code)) ||
     (draft.value?.active_compilation?.blockers || []).some((issue) => issue.criterion_code === criterion.code && ['MISSING_EXECUTABLE_SCORING_MODE', 'SEVERITY_CONFIRMATION_REQUIRED', 'DEDUCTION_RULES_MISSING', 'MISSING_DEDUCTION_RULES'].includes(issue.code)))));
 const reviewReady = computed(() => !dirty.value && !scoreFormError.value && !activeIssues.value.length && !blocking.value.length && canEdit.value && canSubmitReview(current.value?.status, draft.value));
 const editableCriterion = computed(() => editForm.value?.criteria.find((c) => c.code === activeCriterion.value?.code));
 const pendingRules = computed(() => (workspace.value?.rules || []).filter(r => r.status !== 'approved'));
 const pendingMappings = computed(() => (workspace.value?.template_links || []).filter(link => link.review_status !== 'confirmed'));
+// 第 2 步底部阻断项：与「保存规则，下一步」的禁用条件逐项对应，点击直接打开能处理它的位置。
+function revealStepDetail() { nextTick(() => stepDetail.value?.scrollIntoView?.({ block: "start", behavior: "smooth" })); }
+function openSourceFilter(filter) { sourceFilter.value = filter; sourceMode.value = true; revealStepDetail(); }
+// 与筛选状态放在面板内部时一致：离开「待归类原文」后再进入，回到「待处理」。
+watch(sourceMode, (on) => { if (!on) sourceFilter.value = "pending"; });
+function openRuleCriterion(id) { selectRuleCriterion(id); revealStepDetail(); }
+const stepTwoBlockers = computed(() => {
+  const items = [];
+  if (gate.value.blocking) items.push({ key: "units", tone: "danger", label: `待归类 · ${gate.value.blocking} 条疑似规则`, open: () => openSourceFilter("blocking") });
+  const criteria = coverage.value?.criteria || [];
+  const draftCodes = new Set(store.lastDraft.items.filter(item => draftRows(item.draft).length).map(item => item.criterion_code));
+  // 按类别汇总成一个胶囊并跳到该类第一项：评分项多时底栏不被撑高，逐项状态由左侧导航标出。
+  const groups = [
+    { key: "missing", tone: "danger", match: c => missingRuleCodes.value.has(c.code), text: (n) => n > 1 ? ` 等 ${n} 项缺少完整计分细则` : " 缺少完整计分细则" },
+    { key: "drafts", tone: "warn", match: c => !missingRuleCodes.value.has(c.code) && draftCodes.has(c.code), text: (n) => n > 1 ? ` 等 ${n} 项 AI 建议待应用或丢弃` : " · AI 建议待应用或丢弃" },
+    { key: "rules", tone: "warn", match: c => pendingRules.value.some(rule => rule.criterion_id === c.criterion_id), text: (n, count) => n > 1 ? ` 等 ${n} 项共 ${count} 条规则待确认` : ` · ${count} 条规则待确认` },
+  ];
+  for (const group of groups) {
+    const hits = criteria.filter(group.match);
+    if (!hits.length) continue;
+    const count = pendingRules.value.filter(rule => hits.some(c => c.criterion_id === rule.criterion_id)).length;
+    items.push({ key: group.key, tone: group.tone, label: `${hits[0].code}${group.text(hits.length, count)}`, open: () => openRuleCriterion(hits[0].criterion_id) });
+  }
+  // 无法对应到评分项的阻断仍要显示原因，否则按钮禁用却看不到为什么。
+  const known = new Set(criteria.map(c => c.code));
+  const orphanRules = pendingRules.value.filter(rule => !criteria.some(c => c.criterion_id === rule.criterion_id)).length;
+  if (orphanRules) items.push({ key: "orphan-rules", tone: "warn", label: `${orphanRules} 条规则待确认` });
+  const orphanIssues = incompleteScoringIssues.value.filter(issue => !known.has(issue.criterion_code)).length;
+  if (orphanIssues) items.push({ key: "orphan-issues", tone: "danger", label: `${orphanIssues} 个计分完整性问题` });
+  const orphanDrafts = [...draftCodes].filter(code => !known.has(code)).length;
+  if (orphanDrafts) items.push({ key: "orphan-drafts", tone: "warn", label: `${orphanDrafts} 项 AI 建议待应用或丢弃` });
+  return items;
+});
 const validationReady = computed(() => compilationReady(draft.value, draft.value?.active_compilation?.id) && !activeIssues.value.length && !scoreFormError.value && !blocking.value.length);
 const completedSteps = computed(() => [
-  current.value?.status === "published" || Boolean(editForm.value && !dirty.value && !scoreFormError.value && !gate.value.conflicts),
-  current.value?.status === "published" || Boolean(reviewReady.value && !gate.value.blocked),
+  current.value?.status === "published" || Boolean(editForm.value && !dirty.value && !scoreFormError.value && !gate.value.conflicts && !pendingScoreChecks.value),
+  current.value?.status === "published" || Boolean(reviewReady.value && !gate.value.blocking && !gate.value.conflicts),
   current.value?.status === "published",
 ]);
 function goToPendingRules() {
-  if (pendingRules.value.length) selectedCriterion.value = pendingRules.value[0].criterion_id;
+  if (pendingRules.value.length) selectRuleCriterion(pendingRules.value[0].criterion_id);
+  goStep(2);
+}
+async function goToIncompleteRules() {
+  const code = incompleteScoringIssues.value[0]?.criterion_code;
+  if (current.value?.status === 'review') await returnToDraft();
+  if (current.value?.status !== 'draft') return;
+  const criterion = coverage.value?.criteria.find((item) => item.code === code);
+  if (criterion) selectRuleCriterion(criterion.criterion_id);
   goStep(2);
 }
 let loadSequence = 0;
@@ -670,7 +780,7 @@ function selectRubric(id) {
 }
 function locateIssue(issue) {
   const target = coverage.value?.criteria.find((c) => c.code === issue.criterion_code);
-  if (target) selectedCriterion.value = target.criterion_id;
+  if (target) selectRuleCriterion(target.criterion_id);
   goStep(2);
 }
 function addDeduction() {
@@ -769,8 +879,9 @@ async function saveAndValidate() {
   finally { saveBusy.value = false; }
 }
 watch(selected, async (id) => {
+  classificationProgress.value = null;
   workspace.value = null; coverage.value = null; draft.value = null;
-  selectedCriterion.value = null; chosenVisibility.value = null;
+  selectedCriterion.value = null; sourceMode.value = true; sourceFilter.value = "pending"; chosenVisibility.value = null;
   excluded.value = new Set(); editForm.value = null; reviewError.value = null; reviewNotice.value = null;
   store.lastDraft = { items: [] }; applyNotice.value = null; applyError.value = null;
   parseState.value = null; structureEstimate.value = null; ruleEstimate.value = null; parseError.value = null;
@@ -812,9 +923,8 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
         </div>
         <div class="head-actions">
           <button v-if="!importing" class="btn" :disabled="operationBusy" @click="libraryOpen = !libraryOpen">模板库</button>
-          <button v-if="!importing" class="btn" :disabled="operationBusy || !canEdit" @click="beginImport">导入评分模板</button>
-          <button v-if="!importing && current?.status === 'draft'" class="btn" :disabled="operationBusy || loading || !canEdit" @click="saveAndValidate">{{ saveBusy ? '保存中…' : '保存并重新校验' }}</button>
-          <button v-if="!importing && current?.status === 'draft' && step === 1" class="btn" disabled>提交模板审核</button>
+          <button v-if="!importing" class="btn btn-primary" :disabled="operationBusy || !canEdit" @click="beginImport">新建评分标准</button>
+          <button v-if="!importing && current?.status === 'draft' && step !== 1" class="btn" :disabled="operationBusy || loading || !canEdit" @click="saveAndValidate">{{ saveBusy ? '保存中…' : '保存并重新校验' }}</button>
           <button v-if="!importing && current?.status === 'draft' && step === 2" class="btn btn-primary" :disabled="operationBusy || loading" @click="goStep(3)">前往校验与发布</button>
         </div>
       </div>
@@ -906,47 +1016,53 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
       </div>
       <p v-if="scoreFormError && step !== 1" class="notice notice-warn">{{ scoreFormError }}</p>
       <p v-if="loading" class="notice" role="status">正在加载条款与校验结果…</p>
-      <template v-else-if="step === 1 && editForm">
-        <RubricImportWorkspace :session="stepOneSession" persisted :readonly="!canEdit || current.status !== 'draft'"
+      <template v-if="step === 1 && editForm">
+        <RubricImportWorkspace :key="selected" :session="stepOneSession" persisted recognition :parse-state="parseState" :readonly="!canEdit || current.status !== 'draft'"
           :busy="operationBusy || importBusy" :source-preview="sourcePreview" :reupload-preview="rubricReupload.preview"
-          :blocking-message="scoreFormError || (gate.blocked ? `请先核对下方 ${gate.blocking} 条疑似规则和 ${gate.conflicts} 个来源冲突。` : '')"
-          @update-session="updateFirstStep" @update-criterion="updateExistingCriterion" @confirm="confirmFirstStep"
+          :blocking-message="scoreFormError || (gate.blocked ? `请先核对 ${gate.conflicts} 个来源冲突。` : '')"
+          @update-session="updateFirstStep" @update-criterion="updateExistingCriterion" @confirm="confirmFirstStep" @save="saveAndValidate" @score-check="pendingScoreChecks = $event"
           @preview-source="previewExistingSource" @close-source-preview="sourcePreview = null"
           @pick-rules="previewRubricReupload('rules', $event)" @pick-template="previewRubricReupload('template', $event)"
           @confirm-reupload="confirmRubricReupload"
           @cancel-reupload="rubricReupload = { preview: null, rulesFile: null, templateFile: null }">
+          <template #table-analysis>
+            <TableRecognitionPanel :state="parseState" :previews="sourceWorkspace?.previews?.excel || []" :busy="operationBusy" :editable="editable" :connection="connections.find(c => c.id === draftConnection)" :estimate="structureEstimate" @suggest-structure="suggestStructure" />
+          </template>
           <template #analysis>
-            <ParseCoveragePanel :state="parseState" :criteria="coverage?.criteria || []" :connections="connections"
-              v-model:connection-id="draftConnection" :busy="operationBusy" :editable="editable"
-              :structure-estimate="structureEstimate" @resolve="resolveUnits" @classify="classifyUnits"
-              @suggest-structure="suggestStructure" />
             <StructureSuggestionPanel :suggestion="parseState?.structure_suggestions" :busy="operationBusy"
               :editable="editable" @merge="mergeStructure" @undo="undoStructure" />
+          </template>
+          <template #source-analysis>
+            <ParseCoveragePanel :state="parseState" :criteria="coverage?.criteria || []" :busy="operationBusy" :editable="editable" conflicts-only @resolve="resolveUnits" />
           </template>
           <template #issues><p v-if="importError" class="notice notice-danger" role="alert">{{ importError }}</p></template>
         </RubricImportWorkspace>
       </template>
       <div v-else class="editor-layout" :class="{ 'release-layout': step === 3 }">
         <aside v-if="step === 2" class="card criteria-nav">
-          <div class="card-head"><h2 class="card-title">评分项 · {{ coverage?.total_criteria || 0 }}</h2></div>
-          <button v-for="item in coverage?.criteria || []" :key="item.criterion_id" class="lib-item" :class="{ active: item.criterion_id === selectedCriterion, missing: item.status === 'missing' }" :disabled="operationBusy" @click="selectedCriterion = item.criterion_id">
+          <div class="card-head"><h2 class="card-title">规则来源与评分项</h2></div>
+          <button class="lib-item source-nav" :class="{ active: sourceMode }" :disabled="operationBusy" @click="sourceMode = true"><strong>待归类原文 {{ parseState?.coverage?.unclaimed?.length || 0 }}</strong><p :class="gate.blocking ? 'danger' : 'faint'">{{ gate.blocking }} 条疑似规则必须处理</p></button>
+          <button v-for="item in coverage?.criteria || []" :key="item.criterion_id" class="lib-item" :class="{ active: !sourceMode && item.criterion_id === selectedCriterion, missing: missingRuleCodes.has(item.code) }" :disabled="operationBusy" @click="selectRuleCriterion(item.criterion_id)">
             <div class="criterion-title"><span class="faint mono">{{ item.code }}</span><strong>{{ item.name }}</strong><span class="score">{{ item.max_score }} 分</span></div>
-            <p :class="item.status === 'missing' ? 'danger' : item.status === 'pending_review' ? 'warn' : 'faint'">{{ item.rule_count }} 条规则 · {{ STATUS[item.status]?.label || item.status }}</p><p class="faint">原文 {{ item.from_source_count }} · AI {{ item.from_ai_count }}</p>
+            <p :class="missingRuleCodes.has(item.code) ? 'danger' : item.status === 'pending_review' ? 'warn' : 'faint'">{{ missingRuleCodes.has(item.code) ? '缺少完整计分细则' : `${item.rule_count} 条规则 · ${STATUS[item.status]?.label || item.status}` }}</p><p class="faint">原文 {{ item.from_source_count }} · AI {{ item.from_ai_count }}</p>
           </button>
         </aside>
-        <div class="detail">
+        <div ref="stepDetail" class="detail">
           <template v-if="step === 2">
-            <section class="card card-pad coverage-panel">
-              <h2 class="card-title">AI 规则拆分与细则完整度</h2>
-              <p class="card-note">{{ coverage?.complete_count || 0 }} 项规则已确认，{{ coverage?.pending_review_count || 0 }} 项有待确认规则，{{ coverage?.blocking_count || 0 }} 项没有规则。</p>
-              <p class="faint">本步骤只处理评分语义：把原文拆成独立扣分规则，或把不同等级拆成可执行的原子评分项。AI 只补缺失部分，原文表述和第 1 步确认的表结构不会被改写。</p>
-              <div v-if="generationCandidates.length" class="draft-box">
-                <label class="field"><span class="field-label">用哪个 AI 连接起草</span><select v-model="draftConnection" class="select"><option value="">请选择</option><option v-for="item in connections" :key="item.id" :value="item.id">{{ item.name }} · {{ item.model_name }}</option></select></label>
-                <p v-if="!connections.length" class="notice notice-warn">你还没有可用的 AI 连接。请先在 <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink> 绑定一个。</p>
-                <button class="btn" :disabled="operationBusy || !draftConnection || !editable" @click="generateMissingRules">{{ draftBusy ? '起草中…' : `生成全部缺失细则（${generationCandidates.length}）` }}</button>
-                <p v-if="draftError" class="notice notice-danger" role="alert">{{ draftError }}</p>
-              </div>
+            <template v-if="sourceMode">
+              <section class="card card-pad"><h2 class="card-title">待归类原文</h2><p class="card-note">把文档要求归入已有评分项，作为规则来源；归类不会新增评分项或自动产生扣分。</p></section>
+              <SourceReviewPanel v-model:filter="sourceFilter" :progress="classificationProgress" :state="parseState" :previews="[...(sourceWorkspace?.previews?.word || []), ...(sourceWorkspace?.previews?.excel || [])]" :criteria="coverage?.criteria || []" :busy="operationBusy" :editable="editable" :connection="connections.find(c => c.id === draftConnection)" @resolve="resolveUnits" @classify="classifyUnits" @accept-suggestions="acceptSuggestions" />
+            </template>
+            <template v-else>
+            <section v-if="activeCriterion" class="card card-pad criterion-overview">
+              <div><p class="faint mono">{{ activeCriterion.code }} · 满分 {{ activeCriterion.max_score }} 分</p><h2>{{ activeCriterion.name }}</h2><p class="faint">逐条核对规则及其来源，确认后才能用于评分。</p></div>
+              <div class="actions"><button class="btn" :disabled="operationBusy || selectedCriterion === coverage?.criteria[0]?.criterion_id" @click="adjacentCriterion(-1)">上一项</button><button class="btn" :disabled="operationBusy || selectedCriterion === coverage?.criteria.at(-1)?.criterion_id" @click="adjacentCriterion(1)">下一项</button></div>
             </section>
+            <section class="card rule-sources" data-test="rule-sources">
+              <div class="card-head"><h2 class="card-title">规则来源</h2><span class="faint">AI 根据评分说明、原文细则及归入的内容起草</span></div>
+              <div class="rule-source-columns"><div><h3>评分说明</h3><p>{{ editableCriterion?.description || '未提供评分说明' }}</p><p v-for="(text,i) in editableCriterion?.deduction_rules || []" :key="i">{{ text }}</p><p class="faint">修改评分说明请返回第 1 步。</p></div><div><h3>归入的原文要求 · {{ assignedSources.length }} 个单元</h3><button class="btn btn-sm" :disabled="operationBusy" @click="sourceMode = true">从待归类添加</button><article v-for="unit in visibleAssignedSources" :key="unit.unit_id"><div class="source-row"><span class="mono faint">{{ unit.unit_id }}</span><button v-if="unit.locator?.review?.claimed_by?.includes(`${activeCriterion.code}.manual`)" class="btn btn-sm" :disabled="operationBusy || !editable" @click="resolveUnits({unitIds:[unit.unit_id], action:'restore', reason:'用户移出规则来源，重新归类'})">移出</button></div><p>{{ unit.text }}</p></article><button v-if="assignedSources.length > 1" class="btn btn-sm sources-toggle" type="button" data-test="toggle-assigned-sources" :aria-expanded="sourcesExpanded" @click="sourcesExpanded = !sourcesExpanded">{{ sourcesExpanded ? '收起' : `展开其余 ${assignedSources.length - 1} 个单元` }}</button><p v-if="!assignedSources.length" class="faint">还没有归入原文。</p><p class="faint">移出只撤销原文归类；已生成细则请另行核对，未应用的 AI 建议将清除。</p></div></div>
+            </section>
+            <section class="card card-pad coverage-panel"><h2 class="card-title">扣分细则</h2><p class="faint">AI 连接：{{ connections.find(c => c.id === draftConnection)?.name || '未启用，请到账户与连接配置' }}。AI 建议须人工核对后应用与确认。</p><div class="actions"><button class="btn" :disabled="operationBusy || !draftConnection || !editable || !editableCriterion || hasPendingAiDraft" @click="generateMissingRules([editableCriterion])">{{ draftBusy ? '起草中…' : 'AI 根据规则来源起草' }}</button><button v-if="generationCandidates.length" class="btn" :disabled="operationBusy || !draftConnection || !editable" @click="generateMissingRules()">生成全部缺失细则（{{ generationCandidates.length }}）</button></div><p v-if="draftError" class="notice notice-danger" role="alert">{{ draftError }}</p></section>
             <AiRuleDraftPanel :items="currentDraftItems" :busy="operationBusy || !editable" @apply="applyDraft" @discard="discardDraft" />
             <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :excluded="excluded" :busy="operationBusy" :editable="editable"
               :defer-confirmation="hasPendingAiDraft" @confirm="confirmRules([$event])" @confirm-all="confirmRules" @exclude="toggleExcluded" />
@@ -964,10 +1080,18 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
               </div>
               <button class="btn" :disabled="!canEdit || operationBusy" @click="addDeduction()">添加扣分细则</button>
             </details>
+            </template>
+            <footer class="card card-pad rules-footer"><div class="footer-blockers" data-test="step-two-blockers"><strong>{{ stepTwoBlockers.length ? '进入校验与发布前需处理' : '评分规则已处理完成，可以进入校验与发布' }}</strong><div v-if="stepTwoBlockers.length" class="blocker-chips"><template v-for="item in stepTwoBlockers" :key="item.key"><button v-if="item.open" type="button" class="blocker-chip" :class="item.tone" :disabled="operationBusy" @click="item.open()">{{ item.label }}</button><span v-else class="blocker-chip" :class="item.tone">{{ item.label }}</span></template></div></div><div class="actions"><button class="btn" :disabled="operationBusy" @click="goStep(1)">上一步</button><button class="btn" :disabled="operationBusy || !canEdit" @click="saveAndValidate">保存草稿</button><button class="btn btn-primary" :disabled="operationBusy || !!gate.blocking || !!blocking.length || !!pendingRules.length || !!incompleteScoringIssues.length || store.lastDraft.items.some(item => draftRows(item.draft).length)" @click="goStep(3)">保存规则，下一步</button></div></footer>
           </template>
           <section v-if="step === 3" class="card card-pad" data-test="release-panel">
             <h2 class="card-title">{{ current.status === 'draft' ? '发布前检查' : current.status === 'review' ? '确认并发布' : '评分标准已发布' }}</h2>
             <p class="card-note">{{ current.status === 'draft' ? '核对条款与模板映射，通过校验后提交模板审核。提交审核不会自动发布。' : current.status === 'review' ? '模板已提交审核。请核对本次发布版本与分享范围，确认后发布。' : '此版本与分享范围已冻结；后续修改请复制为新版本。' }}</p>
+            <div v-if="current.status !== 'published' && incompleteScoringIssues.length" class="notice notice-danger" role="alert" data-test="scoring-completeness-blockers">
+              <p>评分细则不完整，暂不能发布。每个评分项须有具体细则：扣分制须有扣分标准，等级制须有档位分值和判定说明。</p>
+              <ul><li v-for="issue in incompleteScoringIssues" :key="`${issue.code}:${issue.field_path}`">{{ issue.criterion_code }} · {{ issue.message }}</li></ul>
+              <p>可返回第 2 步使用 AI 生成建议或手动补全；应用后统一确认，重新校验通过才能发布。</p>
+              <button class="btn" :disabled="operationBusy || !canEdit" @click="goToIncompleteRules">{{ current.status === 'review' ? '退回草稿并补全细则' : '去补全细则（可使用 AI）' }}</button>
+            </div>
             <template v-if="current.status === 'draft'">
               <div class="issue-row"><span>条款核对</span><span class="chip" :class="pendingRules.length ? 'chip-warn' : 'chip-ok'">{{ pendingRules.length ? `${pendingRules.length} 条待确认` : '全部已确认' }}</span></div>
               <div class="issue-row"><span>模板映射</span><span class="chip" :class="pendingMappings.length ? 'chip-warn' : 'chip-ok'">{{ pendingMappings.length ? `${pendingMappings.length} 项待核对` : workspace?.template_links?.length ? '全部已确认' : '无需核对' }}</span></div>
@@ -1012,24 +1136,27 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
 .heading-row, .head-actions, .criterion-title, .issue-row { display: flex; align-items: center; gap: 12px; }
 .heading-row, .issue-row { justify-content: space-between; }
 .head-actions { flex-wrap: wrap; }
-.steps { display: flex; padding: 6px; margin: 20px 0; }
-.step { flex: 1; border: 0; background: transparent; padding: 12px 16px; text-align: left; display: flex; align-items: center; gap: 10px; color: #777d78; border-radius: 8px; cursor: pointer; }
+/* 间距与字号对齐 Claude Design「评分标准」原型：步骤条 5px 容器 + 9px 14px 项、正文 13.5px、说明 12–12.5px。 */
+.steps { display: flex; padding: 5px; margin: 16px 0; }
+.step { flex: 1; border: 0; background: transparent; padding: 9px 14px; text-align: left; display: flex; align-items: center; gap: 9px; color: #777d78; border-radius: 7px; cursor: pointer; font-size: 13.5px; }
 .step.active { background: #f0f4f2; color: #185e52; font-weight: 600; }
-.step-number { border: 2px solid currentColor; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; }
-.editor-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 22px; align-items: start; }
+.step-number { border: 1.5px solid currentColor; border-radius: 50%; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; flex: none; font-family: var(--font-mono); font-size: 11px; }
+.criterion-overview,.rules-footer{display:flex;justify-content:space-between;gap:20px;align-items:center}.rule-source-columns{display:grid;grid-template-columns:1fr 1fr}.rule-source-columns>div{padding:16px 20px;min-width:0}.rule-source-columns>div+div{border-left:1px solid #e7e8e3}.rule-source-columns h3{font-size:13.5px;margin:0 0 10px}.rule-source-columns p{line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.rule-source-columns article{border:1px solid #e4e7e1;border-radius:9px;margin-top:10px;padding:10px 14px}.rule-source-columns article p{margin:6px 0 0}.criterion-overview h2{font-size:18px;margin:4px 0}.criterion-overview p{margin:0}.detail>.card.card-pad,.rules-footer{padding:16px 20px}.sources-toggle{margin-top:10px}.source-row{display:flex;justify-content:space-between;gap:10px}.rules-footer{position:sticky;bottom:0;z-index:4;flex-wrap:wrap}.footer-blockers{flex:1 1 320px;min-width:0}.blocker-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.blocker-chip{display:inline-flex;align-items:center;gap:7px;min-height:30px;max-width:100%;padding:4px 12px;border-radius:20px;border:1px solid #f0e6d2;background:#fdfaf3;color:#8a5a12;font:inherit;font-size:12.5px;text-align:left;overflow-wrap:anywhere}.blocker-chip::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:currentColor}.blocker-chip.danger{border-color:#f0dcd8;background:#fdf7f6;color:#a3372b}button.blocker-chip{cursor:pointer}button.blocker-chip:disabled{cursor:not-allowed;opacity:.6}.actions{display:flex;gap:10px;flex-wrap:wrap}@media(max-width:1279px){.editor-layout:not(.release-layout){grid-template-columns:minmax(0,1fr)}.criteria-nav{max-height:260px;overflow:auto}.rules-footer{position:static;flex-wrap:wrap}}@media(max-width:760px){.rule-source-columns{grid-template-columns:1fr}.criterion-overview{flex-wrap:wrap}.rule-source-columns>div+div{border-left:0;border-top:1px solid #e7e8e3}}
+.editor-layout { display: grid; grid-template-columns: 252px minmax(0, 1fr); gap: 18px; align-items: start; }
 .editor-layout.release-layout { grid-template-columns: minmax(0, 1fr); }
 .step.complete .step-number { background: #175c50; border-color: #175c50; color: white; }
 .step:disabled { cursor: default; opacity: .65; }
 .head-actions { gap: 8px; }
 .criteria-nav { overflow: hidden; }
 .detail > .card { margin-bottom: 0; }
-.detail { min-width: 0; display: flex; flex-direction: column; gap: 20px; }
-.lib-item { display: block; width: 100%; border: 0; border-bottom: 1px solid #eeefeb; border-left: 2px solid transparent; background: white; padding: 16px 20px; text-align: left; cursor: pointer; }
+.detail { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.lib-item { display: block; width: 100%; border: 0; border-bottom: 1px solid #eeefeb; border-left: 2px solid transparent; background: white; padding: 11px 16px; text-align: left; cursor: pointer; }
 .lib-item.active { border-left-color: #185e52; background: #f0f4f2; }
 .lib-item.missing { border-left-color: #b83a2d; }
-.lib-item p { margin: 6px 0 0; font-size: 13px; }
-.criterion-title { gap: 8px; flex-wrap: wrap; }
-.score { margin-left: auto; color: #929791; font-size: 13px; }
+.lib-item p { margin: 3px 0 0; font-size: 12px; }
+.criterion-title { gap: 8px; flex-wrap: wrap; font-size: 13.5px; }
+.criterion-title .mono { font-size: 12px; }
+.score { margin-left: auto; color: #929791; font-size: 12px; }
 .library-menu { margin-bottom: 20px; }
 .form-grid, .rule-edit { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .rule-edit { grid-template-columns: 2fr 1fr 1fr; }

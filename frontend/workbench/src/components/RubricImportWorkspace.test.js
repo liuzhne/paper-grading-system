@@ -22,6 +22,12 @@ const session = {
 
 
 describe("导入评分模板与评分项工作区", () => {
+  it("评分表区域提供现有 Excel 导入模板下载", () => {
+    const wrapper = mount(RubricImportWorkspace, { props: { session, initial: true } });
+    const link = wrapper.get('a[download="rubric_import_template.xlsx"]');
+    expect(link.text()).toBe("下载模板");
+    expect(link.attributes("href")).toBe("/api/rubrics/import-template.xlsx");
+  });
   it("点击取整提示能定位对应评分项，合计错误能定位满分", async () => {
     const wrapper = mount(RubricImportWorkspace, { props: { session: { ...session, total_score: 100 } }, attachTo: document.body });
     await wrapper.get('[data-test="rounding-C02"]').trigger("click");
@@ -145,9 +151,20 @@ describe("导入评分模板与评分项工作区", () => {
     });
 
     expect(wrapper.get(".criterion-dimension").text()).toBe("分析与解决问题");
-    expect(wrapper.get(".criterion-name-row").text()).toContain("子项");
+    expect(wrapper.get(".criterion-name-row").text()).toContain("原评分项标识");
     expect(wrapper.get("input.name").element.value).toBe("指导教师成绩项2");
     expect(wrapper.get(".criterion-description summary").text()).toBe("能够检索并分析相关研究现状。");
+  });
+
+  it("同一评价内容的序号名称作为标题显示一次", () => {
+    const wrapper = mount(RubricImportWorkspace, {
+      props: { session: { ...session, criteria: [{
+        code: "T03", name: "分析与解决问题2", dimension: "分析与解决问题",
+        description: "能够运用工程方法形成解决方案。", max_score: 20,
+      }] } },
+    });
+    expect(wrapper.find(".criterion-dimension").exists()).toBe(false);
+    expect(wrapper.get("input.name").element.value).toBe("分析与解决问题2");
   });
 
   it("分值合计与满分不一致时禁用确认", () => {
@@ -188,4 +205,30 @@ describe("导入评分模板与评分项工作区", () => {
     expect(wrapper.emitted("resolve-conflict")[0][0]).toMatchObject({ decision: "use_excel" });
     expect(wrapper.emitted("resolve-conflict")[1][0]).toMatchObject({ decision: "use_word" });
   });
+});
+
+it('评分项页核对文字分值，规则原文留待第二步处理', async () => {
+  const wrapper = mount(RubricImportWorkspace, { props: {recognition:true,persisted:true,session:{name:'合成',total_score:20,criteria:[{code:'T01',name:'方法',max_score:20}]},parseState:{extraction:{mapping:{name:1}},coverage:{unclaimed:[],blocking_count:0}}} });
+  expect(wrapper.get('.recognition-footer .btn-primary').attributes('disabled')).toBeDefined();
+  await wrapper.findAll('button').find(b => b.text() === '分值无误，全部确认').trigger('click');
+  expect(wrapper.get('.recognition-footer .btn-primary').attributes('disabled')).toBeUndefined();
+  expect(wrapper.text()).toContain('规则来源 · 第 2 步使用');
+  expect(wrapper.text()).not.toContain('关联原文');
+  await wrapper.setProps({session:{name:'合成2',total_score:20,criteria:[{code:'T01',name:'方法',max_score:20}]}});
+  expect(wrapper.get('.recognition-footer .btn-primary').attributes('disabled')).toBeUndefined();
+});
+
+it('逐项核对的分值可以取消，取消后重新阻止进入下一步', async () => {
+  const wrapper = mount(RubricImportWorkspace, { props: {recognition:true,persisted:true,session:{name:'合成',total_score:30,criteria:[{code:'T01',name:'方法',max_score:20},{code:'T02',name:'规范',max_score:10}]},parseState:{extraction:{mapping:{name:1}},coverage:{unclaimed:[],blocking_count:0}}} });
+  const toggle = code => wrapper.get(`[data-test="score-check-${code}"]`);
+  await toggle('T01').trigger('click');
+  await toggle('T02').trigger('click');
+  expect(toggle('T01').text()).toBe('已核对');
+  expect(toggle('T01').attributes('aria-pressed')).toBe('true');
+  expect(wrapper.get('.recognition-footer .btn-primary').attributes('disabled')).toBeUndefined();
+  await toggle('T01').trigger('click');
+  expect(toggle('T01').text()).toBe('核对');
+  expect(wrapper.text()).toContain('请核对 1 个从文字提取的分值。');
+  expect(wrapper.get('.recognition-footer .btn-primary').attributes('disabled')).toBeDefined();
+  expect(wrapper.emitted('score-check').at(-1)).toEqual([1]);
 });

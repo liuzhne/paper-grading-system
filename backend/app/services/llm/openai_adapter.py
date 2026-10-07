@@ -7,10 +7,13 @@ import httpx
 from backend.app.core.config import settings
 from backend.app.services.llm.base import LLMScorer
 from backend.app.services.llm.base import validated_envelope_provider
-from backend.app.services.llm.core_adapter import core_envelope_instructions
-from backend.app.services.llm.core_adapter import core_response_json_schema
-from backend.app.services.llm.core_adapter import normalize_core_provider_response
 from backend.app.services.llm.core_adapter import validated_core_envelope_provider
+from backend.app.services.llm.core_view import build_core_group_request
+from backend.app.services.llm.core_view import build_core_request
+from backend.app.services.llm.core_view import compression_summary
+from backend.app.services.llm.core_view import decode_core_group_response
+from backend.app.services.llm.core_view import decode_core_response
+from backend.app.services.llm.core_view import preflight_core_request
 from backend.app.services.llm.debug_logging import log_llm_exception
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
@@ -21,18 +24,25 @@ from backend.app.services.llm.retry import exponential_delay_seconds
 from backend.app.services.llm.retry import is_retryable_http_error
 from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_reason
+from backend.app.services.llm.rate_limit import provider_circuit_key
 from backend.app.services.llm.rate_limit import provider_request_slot
+from backend.app.services.llm.usage import UsageMeter
 from backend.app.services.llm_observability import observation
-from backend.app.services.scoring.retrieval.selection import (
-    preflight_v4_provider_payload,
-)
+
+
+class ResponsesJSONOutputError(ValueError):
+    """Safe completion metadata; never include model content or credentials."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__("Responses JSON output: " + reason)
 
 
 class OpenAIResponsesScorer(LLMScorer):
     provider = "openai"
     model_version = "responses-api"
 
-    def __init__(self, api_key=None, base_url=None, model_name=None, client=None, timeout_seconds=None, max_output_tokens=None, temperature=None):
+    def __init__(self, api_key=None, base_url=None, model_name=None, client=None, timeout_seconds=None, max_output_tokens=None, temperature=None, top_p=None):
         self.api_key = api_key or settings.OPENAI_API_KEY
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
@@ -41,11 +51,14 @@ class OpenAIResponsesScorer(LLMScorer):
             raise ValueError("OPENAI_BASE_URL is required when LLM_PROVIDER=openai")
         self.base_url = self.base_url.rstrip("/")
         self.model_name = model_name or settings.OPENAI_MODEL
+        self.timeout_seconds_explicit = timeout_seconds is not None
         self.timeout_seconds = float(timeout_seconds or settings.OPENAI_TIMEOUT_SECONDS)
         self.max_output_tokens_explicit = max_output_tokens is not None
         self.max_output_tokens = int(max_output_tokens or settings.OPENAI_MAX_OUTPUT_TOKENS)
         self.temperature = float(temperature if temperature is not None else settings.OPENAI_TEMPERATURE)
+        self.top_p = float(top_p if top_p is not None else 1)
         self._owns_client = client is None
+        self.usage_meter = UsageMeter()
         self.client = client or httpx.Client(timeout=self.timeout_seconds)
 
     def close(self):
@@ -102,8 +115,7 @@ class OpenAIResponsesScorer(LLMScorer):
         criterion = envelope_payload["criterion"]
         payload = {
             "model": provider["model"],
-            "temperature": float(sampling["temperature"]),
-            "top_p": float(sampling["top_p"]),
+            **_sampling_controls(sampling),
             "instructions": _envelope_instructions(criterion["scoring_mode"]),
             "input": json.dumps(envelope_payload, ensure_ascii=False, separators=(",", ":")),
             "max_output_tokens": sampling["max_tokens"],
@@ -119,6 +131,7 @@ class OpenAIResponsesScorer(LLMScorer):
         response = self._post_with_retry(payload)
         response.raise_for_status()
         data = response.json()
+        _raise_if_incomplete(data)
         output = _parse_json_output(data)
         output.setdefault("criterion_id", criterion["code"])
         output.setdefault("criterion_name", criterion["name"])
@@ -127,11 +140,8 @@ class OpenAIResponsesScorer(LLMScorer):
         output["usage"] = _usage_from_responses(data)
         return output
 
-    def score_core_envelope(self, *, envelope):
-        """Score one immutable PromptEnvelopeV3 semantic rule."""
-
+    def _validated_core(self, envelope):
         envelope, provider = validated_core_envelope_provider(self, envelope)
-        envelope_payload = envelope.to_mapping()
         if provider["thinking"] != {"enabled": False, "type": None}:
             raise ValueError(
                 "OpenAI Responses PromptEnvelopeV3 does not support thinking controls"
@@ -140,41 +150,64 @@ class OpenAIResponsesScorer(LLMScorer):
             raise ValueError(
                 "OpenAI Responses PromptEnvelopeV3 requires json_schema response_format"
             )
-        sampling = provider["sampling"]
-        if sampling["seed"] is not None:
+        if provider["sampling"]["seed"] is not None:
             raise ValueError("OpenAI Responses PromptEnvelopeV3 seed is not supported")
-        system_instructions = core_envelope_instructions(envelope)
-        if envelope_payload["schema_version"] == "prompt-envelope@4":
-            preflight_v4_provider_payload(envelope, system_instructions)
+        return envelope, provider
+
+    def _post_core_request(self, envelope, provider, request, *, schema_name):
+        """Send exactly the provider view (never the identity envelope)."""
+
+        preflight_core_request(envelope, request)
+        sampling = provider["sampling"]
         payload = {
             "model": provider["model"],
-            "temperature": float(sampling["temperature"]),
-            "top_p": float(sampling["top_p"]),
-            "instructions": system_instructions,
-            "input": json.dumps(
-                envelope_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
+            **_sampling_controls(sampling),
+            "instructions": request.system,
+            "input": request.user,
             "max_output_tokens": sampling["max_tokens"],
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "semantic_rule_response",
+                    "name": schema_name,
                     "strict": True,
-                    "schema": core_response_json_schema(envelope),
+                    "schema": request.schema,
                 }
             },
         }
+        self.last_view_summary = compression_summary(request)
         response = self._post_with_retry(payload)
         response.raise_for_status()
         data = response.json()
-        return normalize_core_provider_response(
-            envelope,
-            _parse_json_output(data),
-        )
+        _raise_if_incomplete(data)
+        return _parse_json_output(data)
 
-    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None):
+    def score_core_envelope(self, *, envelope):
+        """Score one immutable PromptEnvelopeV3/V4 semantic rule via its view."""
+
+        envelope, provider = self._validated_core(envelope)
+        request = build_core_request(envelope)
+        raw = self._post_core_request(
+            envelope, provider, request, schema_name="semantic_rule_response"
+        )
+        return decode_core_response(envelope, raw, request)
+
+    def score_core_group(self, *, envelopes, group_code):
+        """Judge every tier of one mutex group in a single request."""
+
+        validated = [self._validated_core(envelope) for envelope in envelopes]
+        envelopes = [envelope for envelope, _provider in validated]
+        request = build_core_group_request(envelopes, group_code=group_code)
+        raw = self._post_core_request(
+            envelopes[0], validated[0][1], request, schema_name="semantic_group_response"
+        )
+        return decode_core_group_response(envelopes, raw, request)
+
+    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None):
+        request_options = {}
+        if attempts_limit is not None:
+            request_options["attempts_limit"] = attempts_limit
+        if default_timeout_seconds is not None and not self.timeout_seconds_explicit:
+            request_options["timeout_seconds"] = max(self.timeout_seconds, default_timeout_seconds)
         body = {
             "model": self.model_name,
             "temperature": settings.OPENAI_TEMPERATURE,
@@ -193,17 +226,29 @@ class OpenAIResponsesScorer(LLMScorer):
                 "strict": True,
                 "schema": response_schema,
             }}
-        response = self._post_with_retry(body)
+        response = self._post_with_retry(body, **request_options)
         response.raise_for_status()
-        return _parse_json_output(response.json())
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise ResponsesJSONOutputError("invalid_envelope") from exc
+        if not isinstance(data, dict):
+            raise ResponsesJSONOutputError("invalid_envelope")
+        if data.get("error"):
+            raise ResponsesJSONOutputError("error_envelope")
+        _raise_if_incomplete(data)
+        try:
+            return _parse_json_output(data)
+        except ValueError as exc:
+            raise ResponsesJSONOutputError("invalid_json") from exc
 
-    def _post_with_retry(self, payload):
+    def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None):
         url = "%s/responses" % self.base_url
         headers = {
             "Authorization": "Bearer %s" % self.api_key,
             "Content-Type": "application/json",
         }
-        attempts = max(1, settings.OPENAI_MAX_RETRIES + 1)
+        attempts = max(1, settings.OPENAI_MAX_RETRIES + 1) if attempts_limit is None else max(1, attempts_limit)
         last_error = None
         with observation(
             "llm_generation",
@@ -232,15 +277,18 @@ class OpenAIResponsesScorer(LLMScorer):
                         "retry_attempt",
                         metadata={"attempt": attempt + 1, "attempt_limit": attempts},
                     ):
-                        connection_key = (
-                            getattr(self, "_ai_connection_snapshot", None) or {}
-                        ).get("ai_connection_id") or self.base_url
+                        connection_key = provider_circuit_key(
+                            getattr(self, "_ai_connection_snapshot", None),
+                            base_url=self.base_url,
+                            model_name=self.model_name,
+                        )
                         with provider_request_slot(
                             provider=self.provider,
                             connection_key=connection_key,
                         ) as slot:
                             response = self.client.post(
-                                url, headers=headers, json=payload
+                                url, headers=headers, json=payload,
+                                **({"timeout": timeout_seconds} if timeout_seconds is not None else {}),
                             )
                             slot.record_response(response)
                     elapsed_ms = (time.perf_counter() - started) * 1000
@@ -249,6 +297,7 @@ class OpenAIResponsesScorer(LLMScorer):
                     )
                     response.raise_for_status()
                     data = response.json()
+                    self.usage_meter.record_success(_usage_from_responses(data))
                     generation.update(
                         output={
                             "provider_response_id": data.get("id"),
@@ -263,6 +312,7 @@ class OpenAIResponsesScorer(LLMScorer):
                     return response
                 except httpx.HTTPStatusError as exc:
                     last_error = exc
+                    self.usage_meter.record_failure()
                     projected = project_provider_error(exc)
                     generation.update(
                         level="ERROR",
@@ -282,6 +332,7 @@ class OpenAIResponsesScorer(LLMScorer):
                     )
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     last_error = exc
+                    self.usage_meter.record_failure()
                     projected = project_provider_error(exc)
                     generation.update(
                         level="ERROR",
@@ -301,6 +352,37 @@ class OpenAIResponsesScorer(LLMScorer):
                     )
                 time.sleep(delay_seconds)
         raise_provider_call_error(self.provider, last_error)
+
+
+def _raise_if_incomplete(data):
+    """Name truncation instead of failing later as "no text output".
+
+    Reasoning models (e.g. kimi-k3) can spend the whole ``max_output_tokens``
+    on hidden reasoning and return ``status=incomplete`` with no message.
+    """
+
+    if isinstance(data, dict) and data.get("status") == "incomplete":
+        reason = (data.get("incomplete_details") or {}).get("reason")
+        raise ResponsesJSONOutputError(
+            "output_truncated" if reason == "max_output_tokens" else "incomplete_output"
+        )
+
+
+def _sampling_controls(sampling):
+    """Wire form of the frozen sampling controls.
+
+    ``top_p=1`` is the Responses API default, so omitting it leaves sampling
+    unchanged while the envelope keeps recording ``"1"`` for cache identity.
+    Sending it explicitly is not harmless: Bailian kimi-k3 rejects
+    ``top_p=1.0`` with HTTP 400, and OpenAI reasoning models reject ``top_p``
+    altogether.  Any non-default value is still sent verbatim.
+    """
+
+    controls = {"temperature": float(sampling["temperature"])}
+    top_p = float(sampling["top_p"])
+    if top_p != 1.0:
+        controls["top_p"] = top_p
+    return controls
 
 
 def _usage_from_responses(data):

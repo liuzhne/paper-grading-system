@@ -29,7 +29,7 @@ sys.stdout.buffer.write(out.getvalue())
 async function importTemplate(page) {
   const name = `确认回归合成模板-${Date.now()}`;
   await page.goto("/workbench/rubrics");
-  await page.getByRole("button", { name: "导入评分模板", exact: true }).click();
+  await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
   const panel = page.locator(".import-panel");
   await panel.getByLabel("标准名称", { exact: true }).fill(name);
   await panel.getByLabel("评分表", { exact: true }).setInputFiles({ name: "review.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: workbook });
@@ -45,6 +45,7 @@ async function importTemplate(page) {
   const id = (await confirmResponse.json()).rubric.id;
   await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
   await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
+  await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
   await expect(page.locator("[data-test=rule-review-panel] tbody tr")).toHaveCount(2);
   return { id, name };
 }
@@ -55,7 +56,41 @@ async function reopen(page, name) {
   await page.locator(".library-menu .lib-item", { hasText: name }).click();
   await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
   await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
+  await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
 }
+
+test("已确认的复核提示不能代替计分细则，发布页引导返回 AI 补全", async ({ page, request }) => {
+  const created = await request.post('/api/rubrics', { data: {
+    name: `缺失数值细则-${Date.now()}`, version: 'v1', total_score: 10,
+    criteria: [{code: 'T05', name: '论证质量', max_score: 10,
+      scoring_mode: 'review_only', description: '论证须有依据'}],
+  } });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const rubric = await created.json();
+  const view = await (await request.get(`/api/rubrics/${rubric.id}/review-workspace`)).json();
+  for (const rule of view.rules) {
+    const confirmed = await request.post(`/api/rubrics/${rubric.id}/rules/${rule.rule_code}/confirm`, { data: {
+      compilation_id: view.compilation_id, rule_id: rule.id,
+      content_token: rule.content_token, reason: '合成确认',
+    } });
+    expect(confirmed.ok()).toBeTruthy();
+  }
+  expect((await request.post(`/api/rubrics/${rubric.id}/submit-review`)).ok()).toBeTruthy();
+  await page.goto('/workbench/rubrics');
+  await page.getByRole('button', {name: '模板库', exact: true}).click();
+  await page.locator('.library-menu .lib-item', {hasText: rubric.name}).click();
+  await page.getByRole('navigation', {name: '评分标准编辑步骤'}).getByRole('button', {name: /校验与发布/}).click();
+  const release = page.locator('[data-test="release-panel"]');
+  const issues = release.locator('[data-test="scoring-completeness-blockers"]');
+  await expect(issues).toContainText('T05');
+  await expect(issues).toContainText('AI');
+  await expect(release.getByRole('button', {name: '发布', exact: true})).toBeDisabled();
+  await issues.getByRole('button', {name: '退回草稿并补全细则'}).click();
+  await expect(page.getByRole('heading', {name: '扣分细则', exact: true})).toBeVisible();
+  await expect(page.getByRole('button', {name: '生成全部缺失细则（1）', exact: true})).toBeVisible();
+  await expect(page.locator('.criteria-nav .lib-item.active')).toContainText('T05');
+  expect((await (await request.get(`/api/rubrics/${rubric.id}`)).json()).status).toBe('draft');
+});
 
 test("导入→原文核对→单条及当前评分项批量确认→刷新保留；不自动发布", async ({ page, request }) => {
   const { id, name } = await importTemplate(page);
@@ -123,7 +158,7 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   } });
   expect(created.ok(), await created.text()).toBeTruthy();
   const rubric = await created.json();
-  await page.route("**/api/ai-connections", (route) => route.fulfill({ json: [{ id: "synthetic", name: "合成测试连接", model_name: "fixture" }] }));
+  await page.route("**/api/ai-connections", (route) => route.fulfill({ json: [{ id: "synthetic", name: "合成测试连接", model_name: "fixture", status: "active" }] }));
   const generatedCodes = [];
   let failSecond = true;
   await page.route(`**/api/rubrics/${rubric.id}/draft-deduction-rules`, async (route) => {
@@ -149,7 +184,8 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   await page.goto("/workbench/rubrics");
   await expect(page.getByRole("heading", { level: 1, name: rubric.name })).toBeVisible();
   await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
-  await page.getByLabel("用哪个 AI 连接起草").selectOption("synthetic");
+  await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
+  await expect(page.locator(".coverage-panel")).toContainText("合成测试连接");
   await page.getByRole("button", { name: /生成全部缺失细则/ }).click();
   await expect(page.getByRole("alert").filter({ hasText: "已保留 1 项结果" })).toContainText("缺少互斥标识。");
   await page.getByRole("button", { name: "生成全部缺失细则（1）", exact: true }).click();
@@ -198,16 +234,17 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   await second.getByRole("button", { name: "删除此档位" }).first().click();
   await second.getByRole("button", { name: "删除此档位" }).first().click();
   await page.getByRole("button", { name: /基本信息与评分项/ }).click();
+  await page.getByRole("button", { name: "编辑基本信息", exact: true }).click();
   await page.getByText("更多信息", { exact: true }).click();
   await page.getByLabel("标准说明", { exact: true }).fill("仅用于端到端验证的合成说明");
   await page.getByLabel("标准满分", { exact: true }).fill("20");
   await expect(page.getByText(/有未保存的修改/)).toBeVisible();
   await page.route(`**/api/rubrics/${id}/recompile`, (route) => route.fulfill({ status: 409, json: { detail: "合成保存冲突" } }));
-  await page.getByRole("button", { name: "保存并重新校验" }).click();
+  await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByRole("alert").filter({ hasText: "合成保存冲突" })).toBeVisible();
   await expect(page.getByLabel("标准说明", { exact: true })).toHaveValue("仅用于端到端验证的合成说明");
   await page.unroute(`**/api/rubrics/${id}/recompile`);
-  await page.getByRole("button", { name: "保存并重新校验" }).click();
+  await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText(/有未保存的修改/)).toHaveCount(0);
   const after = await (await request.get(`/api/rubrics/${id}/review-workspace`)).json();
   expect(after.rules.map(r => r.rule_code)).toEqual(before.rules.map(r => r.rule_code));
@@ -215,6 +252,7 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   for (const rule of after.rules) expect(rule.sources).toEqual(before.rules.find(r => r.rule_code === rule.rule_code).sources);
   expect(after.rules.find(r => r.rule_code === 'thesis.method_reproducible.v1').rule_text).toContain('转人工复核');
   await page.getByRole("button", { name: /2 评分规则/ }).click();
+  await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
   await page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /统一确认最终规则/ }).click();
   await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: "确认", exact: true })).toHaveCount(0);
   await page.locator(".criteria-nav .lib-item", { hasText: "RESULT" }).click();
@@ -242,6 +280,7 @@ test("保存失败保留修改，重试生成新草稿；完成确认后显式�
   await expect(release).toContainText('评分标准已发布');
   await expect(release.getByLabel('分享给谁')).toBeDisabled();
   await page.getByRole("button", { name: /2 评分规则/ }).click();
+  await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
   await expect(page.locator("[data-test=rule-review-panel]").getByRole("button", { name: /统一确认最终规则/ })).toBeDisabled();
 });
 
@@ -260,6 +299,7 @@ test("存量单次上限冲突可显式清除并保存新草稿，其它评分�
   await page.getByRole("button", { name: "前往校验与发布" }).click();
   await expect(page.getByRole('alert').filter({hasText:'3 个校验阻断'})).toContainText('单条累计上限');
   await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
+  await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
   await page.getByText('编辑当前评分项的原子规则', {exact:true}).click();
   const editor = page.locator('.atomic-editor');
   await expect(editor).toHaveCount(2);

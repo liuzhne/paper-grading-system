@@ -299,7 +299,13 @@ def _execute_composite(request, node, llm_runtime):
 
 
 def execute_legacy_compatibility_plan(
-    *, request, checker_registry, llm_runtime, profile
+    *,
+    request,
+    checker_registry,
+    llm_runtime,
+    profile,
+    decision_ledger=None,
+    execution_journal=None,
 ):
     """Execute a legacy_unversioned plan@3 and aggregate every parent once."""
 
@@ -319,6 +325,14 @@ def execute_legacy_compatibility_plan(
         checker_registry=checker_registry,
         llm_runtime=llm_runtime,
         profile=profile,
+        **{
+            name: port
+            for name, port in (
+                ("decision_ledger", decision_ledger),
+                ("execution_journal", execution_journal),
+            )
+            if port is not None
+        },
     ).to_mapping()
     criteria = list(atomic["criterion_outcomes"])
     decisions = list(atomic["rule_decisions"])

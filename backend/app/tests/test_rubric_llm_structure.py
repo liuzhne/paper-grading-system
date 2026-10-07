@@ -124,3 +124,61 @@ def test_mock_connection_is_refused():
         recognize_structure(_sheets(fx.unmapped_header_xlsx()), type("M", (), {"provider": "mock"})(),
                             failure_codes=["E1"])
     assert exc.value.code == "AI_CONNECTION_MISSING"
+
+
+def test_malformed_json_is_repaired_once_with_dedicated_budget():
+    from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
+    from backend.app.services.rubric_import.extraction.llm_structure import STRUCTURE_MAX_OUTPUT_TOKENS
+    class Scorer:
+        provider = "openai"
+        calls = []
+        def complete_json(self, instructions, payload, *, default_max_tokens=None):
+            self.calls.append((instructions, default_max_tokens))
+            if len(self.calls) == 1:
+                raise ResponsesJSONOutputError("invalid_json")
+            return VALID
+    scorer = Scorer()
+    result = recognize_structure(_sheets(fx.unmapped_header_xlsx()), scorer, failure_codes=["E1"])
+    assert result["override"]["header_row"] == 1
+    assert [c[1] for c in scorer.calls] == [STRUCTURE_MAX_OUTPUT_TOKENS] * 2
+    assert "STRUCTURE_OUTPUT_INVALID" in scorer.calls[1][0]
+
+
+@pytest.mark.parametrize("reason,code,calls", [("output_truncated", "STRUCTURE_OUTPUT_TRUNCATED", 1), ("invalid_json", "STRUCTURE_OUTPUT_INVALID", 2)])
+def test_output_failure_is_not_reported_as_provider_outage(reason, code, calls):
+    from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
+    from backend.app.services.rubric_import.structure_state import _structure_problem
+    class Scorer:
+        provider = "openai"
+        calls = 0
+        def complete_json(self, instructions, payload):
+            self.calls += 1
+            raise ResponsesJSONOutputError(reason)
+    scorer = Scorer()
+    with pytest.raises(StructureError) as exc:
+        recognize_structure(_sheets(fx.unmapped_header_xlsx()), scorer, failure_codes=["E1"])
+    assert exc.value.code == code
+    assert _structure_problem(exc.value).status == 422
+    assert scorer.calls == calls
+
+
+def test_responses_completion_detects_truncation_and_preserves_explicit_budget():
+    import httpx
+    from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer, ResponsesJSONOutputError
+    captured = []
+    def respond(request):
+        import json
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+                                        "output_text": '{"private": "do not expose'})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        scorer = OpenAIResponsesScorer(api_key="test", base_url="https://example.test/v1", model_name="fixture", client=client, max_output_tokens=1200)
+        with pytest.raises(ResponsesJSONOutputError) as exc:
+            scorer.complete_json("JSON", {}, default_max_tokens=8192)
+        assert exc.value.reason == "output_truncated"
+        assert "private" not in str(exc.value)
+        assert captured[0]["max_output_tokens"] == 1200
+        scorer = OpenAIResponsesScorer(api_key="test", base_url="https://example.test/v1", model_name="fixture", client=client)
+        with pytest.raises(ResponsesJSONOutputError):
+            scorer.complete_json("JSON", {}, default_max_tokens=8192)
+        assert captured[1]["max_output_tokens"] >= 8192

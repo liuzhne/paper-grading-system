@@ -1244,7 +1244,8 @@ def publish_rubric(
         )
         if blockers:
             codes = ", ".join(sorted({item["code"] for item in blockers}))
-            raise RubricLifecycleError(f"评分标准尚不可发布：{codes}")
+            details = "；".join(dict.fromkeys(item["message"] for item in blockers))
+            raise RubricLifecycleError(f"评分标准尚不可发布：{codes}。{details}")
 
         content_hash = _canonical_version_hash(
             session,

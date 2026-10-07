@@ -180,3 +180,35 @@ def test_undo_reverts_a_merge_without_new_criteria(client, monkeypatch):
     assert [c["description"] for c in undone.json()["rubric"]["criteria"]] == [None, None]
     state = client.get(f"/api/rubrics/{rubric['id']}/parse-coverage").json()
     assert state["structure_suggestions"]["status"] == "undone"
+
+
+def test_structure_row_match_keeps_ids_and_requires_name_confirmation(client, monkeypatch):
+    book = Workbook()
+    sheet = book.active
+    sheet.title = '评分'
+    sheet.append(['评分项', '分值', '备用名称'])
+    sheet.append(['研究方法', 10, '方法与实现'])
+    output = BytesIO()
+    book.save(output)
+    rubric = _import(client, output.getvalue())
+    before = rubric['criteria'][0]
+    structure = {**DRAFT_STRUCTURE, 'column_mapping': [
+        {'col':'C3', 'field':'name', 'reason':'名称'},
+        {'col':'C2', 'field':'max_score', 'reason':'满分'},
+        {'col':'C1', 'field':'ignore', 'reason':'旧名称'},
+    ]}
+    _use_scorer(monkeypatch, structure)
+    base = f"/api/rubrics/{rubric['id']}"
+    response = client.post(base + '/structure-suggestions', json={})
+    assert response.status_code == 200, response.text
+    suggestion = response.json()
+    assert not any(i['kind'] == 'removed' for i in suggestion['items'])
+    name_change = next(i for i in suggestion['items'] if i.get('field') == 'name')
+    merged = client.post(base + '/suggestions/merge', json={
+        'fingerprint':suggestion['fingerprint'], 'confirm':[name_change['id']],
+        'exclude':[], 'reason':'合成行对齐验证',
+    })
+    assert merged.status_code == 200, merged.text
+    after = client.get(base).json()['criteria'][0]
+    assert (after['id'], after['code']) == (before['id'], before['code'])
+    assert after['name'] == '方法与实现'

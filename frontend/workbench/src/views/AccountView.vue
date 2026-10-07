@@ -132,13 +132,39 @@ const connections = ref([]);
 const connectionsError = ref(null);
 const draft = reactive({
   name: "我的 AI 连接",
-  provider_type: "openai_responses",
+  // auto：由服务端按地址后缀、已知平台和探测请求识别；手动选择只在「高级设置」里。
+  provider_type: "auto",
   base_url: "https://api.openai.com/v1",
   model_name: "gpt-4.1-mini",
   api_key: "",
   busy: false,
   error: null,
   result: null,
+  detected: null,
+});
+const PROTOCOL_LABELS = {
+  openai_compatible: "OpenAI 兼容（Chat Completions）",
+  openai_responses: "OpenAI Responses",
+};
+const PROTOCOL_SHORT = { openai_compatible: "Chat 兼容", openai_responses: "Responses" };
+const DETECTION_LABELS = {
+  manual: "手动选择",
+  url_suffix: "按接口地址后缀识别",
+  known_host: "按已知平台识别",
+  probe: "按探测请求识别",
+  stored: "已保存的设置",
+};
+function protocolLabel(type) {
+  return PROTOCOL_LABELS[type] || type;
+}
+// 识别结果只对测试时的地址、模型和协议选择有效；改了任何一项就回到「待识别」。
+const draftProtocol = computed(() => {
+  if (draft.provider_type !== "auto") return `${protocolLabel(draft.provider_type)} · 手动选择`;
+  const found = draft.detected;
+  if (found && found.base_url === draft.base_url.trim().replace(/\/+$/, "") && found.model_name === draft.model_name.trim()) {
+    return `${protocolLabel(found.provider_type)} · ${DETECTION_LABELS[found.detection] || found.detection}`;
+  }
+  return "自动识别（测试或保存时确定）";
 });
 const connBusy = reactive({});
 const rotating = ref(null);
@@ -176,7 +202,15 @@ async function onTestDraft() {
     const probe = await api.post("/ai-connections/test-draft", draftPayload(), {
       organizationId,
     });
-    draft.result = `配置校验通过：${probe.provider_type} · ${probe.model_name}`;
+    // 粘贴了完整接口地址时，服务端会去掉 /chat/completions 或 /responses 后缀。
+    if (probe.base_url && probe.base_url !== draft.base_url.trim()) draft.base_url = probe.base_url;
+    draft.detected = {
+      provider_type: probe.provider_type,
+      detection: probe.detection,
+      base_url: probe.base_url || draft.base_url.trim().replace(/\/+$/, ""),
+      model_name: probe.model_name,
+    };
+    draft.result = `配置校验通过：${protocolLabel(probe.provider_type)} · ${probe.model_name}`;
   } catch (error) {
     if (!(error instanceof StaleContextError)) {
       draft.error = error?.message || "测试失败";
@@ -215,6 +249,8 @@ async function connectionAction(connection, action) {
   try {
     if (action === "test") {
       await api.post(`/ai-connections/${connection.id}/test`, {}, { organizationId });
+    } else if (action === "activate") {
+      await api.post(`/ai-connections/${connection.id}/activate`, {}, { organizationId });
     } else if (action === "disable") {
       await api.post(`/ai-connections/${connection.id}/disable`, {}, { organizationId });
     } else if (action === "delete") {
@@ -431,7 +467,7 @@ onMounted(async () => {
         <div>
           <h2 class="card-title">我的 AI 连接</h2>
           <p class="card-note">
-            保存、测试、换 Key、停用与删除都在服务端完成；页面只展示掩码与状态，任何时候都不会回显完整密钥。
+            同一账户在当前组织中只能启用一个连接；首个连接自动启用，新增连接需手动启用。启用后用于新任务与 AI 起草。切换会停用旧连接，绑定旧连接的任务将无法继续评分；已发出的请求可能仍会完成。密钥仅加密保存在服务端。
           </p>
         </div>
         <span class="chip">{{ connections.length }} 个</span>
@@ -458,10 +494,13 @@ onMounted(async () => {
                   <div>{{ conn.name }}</div>
                   <div class="faint mono conn-base">{{ conn.base_url }}</div>
                 </td>
-                <td class="muted">{{ conn.model_name }}</td>
+                <td class="muted">
+                  <div>{{ conn.model_name }}</div>
+                  <div class="faint conn-base" :title="protocolLabel(conn.provider_type)">{{ PROTOCOL_SHORT[conn.provider_type] || conn.provider_type }}</div>
+                </td>
                 <td class="num">{{ conn.key_masked }}<span class="faint"> · v{{ conn.key_version }}</span></td>
                 <td>
-                  <span :class="statusChip(conn.status)">{{ conn.status }}</span>
+                  <span :class="statusChip(conn.status)">{{ conn.status === "active" ? "已启用" : "未启用" }}</span>
                   <div v-if="conn.last_error_code" class="faint mono conn-base">{{ conn.last_error_code }}</div>
                 </td>
                 <td class="num muted">{{ formatTime(conn.last_verified_at) }}</td>
@@ -482,6 +521,15 @@ onMounted(async () => {
                       @click="rotating = rotating === conn.id ? null : conn.id"
                     >
                       换 Key
+                    </button>
+                    <button
+                      v-if="conn.status !== 'active'"
+                      class="btn btn-sm btn-primary"
+                      type="button"
+                      :disabled="Object.values(connBusy).some(Boolean)"
+                      @click="connectionAction(conn, 'activate')"
+                    >
+                      启用
                     </button>
                     <button
                       v-if="conn.status === 'active'"
@@ -538,13 +586,10 @@ onMounted(async () => {
               <span class="field-label">名称</span>
               <input v-model="draft.name" class="input" type="text" required />
             </label>
-            <label class="field">
-              <span class="field-label">厂商协议</span>
-              <select v-model="draft.provider_type" class="select">
-                <option value="openai_responses">OpenAI Responses</option>
-                <option value="openai_compatible">OpenAI 兼容</option>
-              </select>
-            </label>
+            <div class="field">
+              <span class="field-label">接口协议</span>
+              <div class="input protocol-value" data-test="protocol-value" role="status">{{ draftProtocol }}</div>
+            </div>
             <label class="field">
               <span class="field-label">模型</span>
               <input v-model="draft.model_name" class="input" type="text" required />
@@ -558,6 +603,19 @@ onMounted(async () => {
               <input v-model="draft.api_key" class="input" type="password" autocomplete="off" required />
             </label>
           </div>
+
+          <details class="advanced" :open="draft.provider_type !== 'auto'">
+            <summary>高级设置</summary>
+            <label class="field advanced-field">
+              <span class="field-label">接口协议</span>
+              <select v-model="draft.provider_type" class="select" data-test="protocol-select">
+                <option value="auto">自动识别（推荐）</option>
+                <option value="openai_compatible">OpenAI 兼容（Chat Completions）</option>
+                <option value="openai_responses">OpenAI Responses</option>
+              </select>
+              <span class="field-hint">一般不用改。自动识别依次看接口地址后缀、已知平台和探测请求；只有网关或特殊部署识别不对时才手动指定。</span>
+            </label>
+          </details>
 
           <div class="form-actions">
             <span class="muted">测试与保存都在服务端完成，浏览器不直接调用厂商。</span>
@@ -632,6 +690,31 @@ onMounted(async () => {
 
 .invite-submit {
   height: 40px;
+}
+
+.protocol-value {
+  display: flex;
+  align-items: center;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.advanced {
+  margin: 4px 0 14px;
+}
+
+.advanced summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.advanced-field {
+  max-width: 420px;
+  margin: 10px 0 0;
 }
 
 .rotate-form {

@@ -593,11 +593,18 @@ def test_execute_rule_plan_has_a_pure_keyword_only_ports_signature():
         "checker_registry",
         "llm_runtime",
         "profile",
+        # 2026-10-05: the optional rule decision ledger is another port, not an
+        # I/O dependency; omitting it must keep the original behaviour.
+        "decision_ledger",
+        # Records which decisions were replayed or shared one group call.
+        "execution_journal",
     ]
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY
         for parameter in signature.parameters.values()
     )
+    assert signature.parameters["decision_ledger"].default is None
+    assert signature.parameters["execution_journal"].default is None
 
 
 @requires_rule_executor

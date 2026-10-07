@@ -17,6 +17,59 @@ def confirmation(view, rule):
             "content_token": rule["content_token"], "reason": "核对合成模板条款"}
 
 
+def test_confirmed_review_only_rules_block_publication_until_numeric_rules_added(client):
+    response = client.post("/api/rubrics", json={
+        "name": "合成缺失计分规则", "version": "v1", "total_score": 10,
+        "criteria": [{"code": "T05", "name": "论证质量", "max_score": 10,
+                      "scoring_mode": "review_only", "description": "论证须有依据"}],
+    })
+    assert response.status_code == 200, response.text
+    rubric = response.json()
+    rubric_id = rubric["id"]
+    view = workspace(client, rubric_id)
+    assert "criterion_numeric_scoring_missing" in {item["code"] for item in view["structural_blockers"]}
+    for rule in view["rules"]:
+        confirmed = client.post(f"/api/rubrics/{rubric_id}/rules/{rule['rule_code']}/confirm",
+                                json=confirmation(view, rule))
+        assert confirmed.status_code == 200, confirmed.text
+    assert client.post(f"/api/rubrics/{rubric_id}/submit-review").status_code == 200
+    with client.session_factory() as session:
+        version = session.scalar(select(models.RubricVersion).where(models.RubricVersion.rubric_id == rubric_id))
+        original_hash = version.version_hash
+        original_audit = session.get(models.RubricCompilation, view["compilation_id"]).human_changes
+    failed = client.post(f"/api/rubrics/{rubric_id}/publish", json={
+        "compilation_id": view["compilation_id"], "visibility": "organization",
+    })
+    assert failed.status_code == 400, failed.text
+    assert "T05" in failed.json()["detail"] and "AI" in failed.json()["detail"]
+    after = client.get(f"/api/rubrics/{rubric_id}").json()
+    assert after["status"] == "review" and after["visibility"] == rubric["visibility"]
+    with client.session_factory() as session:
+        version = session.scalar(select(models.RubricVersion).where(models.RubricVersion.rubric_id == rubric_id))
+        compilation = session.get(models.RubricCompilation, view["compilation_id"])
+        assert version.version_hash == original_hash
+        assert compilation.published_at is None
+        assert compilation.human_changes == original_audit
+
+    assert client.post(f"/api/rubrics/{rubric_id}/return-to-draft").status_code == 200
+    rubric["criteria"][0].update(scoring_mode="deductive", deduction_rules_structured=[
+        {"match": "论证缺少依据", "trigger": "论证缺少依据", "points": 2, "reason": "扣2分"},
+    ])
+    saved = client.post(f"/api/rubrics/{rubric_id}/recompile", json={
+        "supersedes_compilation_id": view["compilation_id"], "version": "v2", "criteria": rubric["criteria"],
+    })
+    assert saved.status_code == 200, saved.text
+    complete = workspace(client, rubric_id)
+    assert not complete["structural_blockers"]
+    for rule in complete["rules"]:
+        assert client.post(f"/api/rubrics/{rubric_id}/rules/{rule['rule_code']}/confirm",
+                           json=confirmation(complete, rule)).status_code == 200
+    assert client.post(f"/api/rubrics/{rubric_id}/submit-review").status_code == 200
+    published = client.post(f"/api/rubrics/{rubric_id}/publish", json={"compilation_id": complete["compilation_id"]})
+    assert published.status_code == 200, published.text
+    assert published.json()["status"] == "published"
+
+
 def test_atomic_edit_preserves_source_and_rejects_stale_or_incomplete_input(client):
     imported = _import_rubric(client, name="合成原子编辑")
     rubric = imported["rubric"]

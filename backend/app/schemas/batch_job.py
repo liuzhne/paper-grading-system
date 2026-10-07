@@ -82,3 +82,43 @@ class BatchScoringJobRead(BaseModel):
         now = datetime.now(timezone.utc)
         age = (now - heartbeat.astimezone(timezone.utc)).total_seconds()
         return "stale" if age > RUNNER_LEASE_SECONDS else "healthy"
+
+
+class ScoreEstimatePaper(BaseModel):
+    paper_id: str
+    title: Optional[str] = None
+    supported: bool
+    reason: Optional[str] = None
+    semantic_rules: int
+    reused_rules: int
+    calls: int
+    estimated_input_tokens: int
+
+
+class ScoreEstimateViolation(BaseModel):
+    kind: str
+    estimated: int
+    cap: int
+    paper_id: Optional[str] = None
+    title: Optional[str] = None
+
+
+class ScoreEstimateCaps(BaseModel):
+    per_paper: int
+    per_batch: int
+
+
+class BatchScoreEstimateRead(BaseModel):
+    """Local, conservative input-token estimate; no provider is called."""
+
+    batch_id: str
+    rescore: bool
+    paper_count: int
+    skipped_complete_papers: int
+    unsupported_papers: int
+    calls: int
+    reused_rules: int
+    estimated_input_tokens: int
+    caps: ScoreEstimateCaps
+    violations: list[ScoreEstimateViolation]
+    papers: list[ScoreEstimatePaper]

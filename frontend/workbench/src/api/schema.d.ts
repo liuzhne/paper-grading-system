@@ -57,6 +57,23 @@ export interface paths {
         patch: operations["update_ai_connection_api_ai_connections__connection_id__patch"];
         trace?: never;
     };
+    "/api/ai-connections/{connection_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Activate Ai Connection */
+        post: operations["activate_ai_connection_api_ai_connections__connection_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ai-connections/{connection_id}/disable": {
         parameters: {
             query?: never;
@@ -783,6 +800,26 @@ export interface paths {
          *     null，让前端能区分「还没定」和「算出来是空」。
          */
         get: operations["batch_score_distribution_api_batches__batch_id__score_distribution_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{batch_id}/score-estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Score Estimate
+         * @description Estimate input tokens locally before starting; no provider is called.
+         */
+        get: operations["read_score_estimate_api_batches__batch_id__score_estimate_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2779,12 +2816,21 @@ export interface components {
             };
             /**
              * Provider Type
+             * @default auto
              * @enum {string}
              */
-            provider_type: "openai_responses" | "openai_compatible";
+            provider_type: "auto" | "openai_responses" | "openai_compatible";
         };
         /** AIConnectionProbeResult */
         AIConnectionProbeResult: {
+            /** Base Url */
+            base_url?: string | null;
+            /**
+             * Detection
+             * @default stored
+             * @enum {string}
+             */
+            detection: "manual" | "url_suffix" | "known_host" | "probe" | "stored";
             /** Model Name */
             model_name: string;
             /**
@@ -2869,9 +2915,10 @@ export interface components {
             };
             /**
              * Provider Type
+             * @default auto
              * @enum {string}
              */
-            provider_type: "openai_responses" | "openai_compatible";
+            provider_type: "auto" | "openai_responses" | "openai_compatible";
         };
         /** AIConnectionUpdate */
         AIConnectionUpdate: {
@@ -3096,6 +3143,33 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /**
+         * BatchScoreEstimateRead
+         * @description Local, conservative input-token estimate; no provider is called.
+         */
+        BatchScoreEstimateRead: {
+            /** Batch Id */
+            batch_id: string;
+            /** Calls */
+            calls: number;
+            caps: components["schemas"]["ScoreEstimateCaps"];
+            /** Estimated Input Tokens */
+            estimated_input_tokens: number;
+            /** Paper Count */
+            paper_count: number;
+            /** Papers */
+            papers: components["schemas"]["ScoreEstimatePaper"][];
+            /** Rescore */
+            rescore: boolean;
+            /** Reused Rules */
+            reused_rules: number;
+            /** Skipped Complete Papers */
+            skipped_complete_papers: number;
+            /** Unsupported Papers */
+            unsupported_papers: number;
+            /** Violations */
+            violations: components["schemas"]["ScoreEstimateViolation"][];
         };
         /** BatchScoreResult */
         BatchScoreResult: {
@@ -4912,6 +4986,45 @@ export interface components {
              */
             updated_at: string;
         };
+        /** ScoreEstimateCaps */
+        ScoreEstimateCaps: {
+            /** Per Batch */
+            per_batch: number;
+            /** Per Paper */
+            per_paper: number;
+        };
+        /** ScoreEstimatePaper */
+        ScoreEstimatePaper: {
+            /** Calls */
+            calls: number;
+            /** Estimated Input Tokens */
+            estimated_input_tokens: number;
+            /** Paper Id */
+            paper_id: string;
+            /** Reason */
+            reason?: string | null;
+            /** Reused Rules */
+            reused_rules: number;
+            /** Semantic Rules */
+            semantic_rules: number;
+            /** Supported */
+            supported: boolean;
+            /** Title */
+            title?: string | null;
+        };
+        /** ScoreEstimateViolation */
+        ScoreEstimateViolation: {
+            /** Cap */
+            cap: number;
+            /** Estimated */
+            estimated: number;
+            /** Kind */
+            kind: string;
+            /** Paper Id */
+            paper_id?: string | null;
+            /** Title */
+            title?: string | null;
+        };
         /** ScoreItemRead */
         ScoreItemRead: {
             /** Aggregation */
@@ -5067,7 +5180,7 @@ export interface components {
              * Action
              * @enum {string}
              */
-            action: "assign" | "not_rule";
+            action: "assign" | "not_rule" | "restore";
             /** Criterion Code */
             criterion_code?: string | null;
             /** Reason */
@@ -5081,7 +5194,7 @@ export interface components {
              * Action
              * @enum {string}
              */
-            action: "assign" | "not_rule";
+            action: "assign" | "not_rule" | "restore";
             /** Criterion Code */
             criterion_code?: string | null;
             /** Reason */
@@ -5515,6 +5628,41 @@ export interface operations {
                 "application/json": components["schemas"]["AIConnectionUpdate"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AIConnectionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    activate_ai_connection_api_ai_connections__connection_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                connection_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -6934,6 +7082,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_score_estimate_api_batches__batch_id__score_estimate_get: {
+        parameters: {
+            query?: {
+                rescore?: boolean;
+            };
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                batch_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchScoreEstimateRead"];
                 };
             };
             /** @description Validation Error */

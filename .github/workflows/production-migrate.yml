@@ -190,6 +190,7 @@ jobs:
                   "export_events",
                   "platform_llm_config",
                   "rubric_import_sessions",
+                  "rule_decision_ledger",
               ):
                   connection.execute(text('SELECT count(*) FROM "%s"' % table)).scalar_one()
                   print("runtime role can read:", table)

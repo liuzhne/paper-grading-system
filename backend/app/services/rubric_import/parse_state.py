@@ -11,7 +11,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from backend.app.db import models
@@ -27,7 +27,7 @@ LEDGER_KEYS = (
     "source_ledger", "coverage", "extraction", "triggers", "template_summary", "business_profile_key", "source_conflicts",
 )
 MODEL_OUTPUT_KEYS = ("unit_classifications", "structure_suggestions", "rule_review")
-RESOLVE_ACTIONS = ("assign", "not_rule")
+RESOLVE_ACTIONS = ("assign", "not_rule", "restore")
 
 
 class ParseStateError(Exception):
@@ -70,7 +70,8 @@ def _classification_view(session: Session, rubric_id: str, compilation, raw: dic
     ledger = SourceLedger.from_mapping(raw["source_ledger"])
     units = stored.get("units") or []
     current_units = [
-        {"unit_id": u["unit_id"], "text": ledger.unit(u["unit_id"]).text if ledger.has(u["unit_id"]) else None}
+        {"unit_id": u["unit_id"], "text": ledger.unit(u["unit_id"]).text if ledger.has(u["unit_id"]) else None,
+         "context": dict(ledger.unit(u["unit_id"]).context) if ledger.has(u["unit_id"]) else {}}
         for u in units
     ]
     stale = classification_fingerprint(current_units, criteria_payload(session, rubric_id)) != stored.get("fingerprint")
@@ -106,9 +107,44 @@ def run_unit_classification(session: Session, rubric_id: str, scorer, *, unit_id
         result = classify_units(units, criteria_payload(session, rubric_id), scorer)
     except ClassificationError as exc:
         raise ParseStateError(503, exc.code, exc.message) from exc
+    # Provider calls run without holding the merge lock. Serialize only the short
+    # read/merge/write section, and refresh the identity map after waiting for a
+    # concurrent batch to commit.
+    compilation_id = compilation.id
+    # A no-op UPDATE obtains a write lock on both PostgreSQL (row) and
+    # SQLite (database), where SELECT FOR UPDATE would otherwise be ignored.
+    session.execute(
+        update(models.RubricCompilation)
+        .where(models.RubricCompilation.id == compilation_id)
+        .values(raw_model_output=models.RubricCompilation.raw_model_output)
+        .execution_options(synchronize_session=False)
+    )
+    session.expire_all()
+    current = require_editable_ledger(session, rubric_id)
+    if current.id != compilation_id:
+        raise ParseStateError(409, "CLASSIFICATION_INPUT_CHANGED", "评分标准已变化，请重新归类。")
+    raw = compilation.raw_parse_output
+    ledger = SourceLedger.from_mapping(raw["source_ledger"])
+    fresh_units = select_units(ledger, _coverage(raw), unit_ids=[u["unit_id"] for u in units])
+    if classification_fingerprint(fresh_units, criteria_payload(session, rubric_id)) != result["fingerprint"]:
+        raise ParseStateError(409, "CLASSIFICATION_INPUT_CHANGED", "归类期间原文或评分项已变化，请重新归类。")
+    previous = _classification_view(session, rubric_id, compilation, raw)
+    if previous and not previous["stale"]:
+        requested = {u["unit_id"] for u in units}
+        eligible = {u["unit_id"] for u in select_units(ledger, _coverage(raw))}
+        retained = [u for u in previous.get("units", [])
+                    if u["unit_id"] not in requested and u["unit_id"] in eligible]
+        retained_ids = {u["unit_id"] for u in retained}
+        for key in ("results", "rejected"):
+            result[key] = [item for item in previous.get(key, [])
+                           if item.get("unit_id") in retained_ids] + result[key]
+        for key in ("failed_unit_ids", "unclassified_unit_ids"):
+            result[key] = [uid for uid in previous.get(key, []) if uid in retained_ids] + result[key]
+        units = retained + units
+        result["fingerprint"] = classification_fingerprint(units, criteria_payload(session, rubric_id))
     stored = {
         **result,
-        "units": [{"unit_id": u["unit_id"], "text": u["text"]} for u in units],
+        "units": [{"unit_id": u["unit_id"], "text": u["text"], "context": u.get("context", {})} for u in units],
         "requested_by": actor_id,
         "created_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
@@ -254,6 +290,15 @@ def resolve_units(
             raise ParseStateError(422, "CRITERION_NOT_FOUND", "请选择已有的评分项。")
         for unit_id in unit_ids:
             ledger.claim(unit_id, f"{criterion_code}.manual", extracted_by="human")
+    elif action == "restore":
+        payload = ledger.to_mapping()
+        for item in payload["units"]:
+            if item["unit_id"] in unit_ids:
+                # 自动抽取的规则仍保留，移出只撤销人工归类。
+                refs = [ref for ref in item.get("claimed_by", []) if not ref.endswith(".manual")]
+                item.update(status="consumed" if refs else "unclaimed", claimed_by=refs,
+                            reason=None, extracted_by="human")
+        ledger = SourceLedger.from_mapping(payload)
     else:
         # 人工确认“不是规则”：即使台账中此前为其他状态，也以人工结论为准。
         ledger = _override_status(ledger, set(unit_ids))
@@ -289,3 +334,14 @@ def _override_status(ledger: SourceLedger, unit_ids: set[str]) -> SourceLedger:
         if item["unit_id"] in unit_ids:
             item.update(status="context", claimed_by=[], reason="人工确认不是规则", extracted_by="human")
     return SourceLedger.from_mapping(payload)
+
+
+def assigned_rule_sources(session: Session, rubric_id: str, criterion_code: str) -> list[dict]:
+    """Read human-authorized source material without changing criteria or executable rules."""
+    compilation = current_compilation(session, rubric_id)
+    if not has_ledger(compilation):
+        return []
+    ledger = SourceLedger.from_mapping(compilation.raw_parse_output["source_ledger"])
+    return [{"text": unit.text, "source_refs": [unit.unit_id], "reason": "assigned_source"}
+            for unit in ledger
+            if f"{criterion_code}.manual" in ledger.status(unit.unit_id).claimed_by]

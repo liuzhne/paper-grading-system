@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Query
 from fastapi import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
@@ -15,7 +16,10 @@ from backend.app.api.deps import require_organization_role
 from backend.app.db.models import GradingBatch
 from backend.app.db.session import get_db
 from backend.app.schemas.batch_job import BatchScoringJobCreate
+from backend.app.schemas.batch_job import BatchScoreEstimateRead
 from backend.app.schemas.batch_job import BatchScoringJobRead
+from backend.app.services.batch_scoring.jobs import ACTIVE_JOB_STATUSES
+from backend.app.services.batch_scoring.jobs import RETRYABLE_ITEM_STATUSES
 from backend.app.services.batch_scoring.jobs import cancel_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import create_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import get_batch_scoring_job
@@ -25,6 +29,9 @@ from backend.app.services.batch_scoring.jobs import retry_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import run_batch_scoring_job
 from backend.app.services.batch_scoring.vercel_queue import dispatch_batch_scoring_job
 from backend.app.services.dev_user import ensure_dev_user
+from backend.app.services.scoring.usage_estimate import TokenCapExceededError
+from backend.app.services.scoring.usage_estimate import assert_within_token_caps
+from backend.app.services.scoring.usage_estimate import estimate_batch
 
 
 router = APIRouter(tags=["batch-scoring-jobs"])
@@ -79,6 +86,27 @@ def list_attention_jobs(
     )
 
 
+@router.get(
+    "/batches/{batch_id}/score-estimate",
+    response_model=BatchScoreEstimateRead,
+)
+def read_score_estimate(
+    batch_id: str,
+    rescore: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """Estimate input tokens locally before starting; no provider is called."""
+
+    _batch_or_404(db, batch_id, principal)
+    return estimate_batch(db, batch_id, rescore=rescore)
+
+
+def _has_active_job(db, batch_id) -> bool:
+    latest = get_latest_batch_scoring_job(db, batch_id)
+    return latest is not None and latest.status in ACTIVE_JOB_STATUSES
+
+
 @router.post(
     "/batches/{batch_id}/score-jobs",
     response_model=BatchScoringJobRead,
@@ -96,6 +124,10 @@ async def create_job(
     try:
         _batch_or_404(db, batch_id, principal)
         require_organization_role(principal, "org_admin", "teacher")
+        # An active job is returned idempotently below; only new work is
+        # checked against the configured input-token caps.
+        if not _has_active_job(db, batch_id):
+            assert_within_token_caps(db, batch_id, rescore=payload.rescore)
         job, created = create_batch_scoring_job(
             db,
             batch_id=batch_id,
@@ -104,6 +136,8 @@ async def create_job(
             observation_policy=payload.observation_policy,
             actor_id=user_id,
         )
+    except TokenCapExceededError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         detail = str(exc)
         status = 404 if detail == "batch not found" else 409 if "active" in detail else 400
@@ -168,9 +202,25 @@ async def retry_job(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     try:
-        _job_or_404(db, job_id, principal)
+        existing = _job_or_404(db, job_id, principal)
         require_organization_role(principal, "org_admin", "teacher")
+        retry_paper_ids = [
+            item.paper_id
+            for item in existing.items
+            if item.status in RETRYABLE_ITEM_STATUSES
+        ]
+        if retry_paper_ids:
+            # Retried papers reuse the decision ledger, so this usually only
+            # counts the rules that failed.
+            assert_within_token_caps(
+                db,
+                existing.grading_batch_id,
+                rescore=existing.rescore,
+                paper_ids=retry_paper_ids,
+            )
         job = retry_batch_scoring_job(db, job_id)
+    except TokenCapExceededError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         status = 404 if "not found" in str(exc) else 409
         raise HTTPException(status_code=status, detail=str(exc)) from exc

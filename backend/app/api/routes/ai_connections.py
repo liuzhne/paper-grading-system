@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.api.deps import CurrentPrincipal, current_principal
 from backend.app.db.models import AIConnection
@@ -11,6 +12,7 @@ from backend.app.schemas.ai_connection import AIConnectionProbeResult
 from backend.app.schemas.ai_connection import AIConnectionRotateKey
 from backend.app.schemas.ai_connection import AIConnectionTestDraft
 from backend.app.schemas.ai_connection import AIConnectionUpdate
+from backend.app.services.ai_connections import activate_connection, lock_connection_owner
 from backend.app.services.ai_connections import create_connection
 from backend.app.services.ai_connections import ConnectionRuntime
 from backend.app.services.ai_connections import disable_connection
@@ -21,6 +23,9 @@ from backend.app.services.ai_connections import resolve_connection_runtime
 from backend.app.services.ai_connections import validate_base_url
 from backend.app.services.ai_connections import validate_provider_options
 from backend.app.services.ai_connections import verify_connection_runtime
+from backend.app.services.ai_connection_protocol import ProtocolNotDetected
+from backend.app.services.ai_connection_protocol import ProtocolResolution
+from backend.app.services.ai_connection_protocol import resolve_protocol
 from backend.app.db.models import utcnow
 from backend.app.services.auth import audit
 
@@ -39,6 +44,40 @@ def _enforce_rate_limit(principal: CurrentPrincipal) -> None:
         enforce_connection_rate_limit(principal.user_id)
     except ValueError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
+def _resolve_protocol(payload: AIConnectionCreate, organization_id: str, *, verify: bool) -> ProtocolResolution:
+    """Validate the draft fields, then decide Chat vs Responses (see ai_connection_protocol)."""
+
+    base_url = validate_base_url(payload.base_url)
+    options = validate_provider_options(payload.provider_options)
+    api_key = payload.api_key.strip()
+    if len(api_key) < 4:
+        raise ValueError("API key must contain at least four characters")
+
+    def probe(provider_type: str, candidate_base_url: str) -> None:
+        verify_connection_runtime(ConnectionRuntime(
+            connection_id="draft",
+            key_version=0,
+            organization_id=organization_id,
+            provider_type=provider_type,
+            base_url=candidate_base_url,
+            model_name=payload.model_name.strip(),
+            provider_options=options,
+            api_key=api_key,
+        ))
+
+    try:
+        return resolve_protocol(requested=payload.provider_type, base_url=base_url, verify=verify, probe=probe)
+    except ProtocolNotDetected:
+        raise
+    except ValueError as exc:
+        if verify or payload.provider_type != "auto":
+            raise
+        # 保存时只有未知平台才会探测；探测失败多半是地址、模型或 Key 的问题，不是协议。
+        raise ValueError(
+            "无法自动识别协议：测试请求失败，请检查接口地址、模型和 API Key，或在高级设置中手动选择协议。"
+        ) from exc
 
 
 def _read(connection: AIConnection) -> dict:
@@ -65,6 +104,7 @@ def _read(connection: AIConnection) -> dict:
 
 
 def _owned_connection(db: Session, connection_id: str, principal: CurrentPrincipal) -> AIConnection:
+    lock_connection_owner(db, principal.user_id)
     connection = db.scalar(
         select(AIConnection).where(
             AIConnection.id == connection_id,
@@ -103,21 +143,30 @@ def create_ai_connection(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     _enforce_rate_limit(principal)
+    organization_id = _organization_id(principal)
     try:
+        resolution = _resolve_protocol(payload, organization_id, verify=False)
         connection = create_connection(
             db,
             owner_id=principal.user_id,
-            organization_id=_organization_id(principal),
-            **payload.model_dump(),
+            organization_id=organization_id,
+            **{**payload.model_dump(), "provider_type": resolution.provider_type, "base_url": resolution.base_url},
         )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="AI connections changed; refresh and retry") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if resolution.verified:
+        # 未知平台的识别本身就是一次成功的服务端探测。
+        connection.last_verified_at = utcnow()
     audit(
         db,
         "ai_connection.created",
         actor_id=principal.user_id,
         organization_id=connection.organization_id,
-        metadata={"connection_id": connection.id, "provider_type": connection.provider_type},
+        metadata={"connection_id": connection.id, "provider_type": connection.provider_type,
+                  "protocol_detection": resolution.source},
     )
     db.commit()
     db.refresh(connection)
@@ -133,24 +182,22 @@ def test_draft_connection(
     _enforce_rate_limit(principal)
     organization_id = _organization_id(principal)
     try:
-        runtime = ConnectionRuntime(
-            connection_id="draft",
-            key_version=0,
-            organization_id=organization_id,
-            provider_type=payload.provider_type,
-            base_url=validate_base_url(payload.base_url),
-            model_name=payload.model_name.strip(),
-            provider_options=validate_provider_options(payload.provider_options),
-            api_key=payload.api_key,
-        )
-        verified = verify_connection_runtime(runtime)
+        resolution = _resolve_protocol(payload, organization_id, verify=True)
     except ValueError as exc:
         audit(db, "ai_connection.draft_test_failed", actor_id=principal.user_id, organization_id=organization_id, metadata={"provider_type": payload.provider_type})
         db.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    audit(db, "ai_connection.draft_tested", actor_id=principal.user_id, organization_id=organization_id, metadata={"provider_type": payload.provider_type, "model_name": payload.model_name})
+    audit(db, "ai_connection.draft_tested", actor_id=principal.user_id, organization_id=organization_id,
+          metadata={"provider_type": resolution.provider_type, "model_name": payload.model_name,
+                    "protocol_detection": resolution.source})
     db.commit()
-    return {**verified, "status": "verified"}
+    return {
+        "provider_type": resolution.provider_type,
+        "model_name": payload.model_name.strip(),
+        "status": "verified",
+        "detection": resolution.source,
+        "base_url": resolution.base_url,
+    }
 
 
 @router.post("/{connection_id}/test", response_model=AIConnectionProbeResult)
@@ -167,6 +214,7 @@ def test_saved_connection(
             connection_id=connection.id,
             owner_id=principal.user_id,
             organization_id=connection.organization_id,
+            allow_disabled=True,
         )
         verified = verify_connection_runtime(runtime)
     except ValueError as exc:
@@ -222,6 +270,27 @@ def rotate_ai_connection_key(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit(db, "ai_connection.key_rotated", actor_id=principal.user_id, organization_id=connection.organization_id, metadata={"connection_id": connection.id, "key_version": connection.key_version})
     db.commit()
+    db.refresh(connection)
+    return _read(connection)
+
+
+@router.post("/{connection_id}/activate", response_model=AIConnectionRead)
+def activate_ai_connection(
+    connection_id: str,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    _enforce_rate_limit(principal)
+    connection = _owned_connection(db, connection_id, principal)
+    try:
+        activate_connection(db, connection)
+        audit(db, "ai_connection.activated", actor_id=principal.user_id,
+              organization_id=connection.organization_id,
+              metadata={"connection_id": connection.id})
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="AI connections changed; refresh and retry") from exc
     db.refresh(connection)
     return _read(connection)
 

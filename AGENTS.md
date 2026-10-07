@@ -10,7 +10,7 @@
 - CI/生产发布：`.github/workflows/ci.yml` 包含锁文件全量测试、Postgres 16 的逐版本迁移/约束/排序、拒绝 lossy downgrade、备份恢复演练和 Docker 冒烟；推送 `main` 且全部门禁通过后，才由 `deploy-vercel-production` 使用 GitHub `production` Environment 部署 Vercel。Vercel Git 直部署已关闭；当前 CLI 因上游 prebuilt 回归固定为 `58.4.0`。本机 SQLite 通过不能替代真实 CI artifact。
 
 ## 当前发布边界
-- Alembic head：`0031_rubric_import_sessions`（0022 将旧单租户资源安全回填至默认组织；0023 持久化规则检查点与人工复核任务；0024 批次七态约束与 `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0031 新增数据库临时评分标准导入会话。**0024–0028、0031 含数据时一律拒绝降级**——降级会删掉不可重建的审计或导入草稿）。
+- Alembic head：`0033_rule_decision_ledger`（0022 将旧单租户资源安全回填至默认组织；0023 持久化规则检查点与人工复核任务；0024 批次七态约束与 `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本与 `rule_scoring_tasks.decision_reused` / `group_call_id`。**0024–0028、0031 含数据时一律拒绝降级**——降级会删掉不可重建的审计或导入草稿；0033 的账本是可重建的缓存，但有复用标记的任务时同样拒绝降级）。
 - v1 `score_paper()` 与 v2 `score_generic_submission()` 并存；正式 RubricVersion 走 AtomicRule Core，未版本化标准只能走显式 compatibility。
 - `SCORING_ENGINE_MODE` 当前默认 `legacy`；它只控制未版本化兼容路径。真实 `GATE-03` 达到 `gating_eligible=true` 且取得维护者发布批准前，禁止改为默认 Core。
 
@@ -44,7 +44,7 @@
 确定性优先(代码做判定题、LLM 做判断题)、原子评分项、每个扣分/选档强制带证据(抗幻觉)、结构化优先、无状态可缓存可复现、人在回路。**扣哪项/扣几分来自用户授权的模板/Excel 编译，不写死。**
 
 ## 约定
-- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0031_rubric_import_sessions`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
+- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0033_rule_decision_ledger`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
 - 改 prompt/输入构造要 bump `cache/llm_cache.PROMPT_VERSION`。
 - 改评分逻辑后用 §15 QWK 留出集重新锚定基线。
 - 生产变更需完成 `docs/上线清单.md`；备份恢复必须先 verify，restore 只允许显式确认的数据库与空 storage 目标。

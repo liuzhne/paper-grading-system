@@ -104,11 +104,15 @@
   box-sizing: border-box;
 }
 
+/* 基准字号取原型正文 13.5px。原型里每段文字都写了字号、没有 16px 正文；
+ * 这里不设时，漏写字号的文字会落到浏览器默认 16px，比例失调、一屏信息变少。
+ * 只设在 body 上：rem 仍以 16px 为基准，现有 rem 尺寸不受影响。 */
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
+  font-size: 13.5px;
   -webkit-font-smoothing: antialiased;
 }
 

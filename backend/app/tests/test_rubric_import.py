@@ -120,12 +120,12 @@ def test_imports_school_template_with_embedded_scores_and_merged_names(client):
         20,
     ]
     assert [item["name"] for item in rubric["criteria"]] == [
-        "指导教师成绩项1",
-        "指导教师成绩项2",
-        "指导教师成绩项3",
-        "指导教师成绩项4",
-        "指导教师成绩项5",
-        "指导教师成绩项6",
+        "选题与开题",
+        "分析与解决问题1",
+        "分析与解决问题2",
+        "分析与解决问题3",
+        "分析与解决问题4",
+        "学习与工作态度",
     ]
     assert [item["dimension"] for item in rubric["criteria"]] == [
         "选题与开题",

@@ -34,6 +34,8 @@ MIGRATION_SEQUENCE = (
     "0029_runtime_access_for_v2_tables",
     "0030_platform_llm_config",
     "0031_rubric_import_sessions",
+    "0032_single_active_ai_connection",
+    "0033_rule_decision_ledger",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -68,6 +70,7 @@ def verify_postgres(session):
         "rule_scoring_tasks",
         "manual_review_tasks",
         "rubric_import_sessions",
+        "rule_decision_ledger",
     }
     missing = sorted(required_tables - tables)
     if missing:
@@ -108,13 +111,23 @@ def verify_postgres(session):
         "ck_ai_connections_status",
     }.issubset(connection_checks):
         raise RuntimeError("AI connection security constraints are incomplete")
+    active_index = next((index for index in inspector.get_indexes("ai_connections")
+                         if index["name"] == "uq_ai_connections_one_active"), None)
+    if (not active_index or not active_index.get("unique")
+            or active_index.get("column_names") != ["owner_id", "organization_id"]
+            or "active" not in str(active_index.get("dialect_options", {}).get("postgresql_where", ""))):
+        raise RuntimeError("AI connection single-active index is incomplete")
     runtime_role_exists = bool(
         session.scalar(
             text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgs_app')")
         )
     )
     if runtime_role_exists:
-        for table in ("rule_scoring_tasks", "manual_review_tasks"):
+        for table in (
+            "rule_scoring_tasks",
+            "manual_review_tasks",
+            "rule_decision_ledger",
+        ):
             access = session.execute(
                 text(
                     "SELECT c.relrowsecurity, "

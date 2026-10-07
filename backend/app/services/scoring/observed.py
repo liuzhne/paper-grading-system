@@ -26,6 +26,8 @@ def score_submission_observed(
     organization_id: str | None = None,
     batch_job_id: str | None = None,
     score_fn=score_submission,
+    decision_ledger=None,
+    execution_journal=None,
 ):
     """Trace one Core run without making Core depend on infrastructure.
 
@@ -54,11 +56,22 @@ def score_submission_observed(
         "rescore_generation": value["rescore_generation"],
     }
     with observation("scoring_run", as_type="chain", metadata=metadata) as span:
+        # Only forwarded when present: injected score functions predating the
+        # ledger keep their original keyword contract.
+        ledger_kwargs = {
+            name: port
+            for name, port in (
+                ("decision_ledger", decision_ledger),
+                ("execution_journal", execution_journal),
+            )
+            if port is not None
+        }
         outcome = score_fn(
             request=request,
             checker_registry=checker_registry,
             llm_runtime=llm_runtime,
             profile=profile,
+            **ledger_kwargs,
         )
         mapped = outcome.to_mapping()
         span.update(

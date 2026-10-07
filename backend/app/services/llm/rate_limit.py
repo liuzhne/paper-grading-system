@@ -80,7 +80,21 @@ class ConnectionCircuitBreaker:
                 self._probe_in_flight = False
                 return
             if normalized not in _TRANSIENT_CODES:
-                if permit is not None and permit.half_open_probe:
+                # Never leave a probe in ``half_open``: that used to admit one
+                # request at a time and fail every concurrent request with
+                # PROVIDER_CIRCUIT_OPEN, indefinitely, whenever the connection
+                # never succeeded.
+                if normalized != "unknown":
+                    # The provider answered (e.g. HTTP 400), so it is
+                    # reachable: this request is bad, not the connection.
+                    self._state = "closed"
+                    self._transient_failures = 0
+                    self._opened_until = None
+                    self._probe_in_flight = False
+                elif permit is not None and permit.half_open_probe:
+                    # A non-HTTP failure proves nothing; wait another cooldown.
+                    self._state = "open"
+                    self._opened_until = now + timedelta(seconds=self.cooldown_seconds)
                     self._probe_in_flight = False
                 return
             self._transient_failures += 1
@@ -189,6 +203,25 @@ class _ProviderRequestSlot:
         return False
 
 
+def provider_circuit_key(snapshot, *, base_url: str, model_name: str) -> str:
+    """Scope circuit state to one connection, key version and model.
+
+    A connection-id-only key kept an auth/quota circuit (e.g. a model's free
+    quota exhausted -> HTTP 403) permanently open after the user rotated the
+    key or switched the model, until the process restarted.
+    """
+
+    snapshot = snapshot or {}
+    connection_id = snapshot.get("ai_connection_id")
+    if not connection_id:
+        return "%s|%s" % (base_url, model_name)
+    return "%s|key-v%s|%s" % (
+        connection_id,
+        snapshot.get("key_version"),
+        snapshot.get("model_name") or model_name,
+    )
+
+
 def provider_request_slot(*, provider: str, connection_key: str):
     if not settings.PROVIDER_CIRCUIT_BREAKER_ENABLED:
         return _DisabledSlot()
@@ -204,6 +237,7 @@ __all__ = [
     "CircuitOpenError",
     "CircuitPermit",
     "ConnectionCircuitBreaker",
+    "provider_circuit_key",
     "provider_request_slot",
     "reset_provider_runtime_for_tests",
 ]

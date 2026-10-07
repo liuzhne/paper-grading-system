@@ -441,6 +441,21 @@ def _extract_sheet(sheet: SheetView, header_aliases):
     revised_mapping = _hierarchy_mapping(result)
     if revised_mapping != mapping:
         result = _extract_rows(sheet, header_index, revised_mapping)
+        # The merged evaluation content is the semantic title of each scored row.
+        # Keep the item label as the stable code rather than the displayed name.
+        title_counts = {}
+        for row in result.records:
+            title = row.criterion.dimension
+            if title:
+                title_counts[title] = title_counts.get(title, 0) + 1
+        title_positions = {}
+        for row in result.records:
+            title = row.criterion.dimension
+            if title:
+                title_positions[title] = title_positions.get(title, 0) + 1
+                row.criterion.name = (
+                    f"{title}{title_positions[title]}" if title_counts[title] > 1 else title
+                )
         result.warnings.append("检测到纵向合并的父级评价项目，已按评分维度解析。")
     return result
 

@@ -3,6 +3,7 @@ import json as jsonlib
 import pytest
 
 from backend.app.services.llm.core_adapter import core_runtime_provider_contract
+from backend.app.services.llm.core_view import build_core_request
 from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
 from backend.app.services.llm.openai_compatible_adapter import (
     OpenAICompatibleChatScorer,
@@ -69,6 +70,34 @@ def _provider_response(envelope, *, quote=None):
             }
         ],
     }
+
+
+_IDENTITY_ONLY_FIELDS = {
+    "runtime_identity",
+    "rubric_identity",
+    "rubric_snapshot_hash",
+    "plan_hash",
+    "policy_hash",
+    "submission",
+    "evidence_selection_identity",
+    "token_budget_identity",
+    "profile_prompt_extensions",
+}
+
+
+def _assert_is_provider_view(view, envelope_value):
+    assert not _IDENTITY_ONLY_FIELDS & set(view)
+    assert view["rule"]["rule_code"] == envelope_value["atomic_rule_snapshot"]["rule_code"]
+    assert [item["ref"] for item in view["evidence"]] == [
+        "E%d" % index for index in range(1, len(view["evidence"]) + 1)
+    ]
+    serialized = jsonlib.dumps(view, ensure_ascii=False)
+    for unit in envelope_value["evidence_units"]:
+        assert unit["evidence_unit_id"] not in serialized
+    metadata = envelope_value["profile_prompt_extensions"].get("metadata") or {}
+    for value in metadata.values():
+        if isinstance(value, str) and len(value) > 3:
+            assert value not in serialized
 
 
 class _Response:
@@ -167,7 +196,9 @@ def test_openai_responses_scores_prompt_envelope_v3_without_provider_authority()
         client.payload["text"]["format"]["schema"],
         ensure_ascii=False,
     )
-    assert jsonlib.loads(client.payload["input"]) == value
+    # Only the derived provider view is sent; identity stays local.
+    assert client.payload["input"] == build_core_request(envelope).user
+    _assert_is_provider_view(jsonlib.loads(client.payload["input"]), value)
 
 
 @pytest.mark.parametrize("json_mode", [False, True])
@@ -202,8 +233,9 @@ def test_openai_compatible_scores_prompt_envelope_v3_with_connection_controls(
     assert "seed" not in client.payload
     assert "thinking" not in client.payload
     assert client.payload["service_tier"] == "flex"
-    assert jsonlib.loads(client.payload["messages"][1]["content"]) == (
-        envelope.to_mapping()
+    assert client.payload["messages"][1]["content"] == build_core_request(envelope).user
+    _assert_is_provider_view(
+        jsonlib.loads(client.payload["messages"][1]["content"]), envelope.to_mapping()
     )
 
 
@@ -269,3 +301,151 @@ def test_core_provider_rejects_runtime_identity_mismatch_before_network():
         scorer.score_core_envelope(envelope=envelope)
 
     assert client.payload is None
+
+
+@pytest.mark.parametrize("adapter", [OpenAIResponsesScorer, OpenAICompatibleChatScorer])
+def test_classification_transport_attempt_limit_disables_implicit_timeout_retries(adapter, monkeypatch):
+    import httpx
+    from backend.app.core.config import settings
+    from backend.app.services.llm.errors import ProviderCallError
+
+    monkeypatch.setattr(settings, "OPENAI_MAX_RETRIES", 2)
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MAX_RETRIES", 2)
+    calls = []
+
+    def timeout(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("synthetic timeout", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
+        scorer = adapter(api_key="synthetic-test", base_url="https://classification-test.invalid/v1",
+                         model_name="synthetic", client=client)
+        with pytest.raises(ProviderCallError) as exc:
+            scorer.complete_json("classify", {"units": []}, attempts_limit=1)
+        assert exc.value.error.code == "request_timeout"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("adapter", [OpenAIResponsesScorer, OpenAICompatibleChatScorer])
+@pytest.mark.parametrize("explicit_timeout, expected", [(None, 120), (25, 25)])
+def test_classification_timeout_is_scoped_and_respects_explicit_connection(adapter, explicit_timeout, expected):
+    import httpx
+
+    observed = []
+    def respond(request):
+        observed.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"output_text": '{"items":[]}', "choices": [{"message": {"content": '{"items":[]}'}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond), timeout=25) as client:
+        scorer = adapter(api_key="synthetic-test", base_url="https://timeout-test.invalid/v1",
+                         model_name="synthetic", client=client, timeout_seconds=explicit_timeout)
+        scorer.complete_json("classify", {}, default_timeout_seconds=120)
+        scorer.complete_json("other task", {})
+    assert observed == [expected, 25]
+
+
+def test_openai_responses_omits_default_top_p_but_keeps_it_in_identity():
+    # Bailian kimi-k3 rejects an explicit top_p=1.0 with HTTP 400 even though
+    # 1 is the Responses default; every semantic rule of a batch failed so.
+    client = _OpenAICoreClient()
+    scorer = OpenAIResponsesScorer(
+        api_key="test-key",
+        model_name="gpt-core-test",
+        client=client,
+        temperature=0,
+    )
+    envelope = _core_envelope(scorer)
+    client.output = _provider_response(envelope)
+
+    ThesisLLMRuntime(scorer).score(envelope=envelope)
+
+    sampling = envelope.to_mapping()["runtime_identity"]["provider"]["sampling"]
+    assert sampling["top_p"] == "1"
+    assert "top_p" not in client.payload
+    assert client.payload["temperature"] == 0.0
+
+
+def test_openai_responses_names_reasoning_truncation_for_rule_tasks():
+    from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
+    from backend.app.services.scoring.core.failures import (
+        project_rule_execution_failure,
+    )
+
+    class _TruncatedClient(_OpenAICoreClient):
+        def post(self, url, headers, json):
+            self.payload = json
+            return _Response(
+                {
+                    "id": "resp_truncated",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "output": [{"type": "reasoning", "content": None}],
+                }
+            )
+
+    scorer = OpenAIResponsesScorer(
+        api_key="test-key",
+        model_name="gpt-core-test",
+        client=_TruncatedClient(),
+        temperature=0,
+    )
+    envelope = _core_envelope(scorer)
+
+    with pytest.raises(ResponsesJSONOutputError) as caught:
+        ThesisLLMRuntime(scorer).score(envelope=envelope)
+
+    assert caught.value.reason == "output_truncated"
+    assert project_rule_execution_failure(caught.value)[0] == (
+        "PROVIDER_OUTPUT_TRUNCATED"
+    )
+
+
+def test_circuit_open_rule_failure_is_not_reported_as_bad_input():
+    from backend.app.services.llm.rate_limit import CircuitOpenError
+    from backend.app.services.scoring.core.failures import (
+        project_rule_execution_failure,
+    )
+
+    code, message = project_rule_execution_failure(CircuitOpenError())
+
+    assert code == "PROVIDER_CIRCUIT_OPEN"
+    assert "input" not in message
+
+
+def test_connection_top_p_reaches_identity_and_chat_payload():
+    # Bailian kimi-k3 rejects top_p=1.0; its connection pins 0.95 instead.
+    from backend.app.services.ai_connections import ConnectionRuntime
+    from backend.app.services.llm.factory import get_llm_scorer
+
+    runtime = ConnectionRuntime(
+        connection_id="conn-kimi",
+        key_version=1,
+        organization_id="org-1",
+        provider_type="openai_compatible",
+        base_url="https://provider.example/v1",
+        model_name="kimi-k3",
+        provider_options={"top_p": 0.95, "thinking_type": "disabled"},
+        api_key="test-key",
+    )
+    scorer = get_llm_scorer(runtime)
+    scorer.close()
+    client = _CompatibleCoreClient()
+    scorer.client = client
+    scorer._owns_client = False
+    envelope = _core_envelope(scorer)
+    client.output = _provider_response(envelope)
+    ThesisLLMRuntime(scorer).score(envelope=envelope)
+
+    sampling = envelope.to_mapping()["runtime_identity"]["provider"]["sampling"]
+    assert sampling["top_p"] == "0.95"
+    assert client.payload["top_p"] == 0.95
+    assert client.payload["thinking"] == {"type": "disabled"}
+
+
+def test_connection_top_p_must_be_a_probability_mass():
+    from backend.app.services.ai_connections import validate_provider_options
+
+    assert validate_provider_options({"top_p": 0.95}) == {"top_p": 0.95}
+    for invalid in (0, 1.5):
+        with pytest.raises(ValueError):
+            validate_provider_options({"top_p": invalid})

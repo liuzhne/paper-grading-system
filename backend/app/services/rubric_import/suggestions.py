@@ -14,8 +14,8 @@ from hashlib import sha256
 
 from backend.app.services.rubric_import.extraction.llm_structure import STRUCTURE_PROMPT_VERSION
 
-DIFF_FIELDS = ("max_score", "description", "deduction_rules")
-RECORD_KEYS = {"name": "评分项", "max_score": "分值", "description": "评分说明", "deduction_rules": "扣分规则"}
+DIFF_FIELDS = ("name", "max_score", "description", "deduction_rules")
+RECORD_KEYS = {"code": "评分项编号", "name": "评分项", "max_score": "分值", "description": "评分说明", "deduction_rules": "扣分规则"}
 
 
 def criterion_view(item) -> dict:
@@ -38,6 +38,9 @@ def diff_criteria(current, proposed) -> list[dict]:
     current = [criterion_view(item) for item in current]
     proposed = [criterion_view(item) for item in proposed]
     by_name = {item["name"]: item for item in current}
+    row_counts = Counter(item["row_number"] for item in current if item["row_number"] is not None)
+    by_row = {item["row_number"]: item for item in current if row_counts[item["row_number"]] == 1}
+    proposed_rows = Counter(item["row_number"] for item in proposed if item["row_number"] is not None)
     current_codes = {item["code"] for item in current}
     duplicate_names = {name for name, count in Counter(p["name"] for p in proposed).items() if count > 1}
     matched: set[str] = set()
@@ -48,7 +51,12 @@ def diff_criteria(current, proposed) -> list[dict]:
             items.append({"id": f"conflict:{item['code']}:row{row}", "kind": "conflict", "code": item["code"],
                           "row_number": row, "reason": "duplicate_name", "after": item})
             continue
-        existing = by_name.get(item["name"])
+        # Only one-to-one source rows can establish identity. Never guess by
+        # display order or a generated code when a row is ambiguous.
+        existing = by_row.get(row) if proposed_rows[row] == 1 else None
+        existing = existing or by_name.get(item["name"])
+        if existing and existing["code"] in matched:
+            existing = None
         if existing is None:
             if item["code"] in current_codes:
                 items.append({"id": f"conflict:{item['code']}:row{row}", "kind": "conflict", "code": item["code"],

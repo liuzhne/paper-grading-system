@@ -293,11 +293,44 @@ def validate_publishable_rubric(
             }
         )
 
+    # Completeness is a publication invariant, including older compilations.
+    # A review/report rule is useful alongside scoring rules, but cannot supply
+    # the numeric score of an entire criterion.
+    for criterion in criteria:
+        criterion_rules = rules_by_criterion.get(criterion.id, [])
+        if not criterion_rules:
+            add(
+                "criterion_rules_missing",
+                f"/criteria/{criterion.code}",
+                f"评分项 {criterion.code} 缺少评分细则，不能发布。请返回第 2 步，使用 AI 生成或手动补充，并统一确认。",
+                criterion_code=criterion.code,
+            )
+        elif not any(
+            rule.effect_type == "score" and rule.direction in {"deduct", "band"}
+            for rule in criterion_rules
+        ):
+            add(
+                "criterion_numeric_scoring_missing",
+                f"/criteria/{criterion.code}",
+                f"评分项 {criterion.code} 缺少可计分细则，仅有复核或提示不能用于评分。请返回第 2 步，使用 AI 生成或手动补充扣分标准或等级划分，并统一确认后再发布。",
+                criterion_code=criterion.code,
+            )
+    for rule in rules:
+        if not (rule.rule_text or "").strip():
+            criterion = criterion_by_id.get(rule.criterion_id)
+            add(
+                "rule_text_missing",
+                f"/atomic_rules/{rule.rule_code}/rule_text",
+                f"规则 {rule.rule_code} 缺少细则正文。请返回第 2 步补充具体判定条件，可使用 AI 辅助生成，确认后再发布。",
+                criterion_code=criterion.code if criterion else "__unknown__",
+                rule_code=rule.rule_code,
+            )
+
     # Pre-M4 graphs predate the validation_result/profile/audit contract.  The
     # lifecycle has already checked rubric/compilation lineage and validated
     # status before requesting this narrow compatibility mode.
     if allow_pre_m4_provenance and version is not None:
-        return ()
+        return _sorted_blockers(blockers)
 
     validation_result = compilation.validation_result or {}
     if compilation.status != "validated" or validation_result.get("valid") is not True:
@@ -544,6 +577,12 @@ def validate_publishable_rubric(
             if (
                 len(levels) < 2
                 or len(level_codes) != len(set(level_codes))
+                or any(
+                    not (item.level_code or "").strip()
+                    or not (item.descriptor or "").strip()
+                    for item in levels
+                )
+                or len({_decimal(item.points) for item in levels}) < 2
                 or criterion_max is None
                 or any(
                     _decimal(item.points) is None
@@ -555,7 +594,7 @@ def validate_publishable_rubric(
                 add(
                     "band_levels_invalid",
                     path + "/levels",
-                    "band rule requires at least two unique in-range levels",
+                    f"规则 {rule.rule_code} 的等级划分不完整：至少需要两个编号唯一、分值不同且在满分范围内的档位，每档须有判定说明。请返回第 2 步补全，可使用 AI 辅助生成，确认后再发布。",
                     **rule_entity,
                 )
         elif direction == "deduct":
@@ -577,7 +616,7 @@ def validate_publishable_rubric(
                 add(
                     "deduct_rule_invalid",
                     path,
-                    f"规则 {rule.rule_code}：" + "；".join(reasons),
+                    f"规则 {rule.rule_code}：" + "；".join(reasons) + "。请返回第 2 步补全扣分标准，可使用 AI 辅助生成，确认后再发布。",
                     **rule_entity,
                 )
         elif direction == "none":
@@ -638,13 +677,6 @@ def validate_publishable_rubric(
     for criterion in criteria:
         criterion_rules = rules_by_criterion.get(criterion.id, [])
         score_mode = criterion.scoring_mode
-        if not criterion_rules:
-            add(
-                "criterion_rules_missing",
-                f"/criteria/{criterion.code}",
-                "every criterion requires at least one executable AtomicRule",
-                criterion_code=criterion.code,
-            )
         band_rules = [
             item
             for item in criterion_rules

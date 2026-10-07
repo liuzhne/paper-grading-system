@@ -19,6 +19,7 @@ from sqlalchemy import Table
 from sqlalchemy import Text
 from sqlalchemy import UniqueConstraint
 from sqlalchemy import event
+from sqlalchemy import false
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy import text as sql_text
@@ -178,6 +179,9 @@ class AIConnection(Base):
             name="ck_ai_connections_status",
         ),
         UniqueConstraint("owner_id", "name", name="uq_ai_connections_owner_name"),
+        Index("uq_ai_connections_one_active", "owner_id", "organization_id", unique=True,
+              sqlite_where=sql_text("status = 'active'"),
+              postgresql_where=sql_text("status = 'active'")),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -2535,6 +2539,52 @@ class ExportEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
 
+class RuleDecisionLedger(Base):
+    """Reusable validated semantic decision, keyed by its full decision identity.
+
+    A cache, not an audit record: rows are written as soon as a rule decision
+    validates (not at run end) so retries skip decisions already paid for, and
+    they may be purged on expiry.  ``scope_key`` binds organization and AI
+    connection so one connection's results are never replayed for another.
+    """
+
+    __tablename__ = "rule_decision_ledger"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_key",
+            "decision_identity_hash",
+            name="uq_rule_decision_ledger_scope_identity",
+        ),
+        CheckConstraint(
+            _lower_hex_digest_check("decision_identity_hash"),
+            name="ck_rule_decision_ledger_identity_hash",
+        ),
+        CheckConstraint(
+            "prompt_tokens >= 0 AND completion_tokens >= 0",
+            name="ck_rule_decision_ledger_nonnegative_tokens",
+        ),
+        Index("ix_rule_decision_ledger_expires_at", "expires_at"),
+        Index("ix_rule_decision_ledger_organization_id", "organization_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    scope_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    decision_identity_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rule_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    response: Mapped[dict] = mapped_column(JSON, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class RuleScoringTask(Base):
     """Durable audit/checkpoint for one AtomicRule execution."""
 
@@ -2577,6 +2627,14 @@ class RuleScoringTask(Base):
     dependency_rule_codes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     blocking_final_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # True when the decision was replayed from the rule decision ledger rather
+    # than judged by a provider call in this run (audit: why a retry was free).
+    decision_reused: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    # Shared by the tiers of a mutex group judged in one provider call (the
+    # group decision identity); NULL for rules judged on their own.
+    group_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     provider_error: Mapped[dict | None] = mapped_column(

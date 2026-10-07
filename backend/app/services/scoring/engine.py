@@ -8,6 +8,7 @@ from dataclasses import fields
 from dataclasses import is_dataclass
 from decimal import Decimal
 from decimal import InvalidOperation
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -32,6 +33,12 @@ from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.services.llm.base import LLMScoringError
 from backend.app.services.llm.factory import get_llm_scorer
+from backend.app.services.ai_connections import AIConnectionBindingError
+from backend.app.services.llm.usage import scorer_usage_snapshot
+from backend.app.services.llm.usage import usage_delta
+from backend.app.services.scoring.decision_ledger import build_decision_ledger
+from backend.app.services.scoring.decision_ledger import bypass_ledger_reads
+from backend.app.services.scoring.decision_ledger import RuleCallJournal
 from backend.app.services.ai_connections import resolve_connection_runtime
 from backend.app.services.ai_connections import record_usage_ledger
 from backend.app.services.ai_connections import usage_connection_id
@@ -86,6 +93,9 @@ from backend.app.services.scoring.adapters.persistence import (
     LocalDocumentSnapshotStore,
 )
 from backend.app.services.scoring.profiles.thesis import ThesisProfile
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -157,9 +167,15 @@ def _scorer_for_batch(db: Session, batch: GradingBatch):
         organization_id=batch.organization_id,
     )
     if runtime.key_version != batch.ai_connection_key_version:
-        raise ValueError("AI connection key has changed; recreate the scoring task")
+        raise AIConnectionBindingError(
+            "AI_CONNECTION_KEY_CHANGED",
+            "AI connection key has changed; recreate the scoring task",
+        )
     if batch.ai_connection_snapshot != runtime.snapshot():
-        raise ValueError("AI connection configuration has changed; recreate the scoring task")
+        raise AIConnectionBindingError(
+            "AI_CONNECTION_CONFIG_CHANGED",
+            "AI connection configuration has changed; recreate the scoring task",
+        )
     validate_outbound_base_url(runtime.base_url)
     return get_llm_scorer(runtime)
 
@@ -555,13 +571,26 @@ def _score_paper_core(
         scorer,
         rescore_generation=rescore_generation,
     )
+    organization_id = getattr(paper, "organization_id", None)
+    # The scorer may be shared by several papers, so this run's usage is the
+    # delta over its lifetime (rule calls and the semantic coherence pass).
+    usage_before = scorer_usage_snapshot(scorer)
+    decision_ledger = build_decision_ledger(
+        db, organization_id=organization_id, scorer=scorer
+    )
+    execution_journal = RuleCallJournal()
     outcome = score_submission_observed(
         request=request,
         checker_registry=registry,
-        llm_runtime=profile.build_llm_runtime(scorer),
+        llm_runtime=profile.build_llm_runtime(
+            scorer,
+            input_token_cap=settings.SCORING_MAX_INPUT_TOKENS_PER_PAPER,
+        ),
         profile=profile,
-        organization_id=getattr(paper, "organization_id", None),
+        organization_id=organization_id,
         score_fn=score_submission,
+        decision_ledger=decision_ledger,
+        execution_journal=execution_journal,
     )
     snapshot_store = LocalDocumentSnapshotStore()
     document_snapshot_ref = snapshot_store.put(request.document)
@@ -569,6 +598,19 @@ def _score_paper_core(
     coherence_findings = list(parsed.get("coherence_findings", []) or [])
     coherence_findings.extend(analyze_semantic_coherence(parsed, scorer))
     format_findings = _compute_format_findings(paper, rubric)
+    usage = (
+        None
+        if usage_before is None
+        else usage_delta(scorer_usage_snapshot(scorer), usage_before)
+    )
+    if decision_ledger is not None:
+        logger.info(
+            "rule_decision_ledger paper_id=%s hits=%d misses=%d writes=%d",
+            paper.id,
+            decision_ledger.hits,
+            decision_ledger.misses,
+            decision_ledger.writes,
+        )
     return CoreRunPersistence(
         db, document_snapshot_store=snapshot_store
     ).persist(
@@ -584,6 +626,9 @@ def _score_paper_core(
         coherence_findings=coherence_findings,
         format_findings=format_findings,
         ai_connection_snapshot=getattr(scorer, "_ai_connection_snapshot", None),
+        usage=usage,
+        reused_rule_codes=execution_journal.reused_rule_codes,
+        group_call_ids=execution_journal.group_call_ids,
     )
 
 
@@ -1319,7 +1364,9 @@ def score_batch(db: Session, batch_id: str, rescore: bool = False):
                             paper.scoring_runs,
                             key=lambda item: (item.created_at, item.id),
                         )
-                        run = retry_score_paper(db, previous.id, scorer=scorer)
+                        # 显式重新评分：不复用规则决策账本。
+                        with bypass_ledger_reads():
+                            run = retry_score_paper(db, previous.id, scorer=scorer)
                     else:
                         run = score_paper(db, paper.id, scorer=scorer)
                 except (ValueError, LLMScoringError) as exc:

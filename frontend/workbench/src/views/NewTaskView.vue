@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
+import { compactTokens } from "@/lib/score-jobs.js";
 import { requiresOwnConnection, uploadStatusLabel, useUploadStore } from "@/stores/upload.js";
 import { useSessionStore } from "@/stores/session.js";
 
@@ -15,6 +16,8 @@ const rubrics = ref([]);
 const batchId = ref(null);
 const precheck = ref(null);
 const error = ref(null);
+// 评分前的本地用量估算（不调用模型）。估算失败只是不显示，不能挡住开始评分。
+const estimate = ref(null);
 const busy = ref(false);
 
 /** 只有已发布的评分标准可用于评分——草稿列出但不可选。 */
@@ -47,8 +50,8 @@ async function loadRubrics() {
 
 // --- AI 连接（D-027）-------------------------------------------------------
 //
-// 平台没配默认模型时**必选**：不绑连接就评分，评出来的是 Mock 假分，而假结果会
-// 被当成真结论沿用下去。平台配好后不强制——那正是「所有用户可正常使用」的含义。
+// 优先展示并绑定当前启用的个人连接；无个人连接时才使用平台模型。
+// 个人连接的启停统一在账户页操作，任务创建后保持快照。
 const session = useSessionStore();
 const connections = ref([]);
 const connectionRequired = computed(() =>
@@ -60,7 +63,8 @@ const connectionMissing = computed(
 
 async function loadConnections() {
   try {
-    connections.value = (await api.get("/ai-connections")) || [];
+    connections.value = ((await api.get("/ai-connections")) || []).filter((item) => item.status === "active");
+    form.ai_connection_id = connections.value[0]?.id || "";
   } catch (err) {
     if (!(err instanceof StaleContextError)) connections.value = [];
   }
@@ -113,6 +117,22 @@ async function runPrecheck() {
   precheck.value = await api.post(`/batches/${batchId.value}/upload-precheck`, {
     paper_ids: upload.uploadedPaperIds,
   });
+  // 不等待：批次较大时估算要逐条组装请求，不应拖慢预检结果的展示。
+  loadEstimate();
+}
+
+async function loadEstimate() {
+  const requested = batchId.value;
+  try {
+    const value = await api.get(`/batches/${requested}/score-estimate`);
+    if (batchId.value === requested) estimate.value = value;
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) estimate.value = null;
+  }
+}
+
+function tokenText(value) {
+  return value == null ? "—" : `约 ${compactTokens(value)}`;
 }
 
 async function onSaveDraft() {
@@ -159,6 +179,14 @@ onMounted(async () => {
   try {
     const batch = await api.get(`/batches/${batchId.value}`);
     for (const key of Object.keys(form)) form[key] = batch[key] || "";
+    // 已有草稿显示冻结的连接，不能把当前启用项误展示为它的模型。
+    if (batch.ai_connection_id && !connections.value.some(item => item.id === batch.ai_connection_id)) {
+      const snapshot = batch.ai_connection_snapshot || {};
+      connections.value.push({
+        id: batch.ai_connection_id, name: "任务原连接（当前未启用）",
+        provider_type: snapshot.provider_type || "", model_name: snapshot.model_name || "",
+      });
+    }
     await upload.restoreFromServer(batchId.value);
     if (upload.uploadedPaperIds.length) await runPrecheck();
   } catch (err) {
@@ -243,26 +271,27 @@ onMounted(async () => {
         </section>
 
         <!-- 2.5 AI 连接 -->
-        <section v-if="connectionRequired" class="card card-pad">
+        <section class="card card-pad">
           <div class="step">
             <span class="step-num mono">·</span>
             <h2 class="card-title">AI 连接</h2>
-            <span class="faint step-note">本部署未配置平台默认模型，必须选择</span>
+            <span class="faint step-note">{{ batchId ? "保留任务创建时的连接" : "优先使用当前启用的个人连接" }}</span>
           </div>
           <label class="field">
-            <span class="field-label">用哪个连接评分</span>
-            <select v-model="form.ai_connection_id" class="select">
-              <option value="">请选择</option>
+            <span class="field-label">本任务使用的连接</span>
+            <select v-model="form.ai_connection_id" class="select" disabled>
+              <option value="">{{ connectionRequired ? "未启用个人连接" : "平台默认模型" }}</option>
               <option v-for="item in connections" :key="item.id" :value="item.id">
                 {{ item.name }} · {{ item.provider_type }} · {{ item.model_name }}
               </option>
             </select>
           </label>
-          <p v-if="!connections.length" class="notice notice-warn">
+          <p v-if="connectionRequired && !connections.length" class="notice notice-warn">
             你还没有可用的 AI 连接。请先在
             <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink>
-            绑定一个，否则无法开始评分。
+            启用一个连接，否则无法开始评分。
           </p>
+          <RouterLink v-if="!batchId" :to="{ name: 'account' }">去账户与连接切换</RouterLink>
           <p class="faint">
             建任务时会冻结这个连接：之后轮换密钥或改配置，本任务会拒绝继续跑，
             而不是悄悄换一个模型接着评。
@@ -349,7 +378,23 @@ onMounted(async () => {
           <div><dt>材料份数</dt><dd class="mono">{{ upload.uploadedPaperIds.length }}</dd></div>
           <div><dt>解析正常</dt><dd class="mono">{{ precheck?.ready_count ?? "—" }}</dd></div>
           <div><dt>阻断项</dt><dd class="mono">{{ precheck?.blocking_count ?? "—" }}</dd></div>
+          <template v-if="estimate">
+            <div><dt>预计模型调用</dt><dd class="mono">{{ estimate.calls }} 次</dd></div>
+            <div>
+              <dt>预计输入 token</dt>
+              <dd class="mono" data-test="estimate-tokens">{{ tokenText(estimate.estimated_input_tokens) }}</dd>
+            </div>
+          </template>
         </dl>
+        <p v-if="estimate?.reused_rules" class="field-hint">
+          其中 {{ estimate.reused_rules }} 条规则可复用已有判定，不再计费。
+        </p>
+        <p v-if="estimate?.unsupported_papers" class="field-hint">
+          {{ estimate.unsupported_papers }} 份材料暂不支持估算，未计入。
+        </p>
+        <p v-if="estimate?.violations?.length" class="notice notice-warn" data-test="estimate-over-cap">
+          预计用量超过已配置的 token 上限，开始评分会被拒绝。
+        </p>
         <button class="btn btn-primary full" type="button" :disabled="busy || !canStart" @click="onStart">
           开始评分
         </button>

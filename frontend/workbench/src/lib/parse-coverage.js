@@ -2,8 +2,8 @@
 /**
  * 解析台账的前端纯逻辑（解析重构方案 §8）。
  *
- * - 未处理规则、双文件冲突与结构建议统一属于第 1 步解析核对；
- *   未处理的阻断单元或来源冲突不能进入第 2 步，发布时后端仍统一兜底校验
+ * - 第 1 步处理表结构、分值和来源冲突；原文归类在第 2 步完成。
+ *   疑似规则不阻止进入第 2 步，发布时后端仍统一兜底校验
  *   `unresolved_source_units`。
  * - LLM 结构建议的合入规则与后端 `merge_plan` 一致：新增 / 补全一键合入，
  *   修改须逐条确认（未确认的保留当前值），冲突须排除，移除已有评分项一律阻断。
@@ -17,7 +17,7 @@ export function stepOneGate(state) {
   if (!state?.has_ledger) return { blocked: false, blocking: 0, conflicts: 0 };
   const blocking = Number(state.coverage?.blocking_count || 0);
   const conflicts = (state.conflicts || []).filter((/** @type {{resolved?: boolean}} */ item) => !item.resolved).length;
-  return { blocked: blocking + conflicts > 0, blocking, conflicts };
+  return { blocked: conflicts > 0, blocking, conflicts };
 }
 
 /**

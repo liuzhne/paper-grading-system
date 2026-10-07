@@ -19,6 +19,10 @@ function apiBase() {
   return typeof base === "string" && base ? base : "/api";
 }
 
+export function apiUrl(path) {
+  return `${apiBase()}${path}`;
+}
+
 /** 组织上下文纪元：每次切换 +1，用于丢弃迟到响应。 */
 let contextVersion = 0;
 let inflight = new Set();

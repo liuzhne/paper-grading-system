@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
-import { ACTIVE_JOB_STATUSES, itemStatusLabel, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
+import { ACTIVE_JOB_STATUSES, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
 
 const route = useRoute();
 const batchId = String(route.params.batchId);
@@ -115,13 +115,14 @@ onBeforeUnmount(() => window.clearInterval(timer));
       <section class="card table-wrap">
         <div class="card-head"><div><h2 class="card-title">材料进度</h2><p class="card-note">每份材料独立保存，单份失败不会清空其他结果。</p></div></div>
         <table class="table">
-          <thead><tr><th>材料</th><th>状态</th><th>尝试次数</th><th>完成时间</th><th>说明</th></tr></thead>
+          <thead><tr><th>材料</th><th>状态</th><th>尝试次数</th><th>完成时间</th><th>用量</th><th>说明</th></tr></thead>
           <tbody>
             <tr v-for="item in job.items" :key="item.id">
               <td>{{ paperById[item.paper_id]?.file_name || "材料" }}</td>
               <td><span class="chip" :class="tone(item.status)">{{ itemStatusLabel(item.status) }}</span></td>
               <td class="mono">{{ item.attempt_count }}</td>
               <td class="mono faint">{{ formatTime(item.finished_at) }}</td>
+              <td class="mono faint">{{ itemUsageText(item) }}</td>
               <td class="error-cell">{{ item.error_message || "—" }}</td>
             </tr>
           </tbody>
