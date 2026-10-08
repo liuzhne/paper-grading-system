@@ -20,6 +20,16 @@ describe('AI 归类有限并发', () => {
     expect(sent.flat()).toEqual(ids);
     expect(sent.map(b => b.length)).toEqual([3,3,3,3,1]);
   });
+  it('按连接声明的并发上限只开对应条数的通道', async () => {
+    let active=0, peak=0;
+    const summary = await classifyInBatches(ids, {
+      concurrency: 1,
+      request: async batch => { active++; peak=Math.max(peak,active); await tick(); active--; return success(batch); },
+      onResult:vi.fn(), onProgress:vi.fn(),
+    });
+    expect(peak).toBe(1);
+    expect(summary.completed).toBe(13);
+  });
   it('单批内容级失败只记入失败，其它批次继续，全部单元都会送出', async () => {
     const pending=[], onProgress=vi.fn(), onResult=vi.fn();
     const request=vi.fn(batch => new Promise(resolve => pending.push(result => resolve(result || success(batch)))));

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from uuid import uuid4
 from vercel.queue import send
 from vercel.queue import subscribe
 
@@ -55,6 +56,7 @@ async def score_batch_item(payload) -> None:
     # application/runtime imports until an actual delivery so discovery stays
     # independent of native database and Pydantic wheels.
     from backend.app.db.session import SessionLocal
+    from backend.app.services.batch_scoring.jobs import ConnectionAtCapacityError
     from backend.app.services.batch_scoring.jobs import run_batch_scoring_item
 
     job_id = payload.get("job_id")
@@ -66,12 +68,31 @@ async def score_batch_item(payload) -> None:
         job_id,
         item_id,
     )
-    await asyncio.to_thread(
-        run_batch_scoring_item,
-        SessionLocal,
-        job_id=job_id,
-        item_id=item_id,
-    )
+    try:
+        await asyncio.to_thread(
+            run_batch_scoring_item,
+            SessionLocal,
+            job_id=job_id,
+            item_id=item_id,
+        )
+    except ConnectionAtCapacityError as exc:
+        # 连接并发名额已满：另投一条延迟消息，再正常返回确认这一条。若靠抛错让队列
+        # 重投，排队等待会耗尽 max_attempts，消息被静默丢弃，任务卡在排队中。
+        # 幂等键每次唯一：同键会被服务端去重，延迟消息一旦被吞掉，这篇论文就再没人领。
+        await send(
+            SCORING_TOPIC,
+            {"job_id": job_id, "item_id": item_id},
+            idempotency_key=f"score-{item_id}-wait-{uuid4().hex}",
+            retention=86400,
+            delay=exc.retry_after_seconds,
+        )
+        logger.info(
+            "batch_scoring_item_deferred job_id=%s item_id=%s delay_seconds=%s",
+            job_id,
+            item_id,
+            exc.retry_after_seconds,
+        )
+        return
     logger.info(
         "batch_scoring_item_finished job_id=%s item_id=%s",
         job_id,

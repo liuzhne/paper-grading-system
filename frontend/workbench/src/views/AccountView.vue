@@ -137,6 +137,8 @@ const draft = reactive({
   base_url: "https://api.openai.com/v1",
   model_name: "gpt-4.1-mini",
   api_key: "",
+  // 同时请求数上限：空 = 不限制（起草、归类最多 3 路）。免费档常只允许 1 个并发。
+  max_concurrency: "",
   busy: false,
   error: null,
   result: null,
@@ -169,6 +171,35 @@ const draftProtocol = computed(() => {
 const connBusy = reactive({});
 const rotating = ref(null);
 const rotateKey = ref("");
+const tuning = ref(null);
+const tuneValue = ref("");
+
+function startTuning(connection) {
+  rotating.value = null;
+  tuning.value = tuning.value === connection.id ? null : connection.id;
+  tuneValue.value = connection.provider_options?.max_concurrency ?? "";
+}
+
+async function onTune(connection) {
+  const organizationId = orgId.value;
+  connBusy[connection.id] = "tune";
+  connectionsError.value = null;
+  try {
+    await api.patch(
+      `/ai-connections/${connection.id}`,
+      { provider_options: concurrencyOptions(connection.provider_options, tuneValue.value) },
+      { organizationId },
+    );
+    tuning.value = null;
+    await loadConnections();
+  } catch (error) {
+    if (!(error instanceof StaleContextError)) {
+      connectionsError.value = error?.message || "保存并发上限失败";
+    }
+  } finally {
+    connBusy[connection.id] = null;
+  }
+}
 
 async function loadConnections() {
   connectionsError.value = null;
@@ -188,8 +219,17 @@ function draftPayload() {
     base_url: draft.base_url.trim(),
     model_name: draft.model_name.trim(),
     api_key: draft.api_key,
-    provider_options: {},
+    provider_options: concurrencyOptions({}, draft.max_concurrency),
   };
+}
+
+/** 把「同时请求数上限」合进 provider_options；留空表示移除该项。PATCH 是整体替换，必须带上其它已有选项。 */
+function concurrencyOptions(options, value) {
+  const next = { ...(options || {}) };
+  const text = String(value ?? "").trim();
+  if (text) next.max_concurrency = Number(text);
+  else delete next.max_concurrency;
+  return next;
 }
 
 async function onTestDraft() {
@@ -497,6 +537,7 @@ onMounted(async () => {
                 <td class="muted">
                   <div>{{ conn.model_name }}</div>
                   <div class="faint conn-base" :title="protocolLabel(conn.provider_type)">{{ PROTOCOL_SHORT[conn.provider_type] || conn.provider_type }}</div>
+                  <div v-if="conn.provider_options?.max_concurrency" class="faint conn-base" data-test="conn-concurrency">并发上限 {{ conn.provider_options.max_concurrency }}</div>
                 </td>
                 <td class="num">{{ conn.key_masked }}<span class="faint"> · v{{ conn.key_version }}</span></td>
                 <td>
@@ -518,9 +559,18 @@ onMounted(async () => {
                       class="btn btn-sm"
                       type="button"
                       :disabled="connBusy[conn.id]"
-                      @click="rotating = rotating === conn.id ? null : conn.id"
+                      @click="tuning = null; rotating = rotating === conn.id ? null : conn.id"
                     >
                       换 Key
+                    </button>
+                    <button
+                      class="btn btn-sm"
+                      type="button"
+                      data-test="tune-concurrency"
+                      :disabled="connBusy[conn.id]"
+                      @click="startTuning(conn)"
+                    >
+                      并发上限
                     </button>
                     <button
                       v-if="conn.status !== 'active'"
@@ -571,6 +621,20 @@ onMounted(async () => {
                   </form>
                 </td>
               </tr>
+              <tr v-if="tuning === conn.id">
+                <td colspan="6">
+                  <form class="rotate-form" data-test="tune-form" @submit.prevent="onTune(conn)">
+                    <label class="field rotate-field">
+                      <span class="field-label">同时请求数上限</span>
+                      <input v-model="tuneValue" class="input" type="number" min="1" max="8" step="1" placeholder="不限制" />
+                      <span class="field-hint">厂商按 Key 限并发，超出会返回 429（例如免费档常只允许 1 个）。起草、归类与批量评分都不会超过这里的数；留空表示不限制。修改不影响已创建的评分任务。</span>
+                    </label>
+                    <button class="btn btn-primary" type="submit" :disabled="connBusy[conn.id]">
+                      保存
+                    </button>
+                  </form>
+                </td>
+              </tr>
             </template>
             <tr v-if="!connections.length">
               <td class="table-empty" colspan="6">还没有保存任何私有连接。</td>
@@ -614,6 +678,11 @@ onMounted(async () => {
                 <option value="openai_responses">OpenAI Responses</option>
               </select>
               <span class="field-hint">一般不用改。自动识别依次看接口地址后缀、已知平台和探测请求；只有网关或特殊部署识别不对时才手动指定。</span>
+            </label>
+            <label class="field advanced-field">
+              <span class="field-label">同时请求数上限</span>
+              <input v-model="draft.max_concurrency" class="input" type="number" min="1" max="8" step="1" placeholder="不限制" data-test="draft-concurrency" />
+              <span class="field-hint">厂商按 Key 限并发，超出会返回 429。免费档（例如 Z.ai 的 GLM-4.7-Flash）常只允许 1 个，填 1 即可。</span>
             </label>
           </details>
 

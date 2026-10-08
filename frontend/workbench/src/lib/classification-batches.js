@@ -10,13 +10,14 @@ export const CONTENT_FAILURES = new Set([
 export const CONTENT_FAILURE_STREAK_LIMIT = 2;
 
 /**
- * At most three concurrent requests of three units each.
+ * At most three concurrent requests of three units each; `concurrency` lowers that
+ * to the connection's declared limit (providers enforce concurrency per key).
  * - 单批内容级失败：记入 failed，其它批次继续；
  * - 系统级失败（请求抛错，或回包里出现限流、鉴权、超时、熔断等非内容错误码）或连续内容级失败：
  *   停止派发新批次，等在途请求结束后返回；请求抛错时最后抛出第一个错误。
  * 返回 { completed, failed, total, stopped }，stopped 为 null | 'repeated' | 'provider' | 'request'。
  */
-export async function classifyInBatches(unitIds, { request, onResult, onProgress, isCurrent = () => true }) {
+export async function classifyInBatches(unitIds, { request, onResult, onProgress, isCurrent = () => true, concurrency = 3 }) {
   const ids = [...new Set(unitIds)];
   let cursor = 0, completed = 0, failed = 0, active = 0, streak = 0;
   /** @type {null | 'repeated' | 'provider' | 'request'} */
@@ -62,7 +63,8 @@ export async function classifyInBatches(unitIds, { request, onResult, onProgress
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(3, Math.ceil(ids.length / 3)) }, worker));
+  const lanes = Math.max(1, Math.min(3, Math.floor(Number(concurrency)) || 3));
+  await Promise.all(Array.from({ length: Math.min(lanes, Math.ceil(ids.length / 3)) }, worker));
   if (firstError) throw firstError;
   return { completed, failed, total: ids.length, stopped };
 }

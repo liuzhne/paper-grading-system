@@ -693,7 +693,12 @@ def test_openai_responses_drafting_uses_same_schema_and_dedicated_budget():
     assert calls[0]["max_output_tokens"] == AI_RULE_DRAFT_MAX_OUTPUT_TOKENS
     assert calls[0]["text"]["format"]["type"] == "json_schema"
     assert calls[0]["text"]["format"]["strict"] is True
-    assert options[0] == {"attempts_limit": 1, "timeout_seconds": AI_RULE_DRAFT_TIMEOUT_SECONDS}
+    # 超时不重试（attempts_limit=1），429 另有两次按 Retry-After 的等待。
+    assert options[0] == {
+        "attempts_limit": 1,
+        "timeout_seconds": AI_RULE_DRAFT_TIMEOUT_SECONDS,
+        "rate_limit_retries": 2,
+    }
 
 
 @pytest.mark.parametrize("groups", [None, 4, {}, [4], [{"group_code": "G", "mutex_group": "M", "cap_points": 2, "rules": 4}]])

@@ -4,6 +4,7 @@ from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
 from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
 from backend.app.services.ai_connections import ConnectionRuntime
+from backend.app.services.ai_connections import connection_max_concurrency
 
 # 云·OpenAI 兼容厂商别名（走 OPENAI_COMPATIBLE_*）
 COMPATIBLE_PROVIDERS = {"openai_compatible", "zhipu", "bigmodel", "qwen", "dashscope", "google", "gemini", "google_ai_studio"}
@@ -81,6 +82,7 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None, *, sessi
             raise ValueError("unsupported AI connection provider type")
         scorer._ai_connection_snapshot = connection_runtime.snapshot()
         scorer._ai_connection_organization_id = connection_runtime.organization_id
+        scorer.max_concurrency = connection_max_concurrency(options)
         return scorer
 
     # 受保护部署：环境变量**不是**模型来源，平台模型来自管理员配置的单例
@@ -150,3 +152,15 @@ def provider_network_scope():
     else:
         base = ""
     return "local" if _is_local_url(base) else "external"
+
+
+def scorer_concurrency(scorer, default: int) -> int:
+    """同一次操作里最多同时发出的请求数：调用方默认值与连接声明上限取较小者。
+
+    厂商的并发上限按 Key 计算（例如免费档只允许 1 个并发），超出的请求会被 429 拒绝。
+    """
+
+    declared = getattr(scorer, "max_concurrency", None)
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 1:
+        return max(1, min(default, declared))
+    return max(1, default)
