@@ -37,6 +37,7 @@ from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import utcnow
 from backend.app.services.ai_connections import AIConnectionBindingError
+from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.scoring.decision_ledger import bypass_ledger_reads
 from backend.app.services.scoring.core.canonical import canonical_sha256
@@ -832,6 +833,8 @@ def _safe_failure_message(exc, code):
     if isinstance(exc, AIConnectionBindingError):
         changed = "密钥" if exc.code == "AI_CONNECTION_KEY_CHANGED" else "配置"
         return f"评分任务创建后，绑定的 AI 连接{changed}已变更；请重新创建评分任务后再评分。"
+    if isinstance(exc, PlatformModelMissingError):
+        return str(exc)
     exception_type = type(exc).__name__
     return f"评分执行失败（{code}; exception_type={exception_type}）"
 

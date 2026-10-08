@@ -74,6 +74,24 @@ class ProviderCallError(RuntimeError):
         )
 
 
+class PlatformModelMissingError(RuntimeError):
+    """受保护部署既没有绑定的私有连接，也没有管理员配置的平台模型（D-028）。
+
+    这是部署配置问题，不是模型调用失败；``code`` / ``failure_kind`` 让批任务把它
+    记成可读的配置错误，而不是笼统的 scoring_failure。继承 RuntimeError，既有的
+    ``except RuntimeError`` 照常接住。
+    """
+
+    code = "PLATFORM_MODEL_MISSING"
+    failure_kind = "checker"
+
+    def __init__(self):
+        super().__init__(
+            "本部署尚未配置平台模型。请绑定你自己的 AI 连接，"
+            "或联系平台管理员在运维页配置平台默认模型。"
+        )
+
+
 _CONTEXT_MARKERS = (
     "context_length_exceeded",
     "context length",

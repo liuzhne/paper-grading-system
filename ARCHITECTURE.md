@@ -1009,3 +1009,17 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 `SourceReviewPanel` 的送出范围从 `classifyScope`（勾选项，或当前筛选下的待处理项）改为 `classifyTargets`：未勾选时排除 `suggestionFor` 能返回有效建议的单元，勾选时不变。批量采纳仍使用 `classifyScope`。后端端点、结果合并与指纹不变。
 
 维护记录：2026-10-07 · AI 归类续跑：只改前端调度与送出范围；后端、提示词版本与迁移不变。
+
+### 2026-10-08 自部署的后台评分执行
+
+两种部署的执行者不同，任务状态都在数据库：
+- **Vercel**：`dispatch_batch_scoring_job` 把每篇论文投递到 Vercel Queues，`score_batch_item` 逐篇执行。
+- **自部署（Compose / 本地脚本）**：不投递消息，由 `run_batch_worker` → `run_worker_loop` 每 3 秒执行 `next_runnable_batch_scoring_job_id`。它会领取排队中的任务，或心跳过期的任务（租约 120 秒，每 15 秒写一次心跳）。
+
+Compose 拓扑：`caddy` → `app`（迁移 + uvicorn）；`worker`（同一镜像，`run_batch_worker`）；`db`。`app` 与 `worker` 共享 `app_storage`，环境配置通过 YAML 锚点共享。部署冒烟 `deployment-smoke@2` 会创建后台任务并等待它到终态。
+
+缺少模型的错误链：`get_llm_scorer` 在受保护部署既没有绑定连接、也没有平台模型时，抛出 `llm/errors.PlatformModelMissingError`（`code=PLATFORM_MODEL_MISSING`，`failure_kind=checker`）。
+- 批任务的 `_classify_failure` 读取这两个属性，`_safe_failure_message` 原样给出中文提示；
+- `POST /api/papers/{id}/score` 与 `/api/scoring-runs/{id}/retry` 把它映射为 503。
+
+维护记录：2026-10-08 · Compose 后台评分 worker：Compose 拓扑新增 worker；缺少模型改为专门的错误类型（同步评分 500 → 503）；无数据模型变化。

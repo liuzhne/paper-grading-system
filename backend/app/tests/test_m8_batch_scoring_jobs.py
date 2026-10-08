@@ -181,6 +181,20 @@ def test_connection_binding_change_is_reported_with_its_cause():
     assert "重新创建评分任务" in message
 
 
+def test_missing_platform_model_is_recorded_as_a_configuration_error():
+    from backend.app.services.llm.errors import PlatformModelMissingError
+
+    jobs = _jobs_module()
+    error = PlatformModelMissingError()
+
+    # 自部署没配平台模型时，用户在任务详情里看到的必须是“去配置模型”，
+    # 而不是 "scoring_failure; exception_type=RuntimeError"。
+    assert jobs._classify_failure(error) == ("PLATFORM_MODEL_MISSING", "checker")
+    message = jobs._safe_failure_message(error, "PLATFORM_MODEL_MISSING")
+    assert "尚未配置平台模型" in message
+    assert "AI 连接" in message
+
+
 def test_incomplete_run_keeps_unknown_rule_failure_safe():
     jobs = _jobs_module()
     error = jobs._incomplete_scoring_error(

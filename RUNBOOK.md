@@ -9,7 +9,7 @@
 | 快速开发或离线冒烟 | 临时 SQLite + `storage/` 或临时目录 | FastAPI 或 `.venv/bin/pgs` |
 | CLI 单机评分 | `~/.paper-grading/cli.db` + 本地 storage | `.venv/bin/pgs`，无需启动 Web |
 | 完整本地开发 | PostgreSQL 16 + 本地 storage | FastAPI + 静态 Web |
-| 内网试点 | Compose：Caddy + FastAPI + PostgreSQL 16 + volumes | `docker compose` |
+| 内网试点 | Compose：Caddy + FastAPI + 后台评分 worker + PostgreSQL 16 + volumes | `docker compose` |
 | Vercel 生产 | Vercel API/静态资源 + PostgreSQL/Supabase | 只允许 GitHub Actions 门禁发布 |
 
 Web SQLite 与 CLI 默认 SQLite 是两套库。排错前先确认当前命令的 `DATABASE_URL`、`STORAGE_ROOT`、CLI `--db/--storage` 指向同一目标。
@@ -341,10 +341,10 @@ cp .env.intranet.example .env.intranet
 # 编辑强密码、Secret、站点、LLM 和 OPS 阈值
 docker compose --env-file .env.intranet up -d --build
 docker compose --env-file .env.intranet ps
-docker compose --env-file .env.intranet logs -f app caddy
+docker compose --env-file .env.intranet logs -f app worker caddy
 ```
 
-验证 HTTPS、`/api/system/integrations`、登录和合成数据冒烟，并确认容器内 `pg_dump --version` 为 16.x。
+验证 HTTPS、`/api/system/integrations`、登录和合成数据冒烟（`smoke_deployment` 会创建后台评分任务并等 worker 跑完），确认 `ps` 里 `worker` 为 running，并确认容器内 `pg_dump --version` 为 16.x。
 
 ## 10. 回滚
 
@@ -1539,3 +1539,29 @@ npm --prefix frontend/workbench run test:unit -- src/lib/classification-batches.
 发布：纯前端改动，重建 `public/` 后走现有 CI；无后端、提示词或迁移变化。回滚：revert 本次提交并重建静态产物。
 
 维护记录：2026-10-07 · AI 归类续跑：新增“跑到一半停下”的排查、续跑方法与验证命令。
+
+### 2026-10-08 自部署后台评分 worker
+
+排错：
+- **现象**：Docker 部署后点“开始评分”，任务一直显示“排队中”，进度不动，接口和健康检查都正常。
+  - 报错指向：看起来像任务创建失败或前端没刷新。
+  - 真正原因：没有 worker 在领取任务。自部署没有队列服务，任务只写在数据库里。检查 `docker compose --env-file .env.intranet ps` 里 `worker` 是否为 running，再看 `logs worker`。旧版 compose 没有这个服务，拉取新代码后执行 `up -d --build`。
+- **现象**：改了评分逻辑或模型配置，后台评分还是旧行为。
+  - 真正原因：worker 不热加载代码，熔断状态也只在它的进程内存里。执行 `up -d --build`，或单独 `restart worker`。
+- **现象**：任务详情显示“本部署尚未配置平台模型……”，同步评分返回 503。
+  - 真正原因：受保护部署（`AUTH_ENABLED=true`）不会回落 Mock（D-028）。管理员需要在运维页配置平台默认模型，或者用户在“账户与连接”绑定自己的连接。这时去改 `LLM_PROVIDER` 不起作用。
+- **现象**：CI 的 `docker-compose-smoke` 是绿的，冒烟证据 `deployment-smoke.json` 却是空的，或者日志里有 Traceback。
+  - 报错指向：步骤显示通过。
+  - 真正原因：`python … | tee` 在没有 pipefail 的 shell 里取的是 tee 的退出码。这个任务已设 `defaults.run.shell: bash`（`-eo pipefail`）。在其它任务里写 `| tee` 时，也要显式 `set -euo pipefail` 或设置 shell。
+- **本地跑冒烟时注意**：compose 里的容器名是固定的（`paper-grading-db` 等），默认项目名下的 `db` 卷可能是你本地开发的数据。冒烟要用独立项目名（`-p`），并用覆盖文件改掉容器名；`down --volumes` 只能对冒烟项目执行。
+- **冒烟模式**：没配模型的栈用 `smoke_deployment --scoring fail-closed`（CI 用法）。已配置平台模型或绑定连接的部署用默认的 `succeed`，它会真实调用模型。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_deployment_smoke_background_job.py backend/app/tests/test_m8_ops_readiness.py
+```
+
+完整验证以 CI 的 `docker-compose-smoke` 为准：`up --wait` 后 `worker` 必须是 running；`smoke_deployment --scoring fail-closed` 输出 `deployment-smoke@2`，`background_job.item_error_code=PLATFORM_MODEL_MISSING`，`synchronous_scoring=refused`。
+
+维护记录：2026-10-08 · Compose 后台评分 worker：新增“任务一直排队”“未配置平台模型”“CI 冒烟假绿”的排查，以及 worker 重启说明、本地冒烟隔离注意事项和冒烟模式说明。

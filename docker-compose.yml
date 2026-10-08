@@ -1,3 +1,17 @@
+# app 与 worker 必须读同一份配置：数据库、存储、鉴权或模型设置只要有一处不一致，
+# worker 就会在另一套环境里评分。用锚点共享，避免两边改漏。
+x-app-env-file: &app-env-file
+  - ${APP_ENV_FILE:-.env.intranet}
+
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paper}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.intranet}@db:5432/${POSTGRES_DB:-paper_grading}
+  STORAGE_ROOT: /app/storage
+  AUTH_ENABLED: ${AUTH_ENABLED:-true}
+  AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+  AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in .env.intranet}
+  AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env.intranet}
+  LLM_DEBUG_LOG_ENABLED: ${LLM_DEBUG_LOG_ENABLED:-false}
+
 services:
   db:
     image: postgres:16-alpine
@@ -18,17 +32,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # worker 复用这个镜像；同名标签让 `build app` 一次构建两者共用。
+    image: ${PGS_APP_IMAGE:-paper-grading-system:local}
     container_name: paper-grading-app
-    env_file:
-      - ${APP_ENV_FILE:-.env.intranet}
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paper}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.intranet}@db:5432/${POSTGRES_DB:-paper_grading}
-      STORAGE_ROOT: /app/storage
-      AUTH_ENABLED: ${AUTH_ENABLED:-true}
-      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
-      AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in .env.intranet}
-      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env.intranet}
-      LLM_DEBUG_LOG_ENABLED: ${LLM_DEBUG_LOG_ENABLED:-false}
+    env_file: *app-env-file
+    environment: *app-environment
     volumes:
       - app_storage:/app/storage
       - ops_backups:/app/ops_backups
@@ -47,6 +55,31 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+    restart: unless-stopped
+
+  # 后台评分执行器。Vercel 上由 Vercel Queues 投递；自部署没有队列服务，
+  # 任务只记在数据库里，由它每几秒领取一次（租约 + 心跳，崩溃后自动接管）。
+  # 缺了它，「开始评分」会一直停在排队中。可用 `--scale worker=N` 多开。
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PGS_APP_IMAGE:-paper-grading-system:local}
+    env_file: *app-env-file
+    environment: *app-environment
+    command: ["python", "-m", "backend.app.scripts.run_batch_worker"]
+    volumes:
+      # 与 app 共用：worker 要读取 app 收到的论文文件。
+      - app_storage:/app/storage
+    extra_hosts:
+      # 本机模型（host.docker.internal）由 worker 调用，评分请求从这里发出。
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      # 迁移只由 app 在启动时执行；worker 等它健康后再连库，避免两边同时迁移。
+      app:
+        condition: service_healthy
     restart: unless-stopped
 
   caddy:

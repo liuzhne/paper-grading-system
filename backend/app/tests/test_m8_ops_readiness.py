@@ -111,6 +111,31 @@ def test_ci_has_locked_unit_postgres_migration_and_restore_gates():
         '"postgresql-client-${POSTGRES_MAJOR}"',
     ):
         assert marker in dockerfile
+    # 镜像入口只起 uvicorn；compose 必须另起 worker，冒烟也必须确认它在运行。
+    assert "ps --status running --services" in workflow
+    assert "grep -qx worker" in workflow
+    # 冒烟步骤是 `python … | tee`：没有 pipefail 时脚本崩溃也是绿的。
+    smoke_job = workflow.split("  docker-compose-smoke:", 1)[1].split("\n  deploy-vercel-production:", 1)[0]
+    assert "defaults:\n      run:\n        shell: bash" in smoke_job
+    assert "smoke_deployment --scoring fail-closed" in smoke_job
+
+
+def test_compose_runs_a_batch_worker_with_the_app_config_and_storage():
+    import yaml
+
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    app, worker = compose["services"]["app"], compose["services"]["worker"]
+    # 自部署没有 Vercel Queues：任务只记在数据库里，靠它轮询领取。
+    assert worker["command"] == ["python", "-m", "backend.app.scripts.run_batch_worker"]
+    # 同一镜像、同一份配置：worker 在另一套数据库或模型设置下评分是静默错误。
+    assert worker["image"] == app["image"]
+    assert worker["env_file"] == app["env_file"]
+    assert worker["environment"] == app["environment"]
+    # 论文文件由 app 落盘，worker 必须读到同一个卷。
+    assert "app_storage:/app/storage" in worker["volumes"]
+    # 迁移只由 app 执行，worker 等它健康后再连库。
+    assert worker["depends_on"]["app"]["condition"] == "service_healthy"
+    assert "command" not in app
 
 
 class _FakePostgresRunner:

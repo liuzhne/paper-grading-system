@@ -285,6 +285,12 @@ jobs:
       - unit-and-sqlite-migrations
       - postgres-migrations-constraints-and-restore
     runs-on: ubuntu-latest
+    # 显式写 shell: bash 时 Actions 用 `bash -eo pipefail`；默认的 `bash -e` 没有
+    # pipefail，`python … | tee` 会取 tee 的退出码。冒烟脚本曾因此在登录改成
+    # Cookie 后崩溃了一个多月，这一步仍是绿的。
+    defaults:
+      run:
+        shell: bash
     env:
       APP_ENV_FILE: .env.intranet.example
       POSTGRES_DB: paper_grading
@@ -307,9 +313,15 @@ jobs:
           docker compose --env-file .env.intranet.example build --pull app
       - name: Start the complete production stack
         run: |
+          set -euo pipefail
           docker compose --env-file .env.intranet.example up -d --wait --wait-timeout 180
           docker compose --env-file .env.intranet.example ps \
             | tee pgs_docker_artifacts/compose-ps.txt
+          # 自部署没有队列服务，后台评分只靠 worker 轮询数据库；它没起来时
+          # 「开始评分」会永远停在排队中，而 /api 健康检查照样是绿的。
+          # 先取完整输出再匹配：pipefail 下 `| grep -q` 提前退出会让上游收到 SIGPIPE。
+          running="$(docker compose --env-file .env.intranet.example ps --status running --services)"
+          grep -qx worker <<<"$running"
       - name: Verify the PostgreSQL 16 client and HTTPS proxy
         run: |
           docker compose --env-file .env.intranet.example exec -T app pg_dump --version \
@@ -358,12 +370,16 @@ jobs:
           code="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --insecure https://localhost/workbench/assets/does-not-exist.js)"
           test "$code" = "404"
-      - name: Exercise login upload score report and export
+      # smoke_deployment 会创建后台评分任务并等它到终态：只有 worker 真正在
+      # 领取任务时才会通过，补的是「接口都健康、任务却没人执行」这个盲区。
+      - name: Exercise login upload and fail-closed background scoring
         run: |
           docker compose --env-file .env.intranet.example exec -T app \
             python -m backend.app.scripts.seed_dev
+          # 冒烟栈没有配置平台模型，也没有绑定连接；受保护部署不回落 Mock（D-028），
+          # 所以验证的是：worker 领取任务后明确拒绝评分，同步评分返回 503。
           docker compose --env-file .env.intranet.example exec -T app \
-            python -m backend.app.scripts.smoke_deployment \
+            python -m backend.app.scripts.smoke_deployment --scoring fail-closed \
             | tee pgs_docker_artifacts/deployment-smoke.json
       - name: Exercise backup creation and independent verification in the image
         run: |

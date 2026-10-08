@@ -1,6 +1,8 @@
 from sqlalchemy import select
 
+from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
+from backend.app.db.models import Organization
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCriterion
 from backend.app.db.session import SessionLocal
@@ -29,9 +31,52 @@ def seed(db=None):
     _seed_into(db)
 
 
+def _default_organization(db, user):
+    """与 Bootstrap Admin 共用的默认组织（按名称找，没有就建）。
+
+    开启鉴权后批次列表只返回当前组织的数据；不带组织的种子批次对登录用户不可见。
+    不开鉴权时列表不按组织过滤，归属默认组织不影响本地开发与 CLI。
+    """
+
+    organization = db.scalar(
+        select(Organization).where(Organization.name == settings.DEFAULT_ORGANIZATION_NAME)
+    )
+    if organization is None:
+        organization = Organization(name=settings.DEFAULT_ORGANIZATION_NAME, created_by=user.id)
+        db.add(organization)
+        db.flush()
+    return organization
+
+
+def _reusable_seed(db, model, user, organization, *conditions):
+    """找可复用的种子记录，绝不取用别的组织或别的用户的同名数据。
+
+    先找默认组织里的；没有时，只认领开发用户自己早期留下、尚无组织归属的种子并补上
+    组织（多租户前的种子都是这样）。同名但属于其它组织或其它用户的记录一律不碰。
+    """
+
+    row = db.scalar(select(model).where(*conditions, model.organization_id == organization.id))
+    if row is None:
+        row = db.scalar(
+            select(model).where(
+                *conditions,
+                model.organization_id.is_(None),
+                model.created_by == user.id,
+            )
+        )
+        if row is not None:
+            row.organization_id = organization.id
+    return row
+
+
 def _seed_into(db):
     user = ensure_dev_user(db)
-    rubric = db.scalar(select(Rubric).where(Rubric.name == "本科毕业论文通用评分标准", Rubric.version == "v1.0"))
+    organization = _default_organization(db, user)
+    rubric = _reusable_seed(
+        db, Rubric, user, organization,
+        Rubric.name == "本科毕业论文通用评分标准",
+        Rubric.version == "v1.0",
+    )
     if rubric is None:
         rubric = Rubric(
             name="本科毕业论文通用评分标准",
@@ -40,6 +85,7 @@ def _seed_into(db):
             status="published",
             description="MVP 默认评分标准，用于本地开发和演示。",
             created_by=user.id,
+            organization_id=organization.id,
         )
         for order, (code, name, max_score, hints, rules) in enumerate(DEFAULT_CRITERIA, start=1):
             rubric.criteria.append(
@@ -56,7 +102,10 @@ def _seed_into(db):
         db.add(rubric)
         db.flush()
 
-    batch = db.scalar(select(GradingBatch).where(GradingBatch.name == "2026 届论文评分开发批次"))
+    batch = _reusable_seed(
+        db, GradingBatch, user, organization,
+        GradingBatch.name == "2026 届论文评分开发批次",
+    )
     if batch is None:
         db.add(
             GradingBatch(
@@ -68,6 +117,7 @@ def _seed_into(db):
                 rubric_id=rubric.id,
                 status="draft",
                 created_by=user.id,
+                organization_id=organization.id,
             )
         )
     db.commit()

@@ -1211,3 +1211,33 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - 结果里仍只记录连接的模型名（如 `openrouter/free`），看不到实际路由到的模型。
 
 维护记录：2026-10-07 · AI 归类续跑：调度器区分内容级与系统级失败，主按钮默认跳过已有建议；无后端、提示词或迁移变化。
+
+### 2026-10-08 自部署 Compose 增加后台评分 worker（Accepted）
+
+背景：Vercel 上的后台评分由 Vercel Queues 投递给函数实例。自部署没有这个队列服务，`vercel_queue_enabled()` 为假时只把任务写进数据库，由 `run_batch_worker` 轮询领取。本地脚本 `start-web-pg.sh` 会启动它，但 Docker 镜像的入口只跑“迁移 + uvicorn”，compose 里也只有 `db`、`app`、`caddy`。前端不调用 `/batch-scoring-jobs/{id}/run`，Web 进程里也没有后台线程。所以 Docker 部署后点“开始评分”，任务会一直停在“排队中”。CI 的 Docker 冒烟只走同步评分接口，覆盖不到这条路径。
+
+选择：
+- compose 增加独立的 `worker` 服务：与 `app` 用同一镜像标签，`env_file` / `environment` 通过 YAML 锚点共享，挂载同一个 `app_storage`，只等 `app` 健康后启动（迁移只由 app 执行）。
+- `smoke_deployment` 改为 `deployment-smoke@2`：上传合成论文后创建后台评分任务，轮询到终态（超时提示“worker 是否在运行”）。分两种模式：
+  - `--scoring succeed`（默认）：部署已配置模型，要求论文评分成功，并检查报告和导出；
+  - `--scoring fail-closed`：部署没有模型，要求 worker 领取后把条目记为 `PLATFORM_MODEL_MISSING`，同步评分返回 503。
+- CI 用 `fail-closed` 模式；`up --wait` 后检查 `worker` 处于 running；契约测试用 YAML 解析校验 worker 的命令、镜像、配置、存储卷和依赖。
+- 验证中发现这条冒烟**从 8 月下旬起一直是假绿**，一并修复：
+  - 步骤是 `python … | tee`，默认 `bash -e` 没有 pipefail，脚本崩溃也通过。现在任务级设置 `defaults.run.shell: bash`，Actions 改用 `bash -eo pipefail`，契约测试固定这一点；
+  - 登录已改为 Cookie 会话，脚本还在读 JSON token。改为取 `pgs_session`，显式放进 Cookie 头（会话 Cookie 带 Secure，经明文 http://127.0.0.1 不会自动回传）；
+  - `seed_dev` 写于多租户之前，种子批次没有组织归属，开启鉴权后登录用户看不到。改为归属默认组织（与 Bootstrap Admin 同名查找或创建）。查找已有种子时，只复用默认组织内的记录；其次只认领开发用户自己留下、尚无组织归属的旧种子。别的组织或别的用户的同名记录一律不复用、不改动（否则默认组织的批次可能挂到别的组织的标准上，或者把别人的数据划进默认组织）。不开鉴权时不按组织过滤，本地开发与 CLI 不受影响；
+  - 受保护部署缺少模型时，原来抛的是普通 `RuntimeError`：批任务记成 `scoring_failure; exception_type=RuntimeError`，同步评分返回 500。现在改为 `PlatformModelMissingError`（`PLATFORM_MODEL_MISSING`，继承 RuntimeError）：任务详情显示“尚未配置平台模型……”，同步评分返回 503。
+
+放弃了什么：
+- **在 app 容器里用进程管理器（supervisord 等）同时跑 uvicorn 和 worker**：一个容器两个进程，健康检查只看得到 Web；worker 崩了容器仍是 healthy，也不能单独扩容。
+- **在 uvicorn 进程里起后台线程**：会随 Web 进程数重复启动；改代码热加载时会把执行中的任务打断；Web 和评分的资源也会互相挤占。
+- **为自部署引入 MQ（RabbitMQ / Redis 队列）**：数据库加租约的轮询已经满足这个规模，崩溃后能自动接管，内网离线部署也不必多带一个组件。
+- **冒烟里直接调 `/run` 同步执行**：这样能通过，但证明不了 worker 在运行，恰好绕过了要测的东西。
+- **为冒烟开一个允许 Mock 的开关**：等于在 D-028 上开口子，生产一旦误配就会悄悄产出假分数。
+- **本次就加 CI 专用的假 OpenAI 兼容模型**：能恢复“评分、报告、导出”的真实覆盖，但假服务要产出能通过证据校验的结果，工作量明显更大。留作后续 PR；在那之前，Docker 冒烟不覆盖报告和导出（它们此前也只是看起来被覆盖了）。
+
+代价：
+- 多一个常驻进程。`docker stop` 默认 10 秒后强制结束 worker，正在跑的任务会中断，等心跳过期后被重新领取。
+- 冒烟多了一次 Mock 评分（几秒）；worker 每 3 秒轮询一次数据库。
+
+维护记录：2026-10-08 · Compose 后台评分 worker：自部署补上任务执行者；冒烟改为 fail-closed 并修复假绿（pipefail、Cookie 登录、种子组织、缺模型错误类型）；无迁移，Vercel 路径不变。

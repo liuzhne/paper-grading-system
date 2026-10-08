@@ -11,6 +11,7 @@
 import pytest
 
 from backend.app.core.config import settings
+from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.services.llm.mock import MockLLMScorer
 
@@ -47,6 +48,9 @@ def test_authenticated_deployment_without_any_model_fails_loudly(client, monkeyp
     message = str(excinfo.value)
     # 报错要能指导下一步，否则运维只会去改 LLM_PROVIDER 再试一次。
     assert "AI" in message or "连接" in message or "connection" in message.lower()
+    # 批任务和同步路由靠这个类型把它报成配置错误，而不是 scoring_failure / HTTP 500。
+    assert isinstance(excinfo.value, PlatformModelMissingError)
+    assert excinfo.value.code == "PLATFORM_MODEL_MISSING"
 
 
 def test_authenticated_deployment_uses_the_platform_config_when_present(
