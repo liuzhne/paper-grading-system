@@ -48,10 +48,35 @@ def _default_organization(db, user):
     return organization
 
 
+def _reusable_seed(db, model, user, organization, *conditions):
+    """找可复用的种子记录，绝不取用别的组织或别的用户的同名数据。
+
+    先找默认组织里的；没有时，只认领开发用户自己早期留下、尚无组织归属的种子并补上
+    组织（多租户前的种子都是这样）。同名但属于其它组织或其它用户的记录一律不碰。
+    """
+
+    row = db.scalar(select(model).where(*conditions, model.organization_id == organization.id))
+    if row is None:
+        row = db.scalar(
+            select(model).where(
+                *conditions,
+                model.organization_id.is_(None),
+                model.created_by == user.id,
+            )
+        )
+        if row is not None:
+            row.organization_id = organization.id
+    return row
+
+
 def _seed_into(db):
     user = ensure_dev_user(db)
     organization = _default_organization(db, user)
-    rubric = db.scalar(select(Rubric).where(Rubric.name == "本科毕业论文通用评分标准", Rubric.version == "v1.0"))
+    rubric = _reusable_seed(
+        db, Rubric, user, organization,
+        Rubric.name == "本科毕业论文通用评分标准",
+        Rubric.version == "v1.0",
+    )
     if rubric is None:
         rubric = Rubric(
             name="本科毕业论文通用评分标准",
@@ -77,7 +102,10 @@ def _seed_into(db):
         db.add(rubric)
         db.flush()
 
-    batch = db.scalar(select(GradingBatch).where(GradingBatch.name == "2026 届论文评分开发批次"))
+    batch = _reusable_seed(
+        db, GradingBatch, user, organization,
+        GradingBatch.name == "2026 届论文评分开发批次",
+    )
     if batch is None:
         db.add(
             GradingBatch(
@@ -92,10 +120,6 @@ def _seed_into(db):
                 organization_id=organization.id,
             )
         )
-    # 早期种子留下的数据没有组织归属，补齐后登录用户才看得到。
-    for row in (rubric, batch):
-        if row is not None and row.organization_id is None:
-            row.organization_id = organization.id
     db.commit()
 
 

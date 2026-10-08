@@ -1225,7 +1225,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - 验证中发现这条冒烟**从 8 月下旬起一直是假绿**，一并修复：
   - 步骤是 `python … | tee`，默认 `bash -e` 没有 pipefail，脚本崩溃也通过。现在任务级设置 `defaults.run.shell: bash`，Actions 改用 `bash -eo pipefail`，契约测试固定这一点；
   - 登录已改为 Cookie 会话，脚本还在读 JSON token。改为取 `pgs_session`，显式放进 Cookie 头（会话 Cookie 带 Secure，经明文 http://127.0.0.1 不会自动回传）；
-  - `seed_dev` 写于多租户之前，种子批次没有组织归属，开启鉴权后登录用户看不到。改为归属默认组织（与 Bootstrap Admin 同名查找或创建），并补齐旧种子；不开鉴权时不按组织过滤，本地开发与 CLI 不受影响；
+  - `seed_dev` 写于多租户之前，种子批次没有组织归属，开启鉴权后登录用户看不到。改为归属默认组织（与 Bootstrap Admin 同名查找或创建）。查找已有种子时，只复用默认组织内的记录；其次只认领开发用户自己留下、尚无组织归属的旧种子。别的组织或别的用户的同名记录一律不复用、不改动（否则默认组织的批次可能挂到别的组织的标准上，或者把别人的数据划进默认组织）。不开鉴权时不按组织过滤，本地开发与 CLI 不受影响；
   - 受保护部署缺少模型时，原来抛的是普通 `RuntimeError`：批任务记成 `scoring_failure; exception_type=RuntimeError`，同步评分返回 500。现在改为 `PlatformModelMissingError`（`PLATFORM_MODEL_MISSING`，继承 RuntimeError）：任务详情显示“尚未配置平台模型……”，同步评分返回 503。
 
 放弃了什么：
