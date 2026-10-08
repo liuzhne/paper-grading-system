@@ -1,6 +1,8 @@
 from sqlalchemy import select
 
+from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
+from backend.app.db.models import Organization
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCriterion
 from backend.app.db.session import SessionLocal
@@ -29,8 +31,26 @@ def seed(db=None):
     _seed_into(db)
 
 
+def _default_organization(db, user):
+    """与 Bootstrap Admin 共用的默认组织（按名称找，没有就建）。
+
+    开启鉴权后批次列表只返回当前组织的数据；不带组织的种子批次对登录用户不可见。
+    不开鉴权时列表不按组织过滤，归属默认组织不影响本地开发与 CLI。
+    """
+
+    organization = db.scalar(
+        select(Organization).where(Organization.name == settings.DEFAULT_ORGANIZATION_NAME)
+    )
+    if organization is None:
+        organization = Organization(name=settings.DEFAULT_ORGANIZATION_NAME, created_by=user.id)
+        db.add(organization)
+        db.flush()
+    return organization
+
+
 def _seed_into(db):
     user = ensure_dev_user(db)
+    organization = _default_organization(db, user)
     rubric = db.scalar(select(Rubric).where(Rubric.name == "本科毕业论文通用评分标准", Rubric.version == "v1.0"))
     if rubric is None:
         rubric = Rubric(
@@ -40,6 +60,7 @@ def _seed_into(db):
             status="published",
             description="MVP 默认评分标准，用于本地开发和演示。",
             created_by=user.id,
+            organization_id=organization.id,
         )
         for order, (code, name, max_score, hints, rules) in enumerate(DEFAULT_CRITERIA, start=1):
             rubric.criteria.append(
@@ -68,8 +89,13 @@ def _seed_into(db):
                 rubric_id=rubric.id,
                 status="draft",
                 created_by=user.id,
+                organization_id=organization.id,
             )
         )
+    # 早期种子留下的数据没有组织归属，补齐后登录用户才看得到。
+    for row in (rubric, batch):
+        if row is not None and row.organization_id is None:
+            row.organization_id = organization.id
     db.commit()
 
 

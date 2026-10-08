@@ -3,6 +3,10 @@
 The caller is responsible for applying migrations and seeding the disposable
 smoke database.  This script uses synthetic content only and exercises the
 same login, upload, score, report, and export routes used by the Web UI.
+
+It also starts a background scoring job and waits for it to finish.  Without a
+queue service the job only advances when a batch worker is running, so a stack
+that forgot the worker fails here instead of leaving users at "queued".
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import argparse
 from io import BytesIO
 import json
+import time
 
 from docx import Document
 import httpx
@@ -19,6 +24,12 @@ from backend.app.core.config import settings
 
 DEFAULT_RUBRIC_NAME = "本科毕业论文通用评分标准"
 DEFAULT_BATCH_NAME = "2026 届论文评分开发批次"
+DEFAULT_BACKGROUND_JOB_TIMEOUT_SECONDS = 180.0
+TERMINAL_JOB_STATUSES = ("completed", "completed_with_errors", "canceled", "failed")
+# 受保护部署不回落 Mock（D-028）。没有配置平台模型、也没有绑定连接的冒烟环境里，
+# 评分必须明确拒绝，而不是悄悄出分；`fail-closed` 模式验证的正是这一点。
+SCORING_MODES = ("succeed", "fail-closed")
+PLATFORM_MODEL_MISSING = "PLATFORM_MODEL_MISSING"
 
 
 def _parser():
@@ -26,6 +37,19 @@ def _parser():
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--rubric-name", default=DEFAULT_RUBRIC_NAME)
     parser.add_argument("--batch-name", default=DEFAULT_BATCH_NAME)
+    parser.add_argument(
+        "--scoring",
+        choices=SCORING_MODES,
+        default="succeed",
+        help="succeed: a model is configured and papers must be scored; "
+        "fail-closed: no model is configured and scoring must be refused explicitly",
+    )
+    parser.add_argument(
+        "--background-job-timeout",
+        type=float,
+        default=DEFAULT_BACKGROUND_JOB_TIMEOUT_SECONDS,
+        help="seconds to wait for the background scoring job to finish",
+    )
     return parser
 
 
@@ -68,7 +92,84 @@ def _sample_docx():
     return buffer.getvalue()
 
 
-def run_smoke(*, base_url, rubric_name, batch_name):
+def await_background_job(
+    client,
+    headers,
+    *,
+    batch_id,
+    paper_id,
+    timeout_seconds,
+    scoring="succeed",
+    poll_seconds=2.0,
+    sleep=time.sleep,
+    clock=time.monotonic,
+):
+    """Start a background scoring job for the batch and wait for its terminal state.
+
+    Reaching a terminal state at all proves a worker picked the job up.  With
+    ``scoring="succeed"`` the paper must also be scored; with ``"fail-closed"``
+    the worker must have attempted it and recorded the missing-model refusal.
+    """
+
+    job = _response(
+        client.post(
+            f"/api/batches/{batch_id}/score-jobs",
+            headers=headers,
+            json={"rescore": False, "max_workers": 1},
+        ),
+        "background scoring job creation",
+    ).json()
+    deadline = clock() + timeout_seconds
+    while job.get("status") not in TERMINAL_JOB_STATUSES:
+        if clock() >= deadline:
+            raise RuntimeError(
+                f"background scoring job {job.get('id')} stayed {job.get('status')!r} "
+                f"for {timeout_seconds:g}s; is the batch worker running?"
+            )
+        sleep(poll_seconds)
+        job = _response(
+            client.get(f"/api/batch-scoring-jobs/{job['id']}", headers=headers),
+            "background scoring job status",
+        ).json()
+    item = next(
+        (value for value in job.get("items") or [] if value.get("paper_id") == paper_id),
+        None,
+    )
+    if item is None:
+        raise RuntimeError("background scoring job did not include the uploaded paper")
+    if scoring == "fail-closed":
+        if (
+            item.get("status") != "failed"
+            or not item.get("attempt_count")
+            or item.get("error_code") != PLATFORM_MODEL_MISSING
+        ):
+            raise RuntimeError(
+                "background scoring without a configured model must fail closed with "
+                f"{PLATFORM_MODEL_MISSING}; got job {job['status']!r}, item "
+                f"{item.get('status')!r} {item.get('error_code') or ''}".rstrip()
+            )
+        return job, item
+    if (
+        job["status"] != "completed"
+        or item.get("status") != "succeeded"
+        or not item.get("scoring_run_id")
+    ):
+        raise RuntimeError(
+            "background scoring job ended as "
+            f"{job['status']!r} with item {item.get('status')!r}: "
+            f"{item.get('error_code') or ''} {item.get('error_message') or ''}".rstrip()
+        )
+    return job, item
+
+
+def run_smoke(
+    *,
+    base_url,
+    rubric_name,
+    batch_name,
+    scoring="succeed",
+    background_job_timeout=DEFAULT_BACKGROUND_JOB_TIMEOUT_SECONDS,
+):
     if not settings.AUTH_ENABLED:
         raise RuntimeError("deployment smoke requires AUTH_ENABLED=true")
     if not settings.AUTH_PASSWORD:
@@ -102,11 +203,13 @@ def run_smoke(*, base_url, rubric_name, batch_name):
                 },
             ),
             "login",
-        ).json()
-        token = login.get("token")
-        if not token:
-            raise RuntimeError("login response did not contain a token")
-        headers = {"Authorization": f"Bearer {token}"}
+        )
+        # 登录只下发 HttpOnly 会话 Cookie（204，无响应体）。它默认带 Secure，
+        # 客户端不会经明文 http://127.0.0.1 自动回传，所以显式放进 Cookie 头。
+        session = login.cookies.get(settings.AUTH_COOKIE_NAME)
+        if not session:
+            raise RuntimeError("login response did not set a session cookie")
+        headers = {"Cookie": f"{settings.AUTH_COOKIE_NAME}={session}"}
 
         _response(
             client.get("/api/auth/me", headers=headers),
@@ -164,12 +267,48 @@ def run_smoke(*, base_url, rubric_name, batch_name):
         if uploaded.get("status") != "parsed":
             raise RuntimeError("synthetic document was not parsed")
 
+        job, job_item = await_background_job(
+            client,
+            headers,
+            batch_id=batch["id"],
+            paper_id=uploaded["id"],
+            timeout_seconds=background_job_timeout,
+            scoring=scoring,
+        )
+        background = {
+            "id": job.get("id"),
+            "status": job.get("status"),
+            "item_status": job_item.get("status"),
+            "item_error_code": job_item.get("error_code"),
+            "scoring_run_id": job_item.get("scoring_run_id"),
+        }
+
+        if scoring == "fail-closed":
+            refused = client.post(f"/api/papers/{uploaded['id']}/score", headers=headers)
+            if refused.status_code != 503 or "平台模型" not in refused.text:
+                raise RuntimeError(
+                    "synchronous scoring without a configured model must be refused with "
+                    f"HTTP 503; got HTTP {refused.status_code}: {refused.text[:300]}"
+                )
+            return {
+                "schema_version": "deployment-smoke@2",
+                "status": "passed",
+                "scoring": "fail-closed",
+                "frontend": "ready",
+                "authentication": "passed",
+                "database": readiness.get("signals", {}).get("database", {}).get("dialect"),
+                "llm_provider": integrations.get("llm", {}).get("provider"),
+                "paper_status": uploaded.get("status"),
+                "background_job": background,
+                "synchronous_scoring": "refused",
+            }
+
         run = _response(
             client.post(
                 f"/api/papers/{uploaded['id']}/score",
                 headers=headers,
             ),
-            "mock scoring",
+            "synchronous scoring",
         ).json()
         if run.get("final_total_score") is None:
             raise RuntimeError("scoring response did not contain a final score")
@@ -195,14 +334,16 @@ def run_smoke(*, base_url, rubric_name, batch_name):
             raise RuntimeError("batch export endpoint did not return XLSX")
 
     return {
-        "schema_version": "deployment-smoke@1",
+        "schema_version": "deployment-smoke@2",
         "status": "passed",
+        "scoring": "succeed",
         "frontend": "ready",
         "authentication": "passed",
         "database": readiness.get("signals", {}).get("database", {}).get("dialect"),
         "llm_provider": integrations.get("llm", {}).get("provider"),
         "paper_status": uploaded.get("status"),
         "scoring_run_id": run.get("id"),
+        "background_job": background,
         "report": "passed",
         "excel_export": "passed",
     }
@@ -214,6 +355,8 @@ def main(argv=None):
         base_url=args.base_url,
         rubric_name=args.rubric_name,
         batch_name=args.batch_name,
+        scoring=args.scoring,
+        background_job_timeout=args.background_job_timeout,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

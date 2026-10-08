@@ -1,4 +1,5 @@
 from backend.app.core.config import settings
+from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
 from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
@@ -90,10 +91,7 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None, *, sessi
         runtime = _platform_runtime(session)
         if runtime is not None:
             return get_llm_scorer(runtime)
-        raise RuntimeError(
-            "本部署尚未配置平台模型。请绑定你自己的 AI 连接，"
-            "或联系平台管理员在运维页配置平台默认模型。"
-        )
+        raise PlatformModelMissingError()
 
     provider = (settings.LLM_PROVIDER or "mock").lower()
     if provider == "mock":

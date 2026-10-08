@@ -27,6 +27,7 @@ from backend.app.schemas.scoring import ScoreItemUpdate
 from backend.app.schemas.scoring import ScoringRunRead
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.llm.base import LLMScoringError
+from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.scoring.engine import score_paper
 from backend.app.services.scoring.engine import retry_score_paper
 from backend.app.services.scoring.engine import submit_review
@@ -101,6 +102,9 @@ def create_scoring_run(
         return score_paper(db, paper_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except PlatformModelMissingError as exc:
+        # 部署配置问题（D-028：受保护部署不回落 Mock），不是服务内部错误。
+        raise HTTPException(status_code=503, detail=str(exc))
     except LLMScoringError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -172,6 +176,9 @@ def retry_scoring_run(
         return retry_score_paper(db, run.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except PlatformModelMissingError as exc:
+        # 部署配置问题（D-028：受保护部署不回落 Mock），不是服务内部错误。
+        raise HTTPException(status_code=503, detail=str(exc))
     except LLMScoringError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
