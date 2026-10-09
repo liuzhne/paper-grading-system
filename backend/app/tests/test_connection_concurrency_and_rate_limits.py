@@ -375,11 +375,11 @@ def test_quota_exhausted_is_not_retried_even_with_rate_limit_budget(sleeps, capl
 # ---- 起草的总时间预算 ---------------------------------------------------------
 
 
-def test_first_batch_always_starts_and_budget_stops_before_the_next_one():
+def test_budget_is_checked_before_every_batch():
     from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
 
     started = []
-    budget = iter([True, False])  # 第 2 批开始前还有时间，第 3 批开始前没有了
+    budget = iter([True, True, False])  # 第 1、2 批开始前还有时间，第 3 批开始前没有了
 
     with pytest.raises(AIRuleDraftValidationError) as excinfo:
         ai_rule_drafter._run_draft_batches(
@@ -394,22 +394,24 @@ def test_first_batch_always_starts_and_budget_stops_before_the_next_one():
     assert "并发上限" in error.user_action
 
 
-def test_a_single_slow_connection_still_gets_its_first_batch():
+def test_a_later_criterion_cannot_start_its_only_batch_after_the_budget_is_spent():
+    # 截止时间按整次请求算：前面的评分项用完了预算，后面只有一批的评分项也不能再开始。
+    from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
+
     started = []
-    assert ai_rule_drafter._run_draft_batches(
-        ["only"], lambda batch: started.append(batch) or batch, max_concurrency=1, has_time=lambda: False,
-    ) == ["only"]
-    assert started == ["only"]
+    with pytest.raises(AIRuleDraftValidationError) as excinfo:
+        ai_rule_drafter._run_draft_batches(["only"], started.append, max_concurrency=1, has_time=lambda: False)
+    assert started == []
+    assert excinfo.value.code == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
 
 
-def test_rate_limit_waits_shrink_with_the_remaining_budget():
-    scorer = type("S", (), {"timeout_seconds": 0, "timeout_seconds_explicit": False})()  # 单次等待按 120 秒算
+def test_admission_needs_less_than_a_full_long_timeout():
+    # 连接显式设了 300 秒超时也能开始第一批：门槛取 60 秒，调用超时由适配器压到预算以内。
+    long_timeout = type("S", (), {"timeout_seconds": 300, "timeout_seconds_explicit": True})()
     now = time.monotonic()
-    assert ai_rule_drafter._budgeted_rate_limit_retries(None, scorer) == 2
-    assert ai_rule_drafter._budgeted_rate_limit_retries(now + 120 + 75, scorer) == 2
-    assert ai_rule_drafter._budgeted_rate_limit_retries(now + 120 + 40, scorer) == 1
-    assert ai_rule_drafter._budgeted_rate_limit_retries(now + 120 + 5, scorer) == 0
-    assert ai_rule_drafter._budgeted_rate_limit_retries(now - 1, scorer) == 0
+    assert ai_rule_drafter._has_time_for_call(now + 259, long_timeout) is True
+    assert ai_rule_drafter._has_time_for_call(now + 59, long_timeout) is False
+    assert ai_rule_drafter._has_time_for_call(None, long_timeout) is True
 
 
 def test_repair_is_skipped_when_it_would_overrun_the_budget(monkeypatch):
@@ -428,8 +430,8 @@ def test_repair_is_skipped_when_it_would_overrun_the_budget(monkeypatch):
             criterion={}, input_analysis={}, scorer=scorer, business_profile_key="thesis",
             deadline=time.monotonic() + 30,
         )
-    assert len(attempts) == 1  # 不够再等一次完整调用，就不做修正
-    assert attempts[0]["rate_limit_retries"] == 0
+    assert len(attempts) == 1  # 剩余时间不够再开始一次调用，就不做修正
+    assert attempts[0]["deadline"] is not None  # 截止时间传给了调用，由适配器约束超时
 
 
 def test_draft_endpoint_shares_one_deadline_and_reports_budget_exhaustion(client, monkeypatch):
@@ -463,3 +465,59 @@ def test_draft_endpoint_shares_one_deadline_and_reports_budget_exhaustion(client
     assert detail["retryable"] is False
     budget = settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
     assert deadlines and 0 < deadlines[0] - time.monotonic() <= budget
+
+
+# ---- 适配器：截止时间约束每次调用与重试 -------------------------------------------
+
+
+def test_expired_deadline_sends_no_request(sleeps):
+    calls = []
+    scorer = _scorer([httpx.Response(200, json=_chat())], calls, "https://deadline-a.example/v4")
+    with pytest.raises(ProviderCallError) as excinfo:
+        scorer.complete_json("系统", {"units": []}, attempts_limit=1, deadline=time.monotonic() - 1)
+    assert excinfo.value.error.code == "request_timeout"
+    assert calls == []
+
+
+def test_call_timeout_is_capped_by_the_remaining_budget(sleeps):
+    calls = []
+    scorer = _scorer([httpx.Response(200, json=_chat())], calls, "https://deadline-b.example/v4")
+    scorer.complete_json("系统", {"units": []}, attempts_limit=1, deadline=time.monotonic() + 40)
+    read_timeout = calls[0].extensions["timeout"]["read"]
+    assert 0 < read_timeout <= 40  # 配置的超时更长，也不能越过截止时间
+
+
+def test_rate_limit_retry_is_skipped_when_the_wait_would_eat_the_budget(sleeps):
+    calls = []
+    scorer = _scorer([_too_many()], calls, "https://deadline-c.example/v4")
+    with pytest.raises(ProviderCallError) as excinfo:
+        # Retry-After 1 秒，但等完只剩不到 30 秒，重试那次调用来不及做完。
+        scorer.complete_json("系统", {"units": []}, attempts_limit=1, rate_limit_retries=2,
+                             deadline=time.monotonic() + 25)
+    assert excinfo.value.error.code == "rate_limited"
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_a_timeout_cut_short_by_the_budget_is_reported_as_budget_exhaustion(monkeypatch):
+    from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
+    from backend.app.tests.test_template_ai_rule_refactor import _criterion
+
+    deadline = time.monotonic() + 61
+    calls = []
+    scorer = _scorer([httpx.ReadTimeout("cut by budget")], calls, "https://deadline-d.example/v4")
+
+    class TimeIsUp:
+        """起草模块看到的时钟已经走到截止时间；适配器仍用真实时钟。"""
+
+        @staticmethod
+        def monotonic():
+            return deadline
+
+    monkeypatch.setattr(ai_rule_drafter, "time", TimeIsUp)
+    with pytest.raises(AIRuleDraftValidationError) as excinfo:
+        ai_rule_drafter._draft_deduction_rules_once(
+            criterion=_criterion(), input_analysis={}, scorer=scorer,
+            business_profile_key="thesis", deadline=deadline,
+        )
+    assert excinfo.value.code == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
+    assert len(calls) == 1

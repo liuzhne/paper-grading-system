@@ -1040,7 +1040,7 @@ Compose 拓扑：`caddy` → `app`（迁移 + uvicorn）；`worker`（同一镜�
 ### 2026-10-09 起草时间预算与额度耗尽
 
 - 路由 `draft_rubric_deduction_rules` 按请求计算 `deadline = monotonic() + RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS`，传给 `draft_deduction_rules(deadline=...)`。
-- `draft_deduction_rules` 把它传给 `_run_draft_batches(has_time=...)`、`_draft_batch_with_repair(deadline=...)` 和 `_draft_deduction_rules_once(rate_limit_retries=_budgeted_rate_limit_retries(...))`。
+- `draft_deduction_rules` 把它传给 `_run_draft_batches(has_time=...)`（每批开始前检查，含第一批）、`_draft_batch_with_repair(deadline=...)`、`_draft_deduction_rules_once(deadline=...)`，再传给适配器 `complete_json(deadline=...)` → `_post_with_retry`：用 `retry.deadline_timeout` 压低每次调用超时，用 `retry.retry_fits_before_deadline` 决定是否还能重试。
 - `llm/errors.project_provider_error`：HTTP 429 加上 `_quota_exhausted(error_type, provider_code)` → `ProviderErrorCode.QUOTA_EXHAUSTED`（不可重试）。适配器的 429 额外重试要求 `projected.retryable`。
 
 维护记录：2026-10-09 · 起草时间预算与额度耗尽：调用链增加截止时间；错误分类新增一类；无数据模型变化。

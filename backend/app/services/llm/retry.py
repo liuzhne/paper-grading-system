@@ -1,11 +1,38 @@
 from datetime import datetime
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+import time
 
 import httpx
 
 from backend.app.core.config import settings
 from backend.app.services.llm.errors import project_provider_error
+
+# 重试之后至少还要留这么久给那次调用，否则重试只会在截止时间被平台或预算截断。
+MIN_SECONDS_FOR_RETRY_CALL = 30.0
+
+
+def deadline_timeout(deadline, timeout_seconds):
+    """有截止时间（time.monotonic）时，本次调用的超时取配置值与剩余时间中较小者。
+
+    返回 (timeout, expired)。expired 为真表示已经没有剩余时间，不应再发请求。
+    """
+
+    if deadline is None:
+        return timeout_seconds, False
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return 0.0, True
+    return (remaining if timeout_seconds is None else min(float(timeout_seconds), remaining)), False
+
+
+def retry_fits_before_deadline(deadline, delay_seconds) -> bool:
+    """等待 delay 秒之后，剩余时间还够不够再做一次有意义的调用。"""
+
+    if deadline is None:
+        return True
+    return deadline - time.monotonic() - float(delay_seconds) >= MIN_SECONDS_FOR_RETRY_CALL
+
 
 def is_retryable_http_error(exc):
     if not isinstance(exc, httpx.HTTPStatusError):
