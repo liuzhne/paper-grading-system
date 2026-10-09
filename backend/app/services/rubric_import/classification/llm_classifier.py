@@ -151,7 +151,7 @@ def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_siz
                 items = _envelope_items(scorer.complete_json(instructions, payload, **options))
             except Exception as exc:  # Safe error enums only; never retain provider payloads.
                 reason = getattr(exc, "reason", None)
-                failure = reason if reason in {"output_truncated", "invalid_json", "error_envelope", "invalid_envelope", "incomplete_output"} else project_provider_error(exc).code
+                failure = reason if reason in {"output_truncated", "invalid_json", "error_envelope", "invalid_envelope", "incomplete_output", "empty_content", "refused"} else project_provider_error(exc).code
                 if getattr(exc, "code", None) == "PROVIDER_CIRCUIT_OPEN":
                     failure = "circuit_open"
                 items = None

@@ -4,10 +4,13 @@ from sqlalchemy import select
 
 from backend.app.db import models
 from backend.app.services.ai_connection_protocol import CHAT
+from backend.app.services.ai_connection_protocol import MESSAGES
 from backend.app.services.ai_connection_protocol import ProtocolEndpointMissing
 from backend.app.services.ai_connection_protocol import ProtocolNotDetected
 from backend.app.services.ai_connection_protocol import RESPONSES
 from backend.app.services.ai_connection_protocol import known_host_protocol
+from backend.app.services.ai_connection_protocol import normalize_base_url
+from backend.app.services.ai_connection_protocol import path_protocol
 from backend.app.services.ai_connection_protocol import resolve_protocol
 from backend.app.services.ai_connection_protocol import split_endpoint_suffix
 from backend.app.tests.test_ai_connections import _login
@@ -31,6 +34,7 @@ class _Probe:
     ("https://gw.example/v1/chat/completions", "https://gw.example/v1", CHAT),
     ("https://gw.example/v1/Chat/Completions/", "https://gw.example/v1", CHAT),
     ("https://gw.example/v1/responses", "https://gw.example/v1", RESPONSES),
+    ("https://gw.example/v1/messages", "https://gw.example/v1", MESSAGES),
     ("https://gw.example/v1", "https://gw.example/v1", None),
 ])
 def test_pasted_full_endpoint_is_trimmed_and_decides_protocol(url, base, protocol):
@@ -88,9 +92,62 @@ def test_auth_or_other_failures_do_not_try_the_other_protocol():
 
 
 def test_no_protocol_found_is_reported_explicitly():
-    probe = _Probe(openai_compatible=ProtocolEndpointMissing("m"), openai_responses=ProtocolEndpointMissing("m"))
+    probe = _Probe(openai_compatible=ProtocolEndpointMissing("m"), openai_responses=ProtocolEndpointMissing("m"),
+                   anthropic_messages=ProtocolEndpointMissing("m"))
     with pytest.raises(ProtocolNotDetected, match="手动选择协议"):
         resolve_protocol(requested="auto", base_url="https://gw.example/v1", verify=True, probe=probe)
+    assert [call[0] for call in probe.calls] == [CHAT, RESPONSES, MESSAGES]
+
+
+def test_unknown_host_tries_messages_last_with_a_v1_base():
+    probe = _Probe(openai_compatible=ProtocolEndpointMissing("m"), openai_responses=ProtocolEndpointMissing("m"))
+    result = resolve_protocol(requested="auto", base_url="https://gw.example", verify=False, probe=probe)
+    assert (result.provider_type, result.base_url, result.source) == (MESSAGES, "https://gw.example/v1", "probe")
+    assert probe.calls[-1] == (MESSAGES, "https://gw.example/v1")
+
+
+@pytest.mark.parametrize("url,base,source", [
+    # 粘贴完整接口地址
+    ("https://api.anthropic.com/v1/messages", "https://api.anthropic.com/v1", "url_suffix"),
+    ("https://bedrock-runtime.us-east-1.amazonaws.com/anthropic/v1/messages",
+     "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic/v1", "url_suffix"),
+    # SDK 风格的 base（…/anthropic）和带 /v1 的写法都认，统一成 /v1 结尾
+    ("https://bedrock-mantle.us-east-1.api.aws/anthropic", "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1", "url_path"),
+    ("https://bedrock-runtime.eu-west-1.amazonaws.com/anthropic/v1/",
+     "https://bedrock-runtime.eu-west-1.amazonaws.com/anthropic/v1", "url_path"),
+    # 路径规则排在已知主机表之前：DeepSeek 主机在表里是 Chat，但 /anthropic 是 Messages 端点
+    ("https://api.deepseek.com/anthropic", "https://api.deepseek.com/anthropic/v1", "url_path"),
+    # Anthropic 官方主机
+    ("https://api.anthropic.com", "https://api.anthropic.com/v1", "known_host"),
+])
+def test_claude_endpoints_are_recognized_offline_and_normalized(url, base, source):
+    probe = _Probe()
+    result = resolve_protocol(requested="auto", base_url=url, verify=False, probe=probe)
+    assert (result.provider_type, result.base_url, result.source, result.verified) == (MESSAGES, base, source, False)
+    assert probe.calls == []
+
+
+def test_bedrock_host_without_anthropic_path_is_not_assumed_to_be_claude():
+    # 同一 Bedrock 主机下还有 OpenAI 兼容端点，只看主机不能定协议。
+    assert path_protocol("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1") is None
+    assert known_host_protocol("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1") is None
+
+
+def test_manual_claude_choice_normalizes_the_sdk_style_base():
+    probe = _Probe()
+    result = resolve_protocol(requested=MESSAGES, base_url="https://bedrock-mantle.us-east-1.api.aws/anthropic",
+                              verify=True, probe=probe)
+    assert result.base_url == "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1"
+    assert probe.calls == [(MESSAGES, "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1")]
+
+
+@pytest.mark.parametrize("provider_type,url,expected", [
+    (MESSAGES, "https://api.anthropic.com", "https://api.anthropic.com/v1"),
+    (MESSAGES, "https://gw.example/custom", "https://gw.example/custom"),
+    (CHAT, "https://gw.example/anthropic", "https://gw.example/anthropic"),
+])
+def test_only_messages_base_urls_are_normalized(provider_type, url, expected):
+    assert normalize_base_url(provider_type, url) == expected
 
 
 @pytest.mark.parametrize("status,missing", [(404, True), (405, True), (401, False), (400, False)])

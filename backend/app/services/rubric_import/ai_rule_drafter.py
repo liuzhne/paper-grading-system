@@ -26,7 +26,9 @@ from backend.app.core.config import settings
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.llm.factory import scorer_concurrency
 from backend.app.services.llm.rate_limit import CircuitOpenError
-from backend.app.services.llm.openai_compatible_adapter import ChatJSONOutputError, OpenAICompatibleChatScorer
+from backend.app.services.llm.anthropic_messages_adapter import AnthropicMessagesScorer
+from backend.app.services.llm.errors import ProviderJSONOutputError
+from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
 from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
 
 logger = logging.getLogger(__name__)
@@ -531,7 +533,7 @@ def _draft_deduction_rules_once(
             maximum=float(criterion_value.get("max_score") or 0),
             allowed_source_refs=allowed_refs,
         )
-        if isinstance(scorer, (OpenAICompatibleChatScorer, OpenAIResponsesScorer)):
+        if isinstance(scorer, (OpenAICompatibleChatScorer, OpenAIResponsesScorer, AnthropicMessagesScorer)):
             explicit = bool(getattr(scorer, "max_tokens_explicit", False) or
                             getattr(scorer, "max_output_tokens_explicit", False))
             configured = int(getattr(scorer, "max_tokens", getattr(scorer, "max_output_tokens", 0)) or 0)
@@ -562,12 +564,18 @@ def _draft_deduction_rules_once(
             "AI_DRAFT_OUTPUT_INVALID", "AI 接口未返回有效的 JSON 响应。",
             "请检查接口兼容性后重试；原有条款未改变。",
         ) from exc
-    except ChatJSONOutputError as exc:
+    except ProviderJSONOutputError as exc:
+        # 三种协议的输出错误共用这一个基类（以前只接住 Chat 的，Responses 的截断落到通用失败）。
         logger.warning("rubric_ai_draft_failed reason=%s", exc.reason)
         if exc.reason == "error_envelope":
             raise AIRuleDraftValidationError(
                 "AI_DRAFT_PROVIDER_ERROR", "AI 接口在成功状态中返回了错误响应。",
                 "请稍后重试或测试当前连接；原有条款未改变。",
+            ) from exc
+        if exc.reason == "refused":
+            raise AIRuleDraftValidationError(
+                "AI_DRAFT_OUTPUT_INVALID", "模型拒绝回答这次起草请求。",
+                "请检查评分项与上传文字是否包含会触发模型安全策略的内容，调整后重试；原有条款未改变。",
             ) from exc
         truncated = exc.reason == "output_truncated"
         raise AIRuleDraftValidationError(

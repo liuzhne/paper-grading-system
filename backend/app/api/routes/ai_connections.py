@@ -20,8 +20,10 @@ from backend.app.services.ai_connections import enforce_connection_rate_limit
 from backend.app.services.ai_connections import key_masked
 from backend.app.services.ai_connections import rotate_connection_key
 from backend.app.services.ai_connections import resolve_connection_runtime
+from backend.app.services.ai_connections import normalize_connection_base_url
 from backend.app.services.ai_connections import validate_base_url
 from backend.app.services.ai_connections import validate_provider_options
+from backend.app.services.ai_connections import validate_provider_options_for
 from backend.app.services.ai_connections import verify_connection_runtime
 from backend.app.services.ai_connection_protocol import ProtocolNotDetected
 from backend.app.services.ai_connection_protocol import ProtocolResolution
@@ -47,7 +49,7 @@ def _enforce_rate_limit(principal: CurrentPrincipal) -> None:
 
 
 def _resolve_protocol(payload: AIConnectionCreate, organization_id: str, *, verify: bool) -> ProtocolResolution:
-    """Validate the draft fields, then decide Chat vs Responses (see ai_connection_protocol)."""
+    """Validate the draft fields, then decide the protocol (see ai_connection_protocol)."""
 
     base_url = validate_base_url(payload.base_url)
     options = validate_provider_options(payload.provider_options)
@@ -56,6 +58,8 @@ def _resolve_protocol(payload: AIConnectionCreate, organization_id: str, *, veri
         raise ValueError("API key must contain at least four characters")
 
     def probe(provider_type: str, candidate_base_url: str) -> None:
+        # 协议相关的参数校验在发请求之前：Claude 专属参数不能发给 Chat/Responses，反之亦然。
+        validate_provider_options_for(provider_type, options)
         verify_connection_runtime(ConnectionRuntime(
             connection_id="draft",
             key_version=0,
@@ -242,11 +246,13 @@ def update_ai_connection(
         if payload.name is not None:
             connection.name = payload.name.strip()
         if payload.base_url is not None:
-            connection.base_url = validate_base_url(payload.base_url)
+            connection.base_url = normalize_connection_base_url(connection.provider_type, payload.base_url)
         if payload.model_name is not None:
             connection.model_name = payload.model_name.strip()
         if payload.provider_options is not None:
-            connection.provider_options = validate_provider_options(payload.provider_options)
+            connection.provider_options = validate_provider_options_for(
+                connection.provider_type, payload.provider_options
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit(db, "ai_connection.updated", actor_id=principal.user_id, organization_id=connection.organization_id, metadata={"connection_id": connection.id})

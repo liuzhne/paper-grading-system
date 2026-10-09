@@ -4,11 +4,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-ProviderType = Literal["openai_responses", "openai_compatible"]
+ProviderType = Literal["openai_responses", "openai_compatible", "anthropic_messages"]
 # 创建与测试时可以不选协议：auto 由服务端按地址后缀、已知平台和探测请求识别，
 # 识别结果写回 provider_type；手动选择放在前端「高级设置」里，始终优先。
-ProviderTypeChoice = Literal["auto", "openai_responses", "openai_compatible"]
-ProtocolDetection = Literal["manual", "url_suffix", "known_host", "probe", "stored"]
+ProviderTypeChoice = Literal["auto", "openai_responses", "openai_compatible", "anthropic_messages"]
+ProtocolDetection = Literal["manual", "url_suffix", "url_path", "known_host", "probe", "stored"]
 
 
 class AIConnectionCreate(BaseModel):

@@ -186,6 +186,25 @@ def _calibration_anchors(anchors):
 
 def _provider_contract(scorer):
     provider_name = str(getattr(scorer, "provider_name", None) or getattr(scorer, "provider", ""))
+    controls = getattr(scorer, "provider_controls", None)
+    if callable(controls):
+        # 适配器自己声明发出的调用参数（Claude），不读全局 settings。
+        frozen = controls()
+        sampling = frozen["sampling"]
+        return {
+            "name": provider_name,
+            "model": str(getattr(scorer, "model_name", "")),
+            "model_version": str(getattr(scorer, "model_version", "v1")),
+            "sampling": {
+                "temperature": _decimal_text(sampling["temperature"]),
+                "top_p": _decimal_text(sampling["top_p"]),
+                "seed": sampling["seed"],
+                "max_tokens": int(sampling["max_tokens"]),
+            },
+            "thinking": dict(frozen["thinking"]),
+            "response_format": frozen["response_format"],
+            "response_schema": "criterion-score-v2",
+        }
     is_openai = provider_name == "openai"
     if is_openai:
         temperature = settings.OPENAI_TEMPERATURE

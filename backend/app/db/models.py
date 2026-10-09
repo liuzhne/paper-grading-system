@@ -171,7 +171,7 @@ class AIConnection(Base):
     __table_args__ = (
         CheckConstraint("scope = 'private'", name="ck_ai_connections_private_scope"),
         CheckConstraint(
-            "provider_type IN ('openai_responses', 'openai_compatible')",
+            "provider_type IN ('openai_responses', 'openai_compatible', 'anthropic_messages')",
             name="ck_ai_connections_provider_type",
         ),
         CheckConstraint(

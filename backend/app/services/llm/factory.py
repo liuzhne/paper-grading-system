@@ -1,4 +1,5 @@
 from backend.app.core.config import settings
+from backend.app.services.llm.anthropic_messages_adapter import AnthropicMessagesScorer
 from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.llm.mock import MockLLMScorer
 from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
@@ -77,6 +78,19 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None, *, sessi
                 # extension.  Send it only when this connection opted in.
                 thinking_type=options.get("thinking_type", ""),
                 service_tier=options.get("service_tier"),
+            )
+        elif connection_runtime.provider_type == "anthropic_messages":
+            scorer = AnthropicMessagesScorer(
+                api_key=connection_runtime.api_key,
+                base_url=connection_runtime.base_url,
+                model_name=connection_runtime.model_name,
+                timeout_seconds=options.get("timeout_seconds"),
+                max_tokens=options.get("max_tokens"),
+                temperature=options.get("temperature"),
+                top_p=options.get("top_p"),
+                thinking_type=options.get("thinking_type"),
+                effort=options.get("effort"),
+                structured_output=options.get("structured_output"),
             )
         else:  # Defensive even though the persistence validator already rejects it.
             raise ValueError("unsupported AI connection provider type")

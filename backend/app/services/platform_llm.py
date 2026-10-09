@@ -24,12 +24,12 @@ from backend.app.services.ai_connections import _decoded
 from backend.app.services.ai_connections import _encoded
 from backend.app.services.ai_connections import _master_key
 from backend.app.services.ai_connections import key_masked
-from backend.app.services.ai_connections import validate_base_url
-from backend.app.services.ai_connections import validate_provider_options
+from backend.app.services.ai_connections import normalize_connection_base_url
+from backend.app.services.ai_connections import validate_provider_options_for
 
 
 #: 平台配置只允许这些 provider——与 BYOK 同一套 adapter。
-SUPPORTED_PROVIDERS = ("openai_responses", "openai_compatible")
+SUPPORTED_PROVIDERS = ("openai_responses", "openai_compatible", "anthropic_messages")
 
 
 def _aad(*, config_id: str, key_version: int) -> bytes:
@@ -111,8 +111,8 @@ def set_config(
         # last4 取不满时说明这不是一个真实的 key。
         raise ValueError("platform LLM api key is too short")
 
-    checked_url = validate_base_url(base_url)
-    options = validate_provider_options(provider_options)
+    checked_url = normalize_connection_base_url(provider_type, base_url)
+    options = validate_provider_options_for(provider_type, provider_options)
 
     config = _existing(session)
     if config is None:

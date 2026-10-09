@@ -946,3 +946,37 @@ def test_provider_failures_name_the_safe_error_code_status_and_wait(failure, exp
     assert caught.value.code == "AI_DRAFT_PROVIDER_ERROR"
     assert caught.value.message.startswith(expected)
     assert caught.value.message.endswith("秒后失败）。")
+
+
+@pytest.mark.parametrize("protocol", ["responses", "claude"])
+def test_every_protocol_reports_drafting_truncation_and_refusal_precisely(protocol):
+    """三个协议的输出错误共用一个基类；以前只接住 Chat 的，Responses 的截断落到通用失败。"""
+    from backend.app.services.llm.anthropic_messages_adapter import AnthropicMessagesScorer
+    from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
+
+    def respond(kind):
+        if protocol == "responses":
+            return {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+        return {"type": "message", "content": [{"type": "text", "text": "{}"}],
+                "stop_reason": "max_tokens" if kind == "truncated" else "refusal"}
+
+    def scorer_for(kind):
+        base = OpenAIResponsesScorer if protocol == "responses" else AnthropicMessagesScorer
+
+        class Scorer(base):
+            def _post_with_retry(self, body, **kwargs):
+                return httpx.Response(200, request=httpx.Request("POST", self.base_url), json=respond(kind))
+
+        if protocol == "responses":
+            return Scorer(api_key="test-key", base_url="https://api.openai.com/v1", model_name="m")
+        return Scorer(api_key="test-key", base_url="https://api.anthropic.com/v1", model_name="claude")
+
+    with pytest.raises(AIRuleDraftValidationError) as truncated:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer_for("truncated"),
+                              business_profile_key="thesis")
+    assert truncated.value.code == "AI_DRAFT_OUTPUT_TRUNCATED"
+    if protocol == "claude":
+        with pytest.raises(AIRuleDraftValidationError) as refused:
+            draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer_for("refused"),
+                                  business_profile_key="thesis")
+        assert "拒绝" in refused.value.message

@@ -219,6 +219,8 @@ class OpenAIResponsesScorer(LLMScorer):
                 "strict": True,
                 "schema": response_schema,
             }}
+            # 与 Chat、Claude 一致：起草层已有一次格式修正，传输层不再重试超时与 5xx。
+            request_options["attempts_limit"] = 1
         response = self._post_with_retry(body, **request_options)
         response.raise_for_status()
         try:

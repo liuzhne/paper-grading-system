@@ -62,6 +62,27 @@ def core_runtime_provider_contract(scorer, *, artifact_hash: str) -> dict:
             "artifact_hash": artifact_hash,
         }
 
+    controls = getattr(scorer, "provider_controls", None)
+    if callable(controls):
+        # 适配器自己声明发出的调用参数（Claude）：身份记录实际发出的值。
+        frozen = controls()
+        sampling = frozen["sampling"]
+        return {
+            "name": provider,
+            "model": model,
+            "model_version": model_version,
+            "sampling": {
+                "temperature": _decimal_text(sampling["temperature"]),
+                "top_p": _decimal_text(sampling["top_p"]),
+                "seed": sampling["seed"],
+                "max_tokens": int(sampling["max_tokens"]),
+            },
+            "thinking": dict(frozen["thinking"]),
+            "response_format": frozen["response_format"],
+            "response_schema": CORE_RESPONSE_SCHEMA,
+            "artifact_hash": artifact_hash,
+        }
+
     temperature = getattr(scorer, "temperature", 0)
     max_tokens = getattr(
         scorer,

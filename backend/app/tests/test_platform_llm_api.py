@@ -115,9 +115,32 @@ def test_who_configured_it_is_recorded(client, monkeypatch):
 def test_an_unsupported_provider_is_rejected(client, monkeypatch):
     _login_platform_admin(client, monkeypatch)
 
-    response = client.post(ENDPOINT, json=_payload(provider_type="anthropic_messages"))
+    response = client.post(ENDPOINT, json=_payload(provider_type="gemini_native"))
 
     assert response.status_code == 422
+
+
+def test_claude_can_be_the_platform_model_with_its_own_options(client, monkeypatch):
+    """平台模型与 BYOK 同一套适配器（0034）：Claude 地址规范化成 /v1，参数按协议校验。"""
+    _login_platform_admin(client, monkeypatch)
+
+    response = client.post(ENDPOINT, json=_payload(
+        provider_type="anthropic_messages",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com/anthropic",
+        model_name="anthropic.claude-opus-5-5",
+        provider_options={"effort": "low"},
+    ))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["provider_type"] == "anthropic_messages"
+    assert body["base_url"] == "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic/v1"
+    assert body["provider_options"] == {"effort": "low"}
+
+    rejected = client.post(ENDPOINT, json=_payload(
+        provider_type="anthropic_messages", provider_options={"service_tier": "flex"},
+    ))
+    assert rejected.status_code == 422
 
 
 def test_a_private_base_url_is_rejected(client, monkeypatch):
