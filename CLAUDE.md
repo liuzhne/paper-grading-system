@@ -31,7 +31,7 @@
   - `checkers/`：确定性检查器(`deterministic`)、findings→扣分(`findings_checker`)。
   - `coherence/`：篇章一致性（确定性 `checker` + 语义 `semantic`）。
   - `calibration/`：L2 锚点库(`library`) + 漂移/排名(`analytics`)。
-  - `llm/`：base + mock + openai + openai_compatible(默认 zhipu) + 重试/缓存日志；`cache/llm_cache` 是 L0 缓存。
+  - `llm/`：base + mock + openai（Responses）+ openai_compatible（Chat，默认 zhipu）+ anthropic_messages（Claude：Bedrock / api.anthropic.com）；三者共用 `transport`（重试/截止时间/熔断/计量）与 `legacy_prompts`；`cache/llm_cache` 是 L0 缓存。
   - `report/generator`：HTML 报告（含扣分明细/篇章一致性/格式问题）；`spreadsheet/` 导出。
 - `eval/`：QWK 评估（`metrics`/`runner`/`labeled_dataset`/`scores_template`）；`scripts/run_qwk_eval.py` 入口。
 - `db/models`、`schemas/`、`scripts/`（seed_dev、diagnose_llm、run_qwk_eval）。

@@ -70,7 +70,7 @@ flowchart LR
 | `services/calibration/`、`eval/`、`services/release_gates.py` | 锚点、QWK/MAE/漂移、候选和人工批准记录 | 把 Mock/test-only 演练声明为生产门禁通过 |
 | `services/report/`、`services/spreadsheet/` | v1/v2 HTML、JSON、Excel、在线写表适配 | 修改历史评分结果 |
 | `services/deployment/`、`backend/app/scripts/ops_backup.py` | inventory、OPS readiness、Postgres 验证、带 manifest 的备份/校验/恢复 | 以 OPS 绿色替代评分质量发布批准 |
-| `services/ai_connections.py`、`services/llm/`、`services/cache/` | 私有 BYOK 加密/快照、provider 适配、重试、诊断、L0 缓存、按连接的进程内并发与熔断 | 把部署级旧 Key 复制成用户私有连接；在 Core 外改变已冻结策略；把进程内额度误当成跨实例全局额度 |
+| `services/ai_connections.py`、`services/llm/`、`services/cache/` | 私有 BYOK 加密/快照、三种协议适配（Chat Completions / Responses / Claude Messages，共用 `llm/transport`）、重试、诊断、L0 缓存、按连接的进程内并发与熔断 | 把部署级旧 Key 复制成用户私有连接；在 Core 外改变已冻结策略；把进程内额度误当成跨实例全局额度 |
 | `services/llm_observability.py` | 以 Langfuse v4/OpenTelemetry 建立 `scoring_run -> rule_scoring_task -> llm_generation -> retry_attempt` Trace，从应用源头脱敏和采样 | 保存权威分数/任务状态；默认上传完整 Prompt/论文；让 Exporter 失败传播到评分主链 |
 
 ## 4. 核心调用链
@@ -1044,3 +1044,36 @@ Compose 拓扑：`caddy` → `app`（迁移 + uvicorn）；`worker`（同一镜�
 - `llm/errors.project_provider_error`：HTTP 429 加上 `_quota_exhausted(error_type, provider_code)` → `ProviderErrorCode.QUOTA_EXHAUSTED`（不可重试）。适配器的 429 额外重试要求 `projected.retryable`。
 
 维护记录：2026-10-09 · 起草时间预算与额度耗尽：调用链增加截止时间；错误分类新增一类；无数据模型变化。
+
+### 2026-10-09 Claude 协议适配器（`anthropic_messages`）
+
+方案：`docs/模型协议适配器改造方案.md`。连接协议从两种变为三种：`openai_compatible`（Chat Completions）、`openai_responses`（Responses）、`anthropic_messages`（Claude，Bedrock 与 `api.anthropic.com` 共用）。
+
+模块边界（`services/llm/`）：
+
+| 模块 | 职责 |
+|---|---|
+| `transport.post_with_retry` | 三个适配器共用的一次 HTTP 调用：截止时间压低单次超时、429 另有 `rate_limit_retries`、额度耗尽不重试、熔断槽位（`rate_limit.provider_request_slot`）、`UsageMeter`、`call_log`、Langfuse generation。各适配器的 `_post_with_retry` 只提供 URL、请求头、`usage_of` 与 `operation`（`chat` / `responses` / `messages`） |
+| `anthropic_messages_adapter.AnthropicMessagesScorer` | 请求 `{base_url}/messages`，头 `x-api-key` + `anthropic-version: 2023-06-01`；实现 `score_criterion`、`build_prompt_envelope`/`score_envelope`、`score_core_envelope`/`score_core_group`、`complete_json`（签名与另两者相同） |
+| `legacy_prompts` | 旧评分路径（v1/v2）的提示词与输出 schema，从 Chat / Responses 适配器原样移出，供三者共用；`test_legacy_prompts_frozen` 锁定文本哈希 |
+| `errors.ProviderJSONOutputError` | 「答了但不能用」的公共基类（`reason`）：`ChatJSONOutputError`、`ResponsesJSONOutputError`、`MessagesJSONOutputError` 都继承它；起草、结构识别按基类捕获 |
+
+Claude 适配器的调用链：
+- `factory.get_llm_scorer(runtime)`：`provider_type == "anthropic_messages"` → `AnthropicMessagesScorer(timeout_seconds, max_tokens, temperature, top_p, thinking_type, effort, structured_output)`，照旧设置 `_ai_connection_snapshot`、`max_concurrency`。
+- 请求体：`model`、`max_tokens`（默认 `ANTHROPIC_MAX_TOKENS=4096`）、`system`、`messages=[user]`；`temperature`/`top_p`（至多其一）、`thinking`、`output_config.effort` **只在连接显式设置时发送**。
+- 结构化输出：`resolve_structured_output(base_url, options)`：连接设置优先；否则只有 `api.anthropic.com` 开启。开启时 `output_config.format = {type: json_schema, schema: sanitize_schema(schema)}`，`sanitize_schema` 只删除 Claude 不支持的约束（`minimum`/`maximum`/`minLength`/`maxLength`/`maxItems`/`uniqueItems`/`pattern`、大于 1 的 `minItems` 等），属性名与结构不动。两种模式下的本地校验都不变（`decode_core_*`、起草层校验）。
+- 响应：只拼接 `type=text` 块；`stop_reason` 为 `refusal` → `refused`，为 `max_tokens` → `output_truncated`，为 `pause_turn`/`tool_use` → `incomplete_output`。用量：`prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens`。
+- 复现身份：适配器提供 `provider_controls()`；`core_adapter.core_runtime_provider_contract` 与 `base._provider_contract` 遇到实现了它的适配器时直接采用。没发的采样记 `"1"`，没发的 thinking 记 `null`；effort 写进 `model_version`（`messages-2023-06-01;effort=low`）。
+
+连接与协议识别：
+- `ai_connection_protocol`：后缀加入 `/messages`；新增路径规则 `url_path`（路径含 `/anthropic` 段，排在已知主机表之前）；已知主机加入 `api.anthropic.com`；未知主机探测顺序 Chat → Responses → Messages。`normalize_base_url` 把 Claude 地址统一为以 `/v1` 结尾。
+- `ai_connections.validate_provider_options_for(provider_type, options)`：协议确定之后校验（创建、PATCH、平台模型 `set_config`、识别探测）。Claude 拒绝 `response_format_json`/`service_tier`/`max_output_tokens`，以及 temperature 与 top_p 同时设置；另两种协议拒绝 `effort`/`structured_output`。这两个新键会影响输出，因此进入复现快照。
+- `verify_connection_runtime`：Claude 探测请求带上与评分相同的参数形状（采样、thinking、effort，以及判定为开启时的小 schema）；400 时给出检查设置的提示，不回显厂商正文。
+
+错误映射（`errors.project_provider_error`）：402 与 Claude 消费上限（429 `enforced_spend_limit_reached`；自设上限的 400 原文前缀）→ `quota_exhausted`；529 → `capacity_unavailable`；`error.details.error_code` 作为厂商错误码；请求 ID 增加 `x-amzn-requestid`；限流头增加 `anthropic-ratelimit-*`；Bedrock 错误体没有类型时用 `x-amzn-errortype` 作诊断。`debug_logging` 对 `*_api_key` 头（`x-api-key`）脱敏。
+
+持久化：迁移 `0034_anthropic_messages_provider` 只改 `ck_ai_connections_provider_type`（SQLite 用 batch 重建表），不建新表；有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级。`postgres_verifier` 同时检查该约束的内容。
+
+前端：账户页、运维页的协议下拉加入 Claude；仅在协议为 Claude 时显示「思考强度」「结构化输出」（`lib/claude-options.js`）。归类把 `refused`、`empty_content` 视为内容级失败。
+
+维护记录：2026-10-09 · Claude 协议适配器：新增 `transport`、`legacy_prompts`、`anthropic_messages_adapter` 三个模块，Chat/Responses 改为共用传输层（行为不变）；head 升为 `0034_anthropic_messages_provider`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
