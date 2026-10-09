@@ -3,6 +3,13 @@ import { computed, onMounted, reactive, ref } from "vue";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { useAnchorHighlight } from "@/lib/anchor-highlight.js";
+import {
+  CLAUDE_PROTOCOL,
+  EFFORT_CHOICES,
+  STRUCTURED_OUTPUT_CHOICES,
+  looksLikeClaudeUrl,
+  withClaudeOptions,
+} from "@/lib/claude-options.js";
 import { useSessionStore } from "@/stores/session.js";
 
 const session = useSessionStore();
@@ -139,6 +146,9 @@ const draft = reactive({
   api_key: "",
   // 同时请求数上限：空 = 不限制（起草、归类最多 3 路）。免费档常只允许 1 个并发。
   max_concurrency: "",
+  // 仅 Claude：留空 = 模型默认 / 自动。
+  effort: "",
+  structured_output: "",
   busy: false,
   error: null,
   result: null,
@@ -147,11 +157,14 @@ const draft = reactive({
 const PROTOCOL_LABELS = {
   openai_compatible: "OpenAI 兼容（Chat Completions）",
   openai_responses: "OpenAI Responses",
+  anthropic_messages: "Anthropic Messages（Claude）",
 };
-const PROTOCOL_SHORT = { openai_compatible: "Chat 兼容", openai_responses: "Responses" };
+const PROTOCOL_SHORT = { openai_compatible: "Chat 兼容", openai_responses: "Responses", anthropic_messages: "Claude" };
+const EFFORT_LABELS = Object.fromEntries(EFFORT_CHOICES.filter(([value]) => value));
 const DETECTION_LABELS = {
   manual: "手动选择",
   url_suffix: "按接口地址后缀识别",
+  url_path: "按接口地址路径识别",
   known_host: "按已知平台识别",
   probe: "按探测请求识别",
   stored: "已保存的设置",
@@ -160,13 +173,24 @@ function protocolLabel(type) {
   return PROTOCOL_LABELS[type] || type;
 }
 // 识别结果只对测试时的地址、模型和协议选择有效；改了任何一项就回到「待识别」。
-const draftProtocol = computed(() => {
-  if (draft.provider_type !== "auto") return `${protocolLabel(draft.provider_type)} · 手动选择`;
+const detectedProtocol = computed(() => {
   const found = draft.detected;
   if (found && found.base_url === draft.base_url.trim().replace(/\/+$/, "") && found.model_name === draft.model_name.trim()) {
-    return `${protocolLabel(found.provider_type)} · ${DETECTION_LABELS[found.detection] || found.detection}`;
+    return found;
   }
+  return null;
+});
+const draftProtocol = computed(() => {
+  if (draft.provider_type !== "auto") return `${protocolLabel(draft.provider_type)} · 手动选择`;
+  const found = detectedProtocol.value;
+  if (found) return `${protocolLabel(found.provider_type)} · ${DETECTION_LABELS[found.detection] || found.detection}`;
   return "自动识别（测试或保存时确定）";
+});
+// 手动选了 Claude、测试识别为 Claude，或地址本身就能判定为 Claude 时，才显示 Claude 专属设置。
+const draftIsClaude = computed(() => {
+  if (draft.provider_type !== "auto") return draft.provider_type === CLAUDE_PROTOCOL;
+  if (detectedProtocol.value) return detectedProtocol.value.provider_type === CLAUDE_PROTOCOL;
+  return looksLikeClaudeUrl(draft.base_url);
 });
 const connBusy = reactive({});
 const rotating = ref(null);
@@ -213,13 +237,18 @@ async function loadConnections() {
 }
 
 function draftPayload() {
+  const isClaude = draftIsClaude.value;
+  const provider_options = withClaudeOptions(concurrencyOptions({}, draft.max_concurrency), draft, isClaude);
+  const claudeOptionsSet = "effort" in provider_options || "structured_output" in provider_options;
   return {
     name: draft.name.trim(),
-    provider_type: draft.provider_type,
+    // Claude 专属设置只对 Claude 有效：带上它们时直接指明协议，免得服务端对未知地址
+    // 先按 Chat 探测、再因为参数不属于 Chat 而拒绝。
+    provider_type: isClaude && claudeOptionsSet && draft.provider_type === "auto" ? CLAUDE_PROTOCOL : draft.provider_type,
     base_url: draft.base_url.trim(),
     model_name: draft.model_name.trim(),
     api_key: draft.api_key,
-    provider_options: concurrencyOptions({}, draft.max_concurrency),
+    provider_options,
   };
 }
 
@@ -242,7 +271,8 @@ async function onTestDraft() {
     const probe = await api.post("/ai-connections/test-draft", draftPayload(), {
       organizationId,
     });
-    // 粘贴了完整接口地址时，服务端会去掉 /chat/completions 或 /responses 后缀。
+    // 粘贴了完整接口地址时，服务端会去掉 /chat/completions、/responses 或 /messages 后缀；
+    // Claude 地址还会统一成以 /v1 结尾。
     if (probe.base_url && probe.base_url !== draft.base_url.trim()) draft.base_url = probe.base_url;
     draft.detected = {
       provider_type: probe.provider_type,
@@ -538,6 +568,7 @@ onMounted(async () => {
                   <div>{{ conn.model_name }}</div>
                   <div class="faint conn-base" :title="protocolLabel(conn.provider_type)">{{ PROTOCOL_SHORT[conn.provider_type] || conn.provider_type }}</div>
                   <div v-if="conn.provider_options?.max_concurrency" class="faint conn-base" data-test="conn-concurrency">并发上限 {{ conn.provider_options.max_concurrency }}</div>
+                  <div v-if="conn.provider_options?.effort" class="faint conn-base" data-test="conn-effort">思考强度 {{ EFFORT_LABELS[conn.provider_options.effort] || conn.provider_options.effort }}</div>
                 </td>
                 <td class="num">{{ conn.key_masked }}<span class="faint"> · v{{ conn.key_version }}</span></td>
                 <td>
@@ -676,9 +707,26 @@ onMounted(async () => {
                 <option value="auto">自动识别（推荐）</option>
                 <option value="openai_compatible">OpenAI 兼容（Chat Completions）</option>
                 <option value="openai_responses">OpenAI Responses</option>
+                <option value="anthropic_messages">Anthropic Messages（Claude）</option>
               </select>
-              <span class="field-hint">一般不用改。自动识别依次看接口地址后缀、已知平台和探测请求；只有网关或特殊部署识别不对时才手动指定。</span>
+              <span class="field-hint">一般不用改。自动识别依次看接口地址后缀、路径、已知平台和探测请求；只有网关或特殊部署识别不对时才手动指定。Bedrock 上的 Claude 填 <code>https://bedrock-runtime.&lt;区域&gt;.amazonaws.com/anthropic</code>，Key 用 Bedrock API Key。</span>
             </label>
+            <template v-if="draftIsClaude">
+              <label class="field advanced-field">
+                <span class="field-label">思考强度（Claude）</span>
+                <select v-model="draft.effort" class="select" data-test="draft-effort">
+                  <option v-for="[value, label] in EFFORT_CHOICES" :key="value" :value="value">{{ label }}</option>
+                </select>
+                <span class="field-hint">越高越慢、越贵；思考也占输出 Token。「模型默认」不发送该参数。</span>
+              </label>
+              <label class="field advanced-field">
+                <span class="field-label">结构化输出（Claude）</span>
+                <select v-model="draft.structured_output" class="select" data-test="draft-structured-output">
+                  <option v-for="[value, label] in STRUCTURED_OUTPUT_CHOICES" :key="value" :value="value">{{ label }}</option>
+                </select>
+                <span class="field-hint">「自动」只在 api.anthropic.com 开启。Bedrock 的 mantle 端点不支持，开启会导致测试失败；关闭时靠提示词约束格式，系统仍会逐项校验。</span>
+              </label>
+            </template>
             <label class="field advanced-field">
               <span class="field-label">同时请求数上限</span>
               <input v-model="draft.max_concurrency" class="input" type="number" min="1" max="8" step="1" placeholder="不限制" data-test="draft-concurrency" />

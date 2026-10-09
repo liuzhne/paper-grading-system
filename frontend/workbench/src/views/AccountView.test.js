@@ -96,3 +96,49 @@ it("新建连接可以在高级设置里填写并发上限", async () => {
   await flushPromises();
   expect(api.post).toHaveBeenLastCalledWith("/ai-connections", expect.objectContaining({ provider_options: { max_concurrency: 1 } }), expect.any(Object));
 });
+
+it("Claude 地址显示思考强度与结构化输出，提交时带上设置并指明协议", async () => {
+  api.get.mockResolvedValue([]);
+  api.post.mockResolvedValue({});
+  vi.spyOn(useSessionStore(), "loadCapabilities").mockResolvedValue();
+  const wrapper = mount(AccountView);
+  await flushPromises();
+  expect(wrapper.find('[data-test="draft-effort"]').exists()).toBe(false);
+
+  await wrapper.get('input[type="url"]').setValue("https://bedrock-runtime.us-east-1.amazonaws.com/anthropic");
+  await wrapper.get('[data-test="draft-effort"]').setValue("low");
+  await wrapper.get('[data-test="draft-structured-output"]').setValue("off");
+  await wrapper.get(".card-foot form").trigger("submit");
+  await flushPromises();
+
+  const [, body] = api.post.mock.calls.find(([url]) => url === "/ai-connections");
+  expect(body.provider_type).toBe("anthropic_messages");
+  expect(body.provider_options).toEqual({ effort: "low", structured_output: "off" });
+
+  // 换回 OpenAI 地址：Claude 设置隐藏，也不再提交。
+  await wrapper.get('input[type="url"]').setValue("https://api.openai.com/v1");
+  expect(wrapper.find('[data-test="draft-effort"]').exists()).toBe(false);
+  await wrapper.get(".card-foot form").trigger("submit");
+  await flushPromises();
+  const last = api.post.mock.calls.filter(([url]) => url === "/ai-connections").at(-1)[1];
+  expect(last.provider_type).toBe("auto");
+  expect(last.provider_options).toEqual({});
+});
+
+it("手动选择 Claude 协议后显示设置，连接列表标出 Claude 与思考强度", async () => {
+  api.get.mockResolvedValue([{
+    id: "c", name: "Bedrock", status: "active", provider_type: "anthropic_messages",
+    model_name: "anthropic.claude-opus-5-5", provider_options: { effort: "medium" },
+  }]);
+  const wrapper = mount(AccountView);
+  await flushPromises();
+  const row = wrapper.findAll("tbody tr").find(r => r.text().includes("Bedrock"));
+  expect(row.text()).toContain("Claude");
+  expect(row.get('[data-test="conn-effort"]').text()).toBe("思考强度 中");
+
+  await wrapper.get('input[type="url"]').setValue("https://gw.example/v1");
+  expect(wrapper.find('[data-test="draft-effort"]').exists()).toBe(false);
+  await wrapper.get('select[data-test="protocol-select"]').setValue("anthropic_messages");
+  expect(wrapper.get('[data-test="protocol-value"]').text()).toBe("Anthropic Messages（Claude） · 手动选择");
+  expect(wrapper.find('[data-test="draft-effort"]').exists()).toBe(true);
+});
