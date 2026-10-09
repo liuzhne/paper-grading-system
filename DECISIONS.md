@@ -1343,7 +1343,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 选择：
 - `_provider_contract` 两个分支都改为读实例属性（`temperature`、`max_tokens` / `max_output_tokens`、`thinking_type`、`response_format_json`），全局设置只在实例没有该属性时回退。Responses 分支的协议约束不变：`json_schema`、不发 `thinking`。Claude 适配器经 `provider_controls()` 在函数开头提前返回，本来就读实例，不涉及。
-- **不 bump `llm_cache.PROMPT_VERSION`**。会改变信封的只有 AI 连接实例，它们在旧路径本来就不读写 L0。环境变量配置的实例属性就是全局设置，测试断言其信封 provider 段与旧实现逐字段相同。所以所有能进 L0 的缓存键都不变，不存在错误复用。`PROMPT_VERSION` 也不进 Core 的规则决策账本。
+- **不 bump `llm_cache.PROMPT_VERSION`**（用户确认）。会改变信封的只有 AI 连接实例，它们在旧路径本来就不读写 L0。环境变量配置的实例属性就是全局设置，测试断言其信封 provider 段与旧实现逐字段相同。所以所有能进 L0 的缓存键都不变，不存在错误复用。`PROMPT_VERSION` 也不进 Core 的规则决策账本。
 - 回归测试用 `httpx.MockTransport` 截获真实请求体，并逐项断言旧路径与 Core 合同的 `sampling` / `thinking` / `response_format` 一致，不调用真实模型。
 
 放弃了什么：
@@ -1356,4 +1356,4 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - 没设置 `thinking_type` 的 Chat 连接，在旧路径上不再收到 `thinking: disabled`。默认开启推理的模型会因此开始推理：变慢、多耗 token，输出预算不够时会截断。需要关闭推理的连接应显式设 `thinking_type=disabled`（Core 路径一直如此要求）。
 - 连接里调过的 `max_tokens` / `temperature` 开始在旧路径生效。这些值原先只在 Core 路径验证过，这次没有用 §15 QWK 留出集复核旧路径。
 
-维护记录：2026-10-09 · 旧路径信封冻结实例参数：两个分支改读实例；`PROMPT_VERSION` 不变（用户确认不 bump 前保持原值）；无迁移，OpenAPI 不变。
+维护记录：2026-10-09 · 旧路径信封冻结实例参数：两个分支改读实例；`PROMPT_VERSION` 不变（用户已确认不 bump）；无迁移，OpenAPI 不变。
