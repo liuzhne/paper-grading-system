@@ -4,6 +4,7 @@
  */
 export const CONTENT_FAILURES = new Set([
   'invalid_json', 'invalid_output', 'invalid_envelope', 'incomplete_output', 'output_truncated', 'error_envelope',
+  'empty_content', 'refused',
   'invalid_item', 'unknown_unit', 'duplicate_unit', 'invalid_label', 'invalid_confidence', 'unknown_criterion', 'missing_reason',
 ]);
 /** 连续这么多批都是内容级失败，就当模型整体不可用，停止派发以免空耗额度。 */

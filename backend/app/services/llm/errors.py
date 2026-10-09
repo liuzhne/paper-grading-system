@@ -75,6 +75,19 @@ class ProviderCallError(RuntimeError):
         )
 
 
+class ProviderJSONOutputError(ValueError):
+    """模型答了（HTTP 2xx），但答案不能当作 JSON 结果使用。
+
+    三个协议各有子类（Chat / Responses / Messages），调用方按这个基类捕获，按
+    ``reason`` 区分：``output_truncated``、``invalid_json``、``empty_content``、
+    ``refused`` 等。只带安全的元数据，绝不带模型正文。
+    """
+
+    def __init__(self, reason, message=None):
+        self.reason = reason
+        super().__init__(message or reason)
+
+
 class PlatformModelMissingError(RuntimeError):
     """受保护部署既没有绑定的私有连接，也没有管理员配置的平台模型（D-028）。
 
@@ -101,10 +114,14 @@ _CONTEXT_MARKERS = (
     "too many tokens",
     "token limit",
     "request too large for model",
+    # Claude：输入超过上下文窗口，或输入加 max_tokens 超过上限。
+    "prompt is too long",
+    "exceed context limit",
 )
 _REQUEST_ID_HEADERS = (
     "x-request-id",
     "request-id",
+    "x-amzn-requestid",
     "x-groq-request-id",
     "cf-ray",
 )
@@ -116,6 +133,11 @@ _RATE_LIMIT_HEADER_NAMES = {
     "x-ratelimit-remaining-tokens",
     "x-ratelimit-reset-requests",
     "x-ratelimit-reset-tokens",
+    *(
+        "anthropic-ratelimit-%s-%s" % (kind, field)
+        for kind in ("requests", "tokens", "input-tokens", "output-tokens")
+        for field in ("limit", "remaining", "reset")
+    ),
 }
 _BEARER_RE = re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]+")
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -155,12 +177,16 @@ def project_provider_error(exc: BaseException) -> ProviderError:
         value for value in (error_type, provider_code, provider_message) if value
     ).casefold()
     code, scope, retryable, reducible = _classify_http(status, searchable)
-    if status == 429 and _quota_exhausted(error_type, provider_code):
+    if _quota_exhausted(status, error_type, provider_code, provider_message):
         # 同是 429，余额或配额用完时等几十秒也不会好；判为不可重试，提示去充值或换 Key。
         code, scope, retryable, reducible = (
             ProviderErrorCode.QUOTA_EXHAUSTED, ProviderErrorScope.CONNECTION, False, False,
         )
     headers = {str(k).casefold(): str(v) for k, v in response.headers.items()}
+    if not error_type and headers.get("x-amzn-errortype"):
+        # Bedrock 的错误体可能不带类型，类型在这个头里（如 ThrottlingException:…）。
+        # 只用于诊断，不参与上面的分类。
+        error_type = headers["x-amzn-errortype"].split(":", 1)[0]
     rate_headers = {
         name: _bounded(headers[name], 200)
         for name in sorted(_RATE_LIMIT_HEADER_NAMES)
@@ -193,12 +219,29 @@ def raise_provider_call_error(provider: str, exc: BaseException):
 
 
 # 只收录核实过的信号，按错误类型或错误码精确匹配（不在正文里模糊搜索，免得把限流误判成欠费）：
-# OpenAI 的 insufficient_quota；智谱 / Z.ai 的业务码 1113（账户欠费或余额不足）。
+# OpenAI 的 insufficient_quota；智谱 / Z.ai 的业务码 1113（账户欠费或余额不足）；
+# Claude 月度消费上限的 enforced_spend_limit_reached（429，且没有 retry-after）。
 _QUOTA_EXHAUSTED_TYPES = frozenset({"insufficient_quota"})
-_QUOTA_EXHAUSTED_CODES = frozenset({"insufficient_quota", "1113"})
+_QUOTA_EXHAUSTED_CODES = frozenset({"insufficient_quota", "1113", "enforced_spend_limit_reached"})
+# 唯一的正文例外：Claude 用户自设消费上限是 HTTP 400、没有错误码，只能按文档给出的
+# 原文开头识别；限定 400 + invalid_request_error，避免误伤其它请求错误。
+_SPEND_LIMIT_MESSAGE_PREFIXES = (
+    "you have reached your specified api usage limits",
+    "you have reached your specified workspace api usage limits",
+)
 
 
-def _quota_exhausted(error_type, provider_code) -> bool:
+def _quota_exhausted(status, error_type, provider_code, message=None) -> bool:
+    if status == 402:
+        # 402 只用于计费问题（Claude 的 billing_error、OpenRouter 的余额不足）。
+        return True
+    if status == 400:
+        return (
+            str(error_type or "") == "invalid_request_error"
+            and str(message or "").strip().casefold().startswith(_SPEND_LIMIT_MESSAGE_PREFIXES)
+        )
+    if status != 429:
+        return False
     return (
         str(error_type or "").casefold() in _QUOTA_EXHAUSTED_TYPES
         or str(provider_code or "").casefold() in _QUOTA_EXHAUSTED_CODES
@@ -225,6 +268,8 @@ def _classify_http(status: int, searchable: str):
         429: (ProviderErrorCode.RATE_LIMITED, ProviderErrorScope.CONNECTION, True, False),
         498: (ProviderErrorCode.CAPACITY_UNAVAILABLE, ProviderErrorScope.PROVIDER, True, False),
         499: (ProviderErrorCode.CANCELED, ProviderErrorScope.REQUEST, False, False),
+        # Claude overloaded_error：整体过载，与本连接无关。
+        529: (ProviderErrorCode.CAPACITY_UNAVAILABLE, ProviderErrorScope.PROVIDER, True, False),
     }
     if status in table:
         return table[status]
@@ -253,7 +298,12 @@ def _response_error_fields(response):
     # diagnostic text and must not be stringified into logs or public errors.
     def scalar(value):
         return str(value) if type(value) in (str, int, float) else None
-    return (scalar(fields.get("type")), scalar(fields.get("code")),
+    code = scalar(fields.get("code"))
+    details = fields.get("details")
+    if code is None and isinstance(details, dict):
+        # Claude 把细分错误码放在 error.details.error_code。
+        code = scalar(details.get("error_code"))
+    return (scalar(fields.get("type")), code,
             fields.get("message") if isinstance(fields.get("message"), str) else None)
 
 

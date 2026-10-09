@@ -28,13 +28,19 @@ def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
         if not normalized.startswith("PROVIDER_"):
             normalized = "PROVIDER_" + normalized
         return normalized, "semantic provider request failed"
-    # Both adapters' JSON-output errors carry a safe ``reason``.  Truncation
+    # Every adapter's JSON-output error carries a safe ``reason``.  Truncation
     # is actionable (raise max output tokens / disable thinking), unlike the
     # generic ValueError it would otherwise be reported as.
     if getattr(exc, "reason", None) == "output_truncated":
         return (
             "PROVIDER_OUTPUT_TRUNCATED",
             "semantic provider output hit the max output token limit",
+        )
+    # Claude 的安全策略拒答（HTTP 200，stop_reason=refusal）：不是输入问题，也不是截断。
+    if getattr(exc, "reason", None) == "refused":
+        return (
+            "PROVIDER_OUTPUT_REFUSED",
+            "semantic provider declined to answer this rule",
         )
     exception_type = type(exc).__name__
     if not _SAFE_EXCEPTION_TYPE.fullmatch(exception_type):

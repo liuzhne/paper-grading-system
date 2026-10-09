@@ -190,6 +190,11 @@ class Settings(BaseSettings):
     OPENAI_COMPATIBLE_SERVICE_TIER: Optional[
         Literal["auto", "on_demand", "flex", "performance"]
     ] = None
+    # Claude（anthropic_messages）连接的默认值。只有默认值：Claude 只能经 BYOK 连接或平台模型使用，
+    # 没有 Key/地址/模型的环境变量。思考 token 也占 max_tokens，所以比 OpenAI 的 1200 高。
+    ANTHROPIC_TIMEOUT_SECONDS: float = Field(default=120, gt=0, le=300)
+    ANTHROPIC_MAX_TOKENS: int = Field(default=4096, ge=1, le=100_000)
+    ANTHROPIC_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
     # 本地私有模型：LLM_PROVIDER=local（或 llama/ollama/vllm）即用本块，走 OpenAI 兼容协议连本地端口，零外呼。
     LOCAL_LLM_BASE_URL: str = "http://localhost:8080/v1"  # llama.cpp llama-server 默认端口；Ollama 用 11434
     LOCAL_LLM_MODEL: str = "local-model"  # llama.cpp 忽略请求名用已加载模型；Ollama/vLLM 需填实际模型名

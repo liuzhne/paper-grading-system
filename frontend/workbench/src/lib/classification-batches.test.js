@@ -106,3 +106,11 @@ describe('AI 归类有限并发', () => {
     expect(onResult).not.toHaveBeenCalled();
   });
 });
+
+describe('Claude failure reasons', () => {
+  it('treats a refusal or an empty answer as a content failure, not a provider outage', async () => {
+    const { CONTENT_FAILURES } = await import('./classification-batches.js');
+    expect(CONTENT_FAILURES.has('refused')).toBe(true);
+    expect(CONTENT_FAILURES.has('empty_content')).toBe(true);
+  });
+});

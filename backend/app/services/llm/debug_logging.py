@@ -148,7 +148,13 @@ def _sanitize(value):
 
 def _is_sensitive_key(key):
     normalized = str(key).lower().replace("-", "_")
-    return normalized in SENSITIVE_KEYS or normalized.endswith("_secret") or normalized.endswith("_token")
+    # Claude 的 Key 放在 x-api-key 头里，归一化后是 x_api_key。
+    return (
+        normalized in SENSITIVE_KEYS
+        or normalized.endswith("_secret")
+        or normalized.endswith("_token")
+        or normalized.endswith("_api_key")
+    )
 
 
 def _response_text(response):

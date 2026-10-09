@@ -1619,3 +1619,50 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 ```
 
 维护记录：2026-10-09 · 起草时间预算与额度耗尽：新增两类报错的排查方法和预算配置说明。
+
+### 2026-10-09 Claude 连接（Bedrock / Anthropic）
+
+设置（账户与连接 → 新建连接；平台模型在运维页，填法相同）：
+- **Bedrock**：接口地址填 `https://bedrock-runtime.<区域>.amazonaws.com/anthropic`（或 mantle：`https://bedrock-mantle.<区域>.api.aws/anthropic`），API Key 填 Bedrock API Key，模型名照 Bedrock 控制台填写（如 `anthropic.claude-opus-5-5`；旧模型可能要推理配置文件前缀 `us.` / `global.`）。粘贴 `…/anthropic/v1/messages` 也可以，系统会统一保存为 `…/anthropic/v1`。
+- **Anthropic 官方**：接口地址填 `https://api.anthropic.com`，模型名如 `claude-opus-5-5`。
+- 协议自动识别：地址以 `/messages` 结尾、路径含 `/anthropic`，或主机是 `api.anthropic.com`，保存时无需探测即可识别；否则在高级设置里手动选「Anthropic Messages（Claude）」。
+- 高级设置里的两项（只对 Claude 显示）：
+  - **思考强度**：默认「模型默认」（不发送；Opus 5.5 为 medium）。调高更慢、更贵，思考也占输出 token。
+  - **结构化输出**：默认「自动」，只在 `api.anthropic.com` 开启，Bedrock 默认关闭。
+- 新环境变量（都只是默认值，可以不设）：`ANTHROPIC_TIMEOUT_SECONDS=120`、`ANTHROPIC_MAX_TOKENS=4096`、`ANTHROPIC_MAX_RETRIES=2`。没有 Claude 的 Key、地址或模型环境变量，Claude 只能通过连接或平台模型使用。
+
+查看调用（不含正文）：`llm_call_failed provider=anthropic … provider_code=… provider_type=…`。Claude 的错误信息主要在 `provider_type` 上（`rate_limit_error`、`overloaded_error` 等）；Bedrock 错误体不带类型时，取 `x-amzn-errortype` 头（如 `ThrottlingException`）。
+
+排错：
+- **现象**：mantle 地址测试连接失败，提示「请求被拒绝，请检查……结构化输出……」；或评分全部 `invalid_request`（400）。
+  - 报错指向：请求参数不合法，看起来像模型名填错了。
+  - 真正原因：结构化输出被设成了「开启」，而 Bedrock mantle（“Claude in Amazon Bedrock”，Opus 4.7 及以后的模型）不支持 `output_config.format`。
+  - 处理：高级设置里把结构化输出改回「自动」或「关闭」。
+- **现象**：换成新模型（Opus 4.7 及以后、Sonnet 5.x、Haiku 5.5）后测试连接 400。
+  - 报错指向：同上。
+  - 真正原因：连接里设置了 `temperature` 或 `top_p`（新模型不接受采样参数），或对 Opus 5.5 设置了 `thinking_type=disabled`（该模型不能关思考）。
+  - 处理：去掉这些连接参数，改用「思考强度」控制成本。
+- **现象**：测试连接通过，但评分或起草大量报「模型输出达到长度上限」（`output_truncated`）。
+  - 报错指向：输出 token 上限不够。
+  - 真正原因：思考 token 也计入 `max_tokens`；测试连接只发 32 个 token 的请求，只看 HTTP 状态，覆盖不到这种情况。
+  - 处理：调低思考强度，或在连接参数里调高 `max_tokens`。
+- **现象**：429 一直不恢复，没有 `retry-after`，日志 `code=quota_exhausted provider_code=enforced_spend_limit_reached`。
+  - 真正原因：Anthropic 账户达到月度消费上限，要到下个月或升级档位后才恢复，重试无效。用户自设的消费上限是 400，也会被识别为额度耗尽。
+- **现象**：Bedrock 上 429 `ThrottlingException`，等待之后仍然反复出现。
+  - 真正原因：AWS 侧 RPM/TPM 配额（默认 2M 输入 TPM）或账户的每日配额。系统按限流处理并重试，每日配额用完时重试不会恢复，需要在 AWS 控制台申请提额。
+- **现象**：批量评分报 `PROVIDER_OUTPUT_REFUSED`，或起草、归类提示模型拒绝回答（`refused`）。
+  - 报错指向：看起来像模型或连接出了故障。
+  - 真正原因：Claude 的安全策略拒绝回答（HTTP 200，`stop_reason=refusal`），重试通常得到同样结果。系统不会自动换模型（换了会让实际出分的模型与复现身份不一致）；被拒的规则作为阻断项转人工复核。
+
+发布：
+- 迁移 `0034_anthropic_messages_provider` 只改 `ck_ai_connections_provider_type`，不建新表，不涉及 `pgs_app` 授权与 RLS。生产按 D-025 的审批工作流先迁移再部署；`verify_postgres_ops` 会检查该约束是否包含 `anthropic_messages`。
+- 回滚：存在 Claude 连接（含软删除）或平台模型为 Claude 时，0034 拒绝降级；先硬删这些连接，并把平台模型换成其它协议。
+- OpenAPI 与 `schema.d.ts` 已更新，`public/` 已重建。
+
+验证（全部用 Mock，不调用真实模型）：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_llm_adapter_contract.py backend/app/tests/test_anthropic_messages_adapter.py backend/app/tests/test_ai_connection_protocol.py backend/app/tests/test_migrations.py
+```
+
+维护记录：2026-10-09 · Claude 连接：新增 Bedrock/Anthropic 接入步骤、三个默认值环境变量、六类报错的排查，以及 0034 的发布与回滚说明。

@@ -3,6 +3,12 @@ import { computed, onMounted, reactive, ref } from "vue";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { useAnchorHighlight } from "@/lib/anchor-highlight.js";
+import {
+  CLAUDE_PROTOCOL,
+  EFFORT_CHOICES,
+  STRUCTURED_OUTPUT_CHOICES,
+  withClaudeOptions,
+} from "@/lib/claude-options.js";
 import { useSessionStore } from "@/stores/session.js";
 
 /**
@@ -39,7 +45,11 @@ const llmForm = reactive({
   base_url: "",
   model_name: "",
   api_key: "",
+  // 仅 Claude：留空 = 模型默认 / 自动。
+  effort: "",
+  structured_output: "",
 });
+const llmIsClaude = computed(() => llmForm.provider_type === CLAUDE_PROTOCOL);
 const llmExpanded = ref(false);
 const llmFormVisible = computed(() => !platformLlm.value?.configured || llmExpanded.value);
 const llmBusy = ref(false);
@@ -61,7 +71,11 @@ async function runLlmAction(action) {
   llmNotice.value = null;
   try {
     if (action === "save") {
-      platformLlm.value = await api.post("/system/platform-llm", llmForm);
+      const { effort, structured_output, ...fields } = llmForm;
+      platformLlm.value = await api.post("/system/platform-llm", {
+        ...fields,
+        provider_options: withClaudeOptions({}, { effort, structured_output }, llmIsClaude.value),
+      });
       // 保存后立刻清掉表单里的明文 key，别让它留在内存与 DOM 里。
       llmForm.api_key = "";
       llmExpanded.value = false;
@@ -225,6 +239,7 @@ onMounted(async () => {
             <select v-model="llmForm.provider_type" class="select">
               <option value="openai_compatible">OpenAI 兼容</option>
               <option value="openai_responses">OpenAI Responses</option>
+              <option value="anthropic_messages">Anthropic Messages（Claude）</option>
             </select>
           </label>
           <label class="field">
@@ -237,6 +252,23 @@ onMounted(async () => {
           <span class="field-label">Base URL</span>
           <input v-model="llmForm.base_url" class="input" type="url" required />
         </label>
+
+        <div v-if="llmIsClaude" class="form-grid">
+          <label class="field">
+            <span class="field-label">思考强度</span>
+            <select v-model="llmForm.effort" class="select" data-test="platform-effort">
+              <option v-for="[value, label] in EFFORT_CHOICES" :key="value" :value="value">{{ label }}</option>
+            </select>
+            <span class="field-hint">越高越慢、越贵；「模型默认」不发送该参数。</span>
+          </label>
+          <label class="field">
+            <span class="field-label">结构化输出</span>
+            <select v-model="llmForm.structured_output" class="select" data-test="platform-structured-output">
+              <option v-for="[value, label] in STRUCTURED_OUTPUT_CHOICES" :key="value" :value="value">{{ label }}</option>
+            </select>
+            <span class="field-hint">「自动」只在 api.anthropic.com 开启；Bedrock mantle 端点不支持。</span>
+          </label>
+        </div>
 
         <label class="field">
           <span class="field-label">API Key</span>

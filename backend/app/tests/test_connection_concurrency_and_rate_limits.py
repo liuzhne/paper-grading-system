@@ -21,6 +21,7 @@ from backend.app.services.ai_connections import ConnectionRuntime
 from backend.app.services.ai_connections import validate_provider_options
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.llm import openai_compatible_adapter as compat
+from backend.app.services.llm import transport
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.llm.factory import get_llm_scorer
 from backend.app.services.llm.factory import scorer_concurrency
@@ -153,7 +154,7 @@ def _too_many():
 @pytest.fixture
 def sleeps(monkeypatch):
     recorded = []
-    monkeypatch.setattr(compat.time, "sleep", recorded.append)
+    monkeypatch.setattr(transport.time, "sleep", recorded.append)
     return recorded
 
 

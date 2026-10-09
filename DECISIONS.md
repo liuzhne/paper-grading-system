@@ -1301,3 +1301,35 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - 额度耗尽只识别两个厂商的信号，其它厂商的同类 429 仍按限流重试。
 
 维护记录：2026-10-09 · 起草时间预算与额度耗尽：新增 `RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS` 和错误码 `quota_exhausted`、`AI_DRAFT_TIME_BUDGET_EXCEEDED`；无迁移，OpenAPI 不变。
+
+### 2026-10-09 Claude 协议适配器（Accepted）
+
+背景：平台改用 AWS Bedrock，而 Bedrock 上的 Claude 走 Anthropic Messages 协议，现有 Chat 与 Responses 两个适配器都接不上。方案见 `docs/模型协议适配器改造方案.md`，维护者确认了其中 7 个待定项（均按推荐）。
+
+选择：
+1. **用 httpx 直接发请求，并把三个适配器的重试主体抽成 `llm/transport.post_with_retry`。** 截止时间、429 额外重试、额度不重试、熔断、计量、观测只写一处。Chat 与 Responses 的行为不变，现有测试作为证据；两条测试的 `sleep` 打桩改指向 `transport`。
+2. **默认不发 `temperature`/`top_p`/`thinking`/`effort`，只在连接显式设置时发。** 新模型（Opus 4.7 及以后、Sonnet 5.x、Haiku 5.5）收到采样参数会 400，Opus 5.5 收到 `thinking: disabled` 也会 400；「不发」是唯一对所有现行模型都安全的默认值。temperature 与 top_p 同时设置时在保存阶段拒绝。
+3. **结构化输出两种模式。** `api.anthropic.com` 默认开启；Bedrock 两种主机、第三方兼容端点默认关闭，靠指令约束。Claude 文档说 mantle 不支持；而 bedrock-runtime 上 Opus 4.7 及以后的模型由同一套设施承载，是否支持没有核实到。开启时发送前删除 Claude 不支持的 schema 约束，被删的约束由调用方现有的本地校验兜底。连接可在高级设置里改为开启或关闭，测试连接带同样的参数，配错在测试时就会暴露。
+4. **复现身份记录实际发出的请求。** 适配器提供 `provider_controls()`；没发的采样记 API 名义默认值 `"1"`，没发的 thinking 记 `null`；effort 写进 `model_version`。
+5. **不引入新提示词，不升 `PROMPT_VERSION`。** 旧路径提示词移到 `llm/legacy_prompts.py`，文本逐字不变（哈希测试锁定）；Claude 与 Chat 发同样的 system/user 文本。Claude 的缓存条目靠身份中的 `name=anthropic`、`model_version`、`response_format` 与现有条目隔离。
+6. **放宽「额度只按错误类型/码精确匹配」这条规则，开一个例外。** Claude 用户自设消费上限返回 HTTP 400、没有错误码，只能按文档给出的消息开头识别。例外限定为：状态 400、类型 `invalid_request_error`、两条文档原文前缀。月度上限（429 `enforced_spend_limit_reached`）仍按错误码精确识别。402 一律判为额度耗尽。
+7. **拒答（`stop_reason=refusal`）失败关闭**：报 `refused`，不重试，评分转人工复核，起草与归类给出单独提示。
+8. **起草、结构识别按 `ProviderJSONOutputError` 基类捕获**；Responses 带 schema 的 `complete_json` 也只尝试一次（与 Chat、Claude 一致）。起草唯一的调用方本来就显式传 `attempts_limit=1`，因此不改变现有行为。
+
+放弃了什么：
+- **官方 Anthropic Python SDK**（官方技能的默认推荐）。现有的重试、熔断、错误投影、观测都建立在 `httpx.Response` / `httpx.HTTPStatusError` 上，而 SDK 1.x 底层是 `httpx2`，对象类型对不上；SDK 自带的重试要关掉，测试注入方式也不同，三个适配器就无法跑同一套合同测试。代价：请求体与错误类型要自己维护，SDK 的类型化异常和约束自动清理用不上，这部分靠 `sanitize_schema` 和测试补齐。
+- **第三份 `_post_with_retry` 拷贝**：风险最低，但截止时间、额度这类修复以后每次都要改三处。
+- **只支持结构化输出**：mantle 是 Opus 4.7 及以后模型在 Bedrock 上的主要入口，而它不支持。
+- **把删掉的 schema 约束改写进字段描述**（SDK 的做法）：那等于改了提示词，要升版本，现有缓存全部失效。
+- **默认发 `temperature: 0`**：新模型直接 400；而且 temperature 为 0 本来也不保证输出一致。
+- **在 PromptEnvelope 契约里新增 `effort` 字段**：要同时升 V1/V3/V4 三个封闭契约，范围过大。代价是 `model_version` 不再只表示协议版本。
+- **服务端 `fallbacks`（拒答时自动换模型）**：实际出分的模型会与身份里记录的模型不一致；Bedrock 也不支持。
+- **提示词缓存（`cache_control`）、流式、SigV4**：缓存需要把视图拆块（改提示词），写缓存还要多付 25%，收益要靠真实调用实测；评分是短 JSON，不需要流式；只支持 API Key。
+- **按主机名判定 Bedrock 为 Claude**：同一主机下还有 OpenAI 兼容端点（`/openai/v1`、mantle 的 `/v1`），只按 `/anthropic` 路径段判定。
+
+代价：
+- Bedrock 上默认不开结构化输出，Claude 只靠指令约束 JSON；格式错误会多走几次本地校验和一次修正。
+- Opus 5.5 不能关思考，单条规则的输出 token 比 GLM 高，成本随之上升；思考强度默认交给模型（Opus 5.5 为 medium），是否调低要等有授权的真实对比后再定。
+- 换用 Claude 后评分质量会变，按 §15 用 QWK 留出集重新锚定需要真实调用，未包含在本次交付中。
+
+维护记录：2026-10-09 · Claude 协议适配器：接受上述选择；迁移 head 升为 `0034_anthropic_messages_provider`；新增 `ANTHROPIC_TIMEOUT_SECONDS`、`ANTHROPIC_MAX_TOKENS`、`ANTHROPIC_MAX_RETRIES` 与连接参数 `effort`、`structured_output`；`PROMPT_VERSION` 不变。

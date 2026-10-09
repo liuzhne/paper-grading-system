@@ -20,8 +20,7 @@ from backend.app.services.rubric_import.extraction.structure_override import Str
 from backend.app.services.rubric_import.extraction.structure_override import normalize_override
 from backend.app.services.rubric_import.sources.xlsx_adapter import SheetView
 
-from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
-from backend.app.services.llm.openai_compatible_adapter import ChatJSONOutputError
+from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.errors import ProviderCallError
 
 logger = logging.getLogger(__name__)
@@ -199,7 +198,7 @@ def recognize_structure(sheets: list[SheetView], scorer, *, failure_codes, known
             if "default_max_tokens" in inspect.signature(scorer.complete_json).parameters:
                 options["default_max_tokens"] = STRUCTURE_MAX_OUTPUT_TOKENS
             raw = scorer.complete_json(instructions, request["payload"], **options)
-        except (ResponsesJSONOutputError, ChatJSONOutputError) as exc:
+        except ProviderJSONOutputError as exc:
             logger.warning("rubric_structure_output_failed reason=%s attempt=%s", exc.reason, attempt + 1)
             if exc.reason == "output_truncated":
                 raise StructureError("STRUCTURE_OUTPUT_TRUNCATED",

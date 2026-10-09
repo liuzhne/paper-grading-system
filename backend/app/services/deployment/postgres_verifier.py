@@ -36,6 +36,7 @@ MIGRATION_SEQUENCE = (
     "0031_rubric_import_sessions",
     "0032_single_active_ai_connection",
     "0033_rule_decision_ledger",
+    "0034_anthropic_messages_provider",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -103,7 +104,8 @@ def verify_postgres(session):
         if index is None or not index.get("unique") or visibility not in predicate:
             raise RuntimeError("rubric visibility partial unique index is incomplete: %s" % index_name)
     connection_checks = {
-        value["name"] for value in inspector.get_check_constraints("ai_connections")
+        value["name"]: str(value.get("sqltext") or "")
+        for value in inspector.get_check_constraints("ai_connections")
     }
     if not {
         "ck_ai_connections_private_scope",
@@ -111,6 +113,9 @@ def verify_postgres(session):
         "ck_ai_connections_status",
     }.issubset(connection_checks):
         raise RuntimeError("AI connection security constraints are incomplete")
+    # 0034：约束名还在但内容停在旧版时，Claude 连接会在保存时被数据库拒绝。
+    if "anthropic_messages" not in connection_checks["ck_ai_connections_provider_type"]:
+        raise RuntimeError("AI connection provider types are behind migration 0034")
     active_index = next((index for index in inspector.get_indexes("ai_connections")
                          if index["name"] == "uq_ai_connections_one_active"), None)
     if (not active_index or not active_index.get("unique")

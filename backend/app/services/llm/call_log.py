@@ -55,9 +55,9 @@ def log_call_succeeded(provider, model, data, *, elapsed_ms, attempt):
 
 def log_call_failed(provider, model, projected, *, attempt, attempts, will_retry):
     logger.warning(
-        "llm_call_failed provider=%s model=%s code=%s status=%s provider_code=%s "
+        "llm_call_failed provider=%s model=%s code=%s status=%s provider_code=%s provider_type=%s "
         "attempt=%d/%d retry=%s",
         _field(provider), _field(model), _field(projected.code), _field(projected.http_status),
-        _field(projected.provider_error_code), attempt + 1, attempts,
-        "yes" if will_retry else "no",
+        _field(projected.provider_error_code), _field(projected.provider_error_type),
+        attempt + 1, attempts, "yes" if will_retry else "no",
     )

@@ -1069,3 +1069,113 @@ def test_0033_adds_the_decision_ledger_and_guards_the_reuse_audit_flag(monkeypat
     with pytest.raises(RuntimeError, match="reuse audit flag"):
         command.downgrade(config, "0032_single_active_ai_connection")
     engine.dispose()
+
+
+def _seed_connection(engine, *, connection_id, provider_type, status="active"):
+    from sqlalchemy.orm import Session
+    from backend.app.db import models
+
+    with Session(engine) as db:
+        user = db.scalar(select(models.User).where(models.User.username == "claude-fixture"))
+        if user is None:
+            user = models.User(username="claude-fixture", display_name="Fixture")
+            db.add(user)
+            db.flush()
+            db.add(models.Organization(id="org-claude", name="claude fixture", created_by=user.id))
+            db.flush()
+        db.add(models.AIConnection(
+            id=connection_id, owner_id=user.id, organization_id="org-claude", name=connection_id,
+            provider_type=provider_type, base_url="https://example.test/v1", model_name="fixture",
+            api_key_ciphertext="fixture", api_key_nonce="fixture", api_key_tag="fixture",
+            key_last4="test", status=status,
+        ))
+        db.flush()
+        # A row that references the connection must survive the SQLite table rebuild.
+        db.add(models.AIUsageLedger(
+            organization_id="org-claude", owner_id=user.id, ai_connection_id=connection_id,
+            provider_type=provider_type, model_name="fixture",
+        ))
+        db.commit()
+
+
+def test_0034_allows_claude_connections_and_keeps_the_other_constraints(monkeypatch, tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "claude-protocol.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0033_rule_decision_ledger")
+    engine = create_engine(url)
+    try:
+        _seed_connection(engine, connection_id="chat", provider_type="openai_compatible")
+        command.upgrade(config, "0034_anthropic_messages_provider")
+        _seed_connection(engine, connection_id="claude", provider_type="anthropic_messages", status="disabled")
+
+        with engine.connect() as db:
+            table_sql = db.execute(
+                text("SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_connections'")
+            ).scalar_one()
+            index_sql = db.execute(
+                text("SELECT sql FROM sqlite_master WHERE name='uq_ai_connections_one_active'")
+            ).scalar_one()
+            assert db.execute(text("SELECT count(*) FROM ai_usage_ledger")).scalar_one() == 2
+        assert "ck_ai_connections_private_scope" in table_sql
+        assert "ck_ai_connections_status" in table_sql
+        assert "anthropic_messages" in table_sql
+        assert "WHERE" in index_sql.upper()
+        with engine.begin() as db, pytest.raises(IntegrityError):
+            db.execute(text("UPDATE ai_connections SET provider_type='gemini' WHERE id='chat'"))
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("owner", ["connection", "deleted-connection", "platform"])
+def test_0034_refuses_to_downgrade_while_claude_is_in_use(monkeypatch, tmp_path, owner):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / ("claude-downgrade-%s.db" % owner))
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    engine = create_engine(url)
+    try:
+        if owner == "platform":
+            with engine.begin() as db:
+                db.execute(text(
+                    "INSERT INTO platform_llm_config (id, provider_type, base_url, model_name,"
+                    " provider_options, api_key_ciphertext, api_key_nonce, api_key_tag, key_version,"
+                    " key_last4, status, configured_by, configured_at, created_at, updated_at) VALUES"
+                    " ('p1','anthropic_messages','https://api.anthropic.com/v1','m','{}','x','y','z',"
+                    " 1,'abcd','disabled','admin',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+                ))
+        else:
+            _seed_connection(
+                engine, connection_id="claude", provider_type="anthropic_messages",
+                status="deleted" if owner == "deleted-connection" else "active",
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="anthropic_messages"):
+        command.downgrade(config, "0033_rule_decision_ledger")
+
+
+def test_0034_downgrades_and_replays_without_claude_rows(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "claude-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    engine = create_engine(url)
+    try:
+        _seed_connection(engine, connection_id="chat", provider_type="openai_compatible")
+        command.downgrade(config, "0033_rule_decision_ledger")
+        with engine.connect() as db:
+            table_sql = db.execute(
+                text("SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_connections'")
+            ).scalar_one()
+            assert db.execute(text("SELECT provider_type FROM ai_connections")).scalar_one() == "openai_compatible"
+        assert "anthropic_messages" not in table_sql
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()

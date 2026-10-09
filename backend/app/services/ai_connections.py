@@ -23,7 +23,11 @@ from backend.app.db.models import User
 from backend.app.db.models import AIConnection
 from backend.app.db.models import AIUsageLedger
 from backend.app.db.models import utcnow
+from backend.app.services.ai_connection_protocol import MESSAGES
+from backend.app.services.ai_connection_protocol import PROTOCOLS
 from backend.app.services.ai_connection_protocol import ProtocolEndpointMissing
+from backend.app.services.ai_connection_protocol import normalize_base_url
+from backend.app.services.ai_connection_protocol import split_endpoint_suffix
 
 
 _ALLOWED_OPTION_KEYS = {
@@ -36,7 +40,16 @@ _ALLOWED_OPTION_KEYS = {
     "thinking_type",
     "service_tier",
     "max_concurrency",
+    # 仅 Claude（anthropic_messages）：思考强度与结构化输出模式，见 validate_provider_options_for。
+    "effort",
+    "structured_output",
 }
+_CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_CLAUDE_THINKING_TYPES = ("adaptive", "disabled")
+_CLAUDE_STRUCTURED_OUTPUT_MODES = ("json_schema", "off")
+# 只对 OpenAI 系协议有意义的键；Claude 连接带上它们等于「设了却不生效」。
+_OPENAI_ONLY_OPTION_KEYS = frozenset({"response_format_json", "service_tier", "max_output_tokens"})
+_CLAUDE_ONLY_OPTION_KEYS = frozenset({"effort", "structured_output"})
 # 只决定「同时发几个请求」，不影响模型看到什么、返回什么；不进复现快照。
 # 否则用户为了躲 429 调低并发，会让所有已锁定该连接的批次报「连接配置已变更」。
 SCHEDULING_OPTION_KEYS = frozenset({"max_concurrency"})
@@ -245,7 +258,44 @@ def validate_provider_options(options: dict | None) -> dict:
         "performance",
     }:
         raise ValueError("service_tier is unsupported")
+    if "effort" in normalized and normalized["effort"] not in _CLAUDE_EFFORT_LEVELS:
+        raise ValueError("effort must be one of: %s" % ", ".join(_CLAUDE_EFFORT_LEVELS))
+    if (
+        "structured_output" in normalized
+        and normalized["structured_output"] not in _CLAUDE_STRUCTURED_OUTPUT_MODES
+    ):
+        raise ValueError("structured_output must be json_schema or off")
     return normalized
+
+
+def validate_provider_options_for(provider_type: str, options: dict | None) -> dict:
+    """在协议确定之后校验连接参数，拒绝该协议不会使用的键。"""
+
+    normalized = validate_provider_options(options)
+    if provider_type == MESSAGES:
+        stray = sorted(set(normalized) & _OPENAI_ONLY_OPTION_KEYS)
+        if stray:
+            raise ValueError("options not used by Claude connections: %s" % ", ".join(stray))
+        thinking = normalized.get("thinking_type")
+        if thinking not in (None, "") and thinking not in _CLAUDE_THINKING_TYPES:
+            raise ValueError("thinking_type for Claude must be adaptive or disabled")
+        if "temperature" in normalized and "top_p" in normalized:
+            raise ValueError("Claude accepts temperature or top_p, not both")
+    else:
+        stray = sorted(set(normalized) & _CLAUDE_ONLY_OPTION_KEYS)
+        if stray:
+            raise ValueError("options only used by Claude connections: %s" % ", ".join(stray))
+    return normalized
+
+
+def normalize_connection_base_url(provider_type: str, base_url: str) -> str:
+    """校验地址；Claude 连接再去掉粘贴进来的 /messages 并统一成以 /v1 结尾。"""
+
+    checked = validate_base_url(base_url)
+    if provider_type != MESSAGES:
+        return checked
+    base, _suffix = split_endpoint_suffix(checked)
+    return normalize_base_url(MESSAGES, base)
 
 
 def active_connection_id(db: Session, *, owner_id: str, organization_id: str) -> str | None:
@@ -290,10 +340,10 @@ def create_connection(
     provider_options: dict | None,
     api_key: str,
 ) -> AIConnection:
-    if provider_type not in {"openai_responses", "openai_compatible"}:
+    if provider_type not in PROTOCOLS:
         raise ValueError("unsupported AI provider type")
-    normalized_url = validate_base_url(base_url)
-    normalized_options = validate_provider_options(provider_options)
+    normalized_url = normalize_connection_base_url(provider_type, base_url)
+    normalized_options = validate_provider_options_for(provider_type, provider_options)
     secret = api_key.strip()
     if len(secret) < 4:
         raise ValueError("API key must contain at least four characters")
@@ -451,27 +501,76 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "max_tokens": 8,
         }
+    elif runtime.provider_type == MESSAGES:
+        endpoint, payload = _claude_probe(runtime, base_url)
     else:
         raise ValueError("unsupported AI connection provider type")
+    headers = (
+        {"x-api-key": runtime.api_key, "anthropic-version": _CLAUDE_API_VERSION}
+        if runtime.provider_type == MESSAGES
+        else {"Authorization": "Bearer %s" % runtime.api_key}
+    )
     try:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            response = client.post(
-                endpoint,
-                json=payload,
-                headers={"Authorization": "Bearer %s" % runtime.api_key},
-            )
+            response = client.post(endpoint, json=payload, headers=headers)
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         # 404/405 只说明这个协议的接口不在该地址下，协议识别据此改试另一种协议；
         # 其它状态照常按测试失败处理。两者对调用方都是 ValueError，行为不变。
         if exc.response.status_code in (404, 405):
             raise ProtocolEndpointMissing("AI connection test failed") from exc
+        if runtime.provider_type == MESSAGES and exc.response.status_code == 400:
+            # Claude 的 400 多半是参数组合不被该模型或端点接受（新模型拒收 temperature，
+            # Bedrock mantle 拒收结构化输出）。只给方向，不回显厂商正文。
+            raise ValueError(
+                "AI connection test failed: 请求被拒绝，请检查模型名，以及高级设置里的"
+                "思考强度、结构化输出与采样参数"
+            ) from exc
         raise ValueError("AI connection test failed") from exc
     except httpx.HTTPError as exc:
         # The caller records only a stable code; provider bodies may include
         # customer or key-adjacent diagnostics and must never leave this layer.
         raise ValueError("AI connection test failed") from exc
     return {"provider_type": runtime.provider_type, "model_name": runtime.model_name}
+
+
+_CLAUDE_API_VERSION = "2023-06-01"
+_CLAUDE_PROBE_SCHEMA = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
+
+
+def _claude_probe(runtime: ConnectionRuntime, base_url: str):
+    """最小 Messages 请求，带上与评分相同的参数形状。
+
+    「Opus 5.5 配了 temperature」「mantle 开了结构化输出」这类组合在测试时就该失败，
+    而不是等评分时才 400。
+    """
+
+    from backend.app.services.llm.anthropic_messages_adapter import request_controls
+    from backend.app.services.llm.anthropic_messages_adapter import resolve_structured_output
+
+    options = runtime.provider_options
+    payload = {
+        "model": runtime.model_name,
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": 'Reply with {"ok":true}.'}],
+        **request_controls(
+            temperature=options.get("temperature"),
+            top_p=options.get("top_p"),
+            thinking_type=(options.get("thinking_type") or "").strip() or None,
+            effort=options.get("effort"),
+        ),
+    }
+    if resolve_structured_output(base_url, options) == "json_schema":
+        payload.setdefault("output_config", {})["format"] = {
+            "type": "json_schema",
+            "schema": _CLAUDE_PROBE_SCHEMA,
+        }
+    return base_url.rstrip("/") + "/messages", payload
 
 
 def usage_connection_id(snapshot) -> str | None:

@@ -2819,7 +2819,7 @@ export interface components {
              * @default auto
              * @enum {string}
              */
-            provider_type: "auto" | "openai_responses" | "openai_compatible";
+            provider_type: "auto" | "openai_responses" | "openai_compatible" | "anthropic_messages";
         };
         /** AIConnectionProbeResult */
         AIConnectionProbeResult: {
@@ -2830,14 +2830,14 @@ export interface components {
              * @default stored
              * @enum {string}
              */
-            detection: "manual" | "url_suffix" | "known_host" | "probe" | "stored";
+            detection: "manual" | "url_suffix" | "url_path" | "known_host" | "probe" | "stored";
             /** Model Name */
             model_name: string;
             /**
              * Provider Type
              * @enum {string}
              */
-            provider_type: "openai_responses" | "openai_compatible";
+            provider_type: "openai_responses" | "openai_compatible" | "anthropic_messages";
             /**
              * Status
              * @constant
@@ -2883,7 +2883,7 @@ export interface components {
              * Provider Type
              * @enum {string}
              */
-            provider_type: "openai_responses" | "openai_compatible";
+            provider_type: "openai_responses" | "openai_compatible" | "anthropic_messages";
             /** Scope */
             scope: string;
             /** Status */
@@ -2918,7 +2918,7 @@ export interface components {
              * @default auto
              * @enum {string}
              */
-            provider_type: "auto" | "openai_responses" | "openai_compatible";
+            provider_type: "auto" | "openai_responses" | "openai_compatible" | "anthropic_messages";
         };
         /** AIConnectionUpdate */
         AIConnectionUpdate: {
