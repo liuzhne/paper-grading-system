@@ -130,7 +130,7 @@ def test_openai_compatible_429_uses_long_retry_delay(monkeypatch, caplog):
     monkeypatch.setattr(settings, "LLM_RETRY_MAX_DELAY_SECONDS", 30)
     delays = []
     monkeypatch.setattr(
-        "backend.app.services.llm.openai_compatible_adapter.time.sleep",
+        "backend.app.services.llm.transport.time.sleep",
         lambda seconds: delays.append(seconds),
     )
     caplog.set_level(logging.INFO, logger="paper_grading.llm")

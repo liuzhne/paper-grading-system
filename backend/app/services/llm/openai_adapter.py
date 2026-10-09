@@ -1,6 +1,4 @@
 import json
-import re
-import time
 
 import httpx
 
@@ -14,32 +12,19 @@ from backend.app.services.llm.core_view import compression_summary
 from backend.app.services.llm.core_view import decode_core_group_response
 from backend.app.services.llm.core_view import decode_core_response
 from backend.app.services.llm.core_view import preflight_core_request
-from backend.app.services.llm.debug_logging import log_llm_exception
-from backend.app.services.llm.debug_logging import log_llm_request
-from backend.app.services.llm.debug_logging import log_llm_response
-from backend.app.services.llm.debug_logging import log_llm_retry_sleep
-from backend.app.services.llm.errors import project_provider_error
-from backend.app.services.llm.call_log import log_call_failed
-from backend.app.services.llm.call_log import log_call_succeeded
-from backend.app.services.llm.errors import raise_provider_call_error
-from backend.app.services.llm.retry import exponential_delay_seconds
-from backend.app.services.llm.retry import deadline_timeout
-from backend.app.services.llm.retry import retry_fits_before_deadline
-from backend.app.services.llm.retry import is_retryable_http_error
-from backend.app.services.llm.retry import retry_delay_seconds
-from backend.app.services.llm.retry import retry_reason
-from backend.app.services.llm.rate_limit import provider_circuit_key
-from backend.app.services.llm.rate_limit import provider_request_slot
+from backend.app.services.llm.errors import ProviderJSONOutputError
+from backend.app.services.llm.legacy_prompts import envelope_score_schema as _envelope_score_schema
+from backend.app.services.llm.legacy_prompts import score_schema as _score_schema
+from backend.app.services.llm.legacy_prompts import strip_json_fence as _strip_json_fence
+from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
-from backend.app.services.llm_observability import observation
 
 
-class ResponsesJSONOutputError(ValueError):
+class ResponsesJSONOutputError(ProviderJSONOutputError):
     """Safe completion metadata; never include model content or credentials."""
 
     def __init__(self, reason):
-        self.reason = reason
-        super().__init__("Responses JSON output: " + reason)
+        super().__init__(reason, "Responses JSON output: " + reason)
 
 
 class OpenAIResponsesScorer(LLMScorer):
@@ -251,149 +236,28 @@ class OpenAIResponsesScorer(LLMScorer):
             raise ResponsesJSONOutputError("invalid_json") from exc
 
     def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None):
-        url = "%s/responses" % self.base_url
-        headers = {
-            "Authorization": "Bearer %s" % self.api_key,
-            "Content-Type": "application/json",
-        }
-        base_attempts = max(1, settings.OPENAI_MAX_RETRIES + 1) if attempts_limit is None else max(1, attempts_limit)
-        # 429 另有额度：超时与 5xx 只用 base_attempts（起草、归类传 1，避免把一次超时放大成
-        # 多次长等待），限流则按 Retry-After 再等几次。默认不追加，评分路径行为不变。
-        attempts = base_attempts + max(0, rate_limit_retries or 0)
-        last_error = None
-        with observation(
-            "llm_generation",
-            as_type="generation",
-            input=payload,
-            model=self.model_name,
+        return post_with_retry(
+            self,
+            url="%s/responses" % self.base_url,
+            headers={
+                "Authorization": "Bearer %s" % self.api_key,
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+            provider_label=self.provider,
+            operation="responses",
             model_parameters={
                 "temperature": payload.get("temperature"),
                 "top_p": payload.get("top_p"),
                 "max_output_tokens": payload.get("max_output_tokens"),
             },
-            metadata={
-                "gen_ai.provider.name": self.provider,
-                "gen_ai.operation.name": "responses",
-                "server.address": self.base_url,
-                "attempt_limit": attempts,
-            },
-        ) as generation:
-            for attempt in range(attempts):
-                # 调用方的截止时间（例如起草的总预算）同时约束每次调用的超时，
-                # 否则单次调用可以越过预算，被平台强行终止。
-                # 没有截止时间、也没显式超时时不传 timeout，沿用客户端默认值（与改动前一致）。
-                attempt_timeout, expired = deadline_timeout(
-                    deadline,
-                    timeout_seconds if timeout_seconds is not None
-                    else (self.timeout_seconds if deadline is not None else None),
-                )
-                if expired:
-                    raise_provider_call_error(self.provider, last_error or httpx.ReadTimeout("request deadline reached"))
-                try:
-                    log_llm_request(
-                        self.provider, url, headers, payload, attempt, attempts
-                    )
-                    started = time.perf_counter()
-                    with observation(
-                        "retry_attempt",
-                        metadata={"attempt": attempt + 1, "attempt_limit": attempts},
-                    ):
-                        connection_key = provider_circuit_key(
-                            getattr(self, "_ai_connection_snapshot", None),
-                            base_url=self.base_url,
-                            model_name=self.model_name,
-                        )
-                        with provider_request_slot(
-                            provider=self.provider,
-                            connection_key=connection_key,
-                        ) as slot:
-                            response = self.client.post(
-                                url, headers=headers, json=payload,
-                                **({"timeout": attempt_timeout} if attempt_timeout is not None else {}),
-                            )
-                            slot.record_response(response)
-                    elapsed_ms = (time.perf_counter() - started) * 1000
-                    log_llm_response(
-                        self.provider, response, elapsed_ms, attempt, attempts
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    log_call_succeeded(
-                        self.provider, self.model_name, data,
-                        elapsed_ms=elapsed_ms, attempt=attempt,
-                    )
-                    self.usage_meter.record_success(_usage_from_responses(data))
-                    generation.update(
-                        output={
-                            "provider_response_id": data.get("id"),
-                            "status_code": getattr(response, "status_code", 200),
-                        },
-                        usage_details=_langfuse_usage(_usage_from_responses(data)),
-                        metadata={
-                            "elapsed_ms": round(elapsed_ms, 2),
-                            "attempts_used": attempt + 1,
-                            "routed_model": data.get("model") if isinstance(data, dict) else None,
-                            "upstream_provider": data.get("provider") if isinstance(data, dict) else None,
-                        },
-                    )
-                    return response
-                except httpx.HTTPStatusError as exc:
-                    last_error = exc
-                    self.usage_meter.record_failure()
-                    projected = project_provider_error(exc)
-                    generation.update(
-                        level="ERROR",
-                        status_message=projected.code,
-                        metadata={"provider_error": projected.to_mapping()},
-                    )
-                    log_llm_exception(self.provider, exc, attempt, attempts)
-                    if projected.code == "rate_limited":
-                        will_retry = projected.retryable and attempt < attempts - 1
-                    else:
-                        will_retry = projected.retryable and attempt < base_attempts - 1
-                    delay_seconds = retry_delay_seconds(exc, attempt) if will_retry else 0.0
-                    will_retry = will_retry and retry_fits_before_deadline(deadline, delay_seconds)
-                    log_call_failed(
-                        self.provider, self.model_name, projected,
-                        attempt=attempt, attempts=attempts, will_retry=will_retry,
-                    )
-                    if not will_retry:
-                        raise_provider_call_error(self.provider, exc)
-                    log_llm_retry_sleep(
-                        self.provider,
-                        delay_seconds,
-                        attempt,
-                        attempts,
-                        retry_reason(exc),
-                    )
-                except (httpx.TimeoutException, httpx.TransportError) as exc:
-                    last_error = exc
-                    self.usage_meter.record_failure()
-                    projected = project_provider_error(exc)
-                    generation.update(
-                        level="ERROR",
-                        status_message=projected.code,
-                        metadata={"provider_error": projected.to_mapping()},
-                    )
-                    log_llm_exception(self.provider, exc, attempt, attempts)
-                    will_retry = attempt < base_attempts - 1
-                    delay_seconds = exponential_delay_seconds(attempt) if will_retry else 0.0
-                    will_retry = will_retry and retry_fits_before_deadline(deadline, delay_seconds)
-                    log_call_failed(
-                        self.provider, self.model_name, projected,
-                        attempt=attempt, attempts=attempts, will_retry=will_retry,
-                    )
-                    if not will_retry:
-                        raise_provider_call_error(self.provider, exc)
-                    log_llm_retry_sleep(
-                        self.provider,
-                        delay_seconds,
-                        attempt,
-                        attempts,
-                        retry_reason(exc),
-                    )
-                time.sleep(delay_seconds)
-        raise_provider_call_error(self.provider, last_error)
+            configured_retries=settings.OPENAI_MAX_RETRIES,
+            usage_of=_usage_from_responses,
+            attempts_limit=attempts_limit,
+            timeout_seconds=timeout_seconds,
+            rate_limit_retries=rate_limit_retries,
+            deadline=deadline,
+        )
 
 
 def _raise_if_incomplete(data):
@@ -433,18 +297,6 @@ def _usage_from_responses(data):
         "prompt_tokens": usage.get("input_tokens"),
         "completion_tokens": usage.get("output_tokens"),
         "total_tokens": usage.get("total_tokens"),
-    }
-
-
-def _langfuse_usage(usage):
-    return {
-        key: value
-        for key, value in {
-            "input_tokens": usage.get("prompt_tokens"),
-            "output_tokens": usage.get("completion_tokens"),
-            "total_tokens": usage.get("total_tokens"),
-        }.items()
-        if value is not None
     }
 
 
@@ -514,123 +366,6 @@ def _input_payload(paper, criterion, evidence_candidates, structure_checks, anch
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _score_schema():
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "criterion_id",
-            "criterion_name",
-            "max_score",
-            "score",
-            "evidence_sufficient",
-            "reason",
-            "deductions",
-            "deduction_items",
-            "evidence",
-            "suggestion",
-            "confidence",
-            "need_manual_review",
-        ],
-        "properties": {
-            "criterion_id": {"type": "string"},
-            "criterion_name": {"type": "string"},
-            "max_score": {"type": "number"},
-            "score": {"type": "number", "minimum": 0},
-            "evidence_sufficient": {"type": "boolean"},
-            "reason": {"type": "string"},
-            "deductions": {"type": "array", "items": {"type": "string"}},
-            "deduction_items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["points", "reason", "rule_ref", "evidence_quote", "evidence_location"],
-                    "properties": {
-                        "points": {"type": ["number", "null"]},
-                        "reason": {"type": "string"},
-                        "rule_ref": {"type": ["string", "null"]},
-                        "evidence_quote": {"type": "string"},
-                        "evidence_location": {"type": "string"},
-                    },
-                },
-            },
-            "evidence": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["quote", "location", "chunk_id"],
-                    "properties": {
-                        "quote": {"type": "string"},
-                        "location": {"type": "string"},
-                        "chunk_id": {"type": "string"},
-                    },
-                },
-            },
-            "suggestion": {"type": "string"},
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "need_manual_review": {"type": "boolean"},
-        },
-    }
-
-
-def _envelope_score_schema(scoring_mode):
-    schema = json.loads(json.dumps(_score_schema()))
-    schema["properties"]["deduction_items"] = {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["rule_ref", "evidence_refs"],
-            "properties": {
-                "rule_ref": {"type": "string", "minLength": 1},
-                "evidence_refs": {
-                    "type": "array",
-                    "minItems": 1,
-                    "uniqueItems": True,
-                    "items": {"type": "string", "minLength": 1},
-                },
-            },
-        },
-    }
-    schema["properties"]["evidence"] = {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "evidence_ref",
-                "type",
-                "quote",
-                "location",
-                "evidence_unit_id",
-            ],
-            "properties": {
-                "evidence_ref": {"type": "string", "minLength": 1},
-                "type": {"type": "string", "enum": ["source_quote"]},
-                "quote": {"type": "string"},
-                "location": {"type": "string"},
-                "evidence_unit_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            },
-        },
-    }
-    if scoring_mode == "banded":
-        schema["required"].append("band_selection")
-        schema["properties"]["band_selection"] = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["level", "rationale", "evidence_quote", "evidence_location"],
-            "properties": {
-                "level": {"type": "string"},
-                "rationale": {"type": "string"},
-                "evidence_quote": {"type": "string"},
-                "evidence_location": {"type": "string"},
-            },
-        }
-    return schema
-
-
 def _parse_json_output(data):
     text = data.get("output_text")
     if not text:
@@ -652,10 +387,3 @@ def _extract_output_text(output_items):
             if content.get("type") in {"output_text", "text"} and content.get("text"):
                 parts.append(content["text"])
     return "\n".join(parts)
-
-
-def _strip_json_fence(text):
-    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
