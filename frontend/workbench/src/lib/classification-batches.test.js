@@ -30,6 +30,18 @@ describe('AI 归类有限并发', () => {
     expect(peak).toBe(1);
     expect(summary.completed).toBe(13);
   });
+  it('连接声明更高的同时请求数时开更多通道，但不超过上限 8', async () => {
+    const many = Array.from({length:40}, (_, i) => String(i));
+    for (const [declared, expected] of [[6, 6], [20, 8]]) {
+      let active=0, peak=0;
+      await classifyInBatches(many, {
+        concurrency: declared,
+        request: async batch => { active++; peak=Math.max(peak,active); await tick(); active--; return success(batch); },
+        onResult:vi.fn(), onProgress:vi.fn(),
+      });
+      expect(peak).toBe(expected);
+    }
+  });
   it('单批内容级失败只记入失败，其它批次继续，全部单元都会送出', async () => {
     const pending=[], onProgress=vi.fn(), onResult=vi.fn();
     const request=vi.fn(batch => new Promise(resolve => pending.push(result => resolve(result || success(batch)))));

@@ -1687,3 +1687,38 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 发布：只改后端，没有迁移。回滚时还原 `backend/app/services/llm/base.py` 并删掉对应测试；回滚后连接参数会在旧路径再次被忽略。
 
 维护记录：2026-10-09 · 旧路径信封冻结实例参数：新增“连接参数在旧路径不生效”和“升级后旧路径开始推理”的排查方法，以及缓存影响的判断方法。
+
+### 2026-10-09 接入 AWS Bedrock 与调高吞吐
+
+**接入 Bedrock（OpenAI 兼容模型，例如 gpt-oss）**：账户与连接 → 新建连接：
+
+| 字段 | 填写 |
+|---|---|
+| HTTPS 接口地址 | `https://bedrock-runtime.<区域>.amazonaws.com/openai/v1`（例如 `us-east-1`） |
+| 模型 | Bedrock 模型 ID，例如 `openai.gpt-oss-120b-1:0`；跨区域推理配置带前缀，例如 `us.…` |
+| API Key | Bedrock API Key（在 Bedrock 控制台生成，Bearer 方式） |
+| 接口协议 | 自动识别即可（探测会选到 Chat Completions） |
+| 同时请求数 | 按该模型在该区域的 RPM / TPM 配额填写（最多 8）；不确定时先填 4 |
+
+注意：
+- `bedrock-runtime` 不提供 `GET /models`；“测试配置”发的是一次最小的 `/chat/completions` 请求，不受影响。
+- **Claude 系列在 Bedrock 上走 Anthropic Messages 协议**（`…/anthropic/v1/messages`），不是 OpenAI 兼容协议，接口地址与高级设置的填法见「2026-10-09 Claude 连接（Bedrock / Anthropic）」一节。“同时请求数”对 Claude 连接同样适用。
+- gpt-oss 是推理模型，思考内容会占用输出预算；如果评分时出现“输出达到长度上限”，调大连接的 `max_tokens`。
+- 配额按账户、区域、模型分别计算；频繁出现 `llm_call_failed … code=rate_limited` 时，调低“同时请求数”，或在 AWS Service Quotas 申请提额。
+
+**调高吞吐**：
+- 连接的“同时请求数”声明了就以它为准，留空用默认值（起草 3 批、归类 3 路、本地批量评分 2 篇）。
+- Vercel 上全系统同时评分的论文数由 `BATCH_SCORING_QUEUE_CONCURRENCY` 决定（默认 8，1–32）。它在**构建期**读取：在 Vercel 项目环境变量里修改后，要重新部署才生效。
+- 平台默认模型也可以在配置里声明 `max_concurrency`；没绑私有连接的批次共用这个名额池。
+
+排错：
+- **现象**：调高了连接的同时请求数，批量评分仍然只有两三篇在跑。
+  - 真正原因：Vercel 队列的全局并发还是旧值（构建期读取），或者同时还有别的用户的批次在占用全局并发。检查 `BATCH_SCORING_QUEUE_CONCURRENCY` 是否已设置并重新部署。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_connection_concurrency_and_rate_limits.py
+```
+
+维护记录：2026-10-09 · 提高吞吐：新增 Bedrock 接入步骤、同时请求数与队列并发说明，以及“调高后仍不变快”的排查。

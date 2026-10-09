@@ -1090,3 +1090,12 @@ Claude 适配器的调用链：
 缓存边界：带 `_ai_connection_snapshot` 的实例（全部 AI 连接）在旧路径不读写 L0（`llm_cache`）。用环境变量配置的实例，属性值就是全局设置，所以信封与缓存键逐字段不变。Core 的规则决策账本 `rule_decision_ledger` 按组织与连接隔离，身份由 `core_runtime_provider_contract` 计算，不受这次改动影响。
 
 维护记录：2026-10-09 · 旧路径信封冻结实例参数：`_provider_contract` 的参数来源改为实例；无数据模型、接口或迁移变化，`PROMPT_VERSION` 不变。
+
+### 2026-10-09 同时请求数与队列并发
+
+- `llm/factory.scorer_concurrency(scorer, default)`：评分器带 `max_concurrency` 时返回它，否则返回默认值。起草（`AI_RULE_DRAFT_MAX_CONCURRENCY=3`）用它决定并行批数。
+- 前端 `classifyInBatches({ concurrency })`：通道数取连接声明（最多 `MAX_CLASSIFY_LANES=8`），默认 3。
+- `batch_scoring/jobs._batch_model_source`：私有连接返回 (声明值, 锁连接行, 同连接批次)；没绑连接的批次返回平台配置 (声明值, 锁平台配置行, `ai_connection_id IS NULL` 的批次)。`_ensure_connection_capacity` 与 `create_batch_scoring_job` 共用它。
+- `batch_scoring/vercel_queue.queue_concurrency()` 在模块导入时读取 `BATCH_SCORING_QUEUE_CONCURRENCY`，作为 `@subscribe(max_concurrency=...)`。
+
+维护记录：2026-10-09 · 提高吞吐：并发来源从“只调低”改为“声明即生效”，平台模型加入名额检查；无数据模型变化。

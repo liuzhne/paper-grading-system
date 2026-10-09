@@ -144,7 +144,7 @@ const draft = reactive({
   base_url: "https://api.openai.com/v1",
   model_name: "gpt-4.1-mini",
   api_key: "",
-  // 同时请求数上限：空 = 不限制（起草、归类最多 3 路）。免费档常只允许 1 个并发。
+  // 同时请求数：空 = 默认（起草 3 批、归类 3 路、批量评分 2 篇）。免费档常只允许 1 个，Bedrock 等可按配额调高。
   max_concurrency: "",
   // 仅 Claude：留空 = 模型默认 / 自动。
   effort: "",
@@ -218,7 +218,7 @@ async function onTune(connection) {
     await loadConnections();
   } catch (error) {
     if (!(error instanceof StaleContextError)) {
-      connectionsError.value = error?.message || "保存并发上限失败";
+      connectionsError.value = error?.message || "保存同时请求数失败";
     }
   } finally {
     connBusy[connection.id] = null;
@@ -252,7 +252,7 @@ function draftPayload() {
   };
 }
 
-/** 把「同时请求数上限」合进 provider_options；留空表示移除该项。PATCH 是整体替换，必须带上其它已有选项。 */
+/** 把「同时请求数」合进 provider_options；留空表示移除该项。PATCH 是整体替换，必须带上其它已有选项。 */
 function concurrencyOptions(options, value) {
   const next = { ...(options || {}) };
   const text = String(value ?? "").trim();
@@ -567,7 +567,7 @@ onMounted(async () => {
                 <td class="muted">
                   <div>{{ conn.model_name }}</div>
                   <div class="faint conn-base" :title="protocolLabel(conn.provider_type)">{{ PROTOCOL_SHORT[conn.provider_type] || conn.provider_type }}</div>
-                  <div v-if="conn.provider_options?.max_concurrency" class="faint conn-base" data-test="conn-concurrency">并发上限 {{ conn.provider_options.max_concurrency }}</div>
+                  <div v-if="conn.provider_options?.max_concurrency" class="faint conn-base" data-test="conn-concurrency">同时请求 {{ conn.provider_options.max_concurrency }} 个</div>
                   <div v-if="conn.provider_options?.effort" class="faint conn-base" data-test="conn-effort">思考强度 {{ EFFORT_LABELS[conn.provider_options.effort] || conn.provider_options.effort }}</div>
                 </td>
                 <td class="num">{{ conn.key_masked }}<span class="faint"> · v{{ conn.key_version }}</span></td>
@@ -601,7 +601,7 @@ onMounted(async () => {
                       :disabled="connBusy[conn.id]"
                       @click="startTuning(conn)"
                     >
-                      并发上限
+                      同时请求数
                     </button>
                     <button
                       v-if="conn.status !== 'active'"
@@ -656,9 +656,9 @@ onMounted(async () => {
                 <td colspan="6">
                   <form class="rotate-form" data-test="tune-form" @submit.prevent="onTune(conn)">
                     <label class="field rotate-field">
-                      <span class="field-label">同时请求数上限</span>
-                      <input v-model="tuneValue" class="input" type="number" min="1" max="8" step="1" placeholder="不限制" />
-                      <span class="field-hint">厂商按 Key 限并发，超出会返回 429（例如免费档常只允许 1 个）。起草、归类与批量评分都不会超过这里的数；留空表示不限制。修改不影响已创建的评分任务。</span>
+                      <span class="field-label">同时请求数</span>
+                      <input v-model="tuneValue" class="input" type="number" min="1" max="8" step="1" placeholder="默认" />
+                      <span class="field-hint">起草、归类与批量评分对这个连接同时发出的请求数。厂商按 Key 限并发，超出会返回 429：免费档常只允许 1 个；Bedrock 等付费平台可按配额调高（最多 8）。留空用默认值（起草 3 批、归类 3 路、批量评分 2 篇）。修改不影响已创建的评分任务。</span>
                     </label>
                     <button class="btn btn-primary" type="submit" :disabled="connBusy[conn.id]">
                       保存
@@ -728,9 +728,9 @@ onMounted(async () => {
               </label>
             </template>
             <label class="field advanced-field">
-              <span class="field-label">同时请求数上限</span>
-              <input v-model="draft.max_concurrency" class="input" type="number" min="1" max="8" step="1" placeholder="不限制" data-test="draft-concurrency" />
-              <span class="field-hint">厂商按 Key 限并发，超出会返回 429。免费档（例如 Z.ai 的 GLM-4.7-Flash）常只允许 1 个，填 1 即可。</span>
+              <span class="field-label">同时请求数</span>
+              <input v-model="draft.max_concurrency" class="input" type="number" min="1" max="8" step="1" placeholder="默认" data-test="draft-concurrency" />
+              <span class="field-hint">厂商按 Key 限并发，超出会返回 429。免费档（例如 Z.ai 的 GLM-4.7-Flash）填 1；Bedrock 等付费平台可按配额填到 8。留空用默认值。</span>
             </label>
           </details>
 
