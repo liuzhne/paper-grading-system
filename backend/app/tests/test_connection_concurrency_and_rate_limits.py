@@ -76,8 +76,8 @@ def test_bound_scorer_carries_the_declared_limit():
     assert scorer_concurrency(limited, 3) == 1
     assert scorer_concurrency(get_llm_scorer(_runtime({})), 3) == 3
     assert scorer_concurrency(object(), 3) == 3
-    # 声明的上限只会调低，不会把调用方的默认值调高。
-    assert scorer_concurrency(get_llm_scorer(_runtime({"max_concurrency": 8})), 3) == 3
+    # 声明了就以它为准：Bedrock 等按配额调高。
+    assert scorer_concurrency(get_llm_scorer(_runtime({"max_concurrency": 8})), 3) == 8
 
 
 # ---- 起草 -----------------------------------------------------------------
@@ -249,11 +249,11 @@ def _bind_connection(session, batch_id, *, max_concurrency):
     session.commit()
 
 
-def _limited_job(client, *, count, name, first_started_at):
+def _limited_job(client, *, count, name, first_started_at, max_concurrency=1):
     jobs = _jobs()
     with client.session_factory() as session:
         batch_id, rubric_id, paper_ids = _seed_batch(session, count=count, name=name)
-        _bind_connection(session, batch_id, max_concurrency=1)
+        _bind_connection(session, batch_id, max_concurrency=max_concurrency)
         job, _ = jobs.create_batch_scoring_job(
             session, batch_id=batch_id, rescore=False, max_workers=2,
             observation_policy=None, actor_id=settings.DEFAULT_DEV_USER_ID,
@@ -267,9 +267,13 @@ def _limited_job(client, *, count, name, first_started_at):
         return job.id, job.max_workers, [item.id for item in items], rubric_id, paper_ids
 
 
-def test_local_worker_parallelism_is_clamped_to_the_connection_limit(client):
-    _job_id, max_workers, *_ = _limited_job(client, count=2, name="clamp", first_started_at=utcnow())
-    assert max_workers == 1
+def test_local_worker_parallelism_follows_the_connection_declaration(client):
+    # 工作台固定传 max_workers=2；连接声明了同时请求数就以它为准，可以调低也可以调高。
+    _job_id, lowered, *_ = _limited_job(client, count=2, name="lowered", first_started_at=utcnow())
+    _job_id, raised, *_ = _limited_job(
+        client, count=2, name="raised", first_started_at=utcnow(), max_concurrency=6,
+    )
+    assert (lowered, raised) == (1, 6)
 
 
 def test_queue_defers_items_while_the_connection_is_busy(client):
@@ -522,3 +526,44 @@ def test_a_timeout_cut_short_by_the_budget_is_reported_as_budget_exhaustion(monk
         )
     assert excinfo.value.code == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
     assert len(calls) == 1
+
+
+# ---- 平台默认模型与全局队列并发 ------------------------------------------------
+
+
+def test_platform_model_declaration_limits_unbound_batches(client):
+    from backend.app.services import platform_llm
+
+    jobs = _jobs()
+    with client.session_factory() as session:
+        platform_llm.set_config(
+            session, provider_type="openai_compatible", base_url="https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+            model_name="openai.gpt-oss-120b-1:0", api_key="platform-test-key", configured_by="admin-1",
+            provider_options={"max_concurrency": 1},
+        )
+        batch_id, _rubric_id, _paper_ids = _seed_batch(session, count=2, name="platform busy")
+        job, _ = jobs.create_batch_scoring_job(
+            session, batch_id=batch_id, rescore=False, max_workers=2,
+            observation_policy=None, actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        assert job.max_workers == 1
+        items = sorted(job.items, key=lambda value: (value.created_at, value.id))
+        items[0].status, items[0].attempt_count, items[0].started_at = "running", 1, utcnow()
+        job.status = "running"
+        session.commit()
+        job_id, waiting_id = job.id, items[1].id
+
+    with pytest.raises(jobs.ConnectionAtCapacityError):
+        jobs.run_batch_scoring_item(client.session_factory, job_id=job_id, item_id=waiting_id)
+
+
+@pytest.mark.parametrize(
+    "raw, expected", [(None, 8), ("", 8), ("16", 16), ("0", 1), ("99", 32), ("abc", 8)],
+)
+def test_queue_concurrency_is_configurable_and_bounded(monkeypatch, raw, expected):
+    queue = importlib.import_module("backend.app.services.batch_scoring.vercel_queue")
+    if raw is None:
+        monkeypatch.delenv("BATCH_SCORING_QUEUE_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("BATCH_SCORING_QUEUE_CONCURRENCY", raw)
+    assert queue.queue_concurrency() == expected

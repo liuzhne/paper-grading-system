@@ -10,6 +10,22 @@ from vercel.queue import send
 from vercel.queue import subscribe
 
 SCORING_TOPIC = "batch-scoring-items"
+# 全系统同时评分的论文数（所有用户共用一个消费组）。每个连接另有自己的名额检查
+# （_ensure_connection_capacity），限额小的连接不会因为这里调高而超限。
+DEFAULT_QUEUE_CONCURRENCY = 8
+MAX_QUEUE_CONCURRENCY = 32
+
+
+def queue_concurrency() -> int:
+    """读取 BATCH_SCORING_QUEUE_CONCURRENCY。在模块导入（构建期发现订阅）时求值，
+    不依赖应用配置，保持发现阶段不加载数据库与 Pydantic。"""
+
+    raw = os.getenv("BATCH_SCORING_QUEUE_CONCURRENCY", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_QUEUE_CONCURRENCY
+    except ValueError:
+        value = DEFAULT_QUEUE_CONCURRENCY
+    return max(1, min(MAX_QUEUE_CONCURRENCY, value))
 logger = logging.getLogger("batch-scoring-queue")
 
 
@@ -47,7 +63,7 @@ async def dispatch_batch_scoring_job(job) -> list[str | None]:
     topic=SCORING_TOPIC,
     consumer_group="paper-grading-production",
     retry_after=30,
-    max_concurrency=2,
+    max_concurrency=queue_concurrency(),
     max_attempts=12,
 )
 async def score_batch_item(payload) -> None:

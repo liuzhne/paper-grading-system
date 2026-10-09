@@ -169,12 +169,13 @@ def provider_network_scope():
 
 
 def scorer_concurrency(scorer, default: int) -> int:
-    """同一次操作里最多同时发出的请求数：调用方默认值与连接声明上限取较小者。
+    """同一次操作里同时发出的请求数：连接声明了就以它为准，否则用调用方默认值。
 
-    厂商的并发上限按 Key 计算（例如免费档只允许 1 个并发），超出的请求会被 429 拒绝。
+    厂商按 Key 限并发：免费档常只允许 1 个（声明 1 调低），Bedrock 等付费平台按配额
+    可以更高（声明 8 调高）。没声明时保守地用默认值，避免对限额不明的厂商并发过多。
     """
 
     declared = getattr(scorer, "max_concurrency", None)
     if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 1:
-        return max(1, min(default, declared))
+        return declared
     return max(1, default)

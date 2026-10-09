@@ -61,7 +61,7 @@ it("新建连接默认自动识别协议，测试后显示识别结果，手动�
   expect(api.post).toHaveBeenLastCalledWith("/ai-connections", expect.objectContaining({ provider_type: "openai_responses" }), expect.any(Object));
 });
 
-it("已有连接可以单独设置并发上限，提交时保留其它选项，清空即移除", async () => {
+it("已有连接可以单独设置同时请求数，提交时保留其它选项，清空即移除", async () => {
   let rows = [{ id: "a", name: "Z.ai 免费", status: "active", provider_options: { top_p: 0.95 } }];
   api.get.mockImplementation(async () => rows);
   api.patch.mockImplementation(async (_url, body) => { rows = [{ ...rows[0], provider_options: body.provider_options }]; });
@@ -74,7 +74,7 @@ it("已有连接可以单独设置并发上限，提交时保留其它选项，�
   await flushPromises();
   // PATCH 是整体替换：漏带 top_p 会把用户原有的采样设置清掉。
   expect(api.patch).toHaveBeenLastCalledWith("/ai-connections/a", { provider_options: { top_p: 0.95, max_concurrency: 1 } }, expect.any(Object));
-  expect(wrapper.get('[data-test="conn-concurrency"]').text()).toBe("并发上限 1");
+  expect(wrapper.get('[data-test="conn-concurrency"]').text()).toBe("同时请求 1 个");
 
   await wrapper.get('[data-test="tune-concurrency"]').trigger("click");
   expect(wrapper.get('[data-test="tune-form"] input').element.value).toBe("1");
@@ -85,7 +85,7 @@ it("已有连接可以单独设置并发上限，提交时保留其它选项，�
   expect(wrapper.find('[data-test="conn-concurrency"]').exists()).toBe(false);
 });
 
-it("新建连接可以在高级设置里填写并发上限", async () => {
+it("新建连接可以在高级设置里填写同时请求数", async () => {
   api.get.mockResolvedValue([]);
   api.post.mockResolvedValue({});
   vi.spyOn(useSessionStore(), "loadCapabilities").mockResolvedValue();

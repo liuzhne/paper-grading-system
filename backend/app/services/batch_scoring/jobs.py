@@ -33,6 +33,7 @@ from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
 from backend.app.services.batches import state as batch_state
 from backend.app.db.models import Paper
+from backend.app.db.models import PlatformLLMConfig
 from backend.app.db.models import RuleScoringTask
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
@@ -73,15 +74,44 @@ class ConnectionAtCapacityError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
-def _batch_connection_limit(session, batch):
-    """批次绑定的私有连接声明的并发上限；没有绑定或没有声明时返回 None。"""
+def _batch_model_source(session, batch):
+    """批次评分所用模型的并发声明：(上限, 加锁语句, 同源批次条件)；未声明返回 None。
 
-    if batch is None or not batch.ai_connection_id:
+    私有连接按连接 ID 计算；没有绑定连接的批次用平台默认模型，所有这类批次共用一个名额池。
+    """
+
+    if batch is None:
         return None
-    options = session.scalar(
-        select(AIConnection.provider_options).where(AIConnection.id == batch.ai_connection_id)
+    if batch.ai_connection_id:
+        options = session.scalar(
+            select(AIConnection.provider_options).where(AIConnection.id == batch.ai_connection_id)
+        )
+        limit = connection_max_concurrency(options)
+        if limit is None:
+            return None
+        return (
+            limit,
+            select(AIConnection.id).where(AIConnection.id == batch.ai_connection_id).with_for_update(),
+            GradingBatch.ai_connection_id == batch.ai_connection_id,
+        )
+    from backend.app.services import platform_llm
+
+    config = platform_llm.get_active_config(session)
+    limit = connection_max_concurrency(getattr(config, "provider_options", None))
+    if config is None or limit is None:
+        return None
+    return (
+        limit,
+        select(PlatformLLMConfig.id).where(PlatformLLMConfig.id == config.id).with_for_update(),
+        GradingBatch.ai_connection_id.is_(None),
     )
-    return connection_max_concurrency(options)
+
+
+def _batch_connection_limit(session, batch):
+    """批次所用模型声明的同时请求数；没有声明时返回 None。"""
+
+    source = _batch_model_source(session, batch)
+    return source[0] if source else None
 
 
 def _ensure_connection_capacity(session, *, job, item, batch, now):
@@ -92,20 +122,19 @@ def _ensure_connection_capacity(session, *, job, item, batch, now):
     不占用队列的重投次数。
     """
 
-    limit = _batch_connection_limit(session, batch)
-    if limit is None:
+    source = _batch_model_source(session, batch)
+    if source is None:
         return
-    # 同一连接的领取在这里串行；任务行已在调用方锁住，加锁顺序固定为 任务 → 连接。
-    session.execute(
-        select(AIConnection.id).where(AIConnection.id == batch.ai_connection_id).with_for_update()
-    )
+    limit, lock_statement, same_source = source
+    # 同一模型来源的领取在这里串行；任务行已在调用方锁住，加锁顺序固定为 任务 → 连接。
+    session.execute(lock_statement)
     lease_cutoff = now - timedelta(seconds=QUEUE_ITEM_LEASE_SECONDS)
     running = session.scalar(
         select(func.count(BatchScoringItem.id))
         .join(BatchScoringJob, BatchScoringJob.id == BatchScoringItem.job_id)
         .join(GradingBatch, GradingBatch.id == BatchScoringJob.grading_batch_id)
         .where(
-            GradingBatch.ai_connection_id == batch.ai_connection_id,
+            same_source,
             BatchScoringItem.status == "running",
             BatchScoringItem.started_at > lease_cutoff,
             BatchScoringItem.id != item.id,
@@ -415,10 +444,11 @@ def create_batch_scoring_job(
         raise ValueError("batch not found")
     if not batch.papers:
         raise ValueError("batch has no papers")
-    # 本地 worker 按 max_workers 并行评分；不能超过连接声明的并发上限（厂商按 Key 限并发）。
+    # 本地 worker 按 max_workers 并行评分。模型声明了同时请求数就以它为准：免费档调低到 1，
+    # Bedrock 等按配额调高；没声明时沿用请求里的值（工作台默认 2）。
     connection_limit = _batch_connection_limit(session, batch)
     if connection_limit is not None:
-        max_workers = min(max_workers, connection_limit)
+        max_workers = connection_limit
     policy = validate_observation_policy(
         observation_policy
         if observation_policy is not None
