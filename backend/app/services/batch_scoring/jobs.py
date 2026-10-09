@@ -775,7 +775,13 @@ def _incomplete_scoring_error(rule_tasks):
         elif code == "PROVIDER_OUTPUT_TRUNCATED":
             message = (
                 "模型输出达到输出 token 上限被截断（推理模型的思考过程可能耗尽了额度）；"
-                "请调大该 AI 连接的 max_output_tokens 或关闭思考后重试。"
+                "请调大该 AI 连接的输出 token 上限（max_output_tokens / max_tokens），"
+                "或关闭思考、降低思考强度后重试。"
+            )
+        elif code == "PROVIDER_OUTPUT_REFUSED":
+            message = (
+                "模型按其安全策略拒绝评判部分规则；这些规则需要人工复核，"
+                "或检查论文内容后换一个模型重试。"
             )
         else:
             message = f"评分模型调用失败（{code}）；请检查模型连接后重试。"

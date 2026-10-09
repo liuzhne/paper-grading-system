@@ -516,3 +516,18 @@ def test_structure_recognition_treats_claude_truncation_like_the_others():
     with pytest.raises(llm_structure.StructureError) as caught:
         llm_structure.recognize_structure([], Truncating(), failure_codes=[])
     assert caught.value.code == "STRUCTURE_OUTPUT_TRUNCATED"
+
+
+def test_a_refused_rule_gets_its_own_failure_code_and_batch_message():
+    from backend.app.services.batch_scoring import jobs
+    from backend.app.services.scoring.core.failures import project_rule_execution_failure
+
+    assert project_rule_execution_failure(MessagesJSONOutputError("refused"))[0] == "PROVIDER_OUTPUT_REFUSED"
+
+    class Task:
+        status = "failed_exhausted"
+        provider_error = {"code": "PROVIDER_OUTPUT_REFUSED"}
+
+    error = jobs._incomplete_scoring_error([Task()])
+    assert error.code == "PROVIDER_OUTPUT_REFUSED"
+    assert "人工复核" in str(error)

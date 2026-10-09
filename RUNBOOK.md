@@ -1650,8 +1650,9 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
   - 真正原因：Anthropic 账户达到月度消费上限，要到下个月或升级档位后才恢复，重试无效。用户自设的消费上限是 400，也会被识别为额度耗尽。
 - **现象**：Bedrock 上 429 `ThrottlingException`，等待之后仍然反复出现。
   - 真正原因：AWS 侧 RPM/TPM 配额（默认 2M 输入 TPM）或账户的每日配额。系统按限流处理并重试，每日配额用完时重试不会恢复，需要在 AWS 控制台申请提额。
-- **现象**：模型拒绝回答（`refused`）。
-  - 真正原因：Claude 的安全策略拒答（HTTP 200，`stop_reason=refusal`）。不会自动换模型；评分转人工复核，起草和归类各自提示。
+- **现象**：批量评分报 `PROVIDER_OUTPUT_REFUSED`，或起草、归类提示模型拒绝回答（`refused`）。
+  - 报错指向：看起来像模型或连接出了故障。
+  - 真正原因：Claude 的安全策略拒绝回答（HTTP 200，`stop_reason=refusal`），重试通常得到同样结果。系统不会自动换模型（换了会让实际出分的模型与复现身份不一致）；被拒的规则作为阻断项转人工复核。
 
 发布：
 - 迁移 `0034_anthropic_messages_provider` 只改 `ck_ai_connections_provider_type`，不建新表，不涉及 `pgs_app` 授权与 RLS。生产按 D-025 的审批工作流先迁移再部署；`verify_postgres_ops` 会检查该约束是否包含 `anthropic_messages`。

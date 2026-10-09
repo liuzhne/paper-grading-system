@@ -1062,7 +1062,7 @@ Claude 适配器的调用链：
 - `factory.get_llm_scorer(runtime)`：`provider_type == "anthropic_messages"` → `AnthropicMessagesScorer(timeout_seconds, max_tokens, temperature, top_p, thinking_type, effort, structured_output)`，照旧设置 `_ai_connection_snapshot`、`max_concurrency`。
 - 请求体：`model`、`max_tokens`（默认 `ANTHROPIC_MAX_TOKENS=4096`）、`system`、`messages=[user]`；`temperature`/`top_p`（至多其一）、`thinking`、`output_config.effort` **只在连接显式设置时发送**。
 - 结构化输出：`resolve_structured_output(base_url, options)`：连接设置优先；否则只有 `api.anthropic.com` 开启。开启时 `output_config.format = {type: json_schema, schema: sanitize_schema(schema)}`，`sanitize_schema` 只删除 Claude 不支持的约束（`minimum`/`maximum`/`minLength`/`maxLength`/`maxItems`/`uniqueItems`/`pattern`、大于 1 的 `minItems` 等），属性名与结构不动。两种模式下的本地校验都不变（`decode_core_*`、起草层校验）。
-- 响应：只拼接 `type=text` 块；`stop_reason` 为 `refusal` → `refused`，为 `max_tokens` → `output_truncated`，为 `pause_turn`/`tool_use` → `incomplete_output`。用量：`prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens`。
+- 响应：只拼接 `type=text` 块；`stop_reason` 为 `refusal` → `refused`，为 `max_tokens` → `output_truncated`，为 `pause_turn`/`tool_use` → `incomplete_output`。规则任务里 `scoring/core/failures.project_rule_execution_failure` 把 `refused` 投影为 `PROVIDER_OUTPUT_REFUSED`（阻断项，转人工复核），批量任务给出对应提示。用量：`prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens`。
 - 复现身份：适配器提供 `provider_controls()`；`core_adapter.core_runtime_provider_contract` 与 `base._provider_contract` 遇到实现了它的适配器时直接采用。没发的采样记 `"1"`，没发的 thinking 记 `null`；effort 写进 `model_version`（`messages-2023-06-01;effort=low`）。
 
 连接与协议识别：
