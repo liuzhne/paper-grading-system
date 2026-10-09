@@ -1666,3 +1666,24 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 ```
 
 维护记录：2026-10-09 · Claude 连接：新增 Bedrock/Anthropic 接入步骤、三个默认值环境变量、六类报错的排查，以及 0034 的发布与回滚说明。
+
+### 2026-10-09 旧路径信封与连接参数
+
+排错：
+- **现象**：AI 连接里设置了 `max_tokens` / `max_output_tokens` / `temperature` / `response_format_json`，正式版本标准（Core）生效，未版本化标准（旧兼容路径）却不生效；或者在本地开 `LLM_DEBUG_LOG_ENABLED=true`（生产就绪检查会把它报为问题，不要在生产开），看到旧路径请求带着 `thinking: {"type": "disabled"}`，而连接根本没设 `thinking_type`。
+  - 报错指向：连接配置没保存，或者厂商忽略了参数。
+  - 真正原因：修复前，旧路径的信封参数来自 `base._provider_contract`，它读全局 `OPENAI_COMPATIBLE_*` / `OPENAI_*`，不读连接；`score_envelope` 又只按信封发请求。现在改为读实例，与 Core 一致。
+- **现象**：升级后，旧路径评分变慢、token 用量上升，或出现 `output_truncated` / `empty_content`；同一连接在 Core 路径正常。
+  - 报错指向：模型或厂商变慢、输出预算不够。
+  - 真正原因：连接没设 `thinking_type`。旧路径以前被全局默认值“顺手”关掉了推理，现在按约定不再发 `thinking`，模型用自己的默认值（可能开启推理）。处理：`PATCH /api/ai-connections/{id}`，在 `provider_options` 里显式设 `"thinking_type": "disabled"`（批次快照的注意事项见 10-04 条目）。
+- **判断会不会影响缓存**：旧路径的 L0 只对环境变量配置的模型生效；AI 连接（含生产的平台模型）在旧路径不读写 L0。所以这次改动没有让缓存失效，也没有 bump `PROMPT_VERSION`。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_legacy_envelope_provider_controls.py backend/app/tests/test_m1_cache_identity.py backend/app/tests/test_core_llm_adapters.py
+```
+
+发布：只改后端，没有迁移。回滚时还原 `backend/app/services/llm/base.py` 并删掉对应测试；回滚后连接参数会在旧路径再次被忽略。
+
+维护记录：2026-10-09 · 旧路径信封冻结实例参数：新增“连接参数在旧路径不生效”和“升级后旧路径开始推理”的排查方法，以及缓存影响的判断方法。

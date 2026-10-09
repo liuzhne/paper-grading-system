@@ -1077,3 +1077,16 @@ Claude 适配器的调用链：
 前端：账户页、运维页的协议下拉加入 Claude；仅在协议为 Claude 时显示「思考强度」「结构化输出」（`lib/claude-options.js`）。归类把 `refused`、`empty_content` 视为内容级失败。
 
 维护记录：2026-10-09 · Claude 协议适配器：新增 `transport`、`legacy_prompts`、`anthropic_messages_adapter` 三个模块，Chat/Responses 改为共用传输层（行为不变）；head 升为 `0034_anthropic_messages_provider`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
+
+### 2026-10-09 旧路径信封冻结实例的调用参数
+
+旧兼容路径（未版本化评分标准）的调用链：`scoring/engine._score_with_runtime_fallback` → `LLMScorer.build_prompt_envelope` → `base._provider_contract(scorer)` 冻结 provider 合同 → 适配器 `score_envelope` **只按信封里的参数**发请求（身份校验只比对 name / model / model_version）。
+
+参数来源：`_provider_contract` 从**本次适配器实例**读取，与 Core 的 `core_adapter.core_runtime_provider_contract` 一致。全局设置只作为实例上没有该属性时的回退。实例的值来自 `llm/factory.get_llm_scorer`：AI 连接（BYOK / 平台模型）传 `provider_options`，没传的项由适配器构造函数回落到全局设置。
+- Chat：`temperature`、`max_tokens`、`thinking_type`、`response_format_json` → 信封的 `sampling` / `thinking` / `response_format`。工厂给 AI 连接传 `thinking_type=options.get("thinking_type", "")`，所以没设置的连接不发 `thinking`。
+- Responses：`temperature`、`max_output_tokens` → `sampling`；`response_format` 固定 `json_schema`，`thinking` 固定 `{enabled: false, type: null}`，不变。
+- Claude（`anthropic_messages`）：适配器实现了 `provider_controls()`，`_provider_contract` 在函数开头直接采用它的返回值，不进上面两个分支，本次不涉及。
+
+缓存边界：带 `_ai_connection_snapshot` 的实例（全部 AI 连接）在旧路径不读写 L0（`llm_cache`）。用环境变量配置的实例，属性值就是全局设置，所以信封与缓存键逐字段不变。Core 的规则决策账本 `rule_decision_ledger` 按组织与连接隔离，身份由 `core_runtime_provider_contract` 计算，不受这次改动影响。
+
+维护记录：2026-10-09 · 旧路径信封冻结实例参数：`_provider_contract` 的参数来源改为实例；无数据模型、接口或迁移变化，`PROMPT_VERSION` 不变。
