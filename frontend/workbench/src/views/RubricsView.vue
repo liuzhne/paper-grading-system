@@ -356,8 +356,11 @@ const classifyUnits = ({ unitIds }) => parseAction(async (id) => {
   const contextVersion = currentContextVersion();
   const connectionId = draftConnection.value || null;
   const isCurrent = () => selected.value === id && currentContextVersion() === contextVersion;
+  // 厂商按 Key 限并发（免费档常见只允许 1 个），超出的请求会被 429 拒绝。
+  const declared = connections.value.find(item => item.id === connectionId)?.provider_options?.max_concurrency;
   try {
     await classifyInBatches(unitIds, {
+      concurrency: declared || 3,
       request: batch => store.classifyUnits(id, { unitIds: batch, connectionId }),
       isCurrent,
       onResult: result => { parseState.value = { ...parseState.value, unit_classifications: result }; },

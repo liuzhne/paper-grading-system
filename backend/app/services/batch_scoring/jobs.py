@@ -27,6 +27,7 @@ from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from backend.app.db.models import AIConnection
 from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
@@ -37,6 +38,7 @@ from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import utcnow
 from backend.app.services.ai_connections import AIConnectionBindingError
+from backend.app.services.ai_connections import connection_max_concurrency
 from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.scoring.decision_ledger import bypass_ledger_reads
@@ -56,6 +58,69 @@ METRICS_SCHEMA_VERSION = "batch-observation-metrics@1"
 RUNNER_LEASE_SECONDS = 120
 RUNNER_HEARTBEAT_SECONDS = 15
 QUEUE_ITEM_LEASE_SECONDS = 330
+# 计入「模型失败率」的错误码；额度耗尽也是模型侧失败，不能算成检查器失败。
+LLM_FAILURE_CODES = ("timeout", "rate_limited", "quota_exhausted", "llm_failure")
+# 连接的并发名额已满时，队列消息延后再来；排得越靠后等得越久，减少空转的函数调用。
+CONNECTION_WAIT_BASE_SECONDS = 30
+CONNECTION_WAIT_MAX_SECONDS = 300
+
+
+class ConnectionAtCapacityError(Exception):
+    """该批次所用连接正在评分的论文数已达上限；队列消费方应延后重投，而不是失败。"""
+
+    def __init__(self, retry_after_seconds: int):
+        super().__init__(f"AI connection is at its concurrency limit; retry in {retry_after_seconds}s")
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _batch_connection_limit(session, batch):
+    """批次绑定的私有连接声明的并发上限；没有绑定或没有声明时返回 None。"""
+
+    if batch is None or not batch.ai_connection_id:
+        return None
+    options = session.scalar(
+        select(AIConnection.provider_options).where(AIConnection.id == batch.ai_connection_id)
+    )
+    return connection_max_concurrency(options)
+
+
+def _ensure_connection_capacity(session, *, job, item, batch, now):
+    """跨实例按连接限流：锁住连接行，再数它在所有批次里正在评分（租约未过期）的论文。
+
+    厂商的并发上限按 Key 计算；队列可能同时把同一连接的多篇论文投给不同实例。
+    名额已满就抛出 ConnectionAtCapacityError，由消费方投递延迟消息后正常确认，
+    不占用队列的重投次数。
+    """
+
+    limit = _batch_connection_limit(session, batch)
+    if limit is None:
+        return
+    # 同一连接的领取在这里串行；任务行已在调用方锁住，加锁顺序固定为 任务 → 连接。
+    session.execute(
+        select(AIConnection.id).where(AIConnection.id == batch.ai_connection_id).with_for_update()
+    )
+    lease_cutoff = now - timedelta(seconds=QUEUE_ITEM_LEASE_SECONDS)
+    running = session.scalar(
+        select(func.count(BatchScoringItem.id))
+        .join(BatchScoringJob, BatchScoringJob.id == BatchScoringItem.job_id)
+        .join(GradingBatch, GradingBatch.id == BatchScoringJob.grading_batch_id)
+        .where(
+            GradingBatch.ai_connection_id == batch.ai_connection_id,
+            BatchScoringItem.status == "running",
+            BatchScoringItem.started_at > lease_cutoff,
+            BatchScoringItem.id != item.id,
+        )
+    )
+    if running < limit:
+        return
+    ahead = sum(
+        1
+        for other in job.items
+        if other.status == "pending"
+        and (other.created_at, other.id) < (item.created_at, item.id)
+    )
+    wait = min(CONNECTION_WAIT_MAX_SECONDS, CONNECTION_WAIT_BASE_SECONDS * (1 + ahead // limit))
+    raise ConnectionAtCapacityError(wait)
 ATTENTION_FAILURE_HOURS = 24
 
 _THRESHOLD_DIRECTIONS = {
@@ -350,6 +415,10 @@ def create_batch_scoring_job(
         raise ValueError("batch not found")
     if not batch.papers:
         raise ValueError("batch has no papers")
+    # 本地 worker 按 max_workers 并行评分；不能超过连接声明的并发上限（厂商按 Key 限并发）。
+    connection_limit = _batch_connection_limit(session, batch)
+    if connection_limit is not None:
+        max_workers = min(max_workers, connection_limit)
     policy = validate_observation_policy(
         observation_policy
         if observation_policy is not None
@@ -1007,12 +1076,12 @@ def _aggregate_metrics(job):
     }
     llm_failure_count = sum(
         attempt_error_counts.get(code, 0)
-        for code in ("timeout", "rate_limited", "llm_failure")
+        for code in LLM_FAILURE_CODES
     )
     checker_failure_count = sum(
         value
         for code, value in attempt_error_counts.items()
-        if code not in ("timeout", "rate_limited", "llm_failure")
+        if code not in LLM_FAILURE_CODES
     )
     deltas = [
         value.get("legacy_core_delta")
@@ -1220,6 +1289,9 @@ def _claim_queue_item(session_factory, *, job_id, item_id):
             item.status = "pending"
             item.finished_at = None
 
+        batch = session.get(GradingBatch, job.grading_batch_id)
+        _ensure_connection_capacity(session, job=job, item=item, batch=batch, now=now)
+
         if item.attempt_count == 0:
             item.baseline_scoring_run_id = session.scalar(
                 select(ScoringRun.id)
@@ -1235,7 +1307,6 @@ def _claim_queue_item(session_factory, *, job_id, item_id):
         job.started_at = job.started_at or now
         job.finished_at = None
         job.heartbeat_at = now
-        batch = session.get(GradingBatch, job.grading_batch_id)
         if batch is not None and batch.status != "scoring":
             batch_state.apply_event(session, batch, "start_scoring")
         _set_job_counts(job)

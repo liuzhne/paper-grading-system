@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     # cap and the per-paper estimate are checked before a job starts; the
     # per-paper cap is also enforced on actual usage while a paper is scored.
     SCORING_MAX_INPUT_TOKENS_PER_PAPER: int = Field(default=0, ge=0)
+    # 一次「AI 起草扣分细则」请求的总时间预算（秒）。Vercel 函数最长 300 秒，留出合并、
+    # 校验与返回的余量；没有函数时长限制的自部署可以调大，0 表示不限。
+    RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS: float = Field(default=260.0, ge=0)
     SCORING_MAX_INPUT_TOKENS_PER_BATCH: int = Field(default=0, ge=0)
     MANUAL_REVIEW_QUEUE_ENABLED: bool = True
     PROVIDER_CIRCUIT_BREAKER_ENABLED: bool = True

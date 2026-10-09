@@ -1023,3 +1023,24 @@ Compose 拓扑：`caddy` → `app`（迁移 + uvicorn）；`worker`（同一镜�
 - `POST /api/papers/{id}/score` 与 `/api/scoring-runs/{id}/retry` 把它映射为 503。
 
 维护记录：2026-10-08 · Compose 后台评分 worker：Compose 拓扑新增 worker；缺少模型改为专门的错误类型（同步评分 500 → 503）；无数据模型变化。
+
+### 2026-10-08 连接级并发上限与模型调用诊断
+
+- **配置**：`ai_connections.provider_options.max_concurrency`（`SCHEDULING_OPTION_KEYS`，从 `ConnectionRuntime.snapshot()` 中排除）。`llm/factory.get_llm_scorer` 设置 `scorer.max_concurrency`；`scorer_concurrency(scorer, default)` 计算有效并发。
+- **起草**：`ai_rule_drafter.draft_deduction_rules` → `_run_draft_batches(..., max_concurrency)`；每批 `complete_json(..., attempts_limit=1, rate_limit_retries=2)`。
+- **归类**：`RubricsView.classifyUnits` 读取当前连接的 `provider_options.max_concurrency` → `classifyInBatches({ concurrency })`；后端 `llm_classifier` 传 `rate_limit_retries=2`。
+- **批量评分**：
+  - `create_batch_scoring_job` 用 `_batch_connection_limit` 压低 `max_workers`；
+  - `_claim_queue_item` → `_ensure_connection_capacity`：锁连接行（加锁顺序 任务 → 连接），统计运行中且租约未过期的条目，满了抛 `ConnectionAtCapacityError(retry_after_seconds)`；
+  - `vercel_queue.score_batch_item` 捕获后 `send(..., delay=...)`，幂等键唯一，然后正常确认。
+- **适配器**：两个适配器的 `_post_with_retry(..., rate_limit_retries)`：`attempts = base_attempts + rate_limit_retries`，429 可以用完全部次数，超时和 5xx 只用 `base_attempts`。每次尝试都调用 `call_log.log_call_succeeded` / `log_call_failed`；Langfuse generation 的 metadata 增加 `routed_model`、`upstream_provider`。
+
+维护记录：2026-10-08 · 连接并发上限与 429 重试：调用链增加连接并发与队列延迟投递；无数据模型或接口变化。
+
+### 2026-10-09 起草时间预算与额度耗尽
+
+- 路由 `draft_rubric_deduction_rules` 按请求计算 `deadline = monotonic() + RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS`，传给 `draft_deduction_rules(deadline=...)`。
+- `draft_deduction_rules` 把它传给 `_run_draft_batches(has_time=...)`（每批开始前检查，含第一批）、`_draft_batch_with_repair(deadline=...)`、`_draft_deduction_rules_once(deadline=...)`，再传给适配器 `complete_json(deadline=...)` → `_post_with_retry`：用 `retry.deadline_timeout` 压低每次调用超时，用 `retry.retry_fits_before_deadline` 决定是否还能重试。
+- `llm/errors.project_provider_error`：HTTP 429 加上 `_quota_exhausted(error_type, provider_code)` → `ProviderErrorCode.QUOTA_EXHAUSTED`（不可重试）。适配器的 429 额外重试要求 `projected.retryable`。
+
+维护记录：2026-10-09 · 起草时间预算与额度耗尽：调用链增加截止时间；错误分类新增一类；无数据模型变化。

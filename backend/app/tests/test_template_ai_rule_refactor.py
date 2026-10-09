@@ -1,5 +1,9 @@
+import time
+
 import httpx
 import pytest
+
+from backend.app.core.config import settings
 
 from backend.app.services.rubric_import.ai_rule_drafter import (
     AIRuleDraftValidationError,
@@ -693,7 +697,15 @@ def test_openai_responses_drafting_uses_same_schema_and_dedicated_budget():
     assert calls[0]["max_output_tokens"] == AI_RULE_DRAFT_MAX_OUTPUT_TOKENS
     assert calls[0]["text"]["format"]["type"] == "json_schema"
     assert calls[0]["text"]["format"]["strict"] is True
-    assert options[0] == {"attempts_limit": 1, "timeout_seconds": AI_RULE_DRAFT_TIMEOUT_SECONDS}
+    # 截止时间一路传到适配器，约束每次调用与重试（不越过请求的时间预算）。
+    deadline = options[0].pop("deadline")
+    assert 0 < deadline - time.monotonic() <= settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
+    # 超时不重试（attempts_limit=1），429 另有两次按 Retry-After 的等待。
+    assert options[0] == {
+        "attempts_limit": 1,
+        "timeout_seconds": AI_RULE_DRAFT_TIMEOUT_SECONDS,
+        "rate_limit_retries": 2,
+    }
 
 
 @pytest.mark.parametrize("groups", [None, 4, {}, [4], [{"group_code": "G", "mutex_group": "M", "cap_points": 2, "rules": 4}]])
@@ -815,7 +827,8 @@ def test_explicit_connection_timeout_wins_over_draft_default():
         draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
 
     assert len(calls) == 1
-    assert "timeout" not in calls[0]  # 使用连接自己的客户端超时
+    # 生效的是连接自己的 45 秒，而不是起草默认的 120 秒；有截止时间时取两者与剩余预算的较小值。
+    assert calls[0]["timeout"] == 45
     assert "45 秒" in caught.value.message
     rate_limit.reset_provider_runtime_for_tests()
 

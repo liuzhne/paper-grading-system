@@ -1565,3 +1565,57 @@ npm --prefix frontend/workbench run test:unit -- src/lib/classification-batches.
 完整验证以 CI 的 `docker-compose-smoke` 为准：`up --wait` 后 `worker` 必须是 running；`smoke_deployment --scoring fail-closed` 输出 `deployment-smoke@2`，`background_job.item_error_code=PLATFORM_MODEL_MISSING`，`synchronous_scoring=refused`。
 
 维护记录：2026-10-08 · Compose 后台评分 worker：新增“任务一直排队”“未配置平台模型”“CI 冒烟假绿”的排查，以及 worker 重启说明、本地冒烟隔离注意事项和冒烟模式说明。
+
+### 2026-10-08 连接并发上限、429 重试与调用日志
+
+设置：账户与连接 → 对应连接点“并发上限” → 填写厂商允许的并发数（Z.ai 免费档的 GLM-4.7-Flash 填 1），留空表示不限制。修改立即生效，不影响已创建的评分任务。新建连接可在“高级设置”里填写。
+
+查看生产调用（不含正文）：
+
+```bash
+vercel logs --environment production --since 30m --query "llm_call" --json
+```
+
+- `llm_call_failed … code=rate_limited status=429 provider_code=1302 … retry=yes`：被限流，正在按 `Retry-After` 重试。
+- `llm_call … routed_model=… upstream=…`：成功，并显示实际路由到的模型和上游服务商。
+- `llm_call_error_envelope … provider_code=… upstream=…`：200 但响应体是错误（聚合平台的上游失败）。
+- `batch_scoring_item_deferred … delay_seconds=…`：批量评分时连接名额已满，这篇论文延后再领取，属于正常现象。
+
+排错：
+- **现象**：设置了并发上限后，起草仍然出现 `rate_limited`，但 `retry=yes` 之后成功了。
+  - 真正原因：厂商除了并发，还有频率限制，或者模型本身繁忙；重试已经兜住。如果 `provider_code` 一直是“频率超额”类的代码，说明请求太密，可以降低使用强度。
+- **现象**：重试用完仍然失败，`provider_code` 每次都一样。
+  - 真正原因：额度耗尽或账户状态问题（看厂商错误码文档），等待重试无效，需要换 Key 或换模型。
+- **现象**：批量评分进度很慢，日志里大量 `batch_scoring_item_deferred`。
+  - 真正原因：连接的并发上限设得较小（例如 1），论文只能一篇一篇评，这是预期行为。需要更快就换支持更高并发的 Key。
+- **注意**：归类的并发上限由页面执行；同一账号开多个标签页同时归类，仍可能超出上限。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_connection_concurrency_and_rate_limits.py
+npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js src/lib/classification-batches.test.js
+```
+
+发布：无迁移、无新环境变量，OpenAPI 不变；`public/` 已重建。回滚时 revert 本次提交并重建静态产物。回滚前先在账户页清空各连接的并发上限：旧代码的复现快照会包含 `max_concurrency`，新代码期间创建、绑定了带上限连接的评分任务会报“连接配置已变更”，只能重新创建任务。
+
+维护记录：2026-10-08 · 连接并发上限与 429 重试：新增设置方法、生产日志查询与字段说明，以及限流、配额和批量变慢的排查。
+
+### 2026-10-09 起草时间预算与额度耗尽
+
+排错：
+- **现象**：起草返回“该评分项需要分 N 批生成……来不及在单次请求的时间上限内完成”（`AI_DRAFT_TIME_BUDGET_EXCEEDED`，503）。
+  - 报错指向：看起来像服务端超时。
+  - 真正原因：连接的并发上限小（例如 1）、模型慢、规则多，几批串行加起来超过了预算（默认 260 秒，为 Vercel 的 300 秒上限留出余量）；或者一次请求里起草了多个评分项，预算按整次请求共用。每批开始前要求至少还剩 min(单次超时, 60 秒)，开始后的调用和重试都会被压到截止时间以内。
+  - 处理：调高该连接的并发上限（厂商允许的前提下），换响应更快的模型，或精简该评分项的原文规则。自部署没有 300 秒上限，可以调大 `RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS`，设为 0 表示不限。
+- **现象**：提示“AI 连接的额度已用完（余额不足或配额耗尽）”，日志里是 `llm_call_failed … code=quota_exhausted status=429 provider_code=1113 … retry=no`。
+  - 真正原因：厂商账户欠费、余额不足，或额度用完，等待和重试都不会恢复。去厂商平台充值，或者换一个连接。
+  - 注意：只有 OpenAI 的 `insufficient_quota` 和智谱/Z.ai 的 1113 会被识别为额度耗尽；其它厂商的同类 429 仍会显示为“限流”并按限流重试。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_connection_concurrency_and_rate_limits.py
+```
+
+维护记录：2026-10-09 · 起草时间预算与额度耗尽：新增两类报错的排查方法和预算配置说明。

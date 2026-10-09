@@ -20,8 +20,12 @@ from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
 from backend.app.services.llm.debug_logging import log_llm_retry_sleep
 from backend.app.services.llm.errors import project_provider_error
+from backend.app.services.llm.call_log import log_call_failed
+from backend.app.services.llm.call_log import log_call_succeeded
 from backend.app.services.llm.errors import raise_provider_call_error
 from backend.app.services.llm.retry import exponential_delay_seconds
+from backend.app.services.llm.retry import deadline_timeout
+from backend.app.services.llm.retry import retry_fits_before_deadline
 from backend.app.services.llm.retry import is_retryable_http_error
 from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_reason
@@ -213,10 +217,14 @@ class OpenAICompatibleChatScorer(LLMScorer):
         raw = self._post_core_request(envelopes[0], validated[0][1], request)
         return decode_core_group_response(envelopes, raw, request)
 
-    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None):
+    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None):
         request_options = {}
         if attempts_limit is not None:
             request_options["attempts_limit"] = attempts_limit
+        if rate_limit_retries:
+            request_options["rate_limit_retries"] = rate_limit_retries
+        if deadline is not None:
+            request_options["deadline"] = deadline
         if default_timeout_seconds is not None and not self.timeout_seconds_explicit:
             request_options["timeout_seconds"] = max(self.timeout_seconds, default_timeout_seconds)
         body = {
@@ -255,13 +263,16 @@ class OpenAICompatibleChatScorer(LLMScorer):
         response.raise_for_status()
         return _parse_chat_json_output(response.json())
 
-    def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None):
+    def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None):
         url = "%s/chat/completions" % self.base_url
         headers = {
             "Authorization": "Bearer %s" % self.api_key,
             "Content-Type": "application/json",
         }
-        attempts = max(1, settings.OPENAI_COMPATIBLE_MAX_RETRIES + 1) if attempts_limit is None else max(1, attempts_limit)
+        base_attempts = max(1, settings.OPENAI_COMPATIBLE_MAX_RETRIES + 1) if attempts_limit is None else max(1, attempts_limit)
+        # 429 另有额度：超时与 5xx 只用 base_attempts（起草、归类传 1，避免把一次超时放大成
+        # 多次长等待），限流则按 Retry-After 再等几次。默认不追加，评分路径行为不变。
+        attempts = base_attempts + max(0, rate_limit_retries or 0)
         last_error = None
         with observation(
             "llm_generation",
@@ -281,6 +292,16 @@ class OpenAICompatibleChatScorer(LLMScorer):
             },
         ) as generation:
             for attempt in range(attempts):
+                # 调用方的截止时间（例如起草的总预算）同时约束每次调用的超时，
+                # 否则单次调用可以越过预算，被平台强行终止。
+                # 没有截止时间、也没显式超时时不传 timeout，沿用客户端默认值（与改动前一致）。
+                attempt_timeout, expired = deadline_timeout(
+                    deadline,
+                    timeout_seconds if timeout_seconds is not None
+                    else (self.timeout_seconds if deadline is not None else None),
+                )
+                if expired:
+                    raise_provider_call_error(self.provider_name, last_error or httpx.ReadTimeout("request deadline reached"))
                 try:
                     log_llm_request(
                         self.provider_name, url, headers, payload, attempt, attempts
@@ -301,7 +322,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
                         ) as slot:
                             response = self.client.post(
                                 url, headers=headers, json=payload,
-                                **({"timeout": timeout_seconds} if timeout_seconds is not None else {}),
+                                **({"timeout": attempt_timeout} if attempt_timeout is not None else {}),
                             )
                             slot.record_response(response)
                     elapsed_ms = (time.perf_counter() - started) * 1000
@@ -314,6 +335,10 @@ class OpenAICompatibleChatScorer(LLMScorer):
                     )
                     response.raise_for_status()
                     data = response.json()
+                    log_call_succeeded(
+                        self.provider_name, self.model_name, data,
+                        elapsed_ms=elapsed_ms, attempt=attempt,
+                    )
                     self.usage_meter.record_success(_usage_from_chat(data))
                     generation.update(
                         output={
@@ -325,6 +350,8 @@ class OpenAICompatibleChatScorer(LLMScorer):
                         metadata={
                             "elapsed_ms": round(elapsed_ms, 2),
                             "attempts_used": attempt + 1,
+                            "routed_model": data.get("model") if isinstance(data, dict) else None,
+                            "upstream_provider": data.get("provider") if isinstance(data, dict) else None,
                         },
                     )
                     return response
@@ -338,9 +365,18 @@ class OpenAICompatibleChatScorer(LLMScorer):
                         metadata={"provider_error": projected.to_mapping()},
                     )
                     log_llm_exception(self.provider_name, exc, attempt, attempts)
-                    if not projected.retryable or attempt == attempts - 1:
+                    if projected.code == "rate_limited":
+                        will_retry = projected.retryable and attempt < attempts - 1
+                    else:
+                        will_retry = projected.retryable and attempt < base_attempts - 1
+                    delay_seconds = retry_delay_seconds(exc, attempt) if will_retry else 0.0
+                    will_retry = will_retry and retry_fits_before_deadline(deadline, delay_seconds)
+                    log_call_failed(
+                        self.provider_name, self.model_name, projected,
+                        attempt=attempt, attempts=attempts, will_retry=will_retry,
+                    )
+                    if not will_retry:
                         raise_provider_call_error(self.provider_name, exc)
-                    delay_seconds = retry_delay_seconds(exc, attempt)
                     log_llm_retry_sleep(
                         self.provider_name,
                         delay_seconds,
@@ -358,9 +394,15 @@ class OpenAICompatibleChatScorer(LLMScorer):
                         metadata={"provider_error": projected.to_mapping()},
                     )
                     log_llm_exception(self.provider_name, exc, attempt, attempts)
-                    if attempt == attempts - 1:
+                    will_retry = attempt < base_attempts - 1
+                    delay_seconds = exponential_delay_seconds(attempt) if will_retry else 0.0
+                    will_retry = will_retry and retry_fits_before_deadline(deadline, delay_seconds)
+                    log_call_failed(
+                        self.provider_name, self.model_name, projected,
+                        attempt=attempt, attempts=attempts, will_retry=will_retry,
+                    )
+                    if not will_retry:
                         raise_provider_call_error(self.provider_name, exc)
-                    delay_seconds = exponential_delay_seconds(attempt)
                     log_llm_retry_sleep(
                         self.provider_name,
                         delay_seconds,

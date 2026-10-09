@@ -214,7 +214,8 @@ def recognize_structure(sheets: list[SheetView], scorer, *, failure_codes, known
             hints = {
                 "authentication_failed": "AI 连接鉴权失败，请检查 API Key 与地域是否匹配。",
                 "permission_denied": "AI 连接没有调用权限，请检查模型授权。",
-                "rate_limited": "AI 调用受到限流或额度限制，请检查平台额度后重试。",
+                "rate_limited": "AI 调用受到限流，请稍后重试。",
+                "quota_exhausted": "AI 连接的额度已用完（余额不足或配额耗尽），请充值或更换连接后重试。",
                 "request_timeout": "AI 请求超时，请稍后重试或调整连接超时。",
                 "model_or_endpoint_not_found": "AI 模型或接口地址不存在，请检查连接配置。",
                 "invalid_request": "AI 接口拒绝了请求参数，请检查模型与协议兼容性。",

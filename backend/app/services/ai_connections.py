@@ -35,7 +35,12 @@ _ALLOWED_OPTION_KEYS = {
     "response_format_json",
     "thinking_type",
     "service_tier",
+    "max_concurrency",
 }
+# 只决定「同时发几个请求」，不影响模型看到什么、返回什么；不进复现快照。
+# 否则用户为了躲 429 调低并发，会让所有已锁定该连接的批次报「连接配置已变更」。
+SCHEDULING_OPTION_KEYS = frozenset({"max_concurrency"})
+MAX_CONNECTION_CONCURRENCY = 8
 _RATE_LOCK = threading.Lock()
 _RATE_WINDOWS: dict[str, deque[float]] = {}
 
@@ -88,8 +93,19 @@ class ConnectionRuntime:
             "provider_type": self.provider_type,
             "base_url": self.base_url,
             "model_name": self.model_name,
-            "provider_options": dict(sorted(self.provider_options.items())),
+            "provider_options": dict(sorted(
+                (key, value)
+                for key, value in self.provider_options.items()
+                if key not in SCHEDULING_OPTION_KEYS
+            )),
         }
+
+
+def connection_max_concurrency(options: dict | None) -> int | None:
+    """连接声明的同时请求上限；未设置返回 None（由各调用方用自己的默认值）。"""
+
+    value = (options or {}).get("max_concurrency")
+    return int(value) if value is not None else None
 
 
 def _master_key() -> bytes:
@@ -215,6 +231,13 @@ def validate_provider_options(options: dict | None) -> dict:
         raise ValueError("response_format_json must be boolean")
     if "thinking_type" in normalized and not isinstance(normalized["thinking_type"], str):
         raise ValueError("thinking_type must be text")
+    if "max_concurrency" in normalized:
+        value = normalized["max_concurrency"]
+        # bool 是 int 的子类：True 会被当成 1 静默接受。
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_CONNECTION_CONCURRENCY:
+            raise ValueError(
+                "max_concurrency must be an integer between 1 and %d" % MAX_CONNECTION_CONCURRENCY
+            )
     if "service_tier" in normalized and normalized["service_tier"] not in {
         "auto",
         "on_demand",
