@@ -108,8 +108,9 @@ def test_drafting_passes_the_scorers_declared_limit(monkeypatch):
 
     seen = {}
 
-    def fake_run(batches, run, *, max_concurrency):
+    def fake_run(batches, run, *, max_concurrency, has_time):
         seen["max_concurrency"] = max_concurrency
+        seen["has_time"] = has_time()
         raise Stop
 
     monkeypatch.setattr(ai_rule_drafter, "_run_draft_batches", fake_run)
@@ -119,6 +120,7 @@ def test_drafting_passes_the_scorers_declared_limit(monkeypatch):
             criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis",
         )
     assert seen["max_concurrency"] == 1
+    assert seen["has_time"] is True  # 刚开始，预算充足
 
 
 # ---- 适配器：429 重试与诊断日志 ---------------------------------------------
@@ -327,3 +329,137 @@ def test_queue_consumer_defers_with_a_fresh_delayed_message(monkeypatch):
     keys = [value[2]["idempotency_key"] for value in sent]
     # 同键会被队列去重：延迟消息一旦被吞，这篇论文就再没人领。
     assert all(key.startswith("score-item-1-wait-") for key in keys) and keys[0] != keys[1]
+
+
+# ---- 额度耗尽：同是 429，但等待不会恢复 ---------------------------------------
+
+
+def _project(status, body):
+    from backend.app.services.llm.errors import project_provider_error
+
+    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+    response = httpx.Response(status, json=body, request=request)
+    return project_provider_error(httpx.HTTPStatusError("error", request=request, response=response))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"type": "insufficient_quota", "code": "insufficient_quota", "message": "quota"}},
+        {"error": {"code": "1113", "message": "余额不足或无可用资源包,请充值。"}},
+    ],
+)
+def test_quota_exhausted_429_is_not_retryable(body):
+    projected = _project(429, body)
+    assert (projected.code, projected.retryable) == ("quota_exhausted", False)
+
+
+def test_concurrency_429_stays_a_retryable_rate_limit():
+    projected = _project(429, {"error": {"code": "1302", "message": "并发数过高"}})
+    assert (projected.code, projected.retryable) == ("rate_limited", True)
+
+
+def test_quota_exhausted_is_not_retried_even_with_rate_limit_budget(sleeps, caplog):
+    calls = []
+    exhausted = httpx.Response(429, json={"error": {"code": "1113", "message": "余额不足"}})
+    scorer = _scorer([exhausted], calls, "https://zai-d.example/v4")
+    with caplog.at_level(logging.INFO, logger="paper_grading.llm.calls"):
+        with pytest.raises(ProviderCallError) as excinfo:
+            scorer.complete_json("系统", {"units": []}, attempts_limit=1, rate_limit_retries=2)
+    assert excinfo.value.error.code == "quota_exhausted"
+    assert len(calls) == 1 and sleeps == []
+    assert "code=quota_exhausted status=429 provider_code=1113" in caplog.text
+    assert "retry=no" in caplog.text
+
+
+# ---- 起草的总时间预算 ---------------------------------------------------------
+
+
+def test_first_batch_always_starts_and_budget_stops_before_the_next_one():
+    from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
+
+    started = []
+    budget = iter([True, False])  # 第 2 批开始前还有时间，第 3 批开始前没有了
+
+    with pytest.raises(AIRuleDraftValidationError) as excinfo:
+        ai_rule_drafter._run_draft_batches(
+            ["b1", "b2", "b3", "b4"], lambda batch: started.append(batch) or batch,
+            max_concurrency=1, has_time=lambda: next(budget),
+        )
+
+    assert started == ["b1", "b2"]
+    error = excinfo.value
+    assert error.code == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
+    assert "分 4 批" in error.message and "已完成 2 批" in error.message and "同时只允许 1 个" in error.message
+    assert "并发上限" in error.user_action
+
+
+def test_a_single_slow_connection_still_gets_its_first_batch():
+    started = []
+    assert ai_rule_drafter._run_draft_batches(
+        ["only"], lambda batch: started.append(batch) or batch, max_concurrency=1, has_time=lambda: False,
+    ) == ["only"]
+    assert started == ["only"]
+
+
+def test_rate_limit_waits_shrink_with_the_remaining_budget():
+    scorer = type("S", (), {"timeout_seconds": 0, "timeout_seconds_explicit": False})()  # 单次等待按 120 秒算
+    now = time.monotonic()
+    assert ai_rule_drafter._budgeted_rate_limit_retries(None, scorer) == 2
+    assert ai_rule_drafter._budgeted_rate_limit_retries(now + 120 + 75, scorer) == 2
+    assert ai_rule_drafter._budgeted_rate_limit_retries(now + 120 + 40, scorer) == 1
+    assert ai_rule_drafter._budgeted_rate_limit_retries(now + 120 + 5, scorer) == 0
+    assert ai_rule_drafter._budgeted_rate_limit_retries(now - 1, scorer) == 0
+
+
+def test_repair_is_skipped_when_it_would_overrun_the_budget(monkeypatch):
+    from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
+
+    attempts = []
+
+    def invalid(**kwargs):
+        attempts.append(kwargs)
+        raise AIRuleDraftValidationError("AI_DRAFT_OUTPUT_INVALID", "模型未返回有效的规则 JSON。", "请重试。")
+
+    monkeypatch.setattr(ai_rule_drafter, "_draft_deduction_rules_once", invalid)
+    scorer = type("S", (), {"timeout_seconds": 0, "timeout_seconds_explicit": False})()
+    with pytest.raises(AIRuleDraftValidationError, match="有效的规则 JSON"):
+        ai_rule_drafter._draft_batch_with_repair(
+            criterion={}, input_analysis={}, scorer=scorer, business_profile_key="thesis",
+            deadline=time.monotonic() + 30,
+        )
+    assert len(attempts) == 1  # 不够再等一次完整调用，就不做修正
+    assert attempts[0]["rate_limit_retries"] == 0
+
+
+def test_draft_endpoint_shares_one_deadline_and_reports_budget_exhaustion(client, monkeypatch):
+    from backend.app.api.routes import rubrics as rubric_routes
+    from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
+    from backend.app.tests.test_template_ai_rule_refactor import _criterion
+
+    created = client.post("/api/rubrics", json={
+        "name": "AI draft time budget", "version": "v1", "total_score": 20,
+        "criteria": [_criterion(scoring_mode="review_only")],
+    })
+    assert created.status_code == 200, created.text
+    deadlines = []
+
+    def out_of_time(**kwargs):
+        deadlines.append(kwargs["deadline"])
+        raise AIRuleDraftValidationError(
+            "AI_DRAFT_TIME_BUDGET_EXCEEDED", "该评分项需要分 4 批生成", "请调高该连接的并发上限",
+        )
+
+    monkeypatch.setattr(rubric_routes, "get_llm_scorer", lambda *a, **k: object())
+    monkeypatch.setattr(rubric_routes, "draft_deduction_rules", out_of_time)
+    response = client.post(
+        f"/api/rubrics/{created.json()['id']}/draft-deduction-rules", json={"criteria": [_criterion()]},
+    )
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
+    # 原样重试还会撞上同一个上限，不能提示「稍后重试」。
+    assert detail["retryable"] is False
+    budget = settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
+    assert deadlines and 0 < deadlines[0] - time.monotonic() <= budget

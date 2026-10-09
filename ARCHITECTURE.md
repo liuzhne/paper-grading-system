@@ -1036,3 +1036,11 @@ Compose 拓扑：`caddy` → `app`（迁移 + uvicorn）；`worker`（同一镜�
 - **适配器**：两个适配器的 `_post_with_retry(..., rate_limit_retries)`：`attempts = base_attempts + rate_limit_retries`，429 可以用完全部次数，超时和 5xx 只用 `base_attempts`。每次尝试都调用 `call_log.log_call_succeeded` / `log_call_failed`；Langfuse generation 的 metadata 增加 `routed_model`、`upstream_provider`。
 
 维护记录：2026-10-08 · 连接并发上限与 429 重试：调用链增加连接并发与队列延迟投递；无数据模型或接口变化。
+
+### 2026-10-09 起草时间预算与额度耗尽
+
+- 路由 `draft_rubric_deduction_rules` 按请求计算 `deadline = monotonic() + RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS`，传给 `draft_deduction_rules(deadline=...)`。
+- `draft_deduction_rules` 把它传给 `_run_draft_batches(has_time=...)`、`_draft_batch_with_repair(deadline=...)` 和 `_draft_deduction_rules_once(rate_limit_retries=_budgeted_rate_limit_retries(...))`。
+- `llm/errors.project_provider_error`：HTTP 429 加上 `_quota_exhausted(error_type, provider_code)` → `ProviderErrorCode.QUOTA_EXHAUSTED`（不可重试）。适配器的 429 额外重试要求 `projected.retryable`。
+
+维护记录：2026-10-09 · 起草时间预算与额度耗尽：调用链增加截止时间；错误分类新增一类；无数据模型变化。

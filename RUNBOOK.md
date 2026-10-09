@@ -1600,3 +1600,22 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 发布：无迁移、无新环境变量，OpenAPI 不变；`public/` 已重建。回滚时 revert 本次提交并重建静态产物。回滚前先在账户页清空各连接的并发上限：旧代码的复现快照会包含 `max_concurrency`，新代码期间创建、绑定了带上限连接的评分任务会报“连接配置已变更”，只能重新创建任务。
 
 维护记录：2026-10-08 · 连接并发上限与 429 重试：新增设置方法、生产日志查询与字段说明，以及限流、配额和批量变慢的排查。
+
+### 2026-10-09 起草时间预算与额度耗尽
+
+排错：
+- **现象**：起草返回“该评分项需要分 N 批生成……来不及在单次请求的时间上限内完成”（`AI_DRAFT_TIME_BUDGET_EXCEEDED`，503）。
+  - 报错指向：看起来像服务端超时。
+  - 真正原因：连接的并发上限小（例如 1）、模型慢、规则多，几批串行加起来超过了预算（默认 260 秒，为 Vercel 的 300 秒上限留出余量）。
+  - 处理：调高该连接的并发上限（厂商允许的前提下），换响应更快的模型，或精简该评分项的原文规则。自部署没有 300 秒上限，可以调大 `RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS`，设为 0 表示不限。
+- **现象**：提示“AI 连接的额度已用完（余额不足或配额耗尽）”，日志里是 `llm_call_failed … code=quota_exhausted status=429 provider_code=1113 … retry=no`。
+  - 真正原因：厂商账户欠费、余额不足，或额度用完，等待和重试都不会恢复。去厂商平台充值，或者换一个连接。
+  - 注意：只有 OpenAI 的 `insufficient_quota` 和智谱/Z.ai 的 1113 会被识别为额度耗尽；其它厂商的同类 429 仍会显示为“限流”并按限流重试。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_connection_concurrency_and_rate_limits.py
+```
+
+维护记录：2026-10-09 · 起草时间预算与额度耗尽：新增两类报错的排查方法和预算配置说明。

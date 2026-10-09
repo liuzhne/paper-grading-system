@@ -352,7 +352,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
                     )
                     log_llm_exception(self.provider_name, exc, attempt, attempts)
                     if projected.code == "rate_limited":
-                        will_retry = attempt < attempts - 1
+                        will_retry = projected.retryable and attempt < attempts - 1
                     else:
                         will_retry = projected.retryable and attempt < base_attempts - 1
                     log_call_failed(

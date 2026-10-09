@@ -441,6 +441,10 @@ _PROVIDER_FAILURE_TEXT = {
         "AI 服务限流，请求被拒绝",
         "请等待约一分钟后重试；原有条款未改变。",
     ),
+    "quota_exhausted": (
+        "AI 连接的额度已用完（余额不足或配额耗尽）",
+        "等待重试不会恢复；请到厂商平台充值或更换连接后再试，原有条款未改变。",
+    ),
     "capacity_unavailable": (
         "AI 服务当前容量不足",
         "请稍后重试；原有条款未改变。",
@@ -472,6 +476,7 @@ def _draft_deduction_rules_once(
     scorer,
     business_profile_key,
     repair_code=None,
+    rate_limit_retries=AI_RULE_DRAFT_RATE_LIMIT_RETRIES,
 ):
     if scorer is None or str(getattr(scorer, "provider", "")).lower() == "mock":
         raise AIRuleDraftValidationError(
@@ -543,7 +548,7 @@ def _draft_deduction_rules_once(
                 default_max_tokens=AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
                 attempts_limit=1,
                 default_timeout_seconds=AI_RULE_DRAFT_TIMEOUT_SECONDS,
-                rate_limit_retries=AI_RULE_DRAFT_RATE_LIMIT_RETRIES,
+                rate_limit_retries=rate_limit_retries,
             )
         else:
             raw = scorer.complete_json(instructions, payload)
@@ -669,7 +674,23 @@ def _draft_deduction_rules_once(
     return draft
 
 
-def _draft_batch_with_repair(*, criterion, input_analysis, scorer, business_profile_key):
+def _has_time_for_call(deadline, scorer) -> bool:
+    """剩余预算是否还够一次完整调用（按该连接的单次等待上限算）。"""
+
+    return deadline is None or deadline - time.monotonic() >= _draft_timeout_seconds(scorer)
+
+
+def _budgeted_rate_limit_retries(deadline, scorer) -> int:
+    """在单次调用之外，剩余预算还能容纳几次 429 等待（每次最多 LLM_RETRY_MAX_DELAY_SECONDS）。"""
+
+    if deadline is None:
+        return AI_RULE_DRAFT_RATE_LIMIT_RETRIES
+    spare = deadline - time.monotonic() - _draft_timeout_seconds(scorer)
+    per_wait = max(1.0, float(settings.LLM_RETRY_MAX_DELAY_SECONDS))
+    return max(0, min(AI_RULE_DRAFT_RATE_LIMIT_RETRIES, int(spare // per_wait)))
+
+
+def _draft_batch_with_repair(*, criterion, input_analysis, scorer, business_profile_key, deadline=None):
     arguments = dict(
         criterion=criterion,
         input_analysis=input_analysis,
@@ -677,7 +698,9 @@ def _draft_batch_with_repair(*, criterion, input_analysis, scorer, business_prof
         business_profile_key=business_profile_key,
     )
     try:
-        return _draft_deduction_rules_once(**arguments)
+        return _draft_deduction_rules_once(
+            **arguments, rate_limit_retries=_budgeted_rate_limit_retries(deadline, scorer),
+        )
     except AIRuleDraftValidationError as exc:
         # One repair only, for malformed model output. Never retry authentication,
         # quota, transport, or output-budget failures at this layer.
@@ -688,15 +711,25 @@ def _draft_batch_with_repair(*, criterion, input_analysis, scorer, business_prof
         }
         if exc.code not in repairable:
             raise
+        if not _has_time_for_call(deadline, scorer):
+            # 修正要再等一次完整调用；预算不够就如实报原错误，而不是让函数被平台强行终止。
+            raise
         logger.warning("rubric_ai_draft_repair validation_code=%s attempt=2", exc.code)
-        return _draft_deduction_rules_once(**arguments, repair_code=exc.code)
+        return _draft_deduction_rules_once(
+            **arguments, repair_code=exc.code,
+            rate_limit_retries=_budgeted_rate_limit_retries(deadline, scorer),
+        )
 
 
-def _run_draft_batches(batches, run, *, max_concurrency=AI_RULE_DRAFT_MAX_CONCURRENCY):
+def _run_draft_batches(batches, run, *, max_concurrency=AI_RULE_DRAFT_MAX_CONCURRENCY, has_time=lambda: True):
     """按原顺序返回各批结果；最多并发 max_concurrency 批（默认 AI_RULE_DRAFT_MAX_CONCURRENCY）。
 
     任一批失败后不再发出新批次，等已发出的批次结束（HTTP 请求无法中途撤回），
     再抛出序号最小的失败，保证同样输入得到同样的错误。
+
+    ``has_time()`` 为假时不再开始新批次（第一批总会开始）：并发上限为 1 的连接要逐批
+    串行，总时长可能超过平台给单次请求的上限；与其被强行终止、返回 504 且已完成的
+    批次全部作废，不如在开始下一批前停下，给出明确原因。
     """
 
     if len(batches) <= 1:
@@ -704,14 +737,20 @@ def _run_draft_batches(batches, run, *, max_concurrency=AI_RULE_DRAFT_MAX_CONCUR
     results = [None] * len(batches)
     errors = {}
     workers = min(max_concurrency, len(batches))
-    upcoming = iter(range(len(batches)))
+    next_index = 0
+    budget_exhausted = False
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rubric-draft") as pool:
         pending = {}
 
         def submit_next():
-            index = next(upcoming, None)
-            if index is None:
+            nonlocal next_index, budget_exhausted
+            if budget_exhausted or next_index >= len(batches):
                 return False
+            if next_index > 0 and not has_time():
+                budget_exhausted = True
+                return False
+            index = next_index
+            next_index += 1
             # 每批复制一份上下文，让观测链路挂在当前请求下；同一 Context 不能被多个线程同时进入。
             context = contextvars.copy_context()
             pending[pool.submit(context.run, run, batches[index])] = index
@@ -731,11 +770,30 @@ def _run_draft_batches(batches, run, *, max_concurrency=AI_RULE_DRAFT_MAX_CONCUR
                 pass
     if errors:
         raise errors[min(errors)]
+    if budget_exhausted:
+        completed = sum(1 for value in results if value is not None)
+        logger.warning(
+            "rubric_ai_draft_failed reason=time_budget_exhausted completed=%s batches=%s concurrency=%s",
+            completed, len(batches), workers,
+        )
+        raise AIRuleDraftValidationError(
+            "AI_DRAFT_TIME_BUDGET_EXCEEDED",
+            f"该评分项需要分 {len(batches)} 批生成，当前连接同时只允许 {workers} 个请求；"
+            f"已完成 {completed} 批，剩余批次来不及在单次请求的时间上限内完成。",
+            "请调高该连接的并发上限、换用响应更快的模型，或精简该评分项的原文规则后重试；原有条款未改变。",
+        )
     return results
 
 
-def draft_deduction_rules(*, criterion, input_analysis, scorer, business_profile_key):
-    """Draft one criterion through bounded, independently validated batches."""
+def draft_deduction_rules(*, criterion, input_analysis, scorer, business_profile_key, deadline=None):
+    """Draft one criterion through bounded, independently validated batches.
+
+    ``deadline``（time.monotonic）由路由按整个请求算一次；缺省时按
+    RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS 从现在起算，0 表示不限。
+    """
+
+    if deadline is None and settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS > 0:
+        deadline = time.monotonic() + settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
 
     criterion_value = _mapping(criterion, label="评分项")
     analysis = deepcopy(dict(input_analysis))
@@ -750,9 +808,11 @@ def draft_deduction_rules(*, criterion, input_analysis, scorer, business_profile
             input_analysis=batch_analysis,
             scorer=scorer,
             business_profile_key=business_profile_key,
+            deadline=deadline,
         ),
         # 连接声明的并发上限（例如免费档只允许 1 个）优先，超出的批次会被 429 拒绝。
         max_concurrency=scorer_concurrency(scorer, AI_RULE_DRAFT_MAX_CONCURRENCY),
+        has_time=lambda: _has_time_for_call(deadline, scorer),
     )
     for batch_index, batch_draft in enumerate(drafts, start=1):
         metadata = metadata or deepcopy(batch_draft.get("generation_metadata") or {})

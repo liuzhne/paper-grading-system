@@ -28,6 +28,7 @@ class ProviderErrorCode(str, Enum):
     REQUEST_TOO_LARGE = "request_too_large"
     UNPROCESSABLE_REQUEST = "unprocessable_request"
     RATE_LIMITED = "rate_limited"
+    QUOTA_EXHAUSTED = "quota_exhausted"
     CAPACITY_UNAVAILABLE = "capacity_unavailable"
     CANCELED = "canceled"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
@@ -154,6 +155,11 @@ def project_provider_error(exc: BaseException) -> ProviderError:
         value for value in (error_type, provider_code, provider_message) if value
     ).casefold()
     code, scope, retryable, reducible = _classify_http(status, searchable)
+    if status == 429 and _quota_exhausted(error_type, provider_code):
+        # 同是 429，余额或配额用完时等几十秒也不会好；判为不可重试，提示去充值或换 Key。
+        code, scope, retryable, reducible = (
+            ProviderErrorCode.QUOTA_EXHAUSTED, ProviderErrorScope.CONNECTION, False, False,
+        )
     headers = {str(k).casefold(): str(v) for k, v in response.headers.items()}
     rate_headers = {
         name: _bounded(headers[name], 200)
@@ -184,6 +190,19 @@ def raise_provider_call_error(provider: str, exc: BaseException):
     if isinstance(exc, ProviderCallError):
         raise exc
     raise ProviderCallError(provider, project_provider_error(exc)) from exc
+
+
+# 只收录核实过的信号，按错误类型或错误码精确匹配（不在正文里模糊搜索，免得把限流误判成欠费）：
+# OpenAI 的 insufficient_quota；智谱 / Z.ai 的业务码 1113（账户欠费或余额不足）。
+_QUOTA_EXHAUSTED_TYPES = frozenset({"insufficient_quota"})
+_QUOTA_EXHAUSTED_CODES = frozenset({"insufficient_quota", "1113"})
+
+
+def _quota_exhausted(error_type, provider_code) -> bool:
+    return (
+        str(error_type or "").casefold() in _QUOTA_EXHAUSTED_TYPES
+        or str(provider_code or "").casefold() in _QUOTA_EXHAUSTED_CODES
+    )
 
 
 def _classify_http(status: int, searchable: str):
@@ -281,6 +300,7 @@ def _default_message(code):
         ProviderErrorCode.REQUEST_TOO_LARGE: "provider request is too large",
         ProviderErrorCode.UNPROCESSABLE_REQUEST: "provider could not process the request",
         ProviderErrorCode.RATE_LIMITED: "provider rate limit reached",
+        ProviderErrorCode.QUOTA_EXHAUSTED: "provider quota or balance exhausted",
         ProviderErrorCode.CAPACITY_UNAVAILABLE: "provider capacity unavailable",
         ProviderErrorCode.CANCELED: "provider request canceled",
         ProviderErrorCode.PROVIDER_UNAVAILABLE: "provider temporarily unavailable",

@@ -7,6 +7,7 @@ from decimal import ROUND_HALF_UP
 from types import SimpleNamespace
 
 import json
+import time
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -22,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
+from backend.app.core.config import settings
 from backend.app.db.models import Rubric
 from backend.app.db.models import AtomicRule
 from backend.app.db.models import RubricCompilation
@@ -1585,6 +1587,9 @@ def draft_rubric_deduction_rules(
     version = active.get("version") or {}
     try:
         scorer = _rubric_ai_scorer(db, principal, payload.ai_connection_id)
+        # 整个请求共用一个截止时间：一次请求带多个评分项时，也不能超过平台的函数时长上限。
+        budget = settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
+        deadline = time.monotonic() + budget if budget > 0 else None
 
         items = []
         for criterion in payload.criteria:
@@ -1628,6 +1633,7 @@ def draft_rubric_deduction_rules(
                         criterion=criterion_value,
                         input_analysis=analysis,
                         scorer=scorer,
+                        deadline=deadline,
                         business_profile_key=(
                             version.get("business_profile_key") or "thesis"
                         ),
@@ -1641,6 +1647,7 @@ def draft_rubric_deduction_rules(
         elif exc.code in {
             "AI_DRAFT_CONNECTION_MISSING",
             "AI_DRAFT_PROVIDER_ERROR",
+            "AI_DRAFT_TIME_BUDGET_EXCEEDED",
         }:
             status_code = 503
         else:

@@ -58,6 +58,8 @@ METRICS_SCHEMA_VERSION = "batch-observation-metrics@1"
 RUNNER_LEASE_SECONDS = 120
 RUNNER_HEARTBEAT_SECONDS = 15
 QUEUE_ITEM_LEASE_SECONDS = 330
+# 计入「模型失败率」的错误码；额度耗尽也是模型侧失败，不能算成检查器失败。
+LLM_FAILURE_CODES = ("timeout", "rate_limited", "quota_exhausted", "llm_failure")
 # 连接的并发名额已满时，队列消息延后再来；排得越靠后等得越久，减少空转的函数调用。
 CONNECTION_WAIT_BASE_SECONDS = 30
 CONNECTION_WAIT_MAX_SECONDS = 300
@@ -1074,12 +1076,12 @@ def _aggregate_metrics(job):
     }
     llm_failure_count = sum(
         attempt_error_counts.get(code, 0)
-        for code in ("timeout", "rate_limited", "llm_failure")
+        for code in LLM_FAILURE_CODES
     )
     checker_failure_count = sum(
         value
         for code, value in attempt_error_counts.items()
-        if code not in ("timeout", "rate_limited", "llm_failure")
+        if code not in LLM_FAILURE_CODES
     )
     deltas = [
         value.get("legacy_core_delta")
