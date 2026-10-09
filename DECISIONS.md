@@ -1333,3 +1333,27 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - 换用 Claude 后评分质量会变，按 §15 用 QWK 留出集重新锚定需要真实调用，未包含在本次交付中。
 
 维护记录：2026-10-09 · Claude 协议适配器：接受上述选择；迁移 head 升为 `0034_anthropic_messages_provider`；新增 `ANTHROPIC_TIMEOUT_SECONDS`、`ANTHROPIC_MAX_TOKENS`、`ANTHROPIC_MAX_RETRIES` 与连接参数 `effort`、`structured_output`；`PROMPT_VERSION` 不变。
+
+### 2026-10-09 旧路径信封改为冻结实例的调用参数（Accepted）
+
+背景：旧兼容路径的 PromptEnvelope 由 `base._provider_contract` 生成。它对 Chat 适配器一律读全局 `OPENAI_COMPATIBLE_*`，对 Responses 适配器读全局 `OPENAI_TEMPERATURE` / `OPENAI_MAX_OUTPUT_TOKENS`。而 `score_envelope` 只按信封发请求，于是在这条路径上：
+- AI 连接（BYOK 或平台模型）在 `provider_options` 里设置的 `max_tokens` / `max_output_tokens`、`temperature`、`response_format_json` 全部被静默忽略。例如 10-04 给百炼 kimi-k3 建议的 `max_tokens: 2400`，旧路径实际仍发 1200。
+- 没设置 `thinking_type` 的 Chat 连接收到全局默认的 `thinking: {"type": "disabled"}`。工厂注释写明 BYOK 端点只是协议兼容，只有连接选择开启时才发 `thinking`；明确设了 `thinking_type=enabled` 的连接，同样被改成 `disabled`。
+- Core 路径的 `core_runtime_provider_contract` 一直读实例，所以同一个连接在两条路径上发出的参数不同。
+
+选择：
+- `_provider_contract` 两个分支都改为读实例属性（`temperature`、`max_tokens` / `max_output_tokens`、`thinking_type`、`response_format_json`），全局设置只在实例没有该属性时回退。Responses 分支的协议约束不变：`json_schema`、不发 `thinking`。Claude 适配器经 `provider_controls()` 在函数开头提前返回，本来就读实例，不涉及。
+- **不 bump `llm_cache.PROMPT_VERSION`**（用户确认）。会改变信封的只有 AI 连接实例，它们在旧路径本来就不读写 L0。环境变量配置的实例属性就是全局设置，测试断言其信封 provider 段与旧实现逐字段相同。所以所有能进 L0 的缓存键都不变，不存在错误复用。`PROMPT_VERSION` 也不进 Core 的规则决策账本。
+- 回归测试用 `httpx.MockTransport` 截获真实请求体，并逐项断言旧路径与 Core 合同的 `sampling` / `thinking` / `response_format` 一致，不调用真实模型。
+
+放弃了什么：
+- **bump `PROMPT_VERSION` 求保险**：会让所有环境变量配置实例的 L0 缓存失效，重评要真实计费，却换不来任何正确性。缓存键不变的依据是上面的测试，不是推测。
+- **只修 Chat 分支，Responses 分支保持读全局**（最初的要求是保留该分支行为）：复现确认 Responses 连接的 `max_output_tokens`、`temperature` 同样被忽略，属于同一个缺陷。经用户确认一并修复，只保留该分支的协议约束。
+- **让 `score_envelope` 改用实例参数、无视信封**：信封是缓存身份和审计记录，请求必须与它一致。正确做法是让信封记录真实参数，而不是让请求和信封分家。
+- **对没设置 `thinking_type` 的连接继续默认发 `disabled`**：这样能保住旧路径过去的行为，但违背工厂“只有选择开启才发”的约定，也与 Core 路径不一致；不认识 `thinking` 扩展的兼容端点可能直接拒绝请求。
+
+代价：
+- 没设置 `thinking_type` 的 Chat 连接，在旧路径上不再收到 `thinking: disabled`。默认开启推理的模型会因此开始推理：变慢、多耗 token，输出预算不够时会截断。需要关闭推理的连接应显式设 `thinking_type=disabled`（Core 路径一直如此要求）。
+- 连接里调过的 `max_tokens` / `temperature` 开始在旧路径生效。这些值原先只在 Core 路径验证过，这次没有用 §15 QWK 留出集复核旧路径。
+
+维护记录：2026-10-09 · 旧路径信封冻结实例参数：两个分支改读实例；`PROMPT_VERSION` 不变（用户已确认不 bump）；无迁移，OpenAPI 不变。

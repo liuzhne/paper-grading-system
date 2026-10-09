@@ -206,16 +206,25 @@ def _provider_contract(scorer):
             "response_schema": "criterion-score-v2",
         }
     is_openai = provider_name == "openai"
+    # 冻结的是 score_envelope 真正要发的参数，所以必须取本实例的值：BYOK/平台
+    # 连接在工厂里各自传入 max_tokens、temperature、thinking_type 等，全局设置
+    # 只是没传时的默认值（构造函数已经回落过）。读全局会让连接配置静默失效。
     if is_openai:
-        temperature = settings.OPENAI_TEMPERATURE
-        max_tokens = settings.OPENAI_MAX_OUTPUT_TOKENS
+        temperature = getattr(scorer, "temperature", settings.OPENAI_TEMPERATURE)
+        max_tokens = getattr(scorer, "max_output_tokens", settings.OPENAI_MAX_OUTPUT_TOKENS)
         thinking_type = None
         thinking_enabled = False
         response_format = "json_schema"
     else:
-        temperature = settings.OPENAI_COMPATIBLE_TEMPERATURE
-        max_tokens = settings.OPENAI_COMPATIBLE_MAX_TOKENS
-        thinking_type = str(settings.OPENAI_COMPATIBLE_THINKING_TYPE or "").strip() or None
+        temperature = getattr(scorer, "temperature", settings.OPENAI_COMPATIBLE_TEMPERATURE)
+        max_tokens = getattr(scorer, "max_tokens", settings.OPENAI_COMPATIBLE_MAX_TOKENS)
+        thinking_type = (
+            str(
+                getattr(scorer, "thinking_type", settings.OPENAI_COMPATIBLE_THINKING_TYPE)
+                or ""
+            ).strip()
+            or None
+        )
         thinking_enabled = str(thinking_type).lower() not in {
             "none",
             "disabled",
@@ -223,7 +232,13 @@ def _provider_contract(scorer):
             "off",
         }
         response_format = (
-            "json_object" if settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON else "none"
+            "json_object"
+            if getattr(
+                scorer,
+                "response_format_json",
+                settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON,
+            )
+            else "none"
         )
     return {
         "name": provider_name,
