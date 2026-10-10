@@ -1864,4 +1864,6 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
   - 真正原因：`pyproject.toml` 给同一个模块写了两条 `[[tool.vercel.subscribers]]`。构建器给每条声明生成一个函数，触发器取模块里**全部** `@subscribe`（没写 `topics` 不过滤），两个函数于是重复注册了同一（主题、消费组），在服务端注册触发器时失败。改为一条声明；`test_each_vercel_subscriber_module_is_declared_once` 防回归。
   - 本地核对生成的触发器：在干净 checkout 里写 `.vercel/project.json`（`settings.framework` 设为 `fastapi`，否则构建器不处理订阅），运行 `npx vercel@58.4.0 build --prod --yes`，看 `.vercel/output/functions/_py_subscribers/*/.vc-config.json` 的 `experimentalTriggers`：每个（主题、消费组）只能出现一次。
 
-维护记录：2026-10-10 · 发布 0035–0037：记录发布顺序、新代码上线判断方法，以及运行角色复验清单漏表的排查；补全工作流清单与守护测试。
+- 发布结果：生产迁移 run 38057720904（0033 → 0037）；PR #18、#19 合并后 main run 38059626116 部署成功，新路由由 404 变为 401，线上产物与 `public/` 一致。登录后的叫醒、巡检与四类 AI 任务验收待维护者完成（见上线清单）。
+
+维护记录：2026-10-10 · 发布 0035–0037：记录发布顺序、新代码上线判断方法，以及运行角色复验清单漏表、同一模块两条订阅声明导致部署失败的排查；补全工作流清单与守护测试。
