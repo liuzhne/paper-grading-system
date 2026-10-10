@@ -1151,3 +1151,33 @@ Claude 适配器的调用链：
 迁移 0035：`batch_scoring_items` 加 `source_key`、`owner_id`、`ordinal`、`heartbeat_at`、`stall_count`、`not_before` 与两条部分索引（`status = 'pending'` 上的 `(source_key, ordinal, created_at)`、`status = 'running'` 上的 `(source_key, heartbeat_at)`）；`batch_scoring_jobs.last_swept_at`；新表 `work_runtime_state`（`pgs_app` 授权与 RLS）。
 
 维护记录：2026-10-10 · 统一执行模型 A1：新增 `services/work_queue`，批量评分在 Vercel 与 worker 上走同一个领取函数；记录调用链、加锁顺序、围栏与计数的持久化边界；迁移 head → 0035。
+
+### 2026-10-10 AI 任务 A2（已实施：起草扣分细则）
+
+方案见 [AI 操作异步任务化与统一执行模型改造方案](docs/AI操作异步任务化改造方案.md) 第 4–8 节。起草不再在请求里调用模型；`POST /rubrics/{id}/draft-deduction-rules` 返回 410。
+
+模块边界（新增 `services/ai_tasks/`）：
+
+| 模块 | 职责 |
+|---|---|
+| `handlers` | 操作种类登记：`TaskHandler(prepare, run_item, merge, on_item_success)`；`PreparedTask`（冻结输入、条目拆分、无需条目时的直接结果）；`TaskView`（执行时传给处理函数的任务快照） |
+| `rule_draft` | `rule_draft`：`prepare` 与原同步接口相同地分析输入（评分说明 + 人工归入的原文单元），用 `_draft_batches` 拆批；`run_item` 调一次 `_draft_deduction_rules_once`（`deadline=None`、`rate_limit_retries=0`）；`merge` 调 `merge_draft_batches`（同步路径与任务路径共用）；起草错误 → 处理方式（repair / retry / defer / fail） |
+| `service` | 锁定模型来源（`resolve_task_model`：显式或当前启用的私有连接，否则平台模型；mock 拒绝）、内容指纹、建任务（同指纹的进行中/已成功任务直接返回，`regenerate` 作废旧任务）、取消、只重试失败与被取消的条目、发布时清理；执行时 `task_scorer` 按锁定的连接 ID、密钥版本与快照重建客户端 |
+| `execution` | `work_queue` 的 `ai_task` 种类（优先级 10，先于批量评分）：领取钩子、一次执行一次模型调用、带围栏写结果、按处理方式回到待处理（429 设 `not_before` 并发延迟叫醒）或判失败（取消同任务剩余待处理条目）、全部成功后按序号合并 |
+| `state` | 任务行加锁、计数增量与重新计数 |
+
+调用链：
+
+- **提交** `POST /rubrics/{id}/ai-tasks {kind, params, ai_connection_id, regenerate}` → `create_ai_task`（prepare → 指纹 → 部分唯一索引兜底的插入）→ 新建返回 202，命中返回 200 → `wake_for_capacity`（Vercel）。
+- **执行**：`claim_next_item` → `ai_task` 种类 `_begin` → `_execute`（会话外调用模型）→ `_finish` → `settle_task`（全部成功 → `handler.merge` → `task.result`）。
+- **进度** `GET /ai-tasks/{id}`：活动任务先 `sweep_parent_on_read`（30 秒一次）；`GET /rubrics/{id}/ai-tasks?kind=&active=1` 找回进行中的任务；`POST /ai-tasks/{id}/cancel|retry`。
+- **前端**：`stores/rubrics.draftRules` 为每个评分项建任务；`RubricsView` 用 `createVisiblePoller(aiTaskInterval)` 轮询（前 30 秒 2 秒、之后 5 秒，页面隐藏暂停），成功结果进入原有确认面板；进入页面时 `resumeDraftTasks`。
+- **版本守卫**：每个响应带 `X-PGS-Contract`（`core/contract.py`）；前端 `api/contract.js` 不一致时在下一次写操作或路由切换前刷新（每个后端版本每个标签页最多一次）。
+
+数据与持久化边界：
+
+- `ai_tasks`：冻结输入、锁定的连接与模型名、计数、合并结果、根因错误；`(rubric_id, fingerprint)` 上的部分唯一索引覆盖 queued/running/succeeded。生命周期：评分标准发布时 `delete_rubric_ai_tasks` 在发布事务内删除；评分标准删除时 FK 级联。
+- `ai_task_items`：本批输入（含 `repair_code`）、输出、`attempt/stall/deferral/retry/repair` 计数、`attempt_history`（错误码与耗时，不含厂商正文）。
+- 规则来源：前端采用 AI 结果时在结构化条目上写 `ai_origin` / `ai_model`；编译（`pipeline._rule`，只在规则来自 AI 时写进编译图）落到 `AtomicRule.ai_origin` / `ai_model`；`atomic_recompile`、版本复制保留它们；`rule_origin.is_ai_rule` 读字段；`review_workspace` 返回它们，规则面板显示 “AI · 模型名”。两列**不进版本内容 hash**。
+
+维护记录：2026-10-10 · AI 任务 A2：新增 `services/ai_tasks` 与任务 API，起草迁移到任务，规则记录 AI 来源与模型名，版本守卫；迁移 head → 0036。

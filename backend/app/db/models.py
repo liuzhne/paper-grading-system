@@ -839,6 +839,11 @@ class AtomicRule(Base):
     )
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     creation_method: Mapped[str] = mapped_column(String(50), nullable=False)
+    # 0036：规则是否来自 AI、由哪个模型生成。只作来源记录，不进版本内容 hash。
+    ai_origin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    ai_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     reviewed_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
@@ -2185,6 +2190,155 @@ class BatchScoringItem(Base):
     baseline_scoring_run: Mapped["ScoringRun | None"] = relationship(
         foreign_keys=[baseline_scoring_run_id]
     )
+
+
+AI_TASK_KINDS = ("rule_draft", "unit_classification", "rule_review", "structure_suggestion")
+AI_TASK_LIVE_STATUSES = ("queued", "running", "succeeded")
+
+
+class AITask(Base):
+    """一次 AI 操作（起草、归类、审查、结构识别）的持久化任务（0036）。
+
+    建任务时冻结输入并锁定连接；每次模型调用是一个 ``AITaskItem``，由统一执行模型
+    领取。同一评分标准下同指纹的进行中或已成功任务直接复用，保留到评分标准发布。
+    """
+
+    __tablename__ = "ai_tasks"
+    __table_args__ = (
+        CheckConstraint("kind IN %s" % (AI_TASK_KINDS,), name="ck_ai_tasks_kind"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed', 'canceled', 'superseded')",
+            name="ck_ai_tasks_status",
+        ),
+        CheckConstraint(_lower_hex_digest_check("fingerprint"), name="ck_ai_tasks_fingerprint"),
+        CheckConstraint(
+            "total_items >= 0 AND pending_count >= 0 AND running_count >= 0 "
+            "AND succeeded_count >= 0 AND failed_count >= 0 AND canceled_count >= 0",
+            name="ck_ai_tasks_nonnegative_counts",
+        ),
+        Index(
+            "ix_ai_tasks_one_live_fingerprint",
+            "rubric_id",
+            "fingerprint",
+            unique=True,
+            sqlite_where=sql_text("status IN ('queued', 'running', 'succeeded')"),
+            postgresql_where=sql_text("status IN ('queued', 'running', 'succeeded')"),
+        ),
+        Index("ix_ai_tasks_rubric_kind_status", "rubric_id", "kind", "status"),
+        Index("ix_ai_tasks_organization_id", "organization_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True
+    )
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    rubric_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("rubrics.id", ondelete="CASCADE"), nullable=False
+    )
+    scope: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    input_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    ai_connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ai_connections.id", ondelete="SET NULL"), nullable=True
+    )
+    ai_connection_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ai_connection_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="queued")
+    total_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    running_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    succeeded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    canceled_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_swept_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    items: Mapped[list["AITaskItem"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="AITaskItem.ordinal",
+    )
+
+
+class AITaskItem(Base):
+    """AI 任务的一个条目：一次模型调用（起草的一批、归类的几个单元）。"""
+
+    __tablename__ = "ai_task_items"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'failed', 'canceled')",
+            name="ck_ai_task_items_status",
+        ),
+        CheckConstraint(
+            "ordinal >= 0 AND attempt_count >= 0 AND stall_count >= 0 "
+            "AND deferral_count >= 0 AND retry_count >= 0 AND repair_count >= 0",
+            name="ck_ai_task_items_counters",
+        ),
+        UniqueConstraint("task_id", "ordinal", name="uq_ai_task_items_task_ordinal"),
+        Index("ix_ai_task_items_task_status", "task_id", "status"),
+        Index(
+            "ix_ai_task_items_claim",
+            "source_key",
+            "ordinal",
+            "created_at",
+            sqlite_where=sql_text("status = 'pending'"),
+            postgresql_where=sql_text("status = 'pending'"),
+        ),
+        Index(
+            "ix_ai_task_items_running",
+            "source_key",
+            "heartbeat_at",
+            sqlite_where=sql_text("status = 'running'"),
+            postgresql_where=sql_text("status = 'running'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ai_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_key: Mapped[str] = mapped_column(String(80), nullable=False, default="platform")
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    input: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    not_before: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stall_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deferral_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    repair_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt_history: Mapped[list] = mapped_column(
+        MutableList.as_mutable(JSON), nullable=False, default=list
+    )
+    output: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    task: Mapped["AITask"] = relationship(back_populates="items")
 
 
 class ScoringRun(Base):

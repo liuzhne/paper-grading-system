@@ -37,7 +37,7 @@ def prepare_atomic_recompile(session, version, command, edits):
                 {key: value for key, value in changes.items() if key != "levels"})
         except lifecycle.RubricLifecycleError as exc:
             raise ValueError(str(exc)) from exc
-        value = _fields(rule, "rule_code name rule_text direction effect_type max_points repeat_policy cap_points judge_type checker_key checker_params evidence_policy positive_example negative_example boundary_example strictness applies_to mutex_group depends_on_rule_codes creation_method")
+        value = _fields(rule, "rule_code name rule_text direction effect_type max_points repeat_policy cap_points judge_type checker_key checker_params evidence_policy positive_example negative_example boundary_example strictness applies_to mutex_group depends_on_rule_codes creation_method ai_origin ai_model")
         value.update(normalized)
         for key in ("max_points", "cap_points"):
             value[key] = number_text(value[key])

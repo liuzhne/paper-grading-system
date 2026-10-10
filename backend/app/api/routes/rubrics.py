@@ -7,7 +7,6 @@ from decimal import ROUND_HALF_UP
 from types import SimpleNamespace
 
 import json
-import time
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -23,7 +22,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
-from backend.app.core.config import settings
 from backend.app.db.models import Rubric
 from backend.app.db.models import AtomicRule
 from backend.app.db.models import RubricCompilation
@@ -59,7 +57,6 @@ from backend.app.schemas.rubric import RubricLifecycleReason
 from backend.app.schemas.rubric import RubricPublishRequest
 from backend.app.schemas.rubric import RubricRead
 from backend.app.schemas.rubric import RubricDraftRecompileRequest
-from backend.app.schemas.rubric import RubricAIRuleDraftRequest
 from backend.app.schemas.rubric import RubricExecutionDraftRead
 from backend.app.schemas.rubric import TemplateLinkReviewRequest
 from backend.app.schemas.rubric import RubricUpdate
@@ -83,13 +80,9 @@ from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.services.rubric_import import pipeline as rubric_pipeline
 from backend.app.services.rubric_import import import_sessions
 from backend.app.services.rubric_import.source_workspace import read_source_workspace
-from backend.app.services.rubric_import.ai_rule_drafter import (
-    AIRuleDraftValidationError,
-    draft_deduction_rules,
-)
-from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 from backend.app.services.rubrics.draft_graph import read_execution_draft
+from backend.app.services.ai_tasks.service import delete_rubric_ai_tasks
 from backend.app.services.rubrics.review_workspace import read_review_workspace, confirm_rule
 from backend.app.services.ai_connections import resolve_connection_runtime
 
@@ -1569,108 +1562,28 @@ def resolve_source_unit(
     return jsonable_encoder(result)
 
 
-@router.post("/{rubric_id}/draft-deduction-rules")
-def draft_rubric_deduction_rules(
-    rubric_id: str,
-    payload: RubricAIRuleDraftRequest,
-    db: Session = Depends(get_db),
-    principal: CurrentPrincipal = Depends(current_principal),
-):
-    """Return non-persistent, human-confirmable AI rule suggestions."""
+def _retired_endpoint(kind: str, label: str) -> HTTPException:
+    """已改为异步任务的同步接口：直接停用（410），不等其它阶段。
 
-    _visible_rubric(db, rubric_id, principal)
-    # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
-    # 怎么被打分，写它必须过角色门控（v3 §4.2）。
-    require_organization_role(principal, "org_admin", "teacher")
-    execution = read_execution_draft(session=db, rubric_id=rubric_id)
-    active = execution.get("active_compilation") or {}
-    version = active.get("version") or {}
-    try:
-        scorer = _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        # 整个请求共用一个截止时间：一次请求带多个评分项时，也不能超过平台的函数时长上限。
-        budget = settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
-        deadline = time.monotonic() + budget if budget > 0 else None
+    已经打开的旧页面由版本守卫在下一次操作前刷新，正常情况下到不了这里。
+    """
 
-        items = []
-        for criterion in payload.criteria:
-            criterion_value = criterion.model_dump(mode="json")
-            analysis = analyze_rule_input(
-                criterion_value.get("deduction_rules") or [],
-                criterion_code=criterion.code,
-            )
-            # A resolved paragraph is rule material, not a new criterion or an
-            # automatically authorized deduction. Feed its original locator to
-            # the existing non-persistent, human-confirmable draft pipeline.
-            assigned = parse_state.assigned_rule_sources(db, rubric_id, criterion.code)
-            if assigned:
-                if analysis["input_state"] == "absent" and criterion_value.get("description"):
-                    analysis["unresolved_segments"].append({
-                        "text": criterion_value["description"],
-                        "source_refs": ["/criterion/description"],
-                    })
-                analysis["unresolved_segments"].extend(assigned)
-                analysis["source_refs"].extend(ref for item in assigned for ref in item["source_refs"])
-                analysis["needs_ai_draft"] = True
-            if not (
-                analysis["needs_ai_draft"]
-                or analysis["needs_severity_expansion"]
-            ):
-                items.append(
-                    {
-                        "criterion_code": criterion.code,
-                        "input_analysis": analysis,
-                        "status": "already_structured",
-                        "draft": None,
-                    }
-                )
-                continue
-            items.append(
-                {
-                    "criterion_code": criterion.code,
-                    "input_analysis": analysis,
-                    "status": "pending_confirmation",
-                    "draft": draft_deduction_rules(
-                        criterion=criterion_value,
-                        input_analysis=analysis,
-                        scorer=scorer,
-                        deadline=deadline,
-                        business_profile_key=(
-                            version.get("business_profile_key") or "thesis"
-                        ),
-                    ),
-                }
-            )
-        return {"rubric_id": rubric_id, "items": items}
-    except AIRuleDraftValidationError as exc:
-        if exc.code == "AI_DRAFT_PROVIDER_REJECTED":
-            status_code = 502
-        elif exc.code in {
-            "AI_DRAFT_CONNECTION_MISSING",
-            "AI_DRAFT_PROVIDER_ERROR",
-            "AI_DRAFT_TIME_BUDGET_EXCEEDED",
-        }:
-            status_code = 503
-        else:
-            status_code = 422
-        raise HTTPException(
-            status_code=status_code,
-            detail=_rubric_problem(
-                code=exc.code,
-                message=exc.message,
-                user_action=exc.user_action,
-                retryable=exc.code == "AI_DRAFT_PROVIDER_ERROR",
-            ),
-        ) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=_rubric_problem(
-                code="AI_DRAFT_CONNECTION_MISSING",
-                message="当前没有可用于起草扣分细则的真实 AI 连接。",
-                user_action="请配置真实 AI 连接，或将评分项改为仅人工复核。",
-                retryable=False,
-            ),
-        ) from exc
+    return HTTPException(
+        status_code=410,
+        detail=_rubric_problem(
+            code="ENDPOINT_RETIRED",
+            message=f"{label}已改为后台任务，这个接口已停用。",
+            user_action="请刷新页面后重试。",
+            context={"replacement": "POST /api/rubrics/{rubric_id}/ai-tasks", "kind": kind},
+        ),
+    )
+
+
+@router.post("/{rubric_id}/draft-deduction-rules", include_in_schema=False)
+def draft_rubric_deduction_rules(rubric_id: str):
+    """停用：起草改为 ``POST /rubrics/{id}/ai-tasks``（kind=rule_draft）。"""
+
+    raise _retired_endpoint("rule_draft", "AI 起草扣分细则")
 
 
 @router.post("/{rubric_id}/submit-review", response_model=RubricRead)
@@ -2170,6 +2083,8 @@ def publish_rubric(
             compilation_id,
             user_id,
         )
+        # AI 任务的结果保留到发布为止（同指纹直接复用）；发布后一并清理。
+        delete_rubric_ai_tasks(db, rubric_id)
         db.commit()
     except rubric_lifecycle.RubricLifecycleError as exc:
         db.rollback()

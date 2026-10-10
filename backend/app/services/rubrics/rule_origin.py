@@ -18,6 +18,25 @@ def rule_origin(rule, criterion):
     return entries[index] if 0 <= index < len(entries) else {}
 
 
-def is_ai_rule(rule, criterion):
-    origin = rule_origin(rule, criterion)
-    return origin.get("source") in AI_RULE_SOURCES or rule.creation_method == "llm"
+def is_ai_entry(entry) -> bool:
+    """结构化扣分条目是否来自 AI：显式的 ai_origin，或 AI 来源标记。"""
+
+    if not isinstance(entry, dict):
+        return False
+    return bool(entry.get("ai_origin")) or str(entry.get("source") or "") in AI_RULE_SOURCES
+
+
+def entry_ai_model(entry) -> str | None:
+    """条目记录的生成模型名：采用 AI 结果时写入的 ai_model，旧条目退回起草元数据。"""
+
+    if not isinstance(entry, dict):
+        return None
+    model = entry.get("ai_model") or (entry.get("generation_metadata") or {}).get("model_name")
+    model = str(model).strip() if model else ""
+    return model[:200] or None
+
+
+def is_ai_rule(rule, criterion=None):
+    """0036 起读规则上的 ``ai_origin`` 字段（存量由迁移按旧推断回填一次）。"""
+
+    return bool(getattr(rule, "ai_origin", False)) or rule.creation_method == "llm"

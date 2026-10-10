@@ -503,37 +503,29 @@ def test_repair_is_skipped_when_it_would_overrun_the_budget(monkeypatch):
     assert attempts[0]["deadline"] is not None  # 截止时间传给了调用，由适配器约束超时
 
 
-def test_draft_endpoint_shares_one_deadline_and_reports_budget_exhaustion(client, monkeypatch):
-    from backend.app.api.routes import rubrics as rubric_routes
-    from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
+def test_draft_task_items_call_once_without_a_request_budget_or_in_place_429_waits(monkeypatch):
+    # 起草改为 AI 任务后，每批是一次独立执行：没有整次请求的时间预算（同步接口的 260 秒
+    # 止血措施随旧接口停用），429 也不在执行里按 Retry-After 原地等，而是延后再领取。
+    from backend.app.services.ai_tasks import rule_draft
+    from backend.app.services.ai_tasks.handlers import TaskView
     from backend.app.tests.test_template_ai_rule_refactor import _criterion
 
-    created = client.post("/api/rubrics", json={
-        "name": "AI draft time budget", "version": "v1", "total_score": 20,
-        "criteria": [_criterion(scoring_mode="review_only")],
-    })
-    assert created.status_code == 200, created.text
-    deadlines = []
+    seen = {}
 
-    def out_of_time(**kwargs):
-        deadlines.append(kwargs["deadline"])
-        raise AIRuleDraftValidationError(
-            "AI_DRAFT_TIME_BUDGET_EXCEEDED", "该评分项需要分 4 批生成", "请调高该连接的并发上限",
-        )
+    def once(**kwargs):
+        seen.update(kwargs)
+        return {"rule_groups": []}
 
-    monkeypatch.setattr(rubric_routes, "get_llm_scorer", lambda *a, **k: object())
-    monkeypatch.setattr(rubric_routes, "draft_deduction_rules", out_of_time)
-    response = client.post(
-        f"/api/rubrics/{created.json()['id']}/draft-deduction-rules", json={"criteria": [_criterion()]},
+    monkeypatch.setattr(rule_draft, "_draft_deduction_rules_once", once)
+    view = TaskView(
+        id="t", kind="rule_draft", rubric_id="r", owner_id=None, organization_id=None, scope={},
+        input_snapshot={"criterion": _criterion(), "input_analysis": {}, "business_profile_key": "thesis"},
+        model_name="m",
     )
-
-    assert response.status_code == 503
-    detail = response.json()["detail"]
-    assert detail["code"] == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
-    # 原样重试还会撞上同一个上限，不能提示「稍后重试」。
-    assert detail["retryable"] is False
-    budget = settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
-    assert deadlines and 0 < deadlines[0] - time.monotonic() <= budget
+    rule_draft._run_item(view, {"analysis": {"batch_index": 1}, "repair_code": "AI_DRAFT_OUTPUT_INVALID"}, object())
+    assert seen["deadline"] is None
+    assert seen["rate_limit_retries"] == 0
+    assert seen["repair_code"] == "AI_DRAFT_OUTPUT_INVALID"
 
 
 # ---- 适配器：截止时间约束每次调用与重试 -------------------------------------------

@@ -55,6 +55,7 @@ class WorkKind:
 _KINDS: dict[str, WorkKind] = {}
 # 种类模块在首次使用时导入，避免 work_queue ↔ 业务模块的循环导入。
 _KIND_MODULES = (
+    "backend.app.services.ai_tasks.execution",
     "backend.app.services.batch_scoring.jobs",
 )
 

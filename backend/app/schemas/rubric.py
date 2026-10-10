@@ -83,11 +83,6 @@ class RubricDraftRecompileRequest(RubricLifecycleReason):
     business_profile_key: str = Field(default="thesis", min_length=1)
 
 
-class RubricAIRuleDraftRequest(BaseModel):
-    criteria: list[RubricCriterionCreate] = Field(min_length=1)
-    ai_connection_id: Optional[str] = None
-
-
 class ExecutionDraftVersionRead(BaseModel):
     id: str
     version: str

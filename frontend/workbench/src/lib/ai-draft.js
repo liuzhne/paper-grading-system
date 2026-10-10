@@ -2,8 +2,8 @@
 /**
  * AI 起草结果 → 可执行扣分规则（V3-2）。
  *
- * `POST /rubrics/{id}/draft-deduction-rules` 的后端 docstring 写得很明确：
- * **non-persistent**。它只返回待人工确认的建议，一条也不落库。要让这些规则真正
+ * 起草任务（`POST /rubrics/{id}/ai-tasks`，kind=rule_draft）的结果只是待人工确认的
+ * 建议，一条也不落库。要让这些规则真正
  * 参与评分，必须由前端合进评分项，再走 `POST /rubrics/{id}/recompile` 生成新的
  * 执行草稿。
  *
@@ -100,6 +100,9 @@ export function confirmedStructuredRules(draft, excluded) {
       source_refs: row.sourceRefs,
       generation_fingerprint: row.fingerprint,
       generation_metadata: draft.generation_metadata || null,
+      // 规则上写明“来自 AI”与生成模型名（0036），编译后进入 AtomicRule，用于对比新旧模型。
+      ai_origin: true,
+      ai_model: draft.generation_metadata?.model_name || null,
       draft_row_key: rowKey(row),
       // 这里只表示用户允许建议进入后继 compilation；AtomicRule 仍以 draft
       // 状态创建，必须与原文规则一起在最终规则面板完成一次正式确认。

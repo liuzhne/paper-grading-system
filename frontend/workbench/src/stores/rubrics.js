@@ -36,6 +36,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
     lastImport.value = { warnings: [], templateSummary: null, rubricId: null, coverage: null, triggers: [], conflicts: [] };
     activeImportSession.value = null;
     lastDraft.value = { items: [] };
+    draftTasks.value = {};
   }
 
   async function load() {
@@ -351,36 +352,99 @@ export const useRubricsStore = defineStore("rubrics", () => {
   const lastDraft = ref({ items: [] });
 
   /**
-   * AI 起草缺失的扣分细则（D-027）。
+   * 起草任务（方案 A2）：按评分项编号记录进行中或刚结束的任务。刷新页面后由
+   * `resumeDraftTasks` 找回进行中的；关页面不影响后台继续执行。
+   * @type {import('vue').Ref<Record<string, any>>}
+   */
+  const draftTasks = ref({});
+
+  /**
+   * 记下任务的最新状态；成功时把结果放进待确认的起草建议（每个任务只放一次）。
+   * @param {any} task
+   */
+  function rememberDraftTask(task) {
+    const code = task?.scope?.criterion_code;
+    if (!code) return;
+    const previous = draftTasks.value[code];
+    draftTasks.value = { ...draftTasks.value, [code]: task };
+    const justFinished = task.status === "succeeded" && task.result &&
+      !(previous?.id === task.id && previous?.status === "succeeded");
+    if (justFinished) {
+      const collection = lastDraft.value;
+      collection.items = [...collection.items.filter((item) => item.criterion_code !== code), task.result];
+    }
+  }
+
+  /** @param {any} task */
+  function isActiveTask(task) {
+    return task?.status === "queued" || task?.status === "running";
+  }
+
+  /**
+   * AI 起草缺失的扣分细则（D-027）：为每个评分项建一个后台任务，立即返回。
    *
    * **必须带上用户自己的连接**：留空会走平台默认，而平台是 mock 时得到的是编出来
    * 的规则，却以「AI 起草 · 待确认」呈现——确认之后它们进入正式发布的评分标准。
    *
+   * 同样的内容重复提交（双击、多个标签页）拿到同一个任务；`regenerate` 作废旧结果重新生成。
+   *
    * @param {string} rubricId
-   * @param {{criteria: any[], connectionId: string|null}} input
+   * @param {{criteria: any[], connectionId: string|null, regenerate?: boolean}} input
    */
   async function draftRules(rubricId, input) {
     if (!input.connectionId) {
       throw new Error("请先选择用于起草的 AI 连接。");
     }
-    // One criterion per request: a large template must not consume one function's
-    // entire time budget, and a later failure must not discard completed drafts.
     const collection = lastDraft.value;
+    const started = [];
     for (const criterion of input.criteria) {
       try {
-        const result = await api.post(`/rubrics/${rubricId}/draft-deduction-rules`, {
-          criteria: [criterion],
+        const task = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
+          kind: "rule_draft",
+          params: { criterion },
           ai_connection_id: input.connectionId,
+          regenerate: Boolean(input.regenerate),
         });
         if (lastDraft.value !== collection) throw new StaleContextError();
-        collection.items = [...collection.items.filter((item) => item.criterion_code !== criterion.code), ...(result.items || [])];
+        rememberDraftTask(task);
+        started.push(task);
       } catch (err) {
         if (err instanceof StaleContextError) throw err;
         const message = err instanceof Error ? err.message : "起草失败";
-        throw new Error(`评分项 ${criterion.code} 起草失败；已保留 ${collection.items.length} 项结果。${message}`);
+        throw new Error(`评分项 ${criterion.code} 起草任务提交失败；已提交 ${started.length} 项。${message}`);
       }
     }
-    return collection;
+    return started;
+  }
+
+  /** 刷新所有进行中的起草任务（由页面轮询调用，页面隐藏时暂停）。 */
+  async function refreshDraftTasks() {
+    const active = Object.values(draftTasks.value).filter(isActiveTask);
+    for (const task of active) {
+      rememberDraftTask(await api.get(`/ai-tasks/${task.id}`));
+    }
+    return Object.values(draftTasks.value).some(isActiveTask);
+  }
+
+  /** 进入评分标准页时找回进行中的起草任务。 @param {string} rubricId */
+  async function resumeDraftTasks(rubricId) {
+    const tasks = (await api.get(`/rubrics/${rubricId}/ai-tasks?kind=rule_draft&active=1`)) || [];
+    for (const task of tasks) rememberDraftTask(task);
+    return tasks;
+  }
+
+  /** @param {string} taskId */
+  async function cancelDraftTask(taskId) {
+    rememberDraftTask(await api.post(`/ai-tasks/${taskId}/cancel`, {}));
+  }
+
+  /** 只重试失败的批次，已成功的保留。 @param {string} taskId */
+  async function retryDraftTask(taskId) {
+    rememberDraftTask(await api.post(`/ai-tasks/${taskId}/retry`, {}));
+  }
+
+  function forgetDraftTasks() {
+    draftTasks.value = {};
   }
 
   /**
@@ -477,7 +541,13 @@ export const useRubricsStore = defineStore("rubrics", () => {
     loadExecutionDraft,
     loadRubric,
     lastDraft,
+    draftTasks,
     draftRules,
+    refreshDraftTasks,
+    resumeDraftTasks,
+    cancelDraftTask,
+    retryDraftTask,
+    forgetDraftTasks,
     applyDraftRules,
   };
 });

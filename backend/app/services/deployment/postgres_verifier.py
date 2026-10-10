@@ -38,6 +38,7 @@ MIGRATION_SEQUENCE = (
     "0033_rule_decision_ledger",
     "0034_anthropic_messages_provider",
     "0035_unified_work_queue",
+    "0036_ai_tasks",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -45,6 +46,8 @@ ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
 WORK_QUEUE_INDEXES = {
     "ix_batch_scoring_items_claim": "pending",
     "ix_batch_scoring_items_running": "running",
+    "ix_ai_task_items_claim": "pending",
+    "ix_ai_task_items_running": "running",
 }
 
 
@@ -79,6 +82,8 @@ def verify_postgres(session):
         "rubric_import_sessions",
         "rule_decision_ledger",
         "work_runtime_state",
+        "ai_tasks",
+        "ai_task_items",
     }
     missing = sorted(required_tables - tables)
     if missing:
@@ -99,8 +104,11 @@ def verify_postgres(session):
     item_indexes = {
         value["name"]: value for value in inspector.get_indexes("batch_scoring_items")
     }
+    ai_item_indexes = {
+        value["name"]: value for value in inspector.get_indexes("ai_task_items")
+    }
     for index_name, status in WORK_QUEUE_INDEXES.items():
-        index = item_indexes.get(index_name)
+        index = item_indexes.get(index_name) or ai_item_indexes.get(index_name)
         predicate = str(
             ((index or {}).get("dialect_options") or {}).get("postgresql_where") or ""
         )
@@ -150,6 +158,8 @@ def verify_postgres(session):
             "manual_review_tasks",
             "rule_decision_ledger",
             "work_runtime_state",
+            "ai_tasks",
+            "ai_task_items",
         ):
             access = session.execute(
                 text(

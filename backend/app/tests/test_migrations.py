@@ -1372,3 +1372,141 @@ def test_0035_downgrades_and_replays_with_only_finished_jobs(monkeypatch, tmp_pa
     finally:
         engine.dispose()
     command.upgrade(config, "head")
+
+
+def _insert_minimal(connection, table, values):
+    """Insert a row at an older revision, filling required columns with neutral values."""
+    from sqlalchemy import Boolean, DateTime, Integer, Numeric
+
+    columns = inspect(connection).get_columns(table)
+    row = dict(values)
+    for column in columns:
+        name = column["name"]
+        if name in row or column["nullable"] or column.get("default") is not None:
+            continue
+        kind = column["type"]
+        if isinstance(kind, Boolean):
+            row[name] = False
+        elif isinstance(kind, (Integer, Numeric)):
+            row[name] = 0
+        elif isinstance(kind, DateTime):
+            row[name] = datetime(2026, 10, 1)
+        elif isinstance(kind, JSON):
+            row[name] = "{}"
+        else:
+            row[name] = name
+    names = ", ".join(row)
+    params = ", ".join(":" + name for name in row)
+    connection.execute(text("INSERT INTO %s (%s) VALUES (%s)" % (table, names, params)), row)
+
+
+def _seed_0035_rules(url):
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            _insert_minimal(connection, "rubric_criteria", {
+                "id": "criterion-1", "code": "C01", "rubric_id": "rubric-1",
+                "deduction_rules_structured": (
+                    '[{"source": "user_text", "match": "a"}, {"source": "ai_inferred", "match": "b"}]'
+                ),
+            })
+            for rule_id, code, method in (
+                ("rule-user", "manual.c01.deduct.1.v1", "manual"),
+                ("rule-ai-entry", "manual.c01.deduct.2.v1", "manual"),
+                ("rule-llm", "c01.v1", "llm"),
+                ("rule-compiler", "c01.other.v1", "compiler"),
+            ):
+                _insert_minimal(connection, "atomic_rules", {
+                    "id": rule_id, "rubric_version_id": "version-1", "criterion_id": "criterion-1",
+                    "rule_code": code, "creation_method": method, "direction": "deduct",
+                    "effect_type": "score", "judge_type": "semantic", "strictness": "required",
+                    "status": "draft", "repeat_policy": None,
+                    "checker_params": "{}", "evidence_policy": "{}", "depends_on_rule_codes": "[]",
+                })
+    finally:
+        engine.dispose()
+
+
+def test_0036_backfills_ai_origin_once_from_the_old_inference(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0036-backfill.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0035_unified_work_queue")
+    _seed_0035_rules(url)
+    command.upgrade(config, "0036_ai_tasks")
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            rows = dict(connection.execute(text("SELECT id, ai_origin FROM atomic_rules")).all())
+            models_recorded = connection.execute(
+                text("SELECT count(*) FROM atomic_rules WHERE ai_model IS NOT NULL")
+            ).scalar_one()
+        # 第 2 条结构化条目来自 AI（按 rule_code 序号反查），LLM 编译的也算。
+        assert {key: bool(value) for key, value in rows.items()} == {
+            "rule-user": False,
+            "rule-ai-entry": True,
+            "rule-llm": True,
+            "rule-compiler": False,
+        }
+        # 历史没有记录生成模型：留空。
+        assert models_recorded == 0
+        inspector = inspect(engine)
+        assert {"ai_tasks", "ai_task_items"}.issubset(inspector.get_table_names())
+        indexes = {value["name"]: value for value in inspector.get_indexes("ai_tasks")}
+        assert indexes["ix_ai_tasks_one_live_fingerprint"]["unique"]
+        item_indexes = {value["name"] for value in inspector.get_indexes("ai_task_items")}
+        assert {"ix_ai_task_items_claim", "ix_ai_task_items_running"}.issubset(item_indexes)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("blocker", ("task", "model"))
+def test_0036_refuses_to_downgrade_while_tasks_or_model_provenance_exist(monkeypatch, tmp_path, blocker):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / ("0036-guard-%s.db" % blocker))
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0035_unified_work_queue")
+    _seed_0035_rules(url)
+    command.upgrade(config, "0036_ai_tasks")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            if blocker == "task":
+                _insert_minimal(connection, "ai_tasks", {
+                    "id": "task-1", "kind": "rule_draft", "rubric_id": "rubric-1",
+                    "status": "succeeded", "fingerprint": "c" * 64, "scope": "{}",
+                    "input_snapshot": "{}",
+                })
+            else:
+                connection.execute(
+                    text("UPDATE atomic_rules SET ai_model = 'model-x' WHERE id = 'rule-ai-entry'")
+                )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="0036 downgrade refused"):
+        command.downgrade(config, "0035_unified_work_queue")
+
+
+def test_0036_downgrades_and_replays_without_tasks(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0036-replay.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0035_unified_work_queue")
+    _seed_0035_rules(url)
+    command.upgrade(config, "0036_ai_tasks")
+    command.downgrade(config, "0035_unified_work_queue")
+    engine = create_engine(url)
+    try:
+        inspector = inspect(engine)
+        assert "ai_tasks" not in inspector.get_table_names()
+        assert "ai_origin" not in {column["name"] for column in inspector.get_columns("atomic_rules")}
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")

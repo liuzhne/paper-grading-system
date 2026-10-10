@@ -15,6 +15,7 @@
 #      内含学生论文/成绩等 PII，仅在可信网络这么开；公网请设 AUTH_ENABLED=true+AUTH_PASSWORD。
 #
 # 注意：这是 Web 库（DATABASE_URL），与 pgs CLI 的 ~/.paper-grading/cli.db 是两套库。
+# 同时启动后台执行器（run_batch_worker）；Ctrl-C 一并退出。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -38,4 +39,10 @@ if [[ "$HOST" == "0.0.0.0" ]]; then
   echo "[start-web] 局域网访问： http://$(ipconfig getifaddr en0 2>/dev/null || echo '本机IP'):${PORT}/"
 fi
 echo "[start-web] 本机打开 http://localhost:${PORT}/"
-exec uv run uvicorn backend.app.main:app --reload --host "$HOST" --port "$PORT"
+
+# 4. 后台执行器：批量评分与 AI 任务（起草扣分细则等）都写进数据库，由它领取执行。
+#    缺了它，「开始评分」与「AI 起草」会一直停在排队中。它不会热加载代码，改了后端要重启本脚本。
+uv run python -m backend.app.scripts.run_batch_worker &
+WORKER_PID=$!
+trap 'kill "$WORKER_PID" 2>/dev/null || true' EXIT INT TERM
+uv run uvicorn backend.app.main:app --reload --host "$HOST" --port "$PORT"

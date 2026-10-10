@@ -125,6 +125,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ai-tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Task
+         * @description 状态、进度与各条目状态；成功时附结果。对本任务做一次限频巡检。
+         */
+        get: operations["read_task_api_ai_tasks__task_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-tasks/{task_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Task */
+        post: operations["cancel_task_api_ai_tasks__task_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-tasks/{task_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Task
+         * @description 只重试失败的条目，已成功的保留；期间已有同内容的任务时返回那个任务。
+         */
+        post: operations["retry_task_api_ai_tasks__task_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/invitations/resolve": {
         parameters: {
             query?: never;
@@ -1565,6 +1622,30 @@ export interface paths {
         patch: operations["update_rubric_api_rubrics__rubric_id__patch"];
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/ai-tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Tasks
+         * @description 刷新页面后找回进行中的任务（``active=1``）。
+         */
+        get: operations["list_tasks_api_rubrics__rubric_id__ai_tasks_get"];
+        put?: never;
+        /**
+         * Create Task
+         * @description 新建返回 202；命中同指纹的进行中或已成功任务返回 200 和已有任务。
+         */
+        post: operations["create_task_api_rubrics__rubric_id__ai_tasks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/clone": {
         parameters: {
             query?: never;
@@ -1576,26 +1657,6 @@ export interface paths {
         put?: never;
         /** Clone Rubric */
         post: operations["clone_rubric_api_rubrics__rubric_id__clone_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/rubrics/{rubric_id}/draft-deduction-rules": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Draft Rubric Deduction Rules
-         * @description Return non-persistent, human-confirmable AI rule suggestions.
-         */
-        post: operations["draft_rubric_deduction_rules_api_rubrics__rubric_id__draft_deduction_rules_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2932,6 +2993,105 @@ export interface components {
             provider_options?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** AITaskCreate */
+        AITaskCreate: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "rule_draft" | "unit_classification" | "rule_review" | "structure_suggestion";
+            /** Params */
+            params?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Regenerate
+             * @default false
+             */
+            regenerate: boolean;
+        };
+        /** AITaskItemRead */
+        AITaskItemRead: {
+            /** Attempt Count */
+            attempt_count: number;
+            /** Deferral Count */
+            deferral_count: number;
+            /** Error Code */
+            error_code?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Id */
+            id: string;
+            /** Not Before */
+            not_before?: string | null;
+            /** Ordinal */
+            ordinal: number;
+            /** Started At */
+            started_at?: string | null;
+            /** Status */
+            status: string;
+        };
+        /** AITaskRead */
+        AITaskRead: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /** Canceled Count */
+            canceled_count: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Code */
+            error_code?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Failed Count */
+            failed_count: number;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Id */
+            id: string;
+            /** Items */
+            items: components["schemas"]["AITaskItemRead"][];
+            /** Kind */
+            kind: string;
+            /** Model Name */
+            model_name?: string | null;
+            /** Pending Count */
+            pending_count: number;
+            /** Result */
+            result?: {
+                [key: string]: unknown;
+            } | null;
+            /** Rubric Id */
+            rubric_id: string;
+            /** Running Count */
+            running_count: number;
+            /** Scope */
+            scope: {
+                [key: string]: unknown;
+            };
+            /** Started At */
+            started_at?: string | null;
+            /** State Version */
+            state_version: number;
+            /** Status */
+            status: string;
+            /** Succeeded Count */
+            succeeded_count: number;
+            /** Total Items */
+            total_items: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** AtomicRuleConfirmRequest */
         AtomicRuleConfirmRequest: {
@@ -4317,13 +4477,6 @@ export interface components {
         ReviewSubmit: {
             /** Reason */
             reason: string;
-        };
-        /** RubricAIRuleDraftRequest */
-        RubricAIRuleDraftRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /** Criteria */
-            criteria: components["schemas"]["RubricCriterionCreate"][];
         };
         /** RubricCloneRequest */
         RubricCloneRequest: {
@@ -5798,6 +5951,111 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AIConnectionProbeResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_task_api_ai_tasks__task_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                task_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_task_api_ai_tasks__task_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                task_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_task_api_ai_tasks__task_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                task_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
                 };
             };
             /** @description Validation Error */
@@ -8948,6 +9206,83 @@ export interface operations {
             };
         };
     };
+    list_tasks_api_rubrics__rubric_id__ai_tasks_get: {
+        parameters: {
+            query?: {
+                kind?: string | null;
+                active?: boolean;
+            };
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_task_api_rubrics__rubric_id__ai_tasks_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AITaskCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     clone_rubric_api_rubrics__rubric_id__clone_post: {
         parameters: {
             query?: never;
@@ -8974,45 +9309,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RubricRead"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    draft_rubric_deduction_rules_api_rubrics__rubric_id__draft_deduction_rules_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-Organization-ID"?: string | null;
-            };
-            path: {
-                rubric_id: string;
-            };
-            cookie?: {
-                pgs_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RubricAIRuleDraftRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

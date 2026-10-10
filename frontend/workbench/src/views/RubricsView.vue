@@ -17,6 +17,8 @@ import { importFilesError, stepOneGate } from "@/lib/parse-coverage.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
 import { draftRows, rowKey } from "@/lib/ai-draft.js";
+import { canRetryAiTask, draftTaskProgress, isActiveAiTask } from "@/lib/ai-tasks.js";
+import { aiTaskInterval, createVisiblePoller } from "@/lib/polling.js";
 import { RouterLink, onBeforeRouteLeave } from "vue-router";
 
 /**
@@ -456,8 +458,26 @@ async function loadConnections() {
   }
 }
 
-async function generateMissingRules(candidates = generationCandidates.value) {
+// 起草是后台任务：提交后立即返回，进度靠轮询（前 30 秒每 2 秒、之后每 5 秒；页面隐藏时暂停）。
+const draftPoller = createVisiblePoller(async () => {
+  try {
+    if (!(await store.refreshDraftTasks())) draftPoller.stop();
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "刷新起草进度失败";
+  }
+}, aiTaskInterval);
+
+function watchDraftTasks() {
+  if (Object.values(store.draftTasks).some(isActiveAiTask)) {
+    draftPoller.stop();
+    draftPoller.start();
+  }
+}
+
+async function generateMissingRules(candidates = generationCandidates.value, { regenerate = false } = {}) {
   if (!Array.isArray(candidates)) candidates = generationCandidates.value;
+  // 重入保护：双击只提交一次（后端还会按内容指纹去重）。
+  if (draftBusy.value) return;
   draftBusy.value = true;
   draftError.value = null;
   try {
@@ -465,15 +485,36 @@ async function generateMissingRules(candidates = generationCandidates.value) {
       // 只给缺规则的那些评分项：AI 补缺失部分，用户原文表述保留。
       criteria: JSON.parse(JSON.stringify(candidates)),
       connectionId: draftConnection.value || null,
+      regenerate,
     });
-    if (!store.lastDraft.items.some((item) => item.draft)) draftError.value = "所选评分项的原文细则已可解析，请直接核对或修改规则，无需 AI 补全。";
-    // 这里**不重新加载完整度**：起草端点 non-persistent，库里什么都没变，刷一次
-    // 只会把用户刚拿到的建议换成一模一样的旧数字，看起来像什么都没发生。
-    // 建议由下面的确认面板呈现，应用之后才刷新。
+    // 这里**不重新加载完整度**：起草结果只是建议，库里什么都没变。
+    // 建议在任务完成后由下面的确认面板呈现，应用之后才刷新。
+    watchDraftTasks();
   } catch (err) {
-    draftError.value = err instanceof Error ? err.message : "起草失败";
+    if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "起草失败";
+    watchDraftTasks();
   } finally {
     draftBusy.value = false;
+  }
+}
+
+const currentDraftTask = computed(() => store.draftTasks[activeCriterionCode.value] || null);
+const currentDraftTaskActive = computed(() => isActiveAiTask(currentDraftTask.value));
+const draftTaskBusy = ref(false);
+
+async function draftTaskAction(action) {
+  const task = currentDraftTask.value;
+  if (!task || draftTaskBusy.value) return;
+  draftTaskBusy.value = true;
+  draftError.value = null;
+  try {
+    if (action === "cancel") await store.cancelDraftTask(task.id);
+    else await store.retryDraftTask(task.id);
+    watchDraftTasks();
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "操作失败";
+  } finally {
+    draftTaskBusy.value = false;
   }
 }
 
@@ -887,6 +928,7 @@ watch(selected, async (id) => {
   selectedCriterion.value = null; sourceMode.value = true; sourceFilter.value = "pending"; chosenVisibility.value = null;
   excluded.value = new Set(); editForm.value = null; reviewError.value = null; reviewNotice.value = null;
   store.lastDraft = { items: [] }; applyNotice.value = null; applyError.value = null;
+  draftPoller.stop(); store.forgetDraftTasks(); draftError.value = null;
   parseState.value = null; structureEstimate.value = null; ruleEstimate.value = null; parseError.value = null;
   sourceWorkspace.value = null; sourcePreview.value = null;
   rubricReupload.value = { preview: null, rulesFile: null, templateFile: null };
@@ -894,6 +936,11 @@ watch(selected, async (id) => {
   nextEntryStep.value = 1;
   await refreshDetail(id);
   if (gate.value.blocked || (parseState.value?.triggers || []).length) step.value = 1;
+  // 刷新页面或换回这份标准时，找回仍在后台进行的起草任务。
+  if (id) {
+    try { await store.resumeDraftTasks(id); watchDraftTasks(); }
+    catch (err) { if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "读取起草任务失败"; }
+  }
 });
 function beforeUnload(event) {
   if (!dirty.value && !store.lastDraft.items.length && !operationBusy.value) return;
@@ -911,7 +958,7 @@ watch(() => session.organizationId, async (next, previous) => {
   await loadRubrics(); await loadConnections();
 });
 onMounted(async () => { window.addEventListener("beforeunload", beforeUnload); await loadRubrics(); await loadConnections(); });
-onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload", beforeUnload); });
+onUnmounted(() => { loadSequence += 1; draftPoller.stop(); window.removeEventListener("beforeunload", beforeUnload); });
 </script>
 
 <template>
@@ -1065,7 +1112,7 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
               <div class="card-head"><h2 class="card-title">规则来源</h2><span class="faint">AI 根据评分说明、原文细则及归入的内容起草</span></div>
               <div class="rule-source-columns"><div><h3>评分说明</h3><p>{{ editableCriterion?.description || '未提供评分说明' }}</p><p v-for="(text,i) in editableCriterion?.deduction_rules || []" :key="i">{{ text }}</p><p class="faint">修改评分说明请返回第 1 步。</p></div><div><h3>归入的原文要求 · {{ assignedSources.length }} 个单元</h3><button class="btn btn-sm" :disabled="operationBusy" @click="sourceMode = true">从待归类添加</button><article v-for="unit in visibleAssignedSources" :key="unit.unit_id"><div class="source-row"><span class="mono faint">{{ unit.unit_id }}</span><button v-if="unit.locator?.review?.claimed_by?.includes(`${activeCriterion.code}.manual`)" class="btn btn-sm" :disabled="operationBusy || !editable" @click="resolveUnits({unitIds:[unit.unit_id], action:'restore', reason:'用户移出规则来源，重新归类'})">移出</button></div><p>{{ unit.text }}</p></article><button v-if="assignedSources.length > 1" class="btn btn-sm sources-toggle" type="button" data-test="toggle-assigned-sources" :aria-expanded="sourcesExpanded" @click="sourcesExpanded = !sourcesExpanded">{{ sourcesExpanded ? '收起' : `展开其余 ${assignedSources.length - 1} 个单元` }}</button><p v-if="!assignedSources.length" class="faint">还没有归入原文。</p><p class="faint">移出只撤销原文归类；已生成细则请另行核对，未应用的 AI 建议将清除。</p></div></div>
             </section>
-            <section class="card card-pad coverage-panel"><h2 class="card-title">扣分细则</h2><p class="faint">AI 连接：{{ connections.find(c => c.id === draftConnection)?.name || '未启用，请到账户与连接配置' }}。AI 建议须人工核对后应用与确认。</p><div class="actions"><button class="btn" :disabled="operationBusy || !draftConnection || !editable || !editableCriterion || hasPendingAiDraft" @click="generateMissingRules([editableCriterion])">{{ draftBusy ? '起草中…' : 'AI 根据规则来源起草' }}</button><button v-if="generationCandidates.length" class="btn" :disabled="operationBusy || !draftConnection || !editable" @click="generateMissingRules()">生成全部缺失细则（{{ generationCandidates.length }}）</button></div><p v-if="draftError" class="notice notice-danger" role="alert">{{ draftError }}</p></section>
+            <section class="card card-pad coverage-panel"><h2 class="card-title">扣分细则</h2><p class="faint">AI 连接：{{ connections.find(c => c.id === draftConnection)?.name || '未启用，请到账户与连接配置' }}。AI 建议须人工核对后应用与确认。</p><div class="actions"><button class="btn" :disabled="operationBusy || currentDraftTaskActive || !draftConnection || !editable || !editableCriterion || hasPendingAiDraft" @click="generateMissingRules([editableCriterion])">{{ draftBusy ? '提交中…' : currentDraftTaskActive ? '起草中…' : 'AI 根据规则来源起草' }}</button><button v-if="currentDraftTask?.status === 'succeeded' && !hasPendingAiDraft && editableCriterion" class="btn" data-test="regenerate-draft" :disabled="operationBusy || !draftConnection || !editable" @click="generateMissingRules([editableCriterion], { regenerate: true })">重新生成</button><button v-if="generationCandidates.length" class="btn" :disabled="operationBusy || !draftConnection || !editable" @click="generateMissingRules()">生成全部缺失细则（{{ generationCandidates.length }}）</button></div><div v-if="currentDraftTask" class="draft-task" data-test="draft-task-status" role="status"><span :class="{ danger: currentDraftTask.status === 'failed' }">{{ draftTaskProgress(currentDraftTask) }}</span><button v-if="currentDraftTaskActive" class="btn btn-sm" :disabled="draftTaskBusy" @click="draftTaskAction('cancel')">取消起草</button><button v-if="canRetryAiTask(currentDraftTask)" class="btn btn-sm" :disabled="draftTaskBusy || !editable" @click="draftTaskAction('retry')">重试失败的批次</button></div><p v-if="draftError" class="notice notice-danger" role="alert">{{ draftError }}</p></section>
             <AiRuleDraftPanel :items="currentDraftItems" :busy="operationBusy || !editable" @apply="applyDraft" @discard="discardDraft" />
             <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :excluded="excluded" :busy="operationBusy" :editable="editable"
               :defer-confirmation="hasPendingAiDraft" @confirm="confirmRules([$event])" @confirm-all="confirmRules" @exclude="toggleExcluded" />
@@ -1136,6 +1183,8 @@ onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload"
   </div>
 </template>
 <style scoped>
+.draft-task { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; }
+.draft-task .danger { color: var(--danger); }
 .heading-row, .head-actions, .criterion-title, .issue-row { display: flex; align-items: center; gap: 12px; }
 .heading-row, .issue-row { justify-content: space-between; }
 .head-actions { flex-wrap: wrap; }

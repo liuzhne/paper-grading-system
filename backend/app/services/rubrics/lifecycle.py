@@ -237,6 +237,10 @@ def _canonical_version_hash(
                         "reviewed_by",
                         "reviewed_at",
                         "created_at",
+                        # 0036 的来源记录（是否来自 AI、生成模型名）不是规则内容：
+                        # 计入会改变 0036 之前已发布版本重算出的 hash。
+                        "ai_origin",
+                        "ai_model",
                     },
                 ),
                 "levels": _stable_rows(levels_by_rule[rule.id]),
@@ -1534,6 +1538,8 @@ def clone_published_rubric(
             depends_on_rule_codes=deepcopy(original.depends_on_rule_codes or []),
             status="draft",
             creation_method=original.creation_method,
+            ai_origin=bool(original.ai_origin),
+            ai_model=original.ai_model,
             reviewed_by=None,
             reviewed_at=None,
         )

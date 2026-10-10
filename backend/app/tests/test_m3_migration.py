@@ -1493,7 +1493,15 @@ def test_m3_k_v1_hash_is_byte_stable_across_0011_0012_0013_and_v2_is_profile_sen
         assert stored["hash_scheme"] == "rubric-content-v1"
         assert stored["business_profile_key"] == "thesis"
         assert _independent_v1_hash_from_database(engine) == expected_v1
+    finally:
+        engine.dispose()
 
+    # The ORM models describe head, so the production hasher runs after
+    # upgrading.  This is the stronger check: later columns (0036 ai_origin /
+    # ai_model provenance) must stay out of the frozen v1 content bytes.
+    command.upgrade(config, "head")
+    engine = _new_engine(url, foreign_keys=True)
+    try:
         # Exercise the production graph hasher, but keep the expected v1 value
         # independently frozen above so implementation code is not its own oracle.
         from backend.app.db import models

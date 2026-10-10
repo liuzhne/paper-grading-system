@@ -1772,3 +1772,32 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 回滚：先确认没有排队、评分中或取消中的批量评分任务（0035 降级会拒绝），再 `alembic downgrade 0034_anthropic_messages_provider` 并部署上一版本。
 
 维护记录：2026-10-10 · 统一执行模型 A1：新增 worker 参数、Vercel 订阅说明、PostgreSQL 并发用例的运行方法、日志关键字，以及“排队不动”“WORK_ITEM_STALLED”“内网 429 变多”的排查；迁移 head → 0035。
+
+### 2026-10-10 AI 任务 A2（起草扣分细则已改为后台任务）
+
+运行与配置：
+- 起草需要执行器：Vercel 上由 `pgs-work` 叫醒；内网 compose 用 `worker` 服务；本地 `start-web.sh` 与 `start-web-pg.sh` 都会同时启动 `run_batch_worker`。只起 uvicorn（例如 README 的 SQLite 手工命令）时，另开终端运行 `python -m backend.app.scripts.run_batch_worker`。
+- 接口：`POST /api/rubrics/{id}/ai-tasks`（202 新建 / 200 复用）、`GET /api/ai-tasks/{id}`、`GET /api/rubrics/{id}/ai-tasks?kind=rule_draft&active=1`、`POST /api/ai-tasks/{id}/cancel|retry`。`POST /api/rubrics/{id}/draft-deduction-rules` 返回 410 `ENDPOINT_RETIRED`。
+- 每个响应带 `X-PGS-Contract`。停用或改变前端在用的接口时，同时修改 `backend/app/core/contract.py` 与 `frontend/workbench/src/api/contract.js`（`test_ai_tasks.py` 校验一致），并重新构建 `public/`。
+- 日志关键字：`ai_task_created`、`work_item_claimed kind=ai_task`、`work_item_deferred … code=… delay=…`、`work_item_requeued`、`work_item_failed kind=ai_task code=…`、`ai_task_finished … status=… code=…`、`ai_tasks_cleared`。
+
+排错：
+- **现象**：点“AI 根据规则来源起草”后一直显示“AI 起草排队中”。
+  - 报错指向：像是模型慢。
+  - 真正原因：没有执行器在领取——本地只起了 uvicorn、内网 `worker` 没启动，或 Vercel 上叫醒与巡检链都断了（运维页“最近巡检”标红）。也可能是该连接的同时请求数被批量评分占满（AI 条目优先，但不抢已在跑的名额）。
+  - 处理：启动 worker；Vercel 上打开任一评分进度页或起草页会补投巡检链。
+- **现象**：进度停在“模型限流，稍后自动继续”。
+  - 真正原因：厂商返回 429，条目按 Retry-After（默认 30 秒、5–300 秒之间）延后，最多延后 5 次后才判失败。不是卡住。长期如此请在账户页调低该连接的同时请求数。
+- **现象**：起草失败，提示“额度已用完”或“拒绝了请求”。
+  - 真正原因：额度耗尽、鉴权失败、请求被拒（400/401/403/404）立即判失败且不重试，同任务剩余批次被取消；“重试失败的批次”在问题解决前会再次失败。
+- **现象**：起草失败，错误码 `AI_CONNECTION_KEY_CHANGED` / `AI_CONNECTION_CONFIG_CHANGED`。
+  - 真正原因：任务创建后改了连接的密钥或配置；任务按创建时锁定的连接执行，不会换成新配置。处理：重新点起草（新任务锁定新配置）。
+- **现象**：用户反馈“点按钮页面就刷新了一下，操作没生效”。
+  - 报错指向：前端 bug。
+  - 真正原因：版本守卫——页面是旧版本，后端契约已更新，页面在写操作前刷新到新版本，需要再点一次。若刷新后仍然如此，控制台有“接口版本……不一致”的警告：前端产物没有随后端一起部署（`public/` 未重建或 Vercel 静态资源是旧的）。
+
+验证（A2，本地已完成）：后端全量（含 `test_ai_tasks.py`：提交即返回、去重、重新生成、429 延后、输出修正、永久失败只重试失败批次、超时重试一次、取消、连接变更、连续无进展、AI 条目优先且共用来源名额、旧接口 410、契约版本一致、发布清理、组织隔离、采用 AI 规则写入来源与模型名）；0036 迁移回填与降级守卫；前端单元、类型检查、OpenAPI 合同；Playwright `rubric-review.spec.js` 覆盖“提交 → 轮询 → 失败重试 → 应用 → 规则显示 AI · 模型名”。**待做**：Vercel 预览或生产上用并发 1 的连接起草 6 批，确认不超时、刷新后找回进度。
+
+回滚：先确认没有 AI 任务需要保留、没有规则记录生成模型（0036 降级会拒绝），再 `alembic downgrade 0035_unified_work_queue` 并部署上一版本；已打开的新页面会被旧版本的契约头触发一次刷新。
+
+维护记录：2026-10-10 · AI 任务 A2：新增起草任务接口、执行器要求、契约版本守卫的维护方法，以及“一直排队”“限流延后”“失败不重试”“连接变更”“点按钮就刷新”的排查；迁移 head → 0036。
