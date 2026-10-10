@@ -40,10 +40,10 @@ pgs = "backend.app.cli.main:run"
 [tool.vercel.scripts]
 build = "python scripts/build_web_static.py"
 
-[[tool.vercel.subscribers]]
-entrypoint = "backend.app.services.batch_scoring.vercel_queue:handle_work_message"
-
-# 旧主题：只为消费统一执行模型上线前留下的 {job_id, item_id} 消息。
+# 一个模块只能写一条声明：Vercel 的 Python 构建器给每条声明生成一个函数，触发器取
+# 该模块里**全部** @subscribe（这里是 pgs-work 与旧主题 batch-scoring-items）。同一模块
+# 写两条，两个函数会重复注册同一（主题、消费组），部署在 Deploying outputs 阶段报
+# Unexpected error。entrypoint 的变量名只决定函数名，沿用旧名保持函数路径不变。
 [[tool.vercel.subscribers]]
 entrypoint = "backend.app.services.batch_scoring.vercel_queue:score_batch_item"
 

@@ -552,3 +552,23 @@ def test_readiness_flags_an_overdue_sweep_and_counts_item_heartbeats(factory):
         assert signal["sweep"]["status"] == "pass"
         assert signal["stale_count"] == 0
         assert signal["status"] == "pass"
+
+
+def test_each_vercel_subscriber_module_is_declared_once():
+    """Vercel 的 Python 构建器给每条 ``[[tool.vercel.subscribers]]`` 生成一个函数，触发器
+    取入口模块里**全部** ``@subscribe``（声明没写 ``topics`` 时不过滤）。同一模块写两条
+    声明，两个函数会重复注册同一（主题、消费组），部署在 Deploying outputs 阶段只报
+    “Unexpected error. Please try again later.”（2026-10-10，重跑一次同样失败）。"""
+
+    tomllib = pytest.importorskip("tomllib")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    with open(os.path.join(root, "pyproject.toml"), "rb") as handle:
+        declarations = tomllib.load(handle)["tool"]["vercel"]["subscribers"]
+    unfiltered = [entry["entrypoint"].split(":")[0] for entry in declarations if "topics" not in entry]
+    assert len(unfiltered) == len(set(unfiltered)), unfiltered
+    # 这一条声明覆盖两个主题：新的叫醒消息与部署前留下的旧格式消息。
+    from backend.app.services.batch_scoring import vercel_queue
+
+    assert "backend.app.services.batch_scoring.vercel_queue" in unfiltered
+    assert callable(vercel_queue.handle_work_message) and callable(vercel_queue.score_batch_item)
+    assert {vercel_queue.WORK_TOPIC, vercel_queue.SCORING_TOPIC} == {"pgs-work", "batch-scoring-items"}

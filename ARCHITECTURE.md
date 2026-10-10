@@ -1137,7 +1137,7 @@ Claude 适配器的调用链：
 调用链：
 
 - **建任务** `POST /batches/{id}/score-jobs` → `create_batch_scoring_job` 写任务与条目（来源键、发起人、任务内序号）→ `wake_for_capacity`（Vercel：按 `min(空位, 可执行条目)` 发叫醒）→ `ensure_sweep_chain`。
-- **Vercel**：订阅 `pgs-work` 的 `handle_work_message` → `messages.handle_wake_payload` → `execute_next(source_key)`；`{sweep}` 先 `schedule_next_sweep`（下一个 2 分钟槽，幂等键 `sweep-<槽号>`）再 `run_global_sweep`。旧主题 `batch-scoring-items` 的 `score_batch_item` 保留一个发布周期，旧消息按“叫醒该条目所属来源”处理。
+- **Vercel**：订阅 `pgs-work` 的 `handle_work_message` → `messages.handle_wake_payload` → `execute_next(source_key)`；`{sweep}` 先 `schedule_next_sweep`（下一个 2 分钟槽，幂等键 `sweep-<槽号>`）再 `run_global_sweep`。旧主题 `batch-scoring-items` 的 `score_batch_item` 保留一个发布周期，旧消息按“叫醒该条目所属来源”处理。两个 `@subscribe` 同在 `vercel_queue` 模块里，`pyproject.toml` 只写一条声明，Vercel 生成一个函数、挂两个触发器。
 - **内网/本地**：`run_batch_worker` → `run_worker_loop`：`--threads`（默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`，未设为 8）个线程循环 `run_worker_cycle` → `execute_next(None)`（依次尝试有可执行条目的来源）；主线程每 `--sweep-seconds`（默认 120）`run_global_sweep`。
 - **同步入口** `POST /batch-scoring-jobs/{id}/run`（非 Vercel）→ `run_batch_scoring_job`：先对本任务巡检，再开 `max_workers` 个线程调用 `execute_next(parent_id=job_id)`。同一个领取函数，只是限定在一个任务内。
 - **进度读取** `GET /batch-scoring-jobs/{id}`、`GET /batches/{id}/score-jobs/latest`（活动任务）→ `sweep_parent_on_read`：原子条件更新 `batch_scoring_jobs.last_swept_at`（不刷新 `updated_at`），抢到才巡检本任务。
