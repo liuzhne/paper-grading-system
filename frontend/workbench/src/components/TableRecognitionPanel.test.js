@@ -25,3 +25,18 @@ it('原表对照按抽取结果与台账归属标出每行识别为什么', asyn
  expect(role(5)).toEqual(['未计入 · 整行合并的说明行']);
  expect(role(6)).toEqual(['合计 · 不计入']);
 });
+it('识别是后台任务：进行中可取消、失败可重试，期间不能再次发起', async () => {
+ const props = {state:{extraction:{sheet_title:'评分',header_row:1,mapping:{name:1},records:[],unmapped_columns:[]},triggers:[]},previews:[],editable:true,connection:{name:'连接',model_name:'test'},estimate:{chars:100,calls:1}};
+ const w = mount(TableRecognitionPanel,{props:{...props,task:{id:'t1',status:'running',items:[]}}});
+ expect(w.get('[data-test=structure-task]').text()).toContain('正在识别');
+ expect(w.get('[data-test=structure-run]').attributes('disabled')).toBeDefined();
+ await w.get('[data-test=structure-cancel]').trigger('click');
+ expect(w.emitted('task-action')[0]).toEqual(['cancel']);
+ await w.setProps({task:{id:'t1',status:'failed',error_message:'模型两次输出的结构都未通过校验。',items:[]}});
+ expect(w.get('[data-test=structure-task]').text()).toContain('识别失败：模型两次输出的结构都未通过校验。');
+ expect(w.get('[data-test=structure-run]').attributes('disabled')).toBeUndefined();
+ await w.get('[data-test=structure-retry]').trigger('click');
+ expect(w.emitted('task-action')[1]).toEqual(['retry']);
+ await w.setProps({task:{id:'t1',status:'succeeded',items:[]}});
+ expect(w.find('[data-test=structure-task]').exists()).toBe(false);
+});

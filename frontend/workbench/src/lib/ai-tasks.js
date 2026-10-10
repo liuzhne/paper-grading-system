@@ -75,3 +75,53 @@ export function classificationTaskProgress(task) {
     error: task.status === "failed" ? task.error_message || task.error_code || null : null,
   };
 }
+
+/** 审查条目的显示名：评分项编号，跨项审查另起名字。 @param {any} item */
+function reviewItemName(item) {
+  return item?.label === "__cross__" ? "跨项审查" : item?.label || `第 ${(item?.ordinal ?? 0) + 1} 项`;
+}
+
+/**
+ * 规则审查任务的进度说明，例如“规则审查中：已完成 2/5 项”。
+ * @param {any} task
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function reviewTaskProgress(task, now = Date.now()) {
+  if (!task) return "";
+  const total = task.total_items || 0;
+  const done = task.succeeded_count || 0;
+  if (task.status === "queued") return `规则审查排队中：共 ${total} 项（关闭页面不会中断）`;
+  if (task.status === "running") {
+    const suffix = isWaitingForRateLimit(task, now) ? "（模型限流，稍后自动继续）" : "";
+    return `规则审查中：已完成 ${done}/${total} 项${suffix}（关闭页面不会中断）`;
+  }
+  if (task.status === "failed") {
+    const failed = (task.items || []).filter((/** @type {any} */ item) => item.status === "failed").map(reviewItemName);
+    const where = failed.length ? `${failed.join("、")} ` : "";
+    return `审查未完成（已完成 ${done}/${total} 项）：${where}${task.error_message || task.error_code || "未知原因"}`;
+  }
+  if (task.status === "canceled") return "已停止审查；本轮结果不会写入。";
+  if (task.status === "succeeded") return "审查完成。";
+  return "";
+}
+
+/**
+ * 表格结构识别任务（草稿或导入前）的进度说明。
+ * @param {any} task
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function structureTaskProgress(task, now = Date.now()) {
+  if (!task) return "";
+  if (task.status === "queued") return "AI 识别表格结构：排队中（关闭页面不会中断）";
+  if (task.status === "running") {
+    return isWaitingForRateLimit(task, now)
+      ? "AI 识别表格结构：模型限流，稍后自动继续"
+      : "AI 正在识别表格结构…（关闭页面不会中断）";
+  }
+  if (task.status === "failed") return `识别失败：${task.error_message || task.error_code || "未知原因"}`;
+  if (task.status === "canceled") return "已取消识别。";
+  if (task.status === "succeeded") return "识别完成。";
+  return "";
+}

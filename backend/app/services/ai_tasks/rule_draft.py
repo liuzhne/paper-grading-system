@@ -8,21 +8,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from email.utils import parsedate_to_datetime
-from datetime import datetime
-from datetime import timezone
 
 from pydantic import ValidationError
 
-from backend.app.core.config import settings
 from backend.app.schemas.rubric import RubricCriterionCreate
 from backend.app.services.ai_tasks.errors import AITaskItemError
 from backend.app.services.ai_tasks.errors import AITaskProblem
 from backend.app.services.ai_tasks.handlers import PreparedTask
 from backend.app.services.ai_tasks.handlers import TaskHandler
 from backend.app.services.ai_tasks.handlers import register_handler
-from backend.app.services.llm.errors import ProviderCallError
-from backend.app.services.llm.rate_limit import CircuitOpenError
+from backend.app.services.ai_tasks.provider_errors import provider_item_error
 from backend.app.services.rubric_import import parse_state
 from backend.app.services.rubric_import.ai_rule_drafter import AI_RULE_DRAFT_PROMPT_VERSION
 from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
@@ -44,40 +39,6 @@ REPAIRABLE_CODES = {
     "DEDUCTION_POINTS_EXCEED_MAX",
     "SEVERITY_RULES_NOT_MONOTONIC",
 }
-# 超时、5xx、网络中断：再执行 1 次。
-TRANSIENT_PROVIDER_CODES = {
-    "request_timeout",
-    "provider_unavailable",
-    "network_error",
-    "capacity_unavailable",
-    "unknown",
-}
-
-
-def _cause_chain(exc):
-    seen = set()
-    current = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        yield current
-        current = current.__cause__ or current.__context__
-
-
-def _retry_after_seconds(value):
-    if value is None:
-        return None
-    text = str(value).strip()
-    try:
-        return max(0, int(float(text)))
-    except ValueError:
-        pass
-    try:
-        when = parsedate_to_datetime(text)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
 
 
 def item_error(exc: AIRuleDraftValidationError) -> AITaskItemError:
@@ -91,31 +52,7 @@ def item_error(exc: AIRuleDraftValidationError) -> AITaskItemError:
     if exc.code == "AI_DRAFT_TIME_BUDGET_EXCEEDED":
         return AITaskItemError(exc.code, message, disposition="retry")
     if exc.code == "AI_DRAFT_PROVIDER_ERROR":
-        for cause in _cause_chain(exc):
-            if isinstance(cause, CircuitOpenError):
-                return AITaskItemError(
-                    exc.code,
-                    message,
-                    disposition="defer",
-                    retry_after_seconds=settings.PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
-                )
-            if isinstance(cause, ProviderCallError):
-                code = cause.error.code
-                if code == "rate_limited":
-                    return AITaskItemError(
-                        exc.code,
-                        message,
-                        disposition="defer",
-                        retry_after_seconds=_retry_after_seconds(cause.error.retry_after),
-                    )
-                if code == "quota_exhausted":
-                    # 等待不会恢复：不调低、不重试。
-                    return AITaskItemError(exc.code, message, disposition="fail")
-                if code in TRANSIENT_PROVIDER_CODES:
-                    return AITaskItemError(exc.code, message, disposition="retry")
-                return AITaskItemError(exc.code, message, disposition="fail")
-        # 成功状态里的错误响应、未分类的服务异常：按超时/5xx 处理，再试一次。
-        return AITaskItemError(exc.code, message, disposition="retry")
+        return provider_item_error(exc, code=exc.code, message=message)
     return AITaskItemError(exc.code, message, disposition="fail")
 
 

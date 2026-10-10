@@ -7,5 +7,5 @@
  *
  * **必须与 backend/app/core/contract.py 的 API_CONTRACT_VERSION 一致**（后端测试校验）。
  */
-export const API_CONTRACT_VERSION = "2026-10-10.ai-tasks-b";
+export const API_CONTRACT_VERSION = "2026-10-10.ai-tasks-c";
 export const API_CONTRACT_HEADER = "X-PGS-Contract";

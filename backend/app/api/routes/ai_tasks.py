@@ -5,9 +5,12 @@ from typing import Optional
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import File
+from fastapi import Form
 from fastapi import HTTPException
 from fastapi import Query
 from fastapi import Response
+from fastapi import UploadFile
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -29,6 +32,8 @@ from backend.app.services.ai_tasks.service import list_ai_tasks
 from backend.app.services.ai_tasks.service import retry_ai_task
 from backend.app.services.ai_tasks.state import ACTIVE_TASK_STATUSES
 from backend.app.services.dev_user import ensure_dev_user
+from backend.app.services.rubric_import import parse_state
+from backend.app.services.rubric_import import structure_state
 from backend.app.services.work_queue.sweep import ensure_sweep_chain
 from backend.app.services.work_queue.sweep import sweep_parent_on_read
 from backend.app.services.work_queue.wake import wake_for_capacity
@@ -76,8 +81,13 @@ def _task_or_404(db, task_id, principal):
     task = get_ai_task(db, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="AI task not found")
-    # 任务只对能看到这份评分标准、且同组织的用户可见。
-    _visible_rubric(db, task.rubric_id, principal)
+    if task.rubric_id is None:
+        # 导入前的结构识别还没有评分标准：只对建任务的用户可见。
+        if task.owner_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="AI task not found")
+    else:
+        # 任务只对能看到这份评分标准、且同组织的用户可见。
+        _visible_rubric(db, task.rubric_id, principal)
     if (
         principal.organization_id is not None
         and task.organization_id is not None
@@ -114,6 +124,54 @@ def create_task(
             principal=principal,
             ai_connection_id=payload.ai_connection_id,
             regenerate=payload.regenerate,
+        )
+    except AITaskProblem as exc:
+        db.rollback()
+        raise _problem(exc) from exc
+    task_id = task.id
+    if created and task.status in ACTIVE_TASK_STATUSES:
+        _wake(db, task, reason="create")
+    response.status_code = 202 if created else 200
+    return get_ai_task(db, task_id)
+
+
+@router.post("/ai-tasks/import-structure", response_model=AITaskRead, status_code=202)
+def create_import_structure_task(
+    response: Response,
+    rules_file: Optional[UploadFile] = File(None),
+    template_file: Optional[UploadFile] = File(None),
+    ai_connection_id: Optional[str] = Form(None),
+    regenerate: bool = Form(False),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """导入前（E1/E7 识别失败、还没有评分标准）的表格结构识别任务。
+
+    上传文件在这里解析成台账后冻结进任务，文件本身不落库；任务只对建任务的用户可见，
+    结果（结构与将导入的评分项）在任务里，确认后带 ``structure_override`` 调用导入接口。
+    """
+
+    ensure_dev_user(db)
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        upload = structure_state.import_structure_request(
+            rules_bytes=rules_file.file.read() if rules_file else None,
+            template_bytes=template_file.file.read() if template_file else None,
+        )
+    except parse_state.ParseStateError as exc:
+        raise _problem(
+            AITaskProblem(exc.status, exc.code, exc.message, "请检查上传的文件后重试。")
+        ) from exc
+    try:
+        task, created = create_ai_task(
+            db,
+            rubric_id=None,
+            kind="structure_suggestion",
+            params={"upload": upload},
+            principal=principal,
+            ai_connection_id=ai_connection_id,
+            regenerate=regenerate,
         )
     except AITaskProblem as exc:
         db.rollback()

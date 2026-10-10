@@ -10,7 +10,7 @@
 - CI/生产发布：`.github/workflows/ci.yml` 包含锁文件全量测试、Postgres 16 的逐版本迁移/约束/排序、拒绝 lossy downgrade、备份恢复演练和 Docker 冒烟；推送 `main` 且全部门禁通过后，才由 `deploy-vercel-production` 使用 GitHub `production` Environment 部署 Vercel。Vercel Git 直部署已关闭；当前 CLI 因上游 prebuilt 回归固定为 `58.4.0`。本机 SQLite 通过不能替代真实 CI artifact。
 
 ## 当前发布边界
-- Alembic head：`0036_ai_tasks`（0022 将旧单租户资源安全回填至默认组织；0023 持久化规则检查点与人工复核任务；0024 批次七态约束与 `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议加入 `anthropic_messages`（Claude），有该协议的连接或平台模型时拒绝降级；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与部分索引，新增 `work_runtime_state`（`pgs_app` 授权与 RLS），有活动批量评分任务时拒绝降级；0036 新增 `ai_tasks` / `ai_task_items`（`pgs_app` 授权与 RLS）与 `atomic_rules.ai_origin` / `ai_model`，有 AI 任务或已记录生成模型的规则时拒绝降级。**0024–0028、0031 含数据时一律拒绝降级**——降级会删掉不可重建的审计或导入草稿；0033 的账本是可重建的缓存，但有复用标记的任务时同样拒绝降级）。
+- Alembic head：`0037_ai_task_upload_scope`（0022 将旧单租户资源安全回填至默认组织；0023 持久化规则检查点与人工复核任务；0024 批次七态约束与 `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议加入 `anthropic_messages`（Claude），有该协议的连接或平台模型时拒绝降级；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与部分索引，新增 `work_runtime_state`（`pgs_app` 授权与 RLS），有活动批量评分任务时拒绝降级；0036 新增 `ai_tasks` / `ai_task_items`（`pgs_app` 授权与 RLS）与 `atomic_rules.ai_origin` / `ai_model`，有 AI 任务或已记录生成模型的规则时拒绝降级；0037 让导入前的结构识别任务可以不挂评分标准，有这类任务时拒绝降级。**0024–0028、0031 含数据时一律拒绝降级**——降级会删掉不可重建的审计或导入草稿；0033 的账本是可重建的缓存，但有复用标记的任务时同样拒绝降级）。
 - v1 `score_paper()` 与 v2 `score_generic_submission()` 并存；正式 RubricVersion 走 AtomicRule Core，未版本化标准只能走显式 compatibility。
 - `SCORING_ENGINE_MODE` 当前默认 `legacy`；它只控制未版本化兼容路径。真实 `GATE-03` 达到 `gating_eligible=true` 且取得维护者发布批准前，禁止改为默认 Core。
 
@@ -23,7 +23,7 @@
   - `scoring/engine`：评分编排（**核心**）；`rules` 总分/等级；`validator` 结构化输出校验+注入检测。
   - `batch_scoring/jobs`：数据库持久化批任务、论文级检查点、租约恢复/取消/定向重试、观察策略与 Core 切换信号；只做观察，不授予 GATE-03 发布权限。它是 `work_queue` 的一种条目。
   - `work_queue/`：数据库即队列——`claim_next_item`（来源名额 + `SKIP LOCKED` + 任务内序号轮转）、条目心跳、`sweep_stale_items` 巡检（连续无进展上限）、叫醒（Vercel 上 `pgs-work` 只带来源键；内网/本地 worker 循环调用同一个领取函数）。
-  - `ai_tasks/`：评分标准侧 AI 操作的异步任务（`rule_draft` 等）。建任务时冻结输入、锁定连接、内容指纹去重；每次模型调用是一个 `ai_task_items` 条目，作为 `work_queue` 的 `ai_task` 种类（优先于批量评分）执行，429 延后、超时重试 1 次、输出不合格修正 1 次。旧同步接口在迁移它的阶段返回 410；`core/contract.py` 与前端 `api/contract.js` 的契约版本做版本守卫。
+  - `ai_tasks/`：评分标准侧 AI 操作的异步任务（`rule_draft` 起草、`unit_classification` 归类、`rule_review` 审查、`structure_suggestion` 结构识别——导入前的识别不挂评分标准，按用户去重）。建任务时冻结输入、锁定连接、内容指纹去重；每次模型调用是一个 `ai_task_items` 条目，作为 `work_queue` 的 `ai_task` 种类（优先于批量评分）执行，429 延后、超时重试 1 次、输出不合格修正 1 次。旧同步接口全部返回 410，估算走单独的 `…/estimate` 接口（不调用模型）；`core/contract.py` 与前端 `api/contract.js` 的契约版本做版本守卫。
   - `deployment/`：Core inventory、OPS readiness、Postgres verifier、带校验 manifest 的数据库+storage 备份恢复；OPS 报告同样不授予默认 Core。
   - `checkers/`：确定性检查器(`deterministic`)、findings→扣分(`findings_checker`)。
   - `coherence/`：篇章一致性（确定性 `checker` + 语义 `semantic`）。
@@ -46,7 +46,7 @@
 确定性优先(代码做判定题、LLM 做判断题)、原子评分项、每个扣分/选档强制带证据(抗幻觉)、结构化优先、无状态可缓存可复现、人在回路。**扣哪项/扣几分来自用户授权的模板/Excel 编译，不写死。**
 
 ## 约定
-- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0036_ai_tasks`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
+- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0037_ai_task_upload_scope`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
 - 改 prompt/输入构造要 bump `cache/llm_cache.PROMPT_VERSION`。
 - 改评分逻辑后用 §15 QWK 留出集重新锚定基线。
 - 生产变更需完成 `docs/上线清单.md`；备份恢复必须先 verify，restore 只允许显式确认的数据库与空 storage 目标。

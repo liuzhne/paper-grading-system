@@ -188,45 +188,68 @@ def _digest(value) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
-def task_fingerprint(*, kind, rubric_id, compilation_id, prepared, model, prompt_version):
+def task_fingerprint(*, kind, rubric_id, compilation_id, prepared, model, prompt_version, owner_id=None):
     """内容指纹：同样的输入、同一个连接与模型、同一版提示词，得到同一个任务。
 
     不含时间戳和客户端生成的键：双击、多个标签页、刷新后重点都命中同一个任务。
+    没有评分标准的任务（导入前识别）按用户区分。
     """
 
-    return _digest(
-        {
-            "kind": kind,
-            "rubric_id": rubric_id,
-            "compilation_id": compilation_id,
-            "scope": prepared.scope,
-            "input": _digest(prepared.input_snapshot),
-            "material": prepared.fingerprint_material,
-            "connection_id": model.connection_id,
-            "key_version": model.key_version,
-            "model_name": model.model_name,
-            "prompt_version": prompt_version,
-        }
-    )
+    material = {
+        "kind": kind,
+        "rubric_id": rubric_id,
+        "compilation_id": compilation_id,
+        "scope": prepared.scope,
+        "input": _digest(prepared.input_snapshot),
+        "material": prepared.fingerprint_material,
+        "connection_id": model.connection_id,
+        "key_version": model.key_version,
+        "model_name": model.model_name,
+        "prompt_version": prompt_version,
+    }
+    if rubric_id is None:
+        material["owner_id"] = owner_id
+    return _digest(material)
 
 
 def _active_compilation_id(db, rubric_id):
     from backend.app.services.rubrics.draft_graph import read_execution_draft
 
+    if rubric_id is None:
+        return None
     execution = read_execution_draft(session=db, rubric_id=rubric_id)
     return (execution.get("active_compilation") or {}).get("id")
 
 
-def _live_task(db, rubric_id, fingerprint):
+def _live_task(db, rubric_id, fingerprint, owner_id=None):
+    scope = (
+        AITask.rubric_id == rubric_id
+        if rubric_id is not None
+        else (AITask.rubric_id.is_(None)) & (AITask.owner_id == owner_id)
+    )
     return db.scalar(
         select(AITask)
-        .where(
-            AITask.rubric_id == rubric_id,
-            AITask.fingerprint == fingerprint,
-            AITask.status.in_(AI_TASK_LIVE_STATUSES),
-        )
+        .where(scope, AITask.fingerprint == fingerprint, AITask.status.in_(AI_TASK_LIVE_STATUSES))
         .options(selectinload(AITask.items))
     )
+
+
+def _prune_upload_tasks(db, owner_id):
+    """导入前识别没有评分标准，不会随发布清理：同一用户再次发起时删掉已结束的旧任务。"""
+
+    task_ids = list(
+        db.scalars(
+            select(AITask.id).where(
+                AITask.rubric_id.is_(None),
+                AITask.owner_id == owner_id,
+                AITask.status.not_in(ACTIVE_TASK_STATUSES),
+            )
+        )
+    )
+    if task_ids:
+        db.execute(delete(AITaskItem).where(AITaskItem.task_id.in_(task_ids)))
+        db.execute(delete(AITask).where(AITask.id.in_(task_ids)))
+    return len(task_ids)
 
 
 def get_ai_task(db, task_id):
@@ -258,7 +281,10 @@ def _supersede(db, task, now):
 
 
 def create_ai_task(db, *, rubric_id, kind, params, principal, ai_connection_id=None, regenerate=False):
-    """建任务；命中同指纹的进行中或已成功任务时返回它（第二个值为 False）。"""
+    """建任务；命中同指纹的进行中或已成功任务时返回它（第二个值为 False）。
+
+    ``rubric_id`` 为空只用于导入前的结构识别（参数由服务端解析上传文件得到）。
+    """
 
     handler = get_handler(kind)
     model = resolve_task_model(db, principal, ai_connection_id)
@@ -280,14 +306,17 @@ def create_ai_task(db, *, rubric_id, kind, params, principal, ai_connection_id=N
         prepared=prepared,
         model=model,
         prompt_version=handler.prompt_version,
+        owner_id=principal.user_id,
     )
     now = utcnow()
-    existing = _live_task(db, rubric_id, fingerprint)
+    existing = _live_task(db, rubric_id, fingerprint, principal.user_id)
     if existing is not None and not regenerate:
         return existing, False
     if existing is not None:
         # “重新生成”：模型每次输出不同，用户可能确实想换一版；旧任务（进行中的先取消）作废。
         _supersede(db, lock_task(db, existing.id), now)
+    if rubric_id is None:
+        _prune_upload_tasks(db, principal.user_id)
     task = AITask(
         organization_id=principal.organization_id,
         owner_id=principal.user_id,
@@ -325,7 +354,7 @@ def create_ai_task(db, *, rubric_id, kind, params, principal, ai_connection_id=N
     except IntegrityError:
         # 并发的两次提交：部分唯一索引兜底，输的一方回查后返回胜出者。
         db.rollback()
-        winner = _live_task(db, rubric_id, fingerprint)
+        winner = _live_task(db, rubric_id, fingerprint, principal.user_id)
         if winner is None:
             raise
         return winner, False
@@ -369,7 +398,7 @@ def retry_ai_task(db, task_id):
             409, "AI_TASK_NOT_RETRYABLE", "只有失败的任务可以重试失败的条目。", "请刷新页面查看任务状态。"
         )
     now = utcnow()
-    other = _live_task(db, task.rubric_id, task.fingerprint)
+    other = _live_task(db, task.rubric_id, task.fingerprint, task.owner_id)
     if other is not None and other.id != task.id:
         # 期间已有同内容的任务（例如另一个标签页重新提交）：直接用它。
         _supersede(db, task, now)
@@ -401,7 +430,7 @@ def retry_ai_task(db, task_id):
         db.commit()
     except IntegrityError:
         db.rollback()
-        winner = _live_task(db, task.rubric_id, task.fingerprint)
+        winner = _live_task(db, task.rubric_id, task.fingerprint, task.owner_id)
         if winner is None:
             raise
         return winner, True

@@ -39,6 +39,7 @@ MIGRATION_SEQUENCE = (
     "0034_anthropic_messages_provider",
     "0035_unified_work_queue",
     "0036_ai_tasks",
+    "0037_ai_task_upload_scope",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -48,6 +49,10 @@ WORK_QUEUE_INDEXES = {
     "ix_batch_scoring_items_running": "running",
     "ix_ai_task_items_claim": "pending",
     "ix_ai_task_items_running": "running",
+}
+AI_TASK_FINGERPRINT_INDEXES = {
+    "ix_ai_tasks_one_live_fingerprint": "succeeded",
+    "ix_ai_tasks_one_live_upload_fingerprint": "rubric_id IS NULL",
 }
 
 
@@ -114,6 +119,15 @@ def verify_postgres(session):
         )
         if index is None or status not in predicate:
             raise RuntimeError("work queue partial index is incomplete: %s" % index_name)
+    # 0036/0037：同指纹的进行中或已成功 AI 任务只能有一个（双击、多标签页不重复计费）。
+    task_indexes = {value["name"]: value for value in inspector.get_indexes("ai_tasks")}
+    for index_name, needle in AI_TASK_FINGERPRINT_INDEXES.items():
+        index = task_indexes.get(index_name)
+        predicate = str(
+            ((index or {}).get("dialect_options") or {}).get("postgresql_where") or ""
+        )
+        if index is None or not index.get("unique") or needle not in predicate:
+            raise RuntimeError("AI task fingerprint index is incomplete: %s" % index_name)
     rubric_indexes = {
         value["name"]: value for value in inspector.get_indexes("rubrics")
     }
@@ -194,6 +208,7 @@ def verify_postgres(session):
         "migration_sequence": list(MIGRATION_SEQUENCE),
         "active_job_index": ACTIVE_JOB_INDEX,
         "work_queue_indexes": sorted(WORK_QUEUE_INDEXES),
+        "ai_task_fingerprint_indexes": sorted(AI_TASK_FINGERPRINT_INDEXES),
         "rubric_visibility_indexes": sorted(
             name for name in rubric_indexes if name.startswith("uq_rubrics_")
         ),

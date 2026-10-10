@@ -579,6 +579,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 四类 AI 操作全部改为任务；三个同步接口 410，估算拆为独立接口；0037 让导入前的结构识别任务不挂评分标准；新增 `on_task_success` 钩子与 `ai_tasks/provider_errors`。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 完成原子编辑、完整来源复制、AI 追加、锁内内容摘要复核及结构阻断展示；本地 1911 项后端与 139 项浏览器回归通过，后续总分补充修复的 10 项专项测试通过。主线 95d189f 经完整 CI 部署；数据库与默认 legacy 不变，线上资源一致、健康 200、未登录审核接口 401，待登录后业务验收。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 核对导入、规则审核、编译与发布边界；新增独立审核投影及带内容校验的确认入口，安全恢复读模型与评分语义不变。实施和验证进行中。 |
 | 2026-09-10 | 未配置模型的拦截修复 | 新增 §7.18：判定/拦截/留痕/呈现四分；`pendingBlock` 取代组件级 `dismissed`；能力表刷新时机列表。无后端改动。 |
@@ -1192,3 +1193,28 @@ Claude 适配器的调用链：
 - 前端：`stores/rubrics.classifyUnits` 建任务；`RubricsView` 轮询任务，`succeeded_count` 变化即刷新原文核对面板；`SourceReviewPanel` 的进度来自任务（`AITaskItemRead.unit_count` 累计），可“停止本轮”“重试失败的批次”；进入页面时找回进行中的归类任务。
 
 维护记录：2026-10-10 · AI 任务 B：归类迁移到任务，按单元去重，前端调度器删除；无迁移，契约版本 → `2026-10-10.ai-tasks-b`。
+
+### 2026-10-10 AI 任务 C（已实施：规则审查、表格结构识别）
+
+四类 AI 操作都已是任务；`POST /rubrics/{id}/rule-review`、`POST /rubrics/{id}/structure-suggestions`、`POST /rubrics/import-files/structure-suggestions` 返回 410。估算拆成单独的接口，不调用模型：`POST /rubrics/{id}/rule-review/estimate`、`POST /rubrics/{id}/structure-suggestions/estimate`、`POST /rubrics/import-files/structure-suggestions/estimate`。
+
+| 模块 | 职责 |
+|---|---|
+| `ai_tasks/rule_review` | `rule_review`：`prepare` 调 `review_state.prepare_rule_review`（前置检查、按范围挑评分项包、按全部规则算指纹）；每个评分项一个条目（`label`=评分项编号），两个以上评分项时再加跨项条目（`label=__cross__`）。`run_item` 调 `review.call_once`（传输层 `attempts_limit=1`、`rate_limit_retries=0`），问题校验沿用 `validate_criterion_issues` / `validate_cross_issues`；缺 issues 数组先修正一次，仍不合格就把这一项记入 `failed` 并照常成功（与同步审查相同）。`merge` 编号 F1…；`on_task_success` 调 `review_state.store_rule_review` 写进当前草稿 |
+| `ai_tasks/structure_suggestion` | `structure_suggestion`，一次模型调用一个条目，两种目标：`draft` 从草稿台账（`structure_state.draft_structure_request`）冻结发送内容，`on_item_success` 调 `store_structure_suggestion`（按识别出的结构重新解析、算差异、带指纹落库；识别期间草稿被换掉时以 `STRUCTURE_SOURCE_CHANGED` 失败）；`import` 由 `POST /ai-tasks/import-structure` 在服务端把上传文件解析成台账（`import_structure_request`，文件不落库），`run_item` 识别后用 `import_structure_preview` 试解析，结果只在任务里 |
+| `ai_tasks/provider_errors` | 厂商异常 → 处理方式（沿异常链找 `ProviderCallError` / `CircuitOpenError`：限流与熔断 defer，额度耗尽与请求被拒 fail，超时与 5xx retry）；起草、审查、结构识别共用 |
+| `handlers.TaskHandler.on_task_success` | 新钩子：全部条目成功、合并之后在同一事务里落库；抛 `AITaskItemError` 时任务判失败、结果不保留 |
+
+调用链：
+
+- **审查**：`RuleAuditPanel` 估算 → `POST /rubrics/{id}/ai-tasks {kind: rule_review, params: {scope}, regenerate}`（已有未过期结果时 `regenerate=true`）→ 轮询 → 成功后 `GET /rubrics/{id}/rule-review`。
+- **草稿结构识别**：`TableRecognitionPanel` 估算 → `POST /rubrics/{id}/ai-tasks {kind: structure_suggestion, params: {target: draft}}` → 轮询 → 成功后 `GET /parse-coverage` 里出现 `structure_suggestions`，合入/撤销接口不变。
+- **导入前结构识别**：导入报“未解析到有效评分项”时 → 估算（multipart）→ `POST /ai-tasks/import-structure`（multipart）→ 轮询 → `task.result.preview` 与 `override` → 用户确认后带 `structure_override` 走原导入接口。
+- **找回**：进入评分标准页时 `GET /rubrics/{id}/ai-tasks?active=1`，按种类恢复审查与结构识别任务的轮询；导入前识别没有评分标准，不找回（页面刷新后重新上传即可，同一文件按指纹复用已完成的任务）。
+
+数据与持久化边界：
+
+- 0037：`ai_tasks.rubric_id` 只对 `structure_suggestion` 可空（`ck_ai_tasks_rubric_scope`）；不挂评分标准的任务按 `(owner_id, fingerprint)` 部分唯一索引去重，只对建任务的用户可见（`_task_or_404`），同一用户发起新的导入前识别时删除其已结束的旧任务（`_prune_upload_tasks`），不会随发布清理。
+- 条目新增只读字段 `label`（来自条目输入），页面据此说明“哪个评分项失败”。
+
+维护记录：2026-10-10 · AI 任务 C：审查与结构识别迁移到任务，估算拆成独立接口，新增 `on_task_success` 钩子与共用的厂商错误分类；迁移 head → 0037；契约版本 → `2026-10-10.ai-tasks-c`。

@@ -461,6 +461,6 @@ def test_every_ai_task_write_route_is_role_gated():
 
     source = source_inspect.getsource(routes)
     blocks = [block for block in re.split(r"\n(?=@router\.)", source) if block.startswith("@router.post")]
-    assert len(blocks) == 3
+    assert len(blocks) == 4
     for block in blocks:
         assert "require_organization_role" in block, block.split("\n", 2)[1]

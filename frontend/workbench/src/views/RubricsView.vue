@@ -16,7 +16,9 @@ import { importFilesError, stepOneGate } from "@/lib/parse-coverage.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
 import { draftRows, rowKey } from "@/lib/ai-draft.js";
-import { canRetryAiTask, classificationTaskProgress, draftTaskProgress, isActiveAiTask } from "@/lib/ai-tasks.js";
+import {
+  canRetryAiTask, classificationTaskProgress, draftTaskProgress, isActiveAiTask, reviewTaskProgress, structureTaskProgress,
+} from "@/lib/ai-tasks.js";
 import { aiTaskInterval, createVisiblePoller } from "@/lib/polling.js";
 import { RouterLink, onBeforeRouteLeave } from "vue-router";
 
@@ -201,8 +203,9 @@ async function confirmRubricReupload() {
   } finally { importBusy.value = false; }
 }
 
-// 表格结构识别失败（E1/E7）时的 AI 预检：先估算、确认后才调用模型，结果由用户确认后再导入。
+// 表格结构识别失败（E1/E7）时的 AI 预检：先估算、确认后才提交识别任务，结果由用户确认后再导入。
 const importStructure = ref({ available: false, estimate: null, result: null });
+const importStructureProgress = computed(() => structureTaskProgress(store.importStructureTask));
 
 async function submitImport(structureOverride = null) {
   const invalid = importFilesError(rulesFile.value, templateFile.value);
@@ -223,12 +226,14 @@ async function submitImport(structureOverride = null) {
     });
     importOpen.value = false;
     importStructure.value = { available: false, estimate: null, result: null };
+    importStructureTracker.stop(); store.importStructureTask = null;
     sourcePreview.value = null;
     reuploadPreview.value = null;
   } catch (err) {
     // 服务端的说明比「导入失败」有用得多：它会指出是文件类型不对还是解析不了。
     importError.value = err instanceof Error ? err.message : "导入失败";
     importStructure.value = { available: /未解析到有效评分项/.test(importError.value), estimate: null, result: null };
+    importStructureTracker.stop(); store.importStructureTask = null;
   } finally {
     importBusy.value = false;
   }
@@ -296,22 +301,64 @@ async function cancelImportSession() {
   } finally { importBusy.value = false; }
 }
 
+/**
+ * 跟踪一个后台 AI 任务（审查、结构识别）：轮询到结束为止（页面隐藏时暂停），结束时
+ * 调用一次 `onFinish`。刷新或关页面不影响任务，回到页面时由 resume 接着跟踪。
+ * @param {"review"|"structure"|"import"} key
+ * @param {(task: any) => unknown} onFinish
+ * @param {(message: string) => void} report
+ */
+function aiTaskTracker(key, onFinish, report) {
+  const poller = createVisiblePoller(async () => {
+    try {
+      const task = await store.refreshAiTask(key);
+      if (!task) { poller.stop(); return; }
+      if (!isActiveAiTask(task)) { poller.stop(); await onFinish(task); }
+    } catch (err) {
+      if (!(err instanceof StaleContextError)) report(err instanceof Error ? err.message : "刷新任务进度失败");
+    }
+  }, aiTaskInterval);
+  return {
+    stop: () => poller.stop(),
+    /** @param {any} task */
+    async track(task) {
+      poller.stop();
+      if (isActiveAiTask(task)) poller.start();
+      else if (task) await onFinish(task);
+    },
+  };
+}
+
+const importStructureTracker = aiTaskTracker("import", (task) => {
+  if (task.status === "succeeded") importStructure.value = { ...importStructure.value, result: task.result };
+}, (message) => { importError.value = message; });
+
 async function previewImportStructure(dryRun) {
+  if (importBusy.value) return;
   importBusy.value = true;
   importError.value = null;
   try {
-    const result = await store.previewImportStructure({
-      rulesFile: rulesFile.value, templateFile: templateFile.value,
-      connectionId: draftConnection.value || null, dryRun,
+    if (dryRun) {
+      const result = await store.estimateImportStructure({ rulesFile: rulesFile.value, templateFile: templateFile.value });
+      importStructure.value = { ...importStructure.value, estimate: result.estimate };
+      return;
+    }
+    const task = await store.startImportStructure({
+      rulesFile: rulesFile.value, templateFile: templateFile.value, connectionId: draftConnection.value || null,
     });
-    importStructure.value = dryRun
-      ? { ...importStructure.value, estimate: result.estimate }
-      : { ...importStructure.value, result };
+    await importStructureTracker.track(task);
   } catch (err) {
     importError.value = err instanceof Error ? err.message : "结构识别失败";
   } finally {
     importBusy.value = false;
   }
+}
+
+/** @param {"cancel"|"retry"} action */
+async function importStructureAction(action) {
+  importError.value = null;
+  try { await importStructureTracker.track(await store.aiTaskAction("import", action)); }
+  catch (err) { importError.value = err instanceof Error ? err.message : "操作失败"; }
 }
 
 // --- 原文识别情况（解析台账）与 AI 兜底（解析重构方案 §8）---------------------
@@ -396,11 +443,29 @@ const classificationAction = (action) => parseAction(async (id) => {
   const task = await store.classificationTaskAction(action);
   await trackClassification(id, task);
 });
+// 结构识别与规则审查同样是后台任务：提交即返回，结果写进草稿后重新读取。
+const structureTracker = aiTaskTracker("structure", async (task) => {
+  const id = selected.value;
+  if (task.status !== "succeeded" || !id || task.rubric_id !== id) return;
+  const latest = await store.loadParseCoverage(id);
+  if (selected.value === id) parseState.value = latest;
+}, (message) => { parseError.value = message; });
+const reviewTracker = aiTaskTracker("review", async (task) => {
+  const id = selected.value;
+  if (task.status !== "succeeded" || !id || task.rubric_id !== id) return;
+  const latest = await store.loadRuleReview(id);
+  if (selected.value === id) ruleReview.value = latest;
+}, (message) => { parseError.value = message; });
+
 const suggestStructure = ({ dryRun }) => parseAction(async (id) => {
-  const result = await store.suggestStructure(id, { connectionId: draftConnection.value || null, dryRun });
-  if (dryRun) { structureEstimate.value = result.estimate; return; }
+  if (dryRun) { structureEstimate.value = (await store.estimateStructure(id)).estimate; return; }
+  const task = await store.startStructureSuggestion(id, { connectionId: draftConnection.value || null });
   structureEstimate.value = null;
-  parseState.value = await store.loadParseCoverage(id);
+  await structureTracker.track(task);
+});
+/** @param {"cancel"|"retry"} action */
+const structureAction = (action) => parseAction(async () => {
+  await structureTracker.track(await store.aiTaskAction("structure", action));
 });
 const mergeStructure = (payload) => parseAction(async (id) => {
   await store.mergeStructure(id, { ...payload, fingerprint: parseState.value?.structure_suggestions?.fingerprint,
@@ -412,12 +477,18 @@ const undoStructure = () => parseAction(async (id) => {
   await refreshDetail(id);
 });
 const estimateReview = ({ scope }) => parseAction(async (id) => {
-  ruleEstimate.value = await store.runRuleReview(id, { connectionId: null, scope, dryRun: true });
+  ruleEstimate.value = await store.estimateRuleReview(id, { scope });
 });
 const runReview = ({ scope }) => parseAction(async (id) => {
-  await store.runRuleReview(id, { connectionId: draftConnection.value || null, scope });
+  // 规则没变时同内容的审查会被直接复用；已有未过期的结果时，再点一次表示明确要重新审查。
+  const regenerate = Boolean(ruleReview.value?.reviewed && !ruleReview.value?.stale);
+  const task = await store.startRuleReview(id, { connectionId: draftConnection.value || null, scope, regenerate });
   ruleEstimate.value = null;
-  ruleReview.value = await store.loadRuleReview(id);
+  await reviewTracker.track(task);
+});
+/** @param {"cancel"|"retry"} action */
+const reviewAction = (action) => parseAction(async () => {
+  await reviewTracker.track(await store.aiTaskAction("review", action));
 });
 const dismissFinding = ({ id: findingId, reason }) => parseAction(async (id) => {
   await store.dismissFinding(id, findingId, reason);
@@ -944,6 +1015,7 @@ async function saveAndValidate() {
 }
 watch(selected, async (id) => {
   classificationProgress.value = null; classificationPoller.stop(); store.classificationTask = null;
+  structureTracker.stop(); reviewTracker.stop(); store.structureTask = null; store.ruleReviewTask = null;
   workspace.value = null; coverage.value = null; draft.value = null;
   selectedCriterion.value = null; sourceMode.value = true; sourceFilter.value = "pending"; chosenVisibility.value = null;
   excluded.value = new Set(); editForm.value = null; reviewError.value = null; reviewNotice.value = null;
@@ -962,6 +1034,8 @@ watch(selected, async (id) => {
       await store.resumeDraftTasks(id); watchDraftTasks();
       const classification = await store.resumeClassificationTask(id);
       if (classification && selected.value === id) await trackClassification(id, classification);
+      const { review, structure } = await store.resumeReviewTasks(id);
+      if (selected.value === id) { await reviewTracker.track(review); await structureTracker.track(structure); }
     }
     catch (err) { if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "读取起草任务失败"; }
   }
@@ -982,7 +1056,11 @@ watch(() => session.organizationId, async (next, previous) => {
   await loadRubrics(); await loadConnections();
 });
 onMounted(async () => { window.addEventListener("beforeunload", beforeUnload); await loadRubrics(); await loadConnections(); });
-onUnmounted(() => { loadSequence += 1; draftPoller.stop(); classificationPoller.stop(); window.removeEventListener("beforeunload", beforeUnload); });
+onUnmounted(() => {
+  loadSequence += 1; draftPoller.stop(); classificationPoller.stop();
+  structureTracker.stop(); reviewTracker.stop(); importStructureTracker.stop();
+  window.removeEventListener("beforeunload", beforeUnload);
+});
 </script>
 
 <template>
@@ -1034,7 +1112,12 @@ onUnmounted(() => { loadSequence += 1; draftPoller.stop(); classificationPoller.
         <button v-if="!importStructure.estimate" class="btn" :disabled="importBusy" @click="previewImportStructure(true)">估算识别规模</button>
         <template v-else-if="!importStructure.result">
           <p class="notice">将发送约 {{ importStructure.estimate.chars }} 字符，调用 {{ importStructure.estimate.calls }} 次模型。</p>
-          <button class="btn btn-primary" :disabled="importBusy || !draftConnection" @click="previewImportStructure(false)">确认调用 AI 识别结构</button>
+          <p v-if="store.importStructureTask" class="draft-task" data-test="import-structure-progress">
+            <span :class="{ danger: store.importStructureTask.status === 'failed' }">{{ importStructureProgress }}</span>
+            <button v-if="isActiveAiTask(store.importStructureTask)" class="btn btn-sm" @click="importStructureAction('cancel')">取消识别</button>
+            <button v-if="canRetryAiTask(store.importStructureTask)" class="btn btn-sm" @click="importStructureAction('retry')">重试</button>
+          </p>
+          <button v-if="!isActiveAiTask(store.importStructureTask)" class="btn btn-primary" :disabled="importBusy || !draftConnection" @click="previewImportStructure(false)">确认调用 AI 识别结构</button>
         </template>
         <template v-else>
           <p>按识别出的结构，将导入 {{ importStructure.result.preview.length }} 个评分项：</p>
@@ -1100,7 +1183,7 @@ onUnmounted(() => { loadSequence += 1; draftPoller.stop(); classificationPoller.
           @confirm-reupload="confirmRubricReupload"
           @cancel-reupload="rubricReupload = { preview: null, rulesFile: null, templateFile: null }">
           <template #table-analysis>
-            <TableRecognitionPanel :state="parseState" :previews="sourceWorkspace?.previews?.excel || []" :busy="operationBusy" :editable="editable" :connection="connections.find(c => c.id === draftConnection)" :estimate="structureEstimate" @suggest-structure="suggestStructure" />
+            <TableRecognitionPanel :state="parseState" :previews="sourceWorkspace?.previews?.excel || []" :busy="operationBusy" :editable="editable" :connection="connections.find(c => c.id === draftConnection)" :estimate="structureEstimate" :task="store.structureTask" @suggest-structure="suggestStructure" @task-action="structureAction" />
           </template>
           <template #analysis>
             <StructureSuggestionPanel :suggestion="parseState?.structure_suggestions" :busy="operationBusy"
@@ -1199,8 +1282,8 @@ onUnmounted(() => { loadSequence += 1; draftPoller.stop(); classificationPoller.
             <p v-if="publishError" class="notice notice-danger" role="alert">{{ publishError }}</p>
           </section>
           <RuleAuditPanel v-if="step === 3 && current.status !== 'published'" :review="ruleReview" :estimate="ruleEstimate"
-            :busy="operationBusy" :editable="canEdit" :connection-id="draftConnection"
-            @estimate="estimateReview" @run="runReview" @dismiss="dismissFinding" />
+            :busy="operationBusy" :editable="canEdit" :connection-id="draftConnection" :task="store.ruleReviewTask"
+            @estimate="estimateReview" @run="runReview" @dismiss="dismissFinding" @task-action="reviewAction" />
         </div>
       </div>
     </template>

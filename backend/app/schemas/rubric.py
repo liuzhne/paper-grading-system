@@ -378,19 +378,12 @@ class RubricStepOneConfirmRequest(RubricLifecycleReason):
 
 
 
-class RuleReviewRequest(BaseModel):
-    ai_connection_id: Optional[str] = None
+class RuleReviewEstimateRequest(BaseModel):
     scope: Literal["priority", "all"] = "priority"
-    dry_run: bool = False
 
 
 class FindingDismissRequest(BaseModel):
     reason: str = Field(min_length=1)
-
-
-class StructureSuggestionRequest(BaseModel):
-    ai_connection_id: Optional[str] = None
-    dry_run: bool = False
 
 
 class StructureMergeRequest(BaseModel):

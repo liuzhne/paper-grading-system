@@ -814,6 +814,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 新增审查/结构识别任务与三个估算接口，三个旧接口 410；迁移 head → 0037；新增改契约版本后须重建 `public/` 等排查。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 本地后端 1911 passed，后续总分补充修复专项 10 passed；前端 176 passed、类型与接口快照通过；浏览器 139 passed、3 skipped。主线完整 CI 和 production 部署通过，线上健康与资源已验证；待登录后的合成流程，不降级数据库。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 新增复现、状态区分、确认回归及发布/回滚检查；实施与验证进行中，尚未发布。 |
 | 2026-09-10 | 未配置模型的拦截修复 | 新增 §11.20（被静默弹回的排查顺序、模块级 ref 的测试污染）与 §11.21（能力表刷新时机表、反向的洞）。未运行生产操作。 |
@@ -1819,3 +1820,32 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 验证（B，本地已完成）：`test_rubric_unit_classification_api.py`（持久化与重载、每 3 个单元一批、缩小范围、评分项变化后过期、mock 拒绝、无台账 404 / 无可归类 422、显式重新判断保留其它建议、续跑剔除已有建议、按单元去重、旧接口 410、429 延后后合并、调用期间原文变化判失败、多个任务共用连接名额）；`SourceReviewPanel` 与 `ai-tasks` 单元测试。
 
 维护记录：2026-10-10 · AI 任务 B：新增归类任务接口说明与“按单元去重看起来像没生效”“CLASSIFICATION_INPUT_CHANGED”的排查；无迁移。
+
+### 2026-10-10 AI 任务 C（规则审查、表格结构识别已改为后台任务）
+
+- 接口：`POST /api/rubrics/{id}/ai-tasks`，`kind=rule_review`（`params={scope: priority|all}`）或 `kind=structure_suggestion`（`params={target: draft}`）；导入前识别 `POST /api/ai-tasks/import-structure`（multipart：`rules_file` / `template_file` / `ai_connection_id`）。估算：`POST /api/rubrics/{id}/rule-review/estimate`、`POST /api/rubrics/{id}/structure-suggestions/estimate`、`POST /api/rubrics/import-files/structure-suggestions/estimate`（都不调用模型）。旧的 `POST …/rule-review`、`POST …/structure-suggestions`、`POST /api/rubrics/import-files/structure-suggestions` 返回 410。契约版本 `2026-10-10.ai-tasks-c`。
+- 迁移：`0037_ai_task_upload_scope` 只改 `ai_tasks`（`rubric_id` 对结构识别可空 + CHECK + 按用户去重的部分唯一索引），不建新表，`pgs_app` 授权不变。
+- 进度：审查任务的条目带 `label`（评分项编号，跨项为 `__cross__`）；审查结果在全部条目结束后写进 `GET /rule-review`；草稿结构建议在条目成功时写进 `GET /parse-coverage` 的 `structure_suggestions`；导入前识别的结果只在 `GET /api/ai-tasks/{id}` 的 `result`（`override` + `preview`）。
+
+排错：
+- **现象**：改了 `API_CONTRACT_VERSION` 之后，Playwright 大面积超时，`waitForResponse` 等不到请求，页面上点了按钮没有反应。
+  - 报错指向：测试或按钮本身。
+  - 真正原因：浏览器测的是已提交的 `public/`，它还是旧构建、带旧的契约版本；后端返回新版本，版本守卫在第一次写操作前刷新页面，请求从未发出。先运行 `python scripts/build_web_static.py --with-workbench` 再跑 Playwright（CI 的漂移门禁同样要求重建）。
+- **现象**：审查任务失败，错误码 `REVIEW_OUTPUT_TRUNCATED`。
+  - 报错指向：审查的模型输出。
+  - 真正原因：连接的输出 Token 上限太低，问题列表被截断；调高连接的输出上限后点“重试失败的评分项”（已完成的评分项不会重跑）。
+- **现象**：审查“完成”了，但面板提示某些评分项“未能审查”。
+  - 真正原因：这些评分项模型修正一次后仍没有按格式返回 issues 数组，按同步审查的规则记为失败项、其余照常写入；换模型或重新审查即可。这不是任务失败，所以没有“重试”按钮。
+- **现象**：草稿结构识别失败，错误码 `STRUCTURE_SOURCE_CHANGED`。
+  - 报错指向：结构识别。
+  - 真正原因：识别期间草稿被换掉（重新上传、合入了另一份结构建议、人工编辑后重新编译），模型给出的行列编号对应的是旧台账，不会写入。在当前草稿上重新识别。
+- **现象**：导入前识别完成后刷新了页面，结果不见了。
+  - 报错指向：像是任务丢了。
+  - 真正原因：导入前识别还没有评分标准，页面没有地方按评分标准找回它；任务仍在（只对本人可见）。重新选择同一文件、估算后点“确认调用 AI 识别结构”，会按指纹直接返回已完成的任务（200，不重复调用模型）。
+- **现象**：`alembic downgrade 0036_ai_tasks` 报 `0037 downgrade refused`。
+  - 报错指向：迁移脚本。
+  - 真正原因：库里有不挂评分标准的结构识别任务，`rubric_id` 无法恢复为非空。确认不再需要后先删除：`DELETE FROM ai_task_items WHERE task_id IN (SELECT id FROM ai_tasks WHERE rubric_id IS NULL); DELETE FROM ai_tasks WHERE rubric_id IS NULL;` 再降级。
+
+验证（C，本地已完成）：`test_rubric_rule_review_api.py`（估算不调用模型、按评分项拆条目与双击复用、持久化与豁免、修正一次后记为失败项、额度失败后只重试失败项、mock 拒绝与旧接口 410、审查期间改规则显示过期、发布留痕与清理任务）；`test_rubric_structure_api.py`（导入前估算、导入前任务与按结构导入、修正一次、同文件复用与新任务清理旧任务、仅本人可见、旧接口 410、只有结构识别可不挂评分标准、草稿估算、差异合入与撤销、人工编辑后拒绝、识别期间草稿变化判失败）；`test_migrations.py` 的 0037 三项；Postgres 16 上 `alembic upgrade head` → `verify_postgres` → 降级 → 重放；前端 `RuleAuditPanel`、`TableRecognitionPanel`、`ai-tasks`、`rubrics-parse` 单元测试；Playwright `rubric-parse.spec.js` 新增三条（审查任务的进度/失败/重试/结果，导入前识别任务到按结构导入，草稿结构识别刷新后找回与取消）。待做：Vercel 预览或生产环境验收。
+
+维护记录：2026-10-10 · AI 任务 C：新增审查与结构识别任务接口、估算接口与 0037 说明，以及“改契约版本后 Playwright 超时”“REVIEW_OUTPUT_TRUNCATED”“未能审查的评分项”“STRUCTURE_SOURCE_CHANGED”“导入前识别刷新后不见了”“0037 降级被拒”的排查；迁移 head → 0037。

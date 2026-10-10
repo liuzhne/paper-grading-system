@@ -30,6 +30,8 @@ class AITaskItemRead(BaseModel):
     deferral_count: int
     # 归类条目处理的单元数（每批最多 3 个）；起草条目为 0。
     unit_count: int = 0
+    # 条目处理的对象（例如审查的评分项编号，跨项审查为 "__cross__"）；起草、归类为空。
+    label: Optional[str] = None
     not_before: Optional[datetime] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -42,7 +44,8 @@ class AITaskRead(BaseModel):
 
     id: str
     kind: str
-    rubric_id: str
+    # 导入前的结构识别还没有评分标准：为空。
+    rubric_id: Optional[str] = None
     scope: dict[str, Any]
     status: str
     model_name: Optional[str] = None

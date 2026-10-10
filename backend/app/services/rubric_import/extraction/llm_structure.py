@@ -48,6 +48,18 @@ STRUCTURE_INSTRUCTIONS = f"""
 """.strip()
 
 
+# 厂商错误码 → 用户能照着做的提示（只用受控的错误分类，不含厂商原文）。
+PROVIDER_HINTS = {
+    "authentication_failed": "AI 连接鉴权失败，请检查 API Key 与地域是否匹配。",
+    "permission_denied": "AI 连接没有调用权限，请检查模型授权。",
+    "rate_limited": "AI 调用受到限流，请稍后重试。",
+    "quota_exhausted": "AI 连接的额度已用完（余额不足或配额耗尽），请充值或更换连接后重试。",
+    "request_timeout": "AI 请求超时，请稍后重试或调整连接超时。",
+    "model_or_endpoint_not_found": "AI 模型或接口地址不存在，请检查连接配置。",
+    "invalid_request": "AI 接口拒绝了请求参数，请检查模型与协议兼容性。",
+}
+
+
 class StructureError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -182,6 +194,49 @@ def _to_override(raw, sheets: list[SheetView]) -> tuple[dict, dict]:
     return override, {"columns": column_reasons, "rows": row_reasons}
 
 
+REPAIR_HINT = "\n上次输出未通过校验，错误码：{code}。请修正后重新输出完整 JSON。"
+# AI 任务的一次执行只调用一次模型；与起草、归类相同的单次超时。
+STRUCTURE_TIMEOUT_SECONDS = 120
+
+
+def _instructions(repair_code=None) -> str:
+    return STRUCTURE_INSTRUCTIONS + (REPAIR_HINT.format(code=repair_code) if repair_code else "")
+
+
+def _result(raw, override, reasons, scorer, estimate) -> dict:
+    return {
+        "override": override,
+        "reasons": reasons,
+        "unresolved": list((raw or {}).get("unresolved") or []),
+        "prompt_version": STRUCTURE_PROMPT_VERSION,
+        "model": {"provider": str(getattr(scorer, "provider", "")),
+                  "model_name": str(getattr(scorer, "model_name", ""))},
+        "estimate": estimate,
+    }
+
+
+def recognize_once(sheets: list[SheetView], scorer, request: dict, *, repair_code=None) -> dict:
+    """AI 任务的一次执行：只调用一次模型，传输层不重试、不按 Retry-After 原地等。
+
+    ``request`` 是 ``build_table_payload`` 的结果（建任务时冻结）。厂商异常与
+    ``StructureOverrideError`` 原样抛出，由调用方按处理方式分类。
+    """
+
+    options = {}
+    parameters = inspect.signature(scorer.complete_json).parameters
+    if "default_max_tokens" in parameters:
+        options["default_max_tokens"] = STRUCTURE_MAX_OUTPUT_TOKENS
+    if "attempts_limit" in parameters:
+        options["attempts_limit"] = 1
+    if "rate_limit_retries" in parameters:
+        options["rate_limit_retries"] = 0
+    if "default_timeout_seconds" in parameters:
+        options["default_timeout_seconds"] = STRUCTURE_TIMEOUT_SECONDS
+    raw = scorer.complete_json(_instructions(repair_code), request["payload"], **options)
+    override, reasons = _to_override(raw, sheets)
+    return _result(raw, override, reasons, scorer, request["estimate"])
+
+
 def recognize_structure(sheets: list[SheetView], scorer, *, failure_codes, known_mapping=None, extra_rows=None,
                         budget_chars: int = DEFAULT_BUDGET_CHARS) -> dict:
     if scorer is None or str(getattr(scorer, "provider", "")).lower() == "mock":
@@ -190,9 +245,7 @@ def recognize_structure(sheets: list[SheetView], scorer, *, failure_codes, known
                                   extra_rows=extra_rows, budget_chars=budget_chars)
     repair_code = None
     for attempt in range(2):
-        instructions = STRUCTURE_INSTRUCTIONS
-        if repair_code:
-            instructions += f"\n上次输出未通过校验，错误码：{repair_code}。请修正后重新输出完整 JSON。"
+        instructions = _instructions(repair_code)
         try:
             options = {}
             if "default_max_tokens" in inspect.signature(scorer.complete_json).parameters:
@@ -210,16 +263,7 @@ def recognize_structure(sheets: list[SheetView], scorer, *, failure_codes, known
         except ProviderCallError as exc:
             # Log controlled classification only, not vendor messages or uploaded text.
             logger.warning("rubric_structure_provider_failed code=%s status=%s", exc.error.code, exc.error.http_status)
-            hints = {
-                "authentication_failed": "AI 连接鉴权失败，请检查 API Key 与地域是否匹配。",
-                "permission_denied": "AI 连接没有调用权限，请检查模型授权。",
-                "rate_limited": "AI 调用受到限流，请稍后重试。",
-                "quota_exhausted": "AI 连接的额度已用完（余额不足或配额耗尽），请充值或更换连接后重试。",
-                "request_timeout": "AI 请求超时，请稍后重试或调整连接超时。",
-                "model_or_endpoint_not_found": "AI 模型或接口地址不存在，请检查连接配置。",
-                "invalid_request": "AI 接口拒绝了请求参数，请检查模型与协议兼容性。",
-            }
-            raise StructureError("AI_PROVIDER_ERROR", hints.get(exc.error.code,
+            raise StructureError("AI_PROVIDER_ERROR", PROVIDER_HINTS.get(exc.error.code,
                 "AI 请求失败，请测试当前连接后重试。")) from exc
         except Exception as exc:  # 传输/鉴权失败不在此层重试
             raise StructureError("AI_PROVIDER_ERROR", "AI 服务暂时不可用，请稍后重试。") from exc
@@ -228,13 +272,5 @@ def recognize_structure(sheets: list[SheetView], scorer, *, failure_codes, known
         except StructureOverrideError as exc:
             repair_code = exc.code
             continue
-        return {
-            "override": override,
-            "reasons": reasons,
-            "unresolved": list((raw or {}).get("unresolved") or []),
-            "prompt_version": STRUCTURE_PROMPT_VERSION,
-            "model": {"provider": str(getattr(scorer, "provider", "")),
-                      "model_name": str(getattr(scorer, "model_name", ""))},
-            "estimate": request["estimate"],
-        }
+        return _result(raw, override, reasons, scorer, request["estimate"])
     raise StructureError(repair_code or "STRUCTURE_OUTPUT_INVALID", "模型两次输出的结构都未通过校验，请改为人工确认结构。")

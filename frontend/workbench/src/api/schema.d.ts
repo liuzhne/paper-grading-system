@@ -125,6 +125,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ai-tasks/import-structure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Import Structure Task
+         * @description 导入前（E1/E7 识别失败、还没有评分标准）的表格结构识别任务。
+         *
+         *     上传文件在这里解析成台账后冻结进任务，文件本身不落库；任务只对建任务的用户可见，
+         *     结果（结构与将导入的评分项）在任务里，确认后带 ``structure_override`` 调用导入接口。
+         */
+        post: operations["create_import_structure_task_api_ai_tasks_import_structure_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ai-tasks/{task_id}": {
         parameters: {
             query?: never;
@@ -1426,7 +1449,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/rubrics/import-files/structure-suggestions": {
+    "/api/rubrics/import-files/structure-suggestions/estimate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1436,11 +1459,11 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Preview Import Structure
-         * @description 导入前结构预检：识别失败（E1/E7）时用 LLM 建议表格结构，不落库；
-         *     ``dry_run`` 只返回将发送的规模估算，供用户确认后再调用模型。
+         * Estimate Import Structure
+         * @description 导入前结构预检（E1/E7）的规模估算：不调用模型。确认后用
+         *     ``POST /ai-tasks/import-structure`` 提交识别任务。
          */
-        post: operations["preview_import_structure_api_rubrics_import_files_structure_suggestions_post"];
+        post: operations["estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1838,11 +1861,27 @@ export interface paths {
         /** Get Rubric Rule Review */
         get: operations["get_rubric_rule_review_api_rubrics__rubric_id__rule_review_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/rule-review/estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
         /**
-         * Run Rubric Rule Review
-         * @description 第二部分结束后的规则审查：代码前置检查 + LLM 审查（只报告，不修改规则）。
+         * Estimate Rubric Rule Review
+         * @description 规则审查的代码前置检查与规模估算：不调用模型。确认后提交 AI 任务（kind=rule_review）。
          */
-        post: operations["run_rubric_rule_review_api_rubrics__rubric_id__rule_review_post"];
+        post: operations["estimate_rubric_rule_review_api_rubrics__rubric_id__rule_review_estimate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2008,7 +2047,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/rubrics/{rubric_id}/structure-suggestions": {
+    "/api/rubrics/{rubric_id}/structure-suggestions/estimate": {
         parameters: {
             query?: never;
             header?: never;
@@ -2018,10 +2057,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Suggest Rubric Structure
-         * @description 用户确认后运行 LLM 结构识别，返回与当前草稿的差异；建议带指纹持久化。
+         * Estimate Rubric Structure
+         * @description 草稿结构建议的规模估算：不调用模型。确认后提交 AI 任务（kind=structure_suggestion）。
          */
-        post: operations["suggest_rubric_structure_api_rubrics__rubric_id__structure_suggestions_post"];
+        post: operations["estimate_rubric_structure_api_rubrics__rubric_id__structure_suggestions_estimate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3007,6 +3046,8 @@ export interface components {
             finished_at?: string | null;
             /** Id */
             id: string;
+            /** Label */
+            label?: string | null;
             /** Not Before */
             not_before?: string | null;
             /** Ordinal */
@@ -3055,7 +3096,7 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             /** Rubric Id */
-            rubric_id: string;
+            rubric_id?: string | null;
             /** Running Count */
             running_count: number;
             /** Scope */
@@ -3541,6 +3582,20 @@ export interface components {
             /** Template File */
             template_file?: string | null;
         };
+        /** Body_create_import_structure_task_api_ai_tasks_import_structure_post */
+        Body_create_import_structure_task_api_ai_tasks_import_structure_post: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Regenerate
+             * @default false
+             */
+            regenerate: boolean;
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
+        };
         /** Body_create_rubric_import_session_api_rubrics_import_sessions_post */
         Body_create_rubric_import_session_api_rubrics_import_sessions_post: {
             /** Description */
@@ -3563,6 +3618,13 @@ export interface components {
              * @default private
              */
             visibility: string;
+        };
+        /** Body_estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post */
+        Body_estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post: {
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
         };
         /** Body_import_rubric_from_files_api_rubrics_import_files_post */
         Body_import_rubric_from_files_api_rubrics_import_files_post: {
@@ -3601,20 +3663,6 @@ export interface components {
         };
         /** Body_preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post */
         Body_preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post: {
-            /** Rules File */
-            rules_file?: string | null;
-            /** Template File */
-            template_file?: string | null;
-        };
-        /** Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post */
-        Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /**
-             * Dry Run
-             * @default false
-             */
-            dry_run: boolean;
             /** Rules File */
             rules_file?: string | null;
             /** Template File */
@@ -5075,15 +5123,8 @@ export interface components {
             /** Version */
             version?: string | null;
         };
-        /** RuleReviewRequest */
-        RuleReviewRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /**
-             * Dry Run
-             * @default false
-             */
-            dry_run: boolean;
+        /** RuleReviewEstimateRequest */
+        RuleReviewEstimateRequest: {
             /**
              * Scope
              * @default priority
@@ -5366,16 +5407,6 @@ export interface components {
             fingerprint: string;
             /** Reason */
             reason: string;
-        };
-        /** StructureSuggestionRequest */
-        StructureSuggestionRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /**
-             * Dry Run
-             * @default false
-             */
-            dry_run: boolean;
         };
         /** StructureUndoRequest */
         StructureUndoRequest: {
@@ -5929,6 +5960,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AIConnectionProbeResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_import_structure_task_api_ai_tasks_import_structure_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_create_import_structure_task_api_ai_tasks_import_structure_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
                 };
             };
             /** @description Validation Error */
@@ -8696,7 +8764,7 @@ export interface operations {
             };
         };
     };
-    preview_import_structure_api_rubrics_import_files_structure_suggestions_post: {
+    estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post: {
         parameters: {
             query?: never;
             header?: {
@@ -8709,7 +8777,7 @@ export interface operations {
         };
         requestBody?: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post"];
+                "multipart/form-data": components["schemas"]["Body_estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post"];
             };
         };
         responses: {
@@ -9666,7 +9734,7 @@ export interface operations {
             };
         };
     };
-    run_rubric_rule_review_api_rubrics__rubric_id__rule_review_post: {
+    estimate_rubric_rule_review_api_rubrics__rubric_id__rule_review_estimate_post: {
         parameters: {
             query?: never;
             header?: {
@@ -9681,7 +9749,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RuleReviewRequest"];
+                "application/json": components["schemas"]["RuleReviewEstimateRequest"];
             };
         };
         responses: {
@@ -10055,7 +10123,7 @@ export interface operations {
             };
         };
     };
-    suggest_rubric_structure_api_rubrics__rubric_id__structure_suggestions_post: {
+    estimate_rubric_structure_api_rubrics__rubric_id__structure_suggestions_estimate_post: {
         parameters: {
             query?: never;
             header?: {
@@ -10068,11 +10136,7 @@ export interface operations {
                 pgs_session?: string | null;
             };
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["StructureSuggestionRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

@@ -2201,6 +2201,8 @@ class AITask(Base):
 
     建任务时冻结输入并锁定连接；每次模型调用是一个 ``AITaskItem``，由统一执行模型
     领取。同一评分标准下同指纹的进行中或已成功任务直接复用，保留到评分标准发布。
+    导入前的结构识别还没有评分标准（0037）：``rubric_id`` 为空，按建任务的用户去重，
+    同一用户再次发起导入前识别时清理已结束的旧任务。
     """
 
     __tablename__ = "ai_tasks"
@@ -2215,6 +2217,20 @@ class AITask(Base):
             "total_items >= 0 AND pending_count >= 0 AND running_count >= 0 "
             "AND succeeded_count >= 0 AND failed_count >= 0 AND canceled_count >= 0",
             name="ck_ai_tasks_nonnegative_counts",
+        ),
+        CheckConstraint(
+            "rubric_id IS NOT NULL OR kind = 'structure_suggestion'",
+            name="ck_ai_tasks_rubric_scope",
+        ),
+        Index(
+            "ix_ai_tasks_one_live_upload_fingerprint",
+            "owner_id",
+            "fingerprint",
+            unique=True,
+            sqlite_where=sql_text("rubric_id IS NULL AND status IN ('queued', 'running', 'succeeded')"),
+            postgresql_where=sql_text(
+                "rubric_id IS NULL AND status IN ('queued', 'running', 'succeeded')"
+            ),
         ),
         Index(
             "ix_ai_tasks_one_live_fingerprint",
@@ -2234,8 +2250,8 @@ class AITask(Base):
     )
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     kind: Mapped[str] = mapped_column(String(50), nullable=False)
-    rubric_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("rubrics.id", ondelete="CASCADE"), nullable=False
+    rubric_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("rubrics.id", ondelete="CASCADE"), nullable=True
     )
     scope: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     input_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
@@ -2345,6 +2361,13 @@ class AITaskItem(Base):
         """本条目处理的原文单元数（归类）；其它种类为 0。页面据此显示“已获得 N/M 条”。"""
 
         return len((self.input or {}).get("units") or [])
+
+    @property
+    def label(self) -> str | None:
+        """条目处理的对象（审查的评分项编号等），建条目时写进输入；页面据此说明哪一项失败。"""
+
+        value = (self.input or {}).get("label")
+        return str(value) if value is not None else None
 
 
 class ScoringRun(Base):

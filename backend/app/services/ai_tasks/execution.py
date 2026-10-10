@@ -132,7 +132,11 @@ def settle_task(session, task_id, now):
     elif statuses and all(status == "succeeded" for status in statuses):
         outputs = [deepcopy(item.output) for item in sorted(task.items, key=lambda value: value.ordinal)]
         try:
-            task.result = handler.merge(task_view(task), outputs)
+            view = task_view(task)
+            result = handler.merge(view, outputs)
+            if handler.on_task_success is not None:
+                handler.on_task_success(session, view, deepcopy(result))
+            task.result = result
             task.status = "succeeded"
         except AITaskItemError as exc:
             task.status = "failed"

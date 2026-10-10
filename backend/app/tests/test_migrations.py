@@ -1510,3 +1510,95 @@ def test_0036_downgrades_and_replays_without_tasks(monkeypatch, tmp_path):
     finally:
         engine.dispose()
     command.upgrade(config, "head")
+
+
+def _upgrade_to_0037(monkeypatch, tmp_path, name):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / name)
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0036_ai_tasks")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            _insert_minimal(connection, "ai_tasks", {
+                "id": "task-with-rubric", "kind": "rule_review", "rubric_id": "rubric-1",
+                "status": "succeeded", "fingerprint": "d" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+    finally:
+        engine.dispose()
+    command.upgrade(config, "0037_ai_task_upload_scope")
+    return url, config
+
+
+def test_0037_lets_only_structure_tasks_omit_the_rubric_and_keeps_the_other_constraints(monkeypatch, tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    url, _config = _upgrade_to_0037(monkeypatch, tmp_path, "0037-scope.db")
+    engine = create_engine(url)
+    try:
+        with engine.connect() as db:
+            table_sql = db.execute(
+                text("SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_tasks'")
+            ).scalar_one()
+            index_sql = {
+                name: sql for name, sql in db.execute(
+                    text("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='ai_tasks'")
+                ).all()
+            }
+            assert db.execute(text("SELECT count(*) FROM ai_tasks")).scalar_one() == 1
+        for name in ("ck_ai_tasks_kind", "ck_ai_tasks_status", "ck_ai_tasks_fingerprint",
+                     "ck_ai_tasks_nonnegative_counts", "ck_ai_tasks_rubric_scope"):
+            assert name in table_sql
+        assert "WHERE" in index_sql["ix_ai_tasks_one_live_fingerprint"].upper()
+        assert "RUBRIC_ID IS NULL" in index_sql["ix_ai_tasks_one_live_upload_fingerprint"].upper()
+        with engine.begin() as db:
+            db.execute(text("PRAGMA foreign_keys = OFF"))
+            _insert_minimal(db, "ai_tasks", {
+                "id": "upload-task", "kind": "structure_suggestion", "rubric_id": None, "owner_id": "user-1",
+                "status": "running", "fingerprint": "e" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+        with engine.begin() as db, pytest.raises(IntegrityError):
+            _insert_minimal(db, "ai_tasks", {
+                "id": "upload-twice", "kind": "structure_suggestion", "rubric_id": None, "owner_id": "user-1",
+                "status": "queued", "fingerprint": "e" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+        with engine.begin() as db, pytest.raises(IntegrityError):
+            _insert_minimal(db, "ai_tasks", {
+                "id": "review-without-rubric", "kind": "rule_review", "rubric_id": None, "owner_id": "user-1",
+                "status": "queued", "fingerprint": "f" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+    finally:
+        engine.dispose()
+
+
+def test_0037_refuses_to_downgrade_while_a_task_has_no_rubric(monkeypatch, tmp_path):
+    url, config = _upgrade_to_0037(monkeypatch, tmp_path, "0037-guard.db")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as db:
+            _insert_minimal(db, "ai_tasks", {
+                "id": "upload-task", "kind": "structure_suggestion", "rubric_id": None, "owner_id": "user-1",
+                "status": "succeeded", "fingerprint": "e" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+    finally:
+        engine.dispose()
+    with pytest.raises(RuntimeError, match="0037 downgrade refused"):
+        command.downgrade(config, "0036_ai_tasks")
+
+
+def test_0037_downgrades_and_replays_with_only_rubric_tasks(monkeypatch, tmp_path):
+    url, config = _upgrade_to_0037(monkeypatch, tmp_path, "0037-replay.db")
+    command.downgrade(config, "0036_ai_tasks")
+    engine = create_engine(url)
+    try:
+        inspector = inspect(engine)
+        rubric_column = next(c for c in inspector.get_columns("ai_tasks") if c["name"] == "rubric_id")
+        assert rubric_column["nullable"] is False
+        assert "ix_ai_tasks_one_live_upload_fingerprint" not in {i["name"] for i in inspector.get_indexes("ai_tasks")}
+        with engine.connect() as db:
+            assert db.execute(text("SELECT count(*) FROM ai_tasks")).scalar_one() == 1
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")

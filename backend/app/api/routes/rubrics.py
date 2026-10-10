@@ -33,9 +33,8 @@ from backend.app.services.rubrics.coverage import build_rule_coverage
 from backend.app.schemas.rubric import RubricCreate
 from backend.app.schemas.rubric import SourceUnitBatchResolveRequest
 from backend.app.schemas.rubric import FindingDismissRequest
-from backend.app.schemas.rubric import RuleReviewRequest
+from backend.app.schemas.rubric import RuleReviewEstimateRequest
 from backend.app.schemas.rubric import StructureMergeRequest
-from backend.app.schemas.rubric import StructureSuggestionRequest
 from backend.app.schemas.rubric import StructureUndoRequest
 from backend.app.schemas.rubric import SourceUnitResolveRequest
 from backend.app.schemas.rubric import RubricCloneRequest
@@ -83,7 +82,6 @@ from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 from backend.app.services.rubrics.draft_graph import read_execution_draft
 from backend.app.services.ai_tasks.service import delete_rubric_ai_tasks
 from backend.app.services.rubrics.review_workspace import read_review_workspace, confirm_rule
-from backend.app.services.ai_connections import resolve_connection_runtime
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
@@ -1130,31 +1128,33 @@ def import_rubric_from_files(
     }
 
 
-@router.post("/import-files/structure-suggestions")
-def preview_import_structure(
+@router.post("/import-files/structure-suggestions/estimate")
+def estimate_import_structure(
     rules_file: Optional[UploadFile] = File(None),
     template_file: Optional[UploadFile] = File(None),
-    ai_connection_id: Optional[str] = Form(None),
-    dry_run: bool = Form(False),
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    """导入前结构预检：识别失败（E1/E7）时用 LLM 建议表格结构，不落库；
-    ``dry_run`` 只返回将发送的规模估算，供用户确认后再调用模型。"""
+    """导入前结构预检（E1/E7）的规模估算：不调用模型。确认后用
+    ``POST /ai-tasks/import-structure`` 提交识别任务。"""
 
     ensure_dev_user(db)
     require_organization_role(principal, "org_admin", "teacher")
     try:
-        scorer = None if dry_run else _rubric_ai_scorer(db, principal, ai_connection_id)
-        result = structure_state.preview_structure(
+        result = structure_state.estimate_import_structure(
             rules_bytes=rules_file.file.read() if rules_file else None,
             template_bytes=template_file.file.read() if template_file else None,
-            scorer=scorer,
-            dry_run=dry_run,
         )
     except parse_state.ParseStateError as exc:
         raise _parse_state_problem(exc) from exc
     return jsonable_encoder(result)
+
+
+@router.post("/import-files/structure-suggestions", include_in_schema=False)
+def preview_import_structure():
+    """停用：导入前结构识别改为 ``POST /ai-tasks/import-structure``。"""
+
+    raise _retired_endpoint("structure_suggestion", "导入前的表格结构识别", "POST /api/ai-tasks/import-structure")
 
 
 @router.post("/{rubric_id}/clone", response_model=RubricRead)
@@ -1292,27 +1292,6 @@ def _parse_state_problem(exc) -> HTTPException:
     )
 
 
-def _rubric_ai_scorer(db, principal, ai_connection_id: str | None):
-    """与 AI 起草共用的连接选择：显式或当前启用的私有连接优先，否则用平台默认模型。"""
-
-    from backend.app.services.ai_connections import active_connection_id
-
-    ai_connection_id = ai_connection_id or active_connection_id(
-        db, owner_id=principal.user_id, organization_id=principal.organization_id or "",
-    )
-    if ai_connection_id:
-        if not principal.organization_id:
-            raise parse_state.ParseStateError(503, "AI_CONNECTION_MISSING", "当前上下文不能使用私有 AI 连接。")
-        runtime = resolve_connection_runtime(
-            db,
-            connection_id=ai_connection_id,
-            owner_id=principal.user_id,
-            organization_id=principal.organization_id,
-        )
-        return get_llm_scorer(runtime)
-    return get_llm_scorer(session=db)
-
-
 @router.post("/{rubric_id}/unit-classifications", include_in_schema=False)
 def classify_source_units(rubric_id: str):
     """停用：归类改为 ``POST /rubrics/{id}/ai-tasks``（kind=unit_classification）。"""
@@ -1320,29 +1299,31 @@ def classify_source_units(rubric_id: str):
     raise _retired_endpoint("unit_classification", "AI 归类")
 
 
-@router.post("/{rubric_id}/rule-review")
-def run_rubric_rule_review(
+@router.post("/{rubric_id}/rule-review/estimate")
+def estimate_rubric_rule_review(
     rubric_id: str,
-    payload: RuleReviewRequest,
+    payload: RuleReviewEstimateRequest,
     db: Session = Depends(get_db),
-    user_id: str = Depends(current_user_id),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    """第二部分结束后的规则审查：代码前置检查 + LLM 审查（只报告，不修改规则）。"""
+    """规则审查的代码前置检查与规模估算：不调用模型。确认后提交 AI 任务（kind=rule_review）。"""
 
     ensure_dev_user(db)
     _visible_rubric(db, rubric_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
     try:
-        scorer = None if payload.dry_run else _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        result = review_state.run_rule_review(
-            db, rubric_id, scorer, scope=payload.scope, dry_run=payload.dry_run, actor_id=user_id
-        )
-        db.commit()
+        result = review_state.estimate_rule_review(db, rubric_id, scope=payload.scope)
     except parse_state.ParseStateError as exc:
         db.rollback()
         raise _parse_state_problem(exc) from exc
     return jsonable_encoder(result)
+
+
+@router.post("/{rubric_id}/rule-review", include_in_schema=False)
+def run_rubric_rule_review(rubric_id: str):
+    """停用：规则审查改为 ``POST /rubrics/{id}/ai-tasks``（kind=rule_review）。"""
+
+    raise _retired_endpoint("rule_review", "规则审查")
 
 
 @router.get("/{rubric_id}/rule-review")
@@ -1380,27 +1361,30 @@ def dismiss_rubric_rule_review_finding(
     return jsonable_encoder(finding)
 
 
-@router.post("/{rubric_id}/structure-suggestions")
-def suggest_rubric_structure(
+@router.post("/{rubric_id}/structure-suggestions/estimate")
+def estimate_rubric_structure(
     rubric_id: str,
-    payload: StructureSuggestionRequest,
     db: Session = Depends(get_db),
-    user_id: str = Depends(current_user_id),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    """用户确认后运行 LLM 结构识别，返回与当前草稿的差异；建议带指纹持久化。"""
+    """草稿结构建议的规模估算：不调用模型。确认后提交 AI 任务（kind=structure_suggestion）。"""
 
     ensure_dev_user(db)
     _visible_rubric(db, rubric_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
     try:
-        scorer = None if payload.dry_run else _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        result = structure_state.suggest_structure(db, rubric_id, scorer, dry_run=payload.dry_run, actor_id=user_id)
-        db.commit()
+        result = structure_state.estimate_draft_structure(db, rubric_id)
     except parse_state.ParseStateError as exc:
         db.rollback()
         raise _parse_state_problem(exc) from exc
     return jsonable_encoder(result)
+
+
+@router.post("/{rubric_id}/structure-suggestions", include_in_schema=False)
+def suggest_rubric_structure(rubric_id: str):
+    """停用：草稿结构建议改为 ``POST /rubrics/{id}/ai-tasks``（kind=structure_suggestion）。"""
+
+    raise _retired_endpoint("structure_suggestion", "表格结构识别")
 
 
 def _persist_structure(db, rubric_id, prepared, *, user_id, reason, action, status, details):
@@ -1543,7 +1527,9 @@ def resolve_source_unit(
     return jsonable_encoder(result)
 
 
-def _retired_endpoint(kind: str, label: str) -> HTTPException:
+def _retired_endpoint(
+    kind: str, label: str, replacement: str = "POST /api/rubrics/{rubric_id}/ai-tasks"
+) -> HTTPException:
     """已改为异步任务的同步接口：直接停用（410），不等其它阶段。
 
     已经打开的旧页面由版本守卫在下一次操作前刷新，正常情况下到不了这里。
@@ -1555,7 +1541,7 @@ def _retired_endpoint(kind: str, label: str) -> HTTPException:
             code="ENDPOINT_RETIRED",
             message=f"{label}已改为后台任务，这个接口已停用。",
             user_action="请刷新页面后重试。",
-            context={"replacement": "POST /api/rubrics/{rubric_id}/ai-tasks", "kind": kind},
+            context={"replacement": replacement, "kind": kind},
         ),
     )
 

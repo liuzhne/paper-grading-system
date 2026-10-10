@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { canRetryAiTask, classificationTaskProgress, draftTaskProgress, isActiveAiTask, isWaitingForRateLimit } from "./ai-tasks.js";
+import {
+  canRetryAiTask, classificationTaskProgress, draftTaskProgress, isActiveAiTask, isWaitingForRateLimit,
+  reviewTaskProgress, structureTaskProgress,
+} from "./ai-tasks.js";
 
 describe("AI 任务呈现", () => {
   it("进行中显示第几批", () => {
@@ -44,5 +47,34 @@ describe("归类任务进度", () => {
     const progress = classificationTaskProgress({ status: "failed", error_message: "额度已用完。", items: [] });
     expect(progress.stopped).toBe("provider");
     expect(progress.error).toBe("额度已用完。");
+  });
+});
+
+describe("规则审查任务进度", () => {
+  it("按评分项计数，关闭页面不中断", () => {
+    const task = { status: "running", total_items: 5, succeeded_count: 2, items: [] };
+    expect(reviewTaskProgress(task)).toBe("规则审查中：已完成 2/5 项（关闭页面不会中断）");
+  });
+
+  it("失败时指出是哪几项，跨项审查单独命名", () => {
+    const task = { status: "failed", total_items: 3, succeeded_count: 1, error_message: "额度已用完。", items: [
+      { status: "succeeded", label: "C01" }, { status: "failed", label: "C02" }, { status: "failed", label: "__cross__" },
+    ] };
+    expect(reviewTaskProgress(task)).toBe("审查未完成（已完成 1/3 项）：C02、跨项审查 额度已用完。");
+  });
+
+  it("停止后说明不会写入", () => {
+    expect(reviewTaskProgress({ status: "canceled" })).toContain("不会写入");
+  });
+});
+
+describe("表格结构识别任务进度", () => {
+  it("运行中、限流与失败各自说明", () => {
+    const now = Date.parse("2026-10-10T00:00:00Z");
+    expect(structureTaskProgress({ status: "running", items: [] }, now)).toContain("正在识别");
+    const waiting = { status: "running", items: [{ status: "pending", not_before: "2026-10-10T00:01:00" }] };
+    expect(structureTaskProgress(waiting, now)).toContain("模型限流");
+    expect(structureTaskProgress({ status: "failed", error_message: "模型两次输出的结构都未通过校验。" }))
+      .toBe("识别失败：模型两次输出的结构都未通过校验。");
   });
 });

@@ -8,6 +8,7 @@ LLM 只报告问题、不修改规则；每条问题的原文引用由代码核�
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from collections import Counter
@@ -184,16 +185,87 @@ def _validate(issue, *, rule_texts: dict, source_texts: dict, cross: bool):
             "severity": issue["severity"]}, None
 
 
+REPAIR_HINT = "\n上次输出缺少 issues 数组，请按格式重新输出。"
+# AI 任务的一次执行只调用一次模型；与起草、归类相同的单次超时。
+REVIEW_TIMEOUT_SECONDS = 120
+
+
+def _issues(raw):
+    return raw["issues"] if isinstance(raw, dict) and isinstance(raw.get("issues"), list) else None
+
+
 def _call(scorer, instructions, payload):
     for attempt in range(2):
-        text = instructions if not attempt else instructions + "\n上次输出缺少 issues 数组，请按格式重新输出。"
+        text = instructions if not attempt else instructions + REPAIR_HINT
         try:
             raw = scorer.complete_json(text, payload)
         except Exception as exc:
             raise ReviewError("AI_PROVIDER_ERROR", "AI 服务暂时不可用，请稍后重试。") from exc
-        if isinstance(raw, dict) and isinstance(raw.get("issues"), list):
-            return raw["issues"]
+        issues = _issues(raw)
+        if issues is not None:
+            return issues
     return None
+
+
+def call_once(scorer, instructions, payload, *, repair=False):
+    """AI 任务的一次执行：只调用一次模型，传输层不重试、不按 Retry-After 原地等。
+
+    输出缺 issues 数组时返回 None；厂商异常原样抛出，由调用方按处理方式分类。
+    """
+
+    options = {}
+    parameters = inspect.signature(scorer.complete_json).parameters
+    if "attempts_limit" in parameters:
+        options["attempts_limit"] = 1
+    if "rate_limit_retries" in parameters:
+        options["rate_limit_retries"] = 0
+    if "default_timeout_seconds" in parameters:
+        options["default_timeout_seconds"] = REVIEW_TIMEOUT_SECONDS
+    text = instructions + REPAIR_HINT if repair else instructions
+    return _issues(scorer.complete_json(text, payload, **options))
+
+
+def validate_criterion_issues(bundle, issues) -> tuple[list[dict], list[dict]]:
+    code = bundle["criterion"]["code"]
+    rule_texts = {r["id"]: r["match"] for r in bundle["rules"]}
+    source_texts = {s["id"]: s["text"] for s in bundle["sources"]}
+    findings, discarded = [], []
+    for issue in issues:
+        finding, error = _validate(issue, rule_texts=rule_texts, source_texts=source_texts, cross=False)
+        if error:
+            discarded.append({"criterion_code": code, "error": error})
+        else:
+            findings.append({**finding, "criterion_code": code})
+    return findings, discarded
+
+
+def cross_summary(bundles) -> list[dict]:
+    return [{"code": b["criterion"]["code"], "name": b["criterion"]["name"],
+             "rules": [{"id": f"{b['criterion']['code']}.{r['id']}", "match": r["match"], "points": r["points"]}
+                       for r in b["rules"]]} for b in bundles]
+
+
+def validate_cross_issues(summary, issues) -> tuple[list[dict], list[dict]]:
+    rule_texts = {rule["id"]: rule["match"] for item in summary for rule in item["rules"]}
+    findings, discarded = [], []
+    for issue in issues:
+        finding, error = _validate(issue, rule_texts=rule_texts, source_texts={}, cross=True)
+        if error:
+            discarded.append({"criterion_code": None, "error": error})
+        else:
+            findings.append({**finding, "criterion_code": None})
+    return findings, discarded
+
+
+def number_findings(findings) -> list[dict]:
+    for index, finding in enumerate(findings, start=1):
+        finding["id"] = f"F{index}"
+        finding["status"] = "open"
+    return findings
+
+
+def scorer_model(scorer) -> dict:
+    return {"provider": str(getattr(scorer, "provider", "")), "model_name": str(getattr(scorer, "model_name", ""))}
 
 
 def review_rules(bundles, scorer) -> dict:
@@ -201,40 +273,25 @@ def review_rules(bundles, scorer) -> dict:
         raise ReviewError("AI_CONNECTION_MISSING", "当前没有可用于规则审查的真实 AI 连接。")
     findings, discarded, failed = [], [], []
     for bundle in bundles:
-        code = bundle["criterion"]["code"]
         issues = _call(scorer, REVIEW_INSTRUCTIONS, bundle)
         if issues is None:
-            failed.append(code)
+            failed.append(bundle["criterion"]["code"])
             continue
-        rule_texts = {r["id"]: r["match"] for r in bundle["rules"]}
-        source_texts = {s["id"]: s["text"] for s in bundle["sources"]}
-        for issue in issues:
-            finding, error = _validate(issue, rule_texts=rule_texts, source_texts=source_texts, cross=False)
-            if error:
-                discarded.append({"criterion_code": code, "error": error})
-            else:
-                findings.append({**finding, "criterion_code": code})
+        kept, dropped = validate_criterion_issues(bundle, issues)
+        findings.extend(kept)
+        discarded.extend(dropped)
     if len(bundles) >= 2:
-        summary = [{"code": b["criterion"]["code"], "name": b["criterion"]["name"],
-                    "rules": [{"id": f"{b['criterion']['code']}.{r['id']}", "match": r["match"], "points": r["points"]}
-                              for r in b["rules"]]} for b in bundles]
+        summary = cross_summary(bundles)
         issues = _call(scorer, CROSS_INSTRUCTIONS, {"criteria": summary})
-        rule_texts = {rule["id"]: rule["match"] for item in summary for rule in item["rules"]}
-        for issue in issues or []:
-            finding, error = _validate(issue, rule_texts=rule_texts, source_texts={}, cross=True)
-            if error:
-                discarded.append({"criterion_code": None, "error": error})
-            else:
-                findings.append({**finding, "criterion_code": None})
+        kept, dropped = validate_cross_issues(summary, issues or [])
+        findings.extend(kept)
+        discarded.extend(dropped)
         if issues is None:
             failed.append("__cross__")
-    for index, finding in enumerate(findings, start=1):
-        finding["id"] = f"F{index}"
-        finding["status"] = "open"
     return {
         "prompt_version": REVIEW_PROMPT_VERSION,
-        "model": {"provider": str(getattr(scorer, "provider", "")), "model_name": str(getattr(scorer, "model_name", ""))},
-        "findings": findings,
+        "model": scorer_model(scorer),
+        "findings": number_findings(findings),
         "discarded": discarded,
         "failed": failed,
     }
