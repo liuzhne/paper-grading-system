@@ -52,3 +52,35 @@ describe("规则审查面板", () => {
     expect(mountPanel({ review: { ...REVIEW, stale: true } }).text()).toContain("规则已修改，审查结果已过期");
   });
 });
+
+describe("规则审查是后台任务", () => {
+  it("进行中显示进度并可停止，审查按钮在此期间不可用", async () => {
+    const task = { id: "t1", status: "running", total_items: 3, succeeded_count: 1, items: [] };
+    const wrapper = mountPanel({ task, estimate: { criteria_codes: ["C01", "C02"], estimate: { calls: 3 }, prechecks: [] } });
+    expect(wrapper.get("[data-test=review-task]").text()).toContain("规则审查中：已完成 1/3 项");
+    expect(wrapper.get("[data-test=review-run]").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-test=review-estimate]").attributes("disabled")).toBeDefined();
+    await wrapper.get("[data-test=review-cancel]").trigger("click");
+    expect(wrapper.emitted("task-action")[0]).toEqual(["cancel"]);
+  });
+
+  it("失败时指出评分项与根因，只重试失败的评分项", async () => {
+    const task = { id: "t1", status: "failed", total_items: 2, succeeded_count: 1, error_message: "额度已用完。",
+      items: [{ status: "succeeded", label: "C01" }, { status: "failed", label: "C02" }] };
+    const wrapper = mountPanel({ task });
+    expect(wrapper.get("[data-test=review-task]").text()).toContain("C02 额度已用完。");
+    await wrapper.get("[data-test=review-retry]").trigger("click");
+    expect(wrapper.emitted("task-action")[0]).toEqual(["retry"]);
+  });
+
+  it("完成后不再显示进度；已有未过期结果时按钮写明重新审查；未能审查的评分项单独列出", () => {
+    const wrapper = mountPanel({
+      task: { status: "succeeded", items: [] },
+      review: { ...REVIEW, failed: ["C03", "__cross__"] },
+      estimate: { criteria_codes: ["C01"], estimate: { calls: 1 }, prechecks: [] },
+    });
+    expect(wrapper.find("[data-test=review-task]").exists()).toBe(false);
+    expect(wrapper.get("[data-test=review-run]").text()).toContain("重新审查");
+    expect(wrapper.get("[data-test=review-failed]").text()).toContain("C03、跨项审查");
+  });
+});

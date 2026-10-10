@@ -14,7 +14,23 @@ export function jobStatusLabel(job) {
   if (job?.heartbeat_state === "stale" && ACTIVE_JOB_STATUSES.has(job.status)) {
     return "执行中断，等待恢复";
   }
+  if (job?.heartbeat_state === "waiting" && job.status === "running") {
+    return "排队等待";
+  }
   return LABELS[job?.status] || job?.status || "未知状态";
+}
+
+/**
+ * 最近一次心跳：统一执行模型后心跳记在每篇材料上，任务行只在领取与写结果时更新。
+ * 取任务与在评材料里最新的那个。
+ * @param {{ heartbeat_at?: string | null, updated_at?: string | null, items?: Array<{ status: string, heartbeat_at?: string | null }> } | null | undefined} job
+ * @returns {string | null}
+ */
+export function lastHeartbeat(job) {
+  const values = [job?.heartbeat_at, ...(job?.items || []).filter((item) => item.status === "running").map((item) => item.heartbeat_at)]
+    .filter(Boolean);
+  if (!values.length) return null;
+  return values.reduce((latest, value) => (Date.parse(`${value}Z`) > Date.parse(`${latest}Z`) ? value : latest));
 }
 
 export function itemStatusLabel(status) {

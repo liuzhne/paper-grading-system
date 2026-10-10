@@ -641,15 +641,14 @@ def test_new_batch_automatically_binds_active_connection_and_old_batch_fails_clo
 
 def test_ai_drafting_prefers_enabled_personal_connection(client, monkeypatch):
     from types import SimpleNamespace
-    from backend.app.api.routes.rubrics import _rubric_ai_scorer
+    from backend.app.services.ai_tasks.service import resolve_task_model
     owner = _login(client, monkeypatch, "draft-selection")
     first = client.post("/api/ai-connections", json=_connection_payload("first")).json()
     second = client.post("/api/ai-connections", json=_connection_payload("second")).json()
     assert client.post(f"/api/ai-connections/{second['id']}/activate").status_code == 200
     principal = SimpleNamespace(user_id=owner.id, organization_id=first["organization_id"])
     with client.session_factory() as db:
-        scorer = _rubric_ai_scorer(db, principal, None)
-        try:
-            assert scorer._ai_connection_snapshot["ai_connection_id"] == second["id"]
-        finally:
-            scorer.close()
+        # AI 任务（起草、归类、审查、结构识别）建任务时锁定当前启用的私有连接。
+        model = resolve_task_model(db, principal, None)
+        assert model.connection_id == second["id"]
+        assert model.snapshot["ai_connection_id"] == second["id"]

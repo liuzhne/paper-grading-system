@@ -24,6 +24,9 @@ class BatchScoringItemRead(BaseModel):
     paper_id: str
     status: str
     attempt_count: int
+    ordinal: int = 0
+    stall_count: int = 0
+    heartbeat_at: Optional[datetime] = None
     scoring_run_id: Optional[str] = None
     baseline_scoring_run_id: Optional[str] = None
     error_code: Optional[str] = None
@@ -69,19 +72,36 @@ class BatchScoringJobRead(BaseModel):
     @computed_field
     @property
     def heartbeat_state(self) -> str:
+        """healthy / stale / waiting / inactive。
+
+        统一执行模型后心跳记在条目上：有在跑的条目就看它们最新的心跳；没有在跑、
+        但还有待处理条目时是 waiting（排队等模型名额或叫醒），不是“执行中断”。
+        """
+
         if self.status not in ("running", "cancel_requested"):
             return "inactive"
-        if self.heartbeat_at is None:
+        items = getattr(self, "items", None)
+        heartbeats = [self.heartbeat_at] if self.heartbeat_at is not None else []
+        if items is not None:
+            running = [item for item in items if item.status == "running"]
+            if running:
+                heartbeats = [item.heartbeat_at for item in running if item.heartbeat_at is not None]
+            elif any(item.status == "pending" for item in items):
+                return "waiting"
+        if not heartbeats:
             return "stale"
         # PostgreSQL stores these timestamps as naive UTC.  ``datetime.now(None)``
         # means local wall-clock time, so hosts outside UTC would otherwise mark
         # a fresh heartbeat stale by their timezone offset (for example +08:00).
-        heartbeat = self.heartbeat_at
-        if heartbeat.tzinfo is None:
-            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        age = (now - heartbeat.astimezone(timezone.utc)).total_seconds()
+        latest = max(_as_utc(value) for value in heartbeats)
+        age = (datetime.now(timezone.utc) - latest).total_seconds()
         return "stale" if age > RUNNER_LEASE_SECONDS else "healthy"
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class ScoreEstimatePaper(BaseModel):

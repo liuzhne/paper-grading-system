@@ -107,7 +107,7 @@ def test_ai_drafted_rules_pending_review_do_not_count_as_complete(client):
     assert body["complete_count"] == 0
 
 
-def test_ai_interpreted_user_text_is_still_classified_as_ai():
+def test_ai_origin_is_read_from_the_rule_instead_of_inferred_from_its_code():
     criterion = models.RubricCriterion(
         code="C01", name="论证", max_score=10,
         deduction_rules_structured=[{
@@ -115,12 +115,17 @@ def test_ai_interpreted_user_text_is_still_classified_as_ai():
             "source": "ai_interpreted_user_text",
         }],
     )
-    rule = models.AtomicRule(
-        rule_code="manual.c01.deduct.1.v1",
-        creation_method="manual",
+    # 0036 起不再按 rule_code 或位置反查：存量由迁移按旧推断回填一次，
+    # 新规则在编译时由条目上的 AI 来源写入 ai_origin。
+    unmarked = models.AtomicRule(
+        rule_code="manual.c01.deduct.1.v1", creation_method="manual", ai_origin=False,
+    )
+    marked = models.AtomicRule(
+        rule_code="manual.c01.deduct.1.v1", creation_method="manual", ai_origin=True,
     )
 
-    assert is_ai_rule(rule, criterion) is True
+    assert is_ai_rule(unmarked, criterion) is False
+    assert is_ai_rule(marked, criterion) is True
 
 
 def test_sources_are_counted_separately(client):

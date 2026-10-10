@@ -273,7 +273,8 @@ def test_0017_batch_scoring_job_migration_refuses_lossy_downgrade(
                     "total_items, pending_count, running_count, succeeded_count, "
                     "skipped_count, failed_count, canceled_count, observation_policy, "
                     "observation_policy_hash, created_at, updated_at) VALUES "
-                    "('job-m8', 'missing-batch', 1, 0, 1, 'queued', 0, 0, 0, 0, "
+                    # 已结束的任务：0035 只拒绝活动任务，这里验证的是 0017 自己的守卫。
+                    "('job-m8', 'missing-batch', 1, 0, 1, 'completed', 0, 0, 0, 0, "
                     "0, 0, 0, '{}', :digest, :now, :now)"
                 ),
                 {"digest": "a" * 64, "now": now},
@@ -1179,3 +1180,425 @@ def test_0034_downgrades_and_replays_without_claude_rows(monkeypatch, tmp_path):
         command.upgrade(config, "head")
     finally:
         engine.dispose()
+
+
+def _seed_0034_batch_jobs(url):
+    """At 0034: one bound batch with an active job, one unbound batch with a finished job."""
+    engine = create_engine(url)
+    base = datetime(2026, 10, 1, 8, 0, 0)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            for batch_id, connection_id, owner in (
+                ("bound-batch", "conn-1", "batch-owner"),
+                ("unbound-batch", None, "batch-owner"),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO grading_batches (id, name, rubric_id, status, owner_id, "
+                        "ai_connection_id, state_version, created_at, updated_at) VALUES "
+                        "(:id, :id, 'rubric', 'scoring', :owner, :connection, 1, :now, :now)"
+                    ),
+                    {"id": batch_id, "connection": connection_id, "owner": owner, "now": base},
+                )
+            for job_id, batch_id, status, created_by in (
+                ("active-job", "bound-batch", "running", "starter"),
+                ("done-job", "unbound-batch", "completed", None),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO batch_scoring_jobs "
+                        "(id, grading_batch_id, generation, rescore, max_workers, status, "
+                        "total_items, pending_count, running_count, succeeded_count, "
+                        "skipped_count, failed_count, canceled_count, observation_policy, "
+                        "observation_policy_hash, created_by, created_at, updated_at) VALUES "
+                        "(:id, :batch, 1, 0, 1, :status, 0, 0, 0, 0, 0, 0, 0, '{}', :digest, "
+                        ":created_by, :now, :now)"
+                    ),
+                    {
+                        "id": job_id,
+                        "batch": batch_id,
+                        "status": status,
+                        "created_by": created_by,
+                        "digest": "b" * 64,
+                        "now": base,
+                    },
+                )
+            for item_id, job_id, status, minute in (
+                ("item-c", "active-job", "pending", 3),
+                ("item-a", "active-job", "running", 1),
+                ("item-b", "active-job", "pending", 2),
+                ("item-z", "done-job", "succeeded", 1),
+            ):
+                created = base.replace(minute=minute)
+                connection.execute(
+                    text(
+                        "INSERT INTO batch_scoring_items (id, job_id, paper_id, status, "
+                        "attempt_count, attempt_history, started_at, created_at, updated_at) "
+                        "VALUES (:id, :job, :paper, :status, 0, '[]', :started, :created, :created)"
+                    ),
+                    {
+                        "id": item_id,
+                        "job": job_id,
+                        "paper": "paper-" + item_id,
+                        "status": status,
+                        "started": created if status == "running" else None,
+                        "created": created,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+
+def test_0035_backfills_the_work_queue_columns_and_partial_indexes(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0035-backfill.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    _seed_0034_batch_jobs(url)
+    command.upgrade(config, "0035_unified_work_queue")
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            rows = {
+                row.id: row
+                for row in connection.execute(
+                    text(
+                        "SELECT id, source_key, owner_id, ordinal, heartbeat_at, stall_count, "
+                        "not_before FROM batch_scoring_items"
+                    )
+                )
+            }
+        assert {key: row.source_key for key, row in rows.items()} == {
+            "item-a": "connection:conn-1",
+            "item-b": "connection:conn-1",
+            "item-c": "connection:conn-1",
+            "item-z": "platform",
+        }
+        # 发起人优先，没有记录发起人时退回批次归属人。
+        assert rows["item-a"].owner_id == "starter"
+        assert rows["item-z"].owner_id == "batch-owner"
+        # 任务内序号按创建时间排列，每个任务从 0 开始。
+        assert [rows[key].ordinal for key in ("item-a", "item-b", "item-c")] == [0, 1, 2]
+        assert rows["item-z"].ordinal == 0
+        # 在跑的条目从此按心跳租约判断，回填为开始时间，过期后由巡检接手。
+        assert rows["item-a"].heartbeat_at is not None
+        assert rows["item-b"].heartbeat_at is None
+        assert all(row.stall_count == 0 and row.not_before is None for row in rows.values())
+
+        inspector = inspect(engine)
+        indexes = {value["name"]: value for value in inspector.get_indexes("batch_scoring_items")}
+        assert indexes["ix_batch_scoring_items_claim"]["column_names"] == [
+            "source_key",
+            "ordinal",
+            "created_at",
+        ]
+        assert indexes["ix_batch_scoring_items_running"]["column_names"] == [
+            "source_key",
+            "heartbeat_at",
+        ]
+        assert "last_swept_at" in {
+            column["name"] for column in inspector.get_columns("batch_scoring_jobs")
+        }
+        assert "work_runtime_state" in inspector.get_table_names()
+        with engine.connect() as connection:
+            plan = " ".join(
+                str(row[-1])
+                for row in connection.execute(
+                    text(
+                        "EXPLAIN QUERY PLAN SELECT id FROM batch_scoring_items "
+                        "WHERE source_key = 'platform' AND status = 'pending' "
+                        "ORDER BY ordinal, created_at LIMIT 1"
+                    )
+                )
+            )
+        assert "ix_batch_scoring_items_claim" in plan
+    finally:
+        engine.dispose()
+
+
+def test_0035_refuses_to_downgrade_while_a_job_is_active(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0035-guard.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    _seed_0034_batch_jobs(url)
+    command.upgrade(config, "0035_unified_work_queue")
+
+    with pytest.raises(RuntimeError, match="0035 downgrade refused: 1 batch scoring job"):
+        command.downgrade(config, "0034_anthropic_messages_provider")
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "0035_unified_work_queue"
+    finally:
+        engine.dispose()
+
+
+def test_0035_downgrades_and_replays_with_only_finished_jobs(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0035-replay.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    _seed_0034_batch_jobs(url)
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE batch_scoring_jobs SET status = 'canceled' WHERE id = 'active-job'")
+            )
+    finally:
+        engine.dispose()
+    command.upgrade(config, "0035_unified_work_queue")
+    command.downgrade(config, "0034_anthropic_messages_provider")
+
+    engine = create_engine(url)
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"] for column in inspector.get_columns("batch_scoring_items")}
+        assert columns.isdisjoint({"source_key", "ordinal", "heartbeat_at", "stall_count"})
+        assert "work_runtime_state" not in inspector.get_table_names()
+        with engine.connect() as connection:
+            # 降级只删运行时列，不删条目本身。
+            assert connection.execute(
+                text("SELECT count(*) FROM batch_scoring_items")
+            ).scalar_one() == 4
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")
+
+
+def _insert_minimal(connection, table, values):
+    """Insert a row at an older revision, filling required columns with neutral values."""
+    from sqlalchemy import Boolean, DateTime, Integer, Numeric
+
+    columns = inspect(connection).get_columns(table)
+    row = dict(values)
+    for column in columns:
+        name = column["name"]
+        if name in row or column["nullable"] or column.get("default") is not None:
+            continue
+        kind = column["type"]
+        if isinstance(kind, Boolean):
+            row[name] = False
+        elif isinstance(kind, (Integer, Numeric)):
+            row[name] = 0
+        elif isinstance(kind, DateTime):
+            row[name] = datetime(2026, 10, 1)
+        elif isinstance(kind, JSON):
+            row[name] = "{}"
+        else:
+            row[name] = name
+    names = ", ".join(row)
+    params = ", ".join(":" + name for name in row)
+    connection.execute(text("INSERT INTO %s (%s) VALUES (%s)" % (table, names, params)), row)
+
+
+def _seed_0035_rules(url):
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            _insert_minimal(connection, "rubric_criteria", {
+                "id": "criterion-1", "code": "C01", "rubric_id": "rubric-1",
+                "deduction_rules_structured": (
+                    '[{"source": "user_text", "match": "a"}, {"source": "ai_inferred", "match": "b"}]'
+                ),
+            })
+            for rule_id, code, method in (
+                ("rule-user", "manual.c01.deduct.1.v1", "manual"),
+                ("rule-ai-entry", "manual.c01.deduct.2.v1", "manual"),
+                ("rule-llm", "c01.v1", "llm"),
+                ("rule-compiler", "c01.other.v1", "compiler"),
+            ):
+                _insert_minimal(connection, "atomic_rules", {
+                    "id": rule_id, "rubric_version_id": "version-1", "criterion_id": "criterion-1",
+                    "rule_code": code, "creation_method": method, "direction": "deduct",
+                    "effect_type": "score", "judge_type": "semantic", "strictness": "required",
+                    "status": "draft", "repeat_policy": None,
+                    "checker_params": "{}", "evidence_policy": "{}", "depends_on_rule_codes": "[]",
+                })
+    finally:
+        engine.dispose()
+
+
+def test_0036_backfills_ai_origin_once_from_the_old_inference(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0036-backfill.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0035_unified_work_queue")
+    _seed_0035_rules(url)
+    command.upgrade(config, "0036_ai_tasks")
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            rows = dict(connection.execute(text("SELECT id, ai_origin FROM atomic_rules")).all())
+            models_recorded = connection.execute(
+                text("SELECT count(*) FROM atomic_rules WHERE ai_model IS NOT NULL")
+            ).scalar_one()
+        # 第 2 条结构化条目来自 AI（按 rule_code 序号反查），LLM 编译的也算。
+        assert {key: bool(value) for key, value in rows.items()} == {
+            "rule-user": False,
+            "rule-ai-entry": True,
+            "rule-llm": True,
+            "rule-compiler": False,
+        }
+        # 历史没有记录生成模型：留空。
+        assert models_recorded == 0
+        inspector = inspect(engine)
+        assert {"ai_tasks", "ai_task_items"}.issubset(inspector.get_table_names())
+        indexes = {value["name"]: value for value in inspector.get_indexes("ai_tasks")}
+        assert indexes["ix_ai_tasks_one_live_fingerprint"]["unique"]
+        item_indexes = {value["name"] for value in inspector.get_indexes("ai_task_items")}
+        assert {"ix_ai_task_items_claim", "ix_ai_task_items_running"}.issubset(item_indexes)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("blocker", ("task", "model"))
+def test_0036_refuses_to_downgrade_while_tasks_or_model_provenance_exist(monkeypatch, tmp_path, blocker):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / ("0036-guard-%s.db" % blocker))
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0035_unified_work_queue")
+    _seed_0035_rules(url)
+    command.upgrade(config, "0036_ai_tasks")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            if blocker == "task":
+                _insert_minimal(connection, "ai_tasks", {
+                    "id": "task-1", "kind": "rule_draft", "rubric_id": "rubric-1",
+                    "status": "succeeded", "fingerprint": "c" * 64, "scope": "{}",
+                    "input_snapshot": "{}",
+                })
+            else:
+                connection.execute(
+                    text("UPDATE atomic_rules SET ai_model = 'model-x' WHERE id = 'rule-ai-entry'")
+                )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="0036 downgrade refused"):
+        command.downgrade(config, "0035_unified_work_queue")
+
+
+def test_0036_downgrades_and_replays_without_tasks(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0036-replay.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0035_unified_work_queue")
+    _seed_0035_rules(url)
+    command.upgrade(config, "0036_ai_tasks")
+    command.downgrade(config, "0035_unified_work_queue")
+    engine = create_engine(url)
+    try:
+        inspector = inspect(engine)
+        assert "ai_tasks" not in inspector.get_table_names()
+        assert "ai_origin" not in {column["name"] for column in inspector.get_columns("atomic_rules")}
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")
+
+
+def _upgrade_to_0037(monkeypatch, tmp_path, name):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / name)
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0036_ai_tasks")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            _insert_minimal(connection, "ai_tasks", {
+                "id": "task-with-rubric", "kind": "rule_review", "rubric_id": "rubric-1",
+                "status": "succeeded", "fingerprint": "d" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+    finally:
+        engine.dispose()
+    command.upgrade(config, "0037_ai_task_upload_scope")
+    return url, config
+
+
+def test_0037_lets_only_structure_tasks_omit_the_rubric_and_keeps_the_other_constraints(monkeypatch, tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    url, _config = _upgrade_to_0037(monkeypatch, tmp_path, "0037-scope.db")
+    engine = create_engine(url)
+    try:
+        with engine.connect() as db:
+            table_sql = db.execute(
+                text("SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_tasks'")
+            ).scalar_one()
+            index_sql = {
+                name: sql for name, sql in db.execute(
+                    text("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='ai_tasks'")
+                ).all()
+            }
+            assert db.execute(text("SELECT count(*) FROM ai_tasks")).scalar_one() == 1
+        for name in ("ck_ai_tasks_kind", "ck_ai_tasks_status", "ck_ai_tasks_fingerprint",
+                     "ck_ai_tasks_nonnegative_counts", "ck_ai_tasks_rubric_scope"):
+            assert name in table_sql
+        assert "WHERE" in index_sql["ix_ai_tasks_one_live_fingerprint"].upper()
+        assert "RUBRIC_ID IS NULL" in index_sql["ix_ai_tasks_one_live_upload_fingerprint"].upper()
+        with engine.begin() as db:
+            db.execute(text("PRAGMA foreign_keys = OFF"))
+            _insert_minimal(db, "ai_tasks", {
+                "id": "upload-task", "kind": "structure_suggestion", "rubric_id": None, "owner_id": "user-1",
+                "status": "running", "fingerprint": "e" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+        with engine.begin() as db, pytest.raises(IntegrityError):
+            _insert_minimal(db, "ai_tasks", {
+                "id": "upload-twice", "kind": "structure_suggestion", "rubric_id": None, "owner_id": "user-1",
+                "status": "queued", "fingerprint": "e" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+        with engine.begin() as db, pytest.raises(IntegrityError):
+            _insert_minimal(db, "ai_tasks", {
+                "id": "review-without-rubric", "kind": "rule_review", "rubric_id": None, "owner_id": "user-1",
+                "status": "queued", "fingerprint": "f" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+    finally:
+        engine.dispose()
+
+
+def test_0037_refuses_to_downgrade_while_a_task_has_no_rubric(monkeypatch, tmp_path):
+    url, config = _upgrade_to_0037(monkeypatch, tmp_path, "0037-guard.db")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as db:
+            _insert_minimal(db, "ai_tasks", {
+                "id": "upload-task", "kind": "structure_suggestion", "rubric_id": None, "owner_id": "user-1",
+                "status": "succeeded", "fingerprint": "e" * 64, "scope": "{}", "input_snapshot": "{}",
+            })
+    finally:
+        engine.dispose()
+    with pytest.raises(RuntimeError, match="0037 downgrade refused"):
+        command.downgrade(config, "0036_ai_tasks")
+
+
+def test_0037_downgrades_and_replays_with_only_rubric_tasks(monkeypatch, tmp_path):
+    url, config = _upgrade_to_0037(monkeypatch, tmp_path, "0037-replay.db")
+    command.downgrade(config, "0036_ai_tasks")
+    engine = create_engine(url)
+    try:
+        inspector = inspect(engine)
+        rubric_column = next(c for c in inspector.get_columns("ai_tasks") if c["name"] == "rubric_id")
+        assert rubric_column["nullable"] is False
+        assert "ix_ai_tasks_one_live_upload_fingerprint" not in {i["name"] for i in inspector.get_indexes("ai_tasks")}
+        with engine.connect() as db:
+            assert db.execute(text("SELECT count(*) FROM ai_tasks")).scalar_one() == 1
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")

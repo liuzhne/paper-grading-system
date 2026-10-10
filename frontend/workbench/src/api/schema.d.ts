@@ -125,6 +125,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ai-tasks/import-structure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Import Structure Task
+         * @description 导入前（E1/E7 识别失败、还没有评分标准）的表格结构识别任务。
+         *
+         *     上传文件在这里解析成台账后冻结进任务，文件本身不落库；任务只对建任务的用户可见，
+         *     结果（结构与将导入的评分项）在任务里，确认后带 ``structure_override`` 调用导入接口。
+         */
+        post: operations["create_import_structure_task_api_ai_tasks_import_structure_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Task
+         * @description 状态、进度与各条目状态；成功时附结果。对本任务做一次限频巡检。
+         */
+        get: operations["read_task_api_ai_tasks__task_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-tasks/{task_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Task */
+        post: operations["cancel_task_api_ai_tasks__task_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-tasks/{task_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Task
+         * @description 只重试失败的条目，已成功的保留；期间已有同内容的任务时返回那个任务。
+         */
+        post: operations["retry_task_api_ai_tasks__task_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/invitations/resolve": {
         parameters: {
             query?: never;
@@ -1369,7 +1449,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/rubrics/import-files/structure-suggestions": {
+    "/api/rubrics/import-files/structure-suggestions/estimate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1379,11 +1459,11 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Preview Import Structure
-         * @description 导入前结构预检：识别失败（E1/E7）时用 LLM 建议表格结构，不落库；
-         *     ``dry_run`` 只返回将发送的规模估算，供用户确认后再调用模型。
+         * Estimate Import Structure
+         * @description 导入前结构预检（E1/E7）的规模估算：不调用模型。确认后用
+         *     ``POST /ai-tasks/import-structure`` 提交识别任务。
          */
-        post: operations["preview_import_structure_api_rubrics_import_files_structure_suggestions_post"];
+        post: operations["estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1565,6 +1645,30 @@ export interface paths {
         patch: operations["update_rubric_api_rubrics__rubric_id__patch"];
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/ai-tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Tasks
+         * @description 刷新页面后找回进行中的任务（``active=1``）。
+         */
+        get: operations["list_tasks_api_rubrics__rubric_id__ai_tasks_get"];
+        put?: never;
+        /**
+         * Create Task
+         * @description 新建返回 202；命中同指纹的进行中或已成功任务返回 200 和已有任务。
+         */
+        post: operations["create_task_api_rubrics__rubric_id__ai_tasks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/clone": {
         parameters: {
             query?: never;
@@ -1576,26 +1680,6 @@ export interface paths {
         put?: never;
         /** Clone Rubric */
         post: operations["clone_rubric_api_rubrics__rubric_id__clone_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/rubrics/{rubric_id}/draft-deduction-rules": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Draft Rubric Deduction Rules
-         * @description Return non-persistent, human-confirmable AI rule suggestions.
-         */
-        post: operations["draft_rubric_deduction_rules_api_rubrics__rubric_id__draft_deduction_rules_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1777,11 +1861,27 @@ export interface paths {
         /** Get Rubric Rule Review */
         get: operations["get_rubric_rule_review_api_rubrics__rubric_id__rule_review_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/rule-review/estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
         /**
-         * Run Rubric Rule Review
-         * @description 第二部分结束后的规则审查：代码前置检查 + LLM 审查（只报告，不修改规则）。
+         * Estimate Rubric Rule Review
+         * @description 规则审查的代码前置检查与规模估算：不调用模型。确认后提交 AI 任务（kind=rule_review）。
          */
-        post: operations["run_rubric_rule_review_api_rubrics__rubric_id__rule_review_post"];
+        post: operations["estimate_rubric_rule_review_api_rubrics__rubric_id__rule_review_estimate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1947,7 +2047,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/rubrics/{rubric_id}/structure-suggestions": {
+    "/api/rubrics/{rubric_id}/structure-suggestions/estimate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1957,10 +2057,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Suggest Rubric Structure
-         * @description 用户确认后运行 LLM 结构识别，返回与当前草稿的差异；建议带指纹持久化。
+         * Estimate Rubric Structure
+         * @description 草稿结构建议的规模估算：不调用模型。确认后提交 AI 任务（kind=structure_suggestion）。
          */
-        post: operations["suggest_rubric_structure_api_rubrics__rubric_id__structure_suggestions_post"];
+        post: operations["estimate_rubric_structure_api_rubrics__rubric_id__structure_suggestions_estimate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2035,26 +2135,6 @@ export interface paths {
         put?: never;
         /** Review Atomic Rule Template Link */
         post: operations["review_atomic_rule_template_link_api_rubrics__rubric_id__template_links__link_id__review_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/rubrics/{rubric_id}/unit-classifications": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Classify Source Units
-         * @description 用户确认后运行兜底分类器；结果只是建议，持久化到当前编译记录并带指纹。
-         */
-        post: operations["classify_source_units_api_rubrics__rubric_id__unit_classifications_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2933,6 +3013,112 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** AITaskCreate */
+        AITaskCreate: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "rule_draft" | "unit_classification" | "rule_review" | "structure_suggestion";
+            /** Params */
+            params?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Regenerate
+             * @default false
+             */
+            regenerate: boolean;
+        };
+        /** AITaskItemRead */
+        AITaskItemRead: {
+            /** Attempt Count */
+            attempt_count: number;
+            /** Deferral Count */
+            deferral_count: number;
+            /** Error Code */
+            error_code?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Id */
+            id: string;
+            /** Label */
+            label?: string | null;
+            /** Not Before */
+            not_before?: string | null;
+            /** Ordinal */
+            ordinal: number;
+            /** Started At */
+            started_at?: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Unit Count
+             * @default 0
+             */
+            unit_count: number;
+        };
+        /** AITaskRead */
+        AITaskRead: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /** Canceled Count */
+            canceled_count: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Code */
+            error_code?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Failed Count */
+            failed_count: number;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Id */
+            id: string;
+            /** Items */
+            items: components["schemas"]["AITaskItemRead"][];
+            /** Kind */
+            kind: string;
+            /** Model Name */
+            model_name?: string | null;
+            /** Pending Count */
+            pending_count: number;
+            /** Result */
+            result?: {
+                [key: string]: unknown;
+            } | null;
+            /** Rubric Id */
+            rubric_id?: string | null;
+            /** Running Count */
+            running_count: number;
+            /** Scope */
+            scope: {
+                [key: string]: unknown;
+            };
+            /** Started At */
+            started_at?: string | null;
+            /** State Version */
+            state_version: number;
+            /** Status */
+            status: string;
+            /** Succeeded Count */
+            succeeded_count: number;
+            /** Total Items */
+            total_items: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
         /** AtomicRuleConfirmRequest */
         AtomicRuleConfirmRequest: {
             /** Compilation Id */
@@ -3206,12 +3392,24 @@ export interface components {
             error_message?: string | null;
             /** Finished At */
             finished_at?: string | null;
+            /** Heartbeat At */
+            heartbeat_at?: string | null;
             /** Id */
             id: string;
+            /**
+             * Ordinal
+             * @default 0
+             */
+            ordinal: number;
             /** Paper Id */
             paper_id: string;
             /** Scoring Run Id */
             scoring_run_id?: string | null;
+            /**
+             * Stall Count
+             * @default 0
+             */
+            stall_count: number;
             /** Started At */
             started_at?: string | null;
             /** Status */
@@ -3259,7 +3457,13 @@ export interface components {
             grading_batch_id: string;
             /** Heartbeat At */
             heartbeat_at?: string | null;
-            /** Heartbeat State */
+            /**
+             * Heartbeat State
+             * @description healthy / stale / waiting / inactive。
+             *
+             *     统一执行模型后心跳记在条目上：有在跑的条目就看它们最新的心跳；没有在跑、
+             *     但还有待处理条目时是 waiting（排队等模型名额或叫醒），不是“执行中断”。
+             */
             readonly heartbeat_state: string;
             /** Id */
             id: string;
@@ -3378,6 +3582,20 @@ export interface components {
             /** Template File */
             template_file?: string | null;
         };
+        /** Body_create_import_structure_task_api_ai_tasks_import_structure_post */
+        Body_create_import_structure_task_api_ai_tasks_import_structure_post: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Regenerate
+             * @default false
+             */
+            regenerate: boolean;
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
+        };
         /** Body_create_rubric_import_session_api_rubrics_import_sessions_post */
         Body_create_rubric_import_session_api_rubrics_import_sessions_post: {
             /** Description */
@@ -3400,6 +3618,13 @@ export interface components {
              * @default private
              */
             visibility: string;
+        };
+        /** Body_estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post */
+        Body_estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post: {
+            /** Rules File */
+            rules_file?: string | null;
+            /** Template File */
+            template_file?: string | null;
         };
         /** Body_import_rubric_from_files_api_rubrics_import_files_post */
         Body_import_rubric_from_files_api_rubrics_import_files_post: {
@@ -3438,20 +3663,6 @@ export interface components {
         };
         /** Body_preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post */
         Body_preview_confirmed_rubric_reupload_api_rubrics__rubric_id__reupload_preview_post: {
-            /** Rules File */
-            rules_file?: string | null;
-            /** Template File */
-            template_file?: string | null;
-        };
-        /** Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post */
-        Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /**
-             * Dry Run
-             * @default false
-             */
-            dry_run: boolean;
             /** Rules File */
             rules_file?: string | null;
             /** Template File */
@@ -4300,13 +4511,6 @@ export interface components {
             /** Reason */
             reason: string;
         };
-        /** RubricAIRuleDraftRequest */
-        RubricAIRuleDraftRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /** Criteria */
-            criteria: components["schemas"]["RubricCriterionCreate"][];
-        };
         /** RubricCloneRequest */
         RubricCloneRequest: {
             /** Description */
@@ -4919,15 +5123,8 @@ export interface components {
             /** Version */
             version?: string | null;
         };
-        /** RuleReviewRequest */
-        RuleReviewRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /**
-             * Dry Run
-             * @default false
-             */
-            dry_run: boolean;
+        /** RuleReviewEstimateRequest */
+        RuleReviewEstimateRequest: {
             /**
              * Scope
              * @default priority
@@ -5211,16 +5408,6 @@ export interface components {
             /** Reason */
             reason: string;
         };
-        /** StructureSuggestionRequest */
-        StructureSuggestionRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /**
-             * Dry Run
-             * @default false
-             */
-            dry_run: boolean;
-        };
         /** StructureUndoRequest */
         StructureUndoRequest: {
             /** Reason */
@@ -5276,13 +5463,6 @@ export interface components {
              * @default 人工生命周期操作
              */
             reason: string;
-        };
-        /** UnitClassificationRequest */
-        UnitClassificationRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /** Unit Ids */
-            unit_ids?: string[] | null;
         };
         /**
          * UploadPrecheckRequest
@@ -5780,6 +5960,148 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AIConnectionProbeResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_import_structure_task_api_ai_tasks_import_structure_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_create_import_structure_task_api_ai_tasks_import_structure_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_task_api_ai_tasks__task_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                task_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_task_api_ai_tasks__task_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                task_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_task_api_ai_tasks__task_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                task_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
                 };
             };
             /** @description Validation Error */
@@ -8442,7 +8764,7 @@ export interface operations {
             };
         };
     };
-    preview_import_structure_api_rubrics_import_files_structure_suggestions_post: {
+    estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post: {
         parameters: {
             query?: never;
             header?: {
@@ -8455,7 +8777,7 @@ export interface operations {
         };
         requestBody?: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_preview_import_structure_api_rubrics_import_files_structure_suggestions_post"];
+                "multipart/form-data": components["schemas"]["Body_estimate_import_structure_api_rubrics_import_files_structure_suggestions_estimate_post"];
             };
         };
         responses: {
@@ -8930,6 +9252,83 @@ export interface operations {
             };
         };
     };
+    list_tasks_api_rubrics__rubric_id__ai_tasks_get: {
+        parameters: {
+            query?: {
+                kind?: string | null;
+                active?: boolean;
+            };
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_task_api_rubrics__rubric_id__ai_tasks_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AITaskCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     clone_rubric_api_rubrics__rubric_id__clone_post: {
         parameters: {
             query?: never;
@@ -8956,45 +9355,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RubricRead"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    draft_rubric_deduction_rules_api_rubrics__rubric_id__draft_deduction_rules_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-Organization-ID"?: string | null;
-            };
-            path: {
-                rubric_id: string;
-            };
-            cookie?: {
-                pgs_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RubricAIRuleDraftRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -9374,7 +9734,7 @@ export interface operations {
             };
         };
     };
-    run_rubric_rule_review_api_rubrics__rubric_id__rule_review_post: {
+    estimate_rubric_rule_review_api_rubrics__rubric_id__rule_review_estimate_post: {
         parameters: {
             query?: never;
             header?: {
@@ -9389,7 +9749,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RuleReviewRequest"];
+                "application/json": components["schemas"]["RuleReviewEstimateRequest"];
             };
         };
         responses: {
@@ -9763,7 +10123,7 @@ export interface operations {
             };
         };
     };
-    suggest_rubric_structure_api_rubrics__rubric_id__structure_suggestions_post: {
+    estimate_rubric_structure_api_rubrics__rubric_id__structure_suggestions_estimate_post: {
         parameters: {
             query?: never;
             header?: {
@@ -9776,11 +10136,7 @@ export interface operations {
                 pgs_session?: string | null;
             };
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["StructureSuggestionRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -9932,45 +10288,6 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TemplateLinkReviewRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    classify_source_units_api_rubrics__rubric_id__unit_classifications_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-Organization-ID"?: string | null;
-            };
-            path: {
-                rubric_id: string;
-            };
-            cookie?: {
-                pgs_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UnitClassificationRequest"];
             };
         };
         responses: {

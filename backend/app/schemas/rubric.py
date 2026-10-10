@@ -83,11 +83,6 @@ class RubricDraftRecompileRequest(RubricLifecycleReason):
     business_profile_key: str = Field(default="thesis", min_length=1)
 
 
-class RubricAIRuleDraftRequest(BaseModel):
-    criteria: list[RubricCriterionCreate] = Field(min_length=1)
-    ai_connection_id: Optional[str] = None
-
-
 class ExecutionDraftVersionRead(BaseModel):
     id: str
     version: str
@@ -383,19 +378,12 @@ class RubricStepOneConfirmRequest(RubricLifecycleReason):
 
 
 
-class RuleReviewRequest(BaseModel):
-    ai_connection_id: Optional[str] = None
+class RuleReviewEstimateRequest(BaseModel):
     scope: Literal["priority", "all"] = "priority"
-    dry_run: bool = False
 
 
 class FindingDismissRequest(BaseModel):
     reason: str = Field(min_length=1)
-
-
-class StructureSuggestionRequest(BaseModel):
-    ai_connection_id: Optional[str] = None
-    dry_run: bool = False
 
 
 class StructureMergeRequest(BaseModel):
@@ -407,11 +395,6 @@ class StructureMergeRequest(BaseModel):
 
 class StructureUndoRequest(BaseModel):
     reason: str = Field(min_length=1)
-
-
-class UnitClassificationRequest(BaseModel):
-    unit_ids: Optional[list[str]] = Field(default=None, max_length=500)
-    ai_connection_id: Optional[str] = None
 
 
 class SourceUnitBatchResolveRequest(BaseModel):

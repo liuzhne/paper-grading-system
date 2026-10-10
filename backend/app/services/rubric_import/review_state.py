@@ -1,7 +1,8 @@
 """规则审查的业务流程（解析重构方案 §7、阶段 6.5）。
 
 审查结果存在当前编译记录的 ``raw_model_output.rule_review``，带指纹（按全部规则计算，
-任何规则变化都会让审查过期）。审查不阻断发布；发布前在同一事务中把审查状态
+任何规则变化都会让审查过期）。模型调用由 AI 任务（``ai_tasks.rule_review``）执行，
+这里只负责冻结输入、估算与落库。审查不阻断发布；发布前在同一事务中把审查状态
 （未审查 / 已过期 / 已审查及未处理问题数）写入 ``human_changes``，便于日后追查。
 """
 
@@ -17,11 +18,9 @@ from sqlalchemy.orm import Session
 from backend.app.db import models
 from backend.app.services.rubric_import.parse_state import ParseStateError
 from backend.app.services.rubric_import.parse_state import current_compilation
-from backend.app.services.rubric_import.review import ReviewError
 from backend.app.services.rubric_import.review import build_bundles
 from backend.app.services.rubric_import.review import precheck
 from backend.app.services.rubric_import.review import review_fingerprint
-from backend.app.services.rubric_import.review import review_rules
 
 REVIEWABLE_STATUSES = ("draft", "review")
 
@@ -56,38 +55,46 @@ def _require_reviewable(session: Session, rubric_id: str):
     return rubric, compilation
 
 
-def run_rule_review(session: Session, rubric_id: str, scorer, *, scope: str, dry_run: bool, actor_id: str) -> dict:
+def prepare_rule_review(session: Session, rubric_id: str, *, scope: str) -> dict:
+    """审查的冻结输入：前置检查、按范围挑出的评分项包、按全部规则算的指纹。"""
+
     rubric, compilation = _require_reviewable(session, rubric_id)
     criteria = _criteria(session, rubric_id)
-    prechecks = precheck(criteria, total_score=float(rubric.total_score))
     bundles = build_bundles(criteria, scope=scope)
     if not bundles:
         raise ParseStateError(422, "NOTHING_TO_REVIEW", "没有需要审查的扣分规则。")
-    codes = [bundle["criterion"]["code"] for bundle in bundles]
-    if dry_run:
-        return {
-            "criteria_codes": codes,
-            "prechecks": prechecks,
-            "estimate": {"calls": len(bundles) + (1 if len(bundles) >= 2 else 0),
-                         "chars": len(json.dumps(bundles, ensure_ascii=False))},
-        }
-    try:
-        result = review_rules(bundles, scorer)
-    except ReviewError as exc:
-        status = 503 if exc.code in {"AI_CONNECTION_MISSING", "AI_PROVIDER_ERROR"} else 422
-        raise ParseStateError(status, exc.code, exc.message) from exc
-    stored = {
-        **result,
+    return {
+        "compilation_id": compilation.id,
         "scope": scope,
-        "criteria_codes": codes,
-        "prechecks": prechecks,
+        "criteria_codes": [bundle["criterion"]["code"] for bundle in bundles],
+        "prechecks": precheck(criteria, total_score=float(rubric.total_score)),
+        "bundles": bundles,
         "fingerprint": review_fingerprint(build_bundles(criteria, scope="all")),
-        "requested_by": actor_id,
-        "created_at": _now(),
     }
+
+
+def estimate_rule_review(session: Session, rubric_id: str, *, scope: str) -> dict:
+    """确认前的规模估算：不调用模型。"""
+
+    prepared = prepare_rule_review(session, rubric_id, scope=scope)
+    bundles = prepared["bundles"]
+    return {
+        "criteria_codes": prepared["criteria_codes"],
+        "prechecks": prepared["prechecks"],
+        "estimate": {"calls": len(bundles) + (1 if len(bundles) >= 2 else 0),
+                     "chars": len(json.dumps(bundles, ensure_ascii=False))},
+    }
+
+
+def store_rule_review(session: Session, rubric_id: str, result: dict, *, actor_id: str | None) -> dict:
+    """把一次审查（AI 任务合并后的结果）写进当前草稿；指纹是建任务时的规则指纹，
+    任务执行期间规则又变了的话，读取时显示为已过期。"""
+
+    _, compilation = _require_reviewable(session, rubric_id)
+    stored = {**deepcopy(result), "requested_by": actor_id, "created_at": _now()}
     compilation.raw_model_output = {**deepcopy(compilation.raw_model_output or {}), "rule_review": stored}
     session.flush()
-    return {**deepcopy(stored), "reviewed": True, "stale": False}
+    return {**deepcopy(stored), "reviewed": True, "stale": _stale(session, rubric_id, stored)}
 
 
 def _stale(session: Session, rubric_id: str, stored: dict) -> bool:

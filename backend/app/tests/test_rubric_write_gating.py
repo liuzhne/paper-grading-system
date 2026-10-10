@@ -26,7 +26,8 @@ def _write_routes():
         if not re.match(r"@router\.(post|patch|put|delete)\(", header):
             continue
         name = re.search(r"\ndef (\w+)\(", block)
-        if name:
+        # 已停用的同步接口只返回 410（改为 AI 任务，见 ai_tasks 路由），不写任何数据。
+        if name and "raise _retired_endpoint(" not in block:
             found[name.group(1)] = block
     return found
 

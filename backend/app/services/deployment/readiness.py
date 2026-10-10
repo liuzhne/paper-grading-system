@@ -7,14 +7,19 @@ from decimal import Decimal
 from pathlib import Path
 import shutil
 
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import text
 
 from backend.app.core.config import deployment_security_issues
 from backend.app.core.config import settings
+from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
+from backend.app.db.models import WorkRuntimeState
 from backend.app.db.models import utcnow
+from backend.app.services.work_queue.limits import SWEEP_INTERVAL_SECONDS
+from backend.app.services.work_queue.state import LAST_SWEEP
 
 
 def _thresholds():
@@ -86,6 +91,25 @@ def _scoped(statement, organization_id):
     ).where(GradingBatch.organization_id == organization_id)
 
 
+def _sweep_signal(db, now, *, active):
+    """最近一次全系统巡检；超过两个周期没巡检且有活动任务时判为失败。
+
+    Vercel 上巡检靠自续期消息链，链断了卡住的条目就没人找回；worker 部署里它说明
+    worker 没在跑。没有活动任务时不算失败（没活可干的部署不需要巡检）。
+    """
+
+    last = db.scalar(
+        select(WorkRuntimeState.value_at).where(WorkRuntimeState.name == LAST_SWEEP)
+    )
+    limit_seconds = 2 * SWEEP_INTERVAL_SECONDS
+    overdue = last is None or last < now - timedelta(seconds=limit_seconds)
+    return {
+        "status": "fail" if overdue and active else ("unavailable" if last is None else "pass"),
+        "last_swept_at": None if last is None else last.isoformat(),
+        "stale_after_seconds": limit_seconds,
+    }
+
+
 def _batch_signal(db, organization_id=None):
     jobs = db.scalars(
         _scoped(
@@ -95,12 +119,30 @@ def _batch_signal(db, organization_id=None):
             organization_id,
         ).order_by(BatchScoringJob.created_at, BatchScoringJob.id)
     ).all()
-    cutoff = utcnow() - timedelta(minutes=settings.OPS_BATCH_STALE_MINUTES)
+    now = utcnow()
+    cutoff = now - timedelta(minutes=settings.OPS_BATCH_STALE_MINUTES)
+    # 统一执行模型后心跳记在条目上：一篇评了很久时，任务行本身不会更新。
+    item_heartbeats = dict(
+        db.execute(
+            select(BatchScoringItem.job_id, func.max(BatchScoringItem.heartbeat_at))
+            .where(
+                BatchScoringItem.job_id.in_([job.id for job in jobs]),
+                BatchScoringItem.status == "running",
+            )
+            .group_by(BatchScoringItem.job_id)
+        ).all()
+    ) if jobs else {}
     stale = []
     for job in jobs:
-        activity = job.heartbeat_at or job.updated_at or job.created_at
+        candidates = [
+            value
+            for value in (job.heartbeat_at, item_heartbeats.get(job.id))
+            if value is not None
+        ]
+        activity = max(candidates) if candidates else (job.updated_at or job.created_at)
         if activity < cutoff:
             stale.append(job.id)
+    sweep = _sweep_signal(db, now, active=bool(jobs))
     completed = db.scalars(
         _scoped(
             select(BatchScoringJob).where(
@@ -124,11 +166,12 @@ def _batch_signal(db, organization_id=None):
         else "pass" if maximum_rate <= allowed else "fail"
     )
     return {
-        "status": "pass" if not stale else "fail",
+        "status": "pass" if not stale and sweep["status"] != "fail" else "fail",
         "active_count": len(jobs),
         "stale_count": len(stale),
         "stale_job_ids": stale,
         "stale_after_minutes": settings.OPS_BATCH_STALE_MINUTES,
+        "sweep": sweep,
         "llm_failure_rate": {
             "status": llm_status,
             "maximum_observed": (

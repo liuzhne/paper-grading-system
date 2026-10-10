@@ -482,7 +482,13 @@ def _draft_deduction_rules_once(
     business_profile_key,
     repair_code=None,
     deadline=None,
+    rate_limit_retries=AI_RULE_DRAFT_RATE_LIMIT_RETRIES,
 ):
+    """一批只调用一次模型。
+
+    ``rate_limit_retries`` 是适配器在原地按 Retry-After 等待重试 429 的次数；AI 任务的
+    条目传 0——不在执行里等，而是带着“最早可执行时间”回到待处理（统一执行模型）。
+    """
     if scorer is None or str(getattr(scorer, "provider", "")).lower() == "mock":
         raise AIRuleDraftValidationError(
             "AI_DRAFT_CONNECTION_MISSING",
@@ -553,7 +559,7 @@ def _draft_deduction_rules_once(
                 default_max_tokens=AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
                 attempts_limit=1,
                 default_timeout_seconds=AI_RULE_DRAFT_TIMEOUT_SECONDS,
-                rate_limit_retries=AI_RULE_DRAFT_RATE_LIMIT_RETRIES,
+                rate_limit_retries=rate_limit_retries,
                 deadline=deadline,
             )
         else:
@@ -820,9 +826,6 @@ def draft_deduction_rules(*, criterion, input_analysis, scorer, business_profile
     criterion_value = _mapping(criterion, label="评分项")
     analysis = deepcopy(dict(input_analysis))
     batches = _draft_batches(criterion_value, analysis)
-    merged_groups = []
-    metadata = None
-    criterion_code = str(criterion_value.get("code") or "")
     drafts = _run_draft_batches(
         batches,
         lambda batch_analysis: _draft_batch_with_repair(
@@ -836,6 +839,20 @@ def draft_deduction_rules(*, criterion, input_analysis, scorer, business_profile
         max_concurrency=scorer_concurrency(scorer, AI_RULE_DRAFT_MAX_CONCURRENCY),
         has_time=lambda: _has_time_for_call(deadline, scorer),
     )
+    return merge_draft_batches(criterion_value, analysis, drafts)
+
+
+def merge_draft_batches(criterion_value, analysis, drafts):
+    """把各批起草结果按批次顺序合并成一个评分项的草稿，并整体校验。
+
+    同步起草与 AI 任务（每批一个条目、全部成功后合并）共用这一段，保证两条路径的
+    规则组编号、互斥组与指纹一致。
+    """
+
+    criterion_value = _mapping(criterion_value, label="评分项")
+    criterion_code = str(criterion_value.get("code") or "")
+    merged_groups = []
+    metadata = None
     for batch_index, batch_draft in enumerate(drafts, start=1):
         metadata = metadata or deepcopy(batch_draft.get("generation_metadata") or {})
         for group_index, raw_group in enumerate(batch_draft.get("rule_groups") or [], start=1):
@@ -848,13 +865,13 @@ def draft_deduction_rules(*, criterion, input_analysis, scorer, business_profile
     draft = {
         "schema_version": AI_RULE_DRAFT_SCHEMA_VERSION,
         "criterion_code": criterion_code,
-        "input_assessment": analysis,
+        "input_assessment": deepcopy(dict(analysis)),
         "rule_groups": merged_groups,
         "requires_confirmation": True,
         "generation_metadata": {
             **(metadata or {}),
             "prompt_version": AI_RULE_DRAFT_PROMPT_VERSION,
-            "batch_count": len(batches),
+            "batch_count": len(drafts),
             "default_max_output_tokens": AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
         },
     }
@@ -870,5 +887,6 @@ __all__ = [
     "AIRuleDraftValidationError",
     "AI_RULE_DRAFT_SCHEMA_VERSION",
     "draft_deduction_rules",
+    "merge_draft_batches",
     "validate_ai_rule_draft",
 ]

@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 
+import { reloadIfStale } from "@/api/client.js";
+
 import { useSessionStore } from "@/stores/session.js";
 import {
   SETUP_ANCHOR,
@@ -121,7 +123,11 @@ export const router = createRouter({
   routes,
 });
 
-router.beforeEach(async (to) => {
+router.beforeEach(async (to, from) => {
+  // 版本守卫：后端契约已更新时，切换路由前直接整页打开目标地址（静默刷新到新版本）。
+  if (from.matched.length && reloadIfStale(() => window.location.assign(router.resolve(to).href))) {
+    return false;
+  }
   const session = useSessionStore();
   if (session.status === "unknown") {
     await session.bootstrap();

@@ -44,6 +44,8 @@ def rule_content(rule):
         "boundary_example": rule.boundary_example,
         "depends_on_rule_codes": rule.depends_on_rule_codes,
         "creation_method": rule.creation_method,
+        "ai_origin": bool(rule.ai_origin),
+        "ai_model": rule.ai_model,
         "origin": rule_origin(rule, rule.criterion),
         "levels": [{"code": level.level_code, "points": number_text(level.points),
                     "descriptor": level.descriptor, "positive_example": level.positive_example,

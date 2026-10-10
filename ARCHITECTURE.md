@@ -579,6 +579,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-10 | 发布 0035–0037 | 无架构变化；生产迁移工作流的运行角色复验覆盖 0035/0036 新表。 |
+| 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 四类 AI 操作全部改为任务；三个同步接口 410，估算拆为独立接口；0037 让导入前的结构识别任务不挂评分标准；新增 `on_task_success` 钩子与 `ai_tasks/provider_errors`。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 完成原子编辑、完整来源复制、AI 追加、锁内内容摘要复核及结构阻断展示；本地 1911 项后端与 139 项浏览器回归通过，后续总分补充修复的 10 项专项测试通过。主线 95d189f 经完整 CI 部署；数据库与默认 legacy 不变，线上资源一致、健康 200、未登录审核接口 401，待登录后业务验收。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 核对导入、规则审核、编译与发布边界；新增独立审核投影及带内容校验的确认入口，安全恢复读模型与评分语义不变。实施和验证进行中。 |
 | 2026-09-10 | 未配置模型的拦截修复 | 新增 §7.18：判定/拦截/留痕/呈现四分；`pendingBlock` 取代组件级 `dismissed`；能力表刷新时机列表。无后端改动。 |
@@ -1099,3 +1101,121 @@ Claude 适配器的调用链：
 - `batch_scoring/vercel_queue.queue_concurrency()` 在模块导入时读取 `BATCH_SCORING_QUEUE_CONCURRENCY`，作为 `@subscribe(max_concurrency=...)`。
 
 维护记录：2026-10-09 · 提高吞吐：并发来源从“只调低”改为“声明即生效”，平台模型加入名额检查；无数据模型变化。
+
+### 2026-10-10 统一执行模型与 AI 任务（方案确认，待实施）
+
+方案见 [AI 操作异步任务化与统一执行模型改造方案](docs/AI操作异步任务化改造方案.md)。
+
+现状（核对代码）：批量评分按部署环境走两条路径。`vercel_queue.vercel_queue_enabled()` 看 `BATCH_SCORING_DISPATCH` 或 `VERCEL`：Vercel 走 `score_batch_item` → `_claim_queue_item`，一篇一条消息、按篇领取；内网 compose 与本地走 `worker.run_worker_cycle` → `next_runnable_batch_scoring_job_id` → `run_batch_scoring_job`，按整个任务领取、线程池执行。起草、归类、规则审查、结构识别在请求里同步调用模型。
+
+目标结构：
+- 任务只在数据库里。批量评分条目与新的 `ai_task_items` 由同一个 `claim_next_item(source_key)` 领取：锁来源行做名额检查（部分索引只读在跑的几行）→ `SELECT … FOR UPDATE SKIP LOCKED` 取下一个条目（AI 条目优先，同类按任务内序号轮转）→ 置为 `running` 并写心跳。
+- 叫醒是唯一与平台相关的一层：Vercel 上的订阅 `pgs-work` 只收 `{source_key}`，被叫醒后领取一个条目执行，结束后再叫醒；内网与本地由 worker 循环调用同一个领取函数。
+- 巡检 `sweep_stale_items` 处理心跳过期、连续无进展达到上限、有空位却没人在跑的来源；由 Vercel 上 2 分钟一次的自续期消息、进度接口（只针对本任务、限频）和 worker 每一轮调用。
+- 持久化：迁移 0035 给 `batch_scoring_items` 加来源键、序号、心跳、无进展计数与部分索引；迁移 0036 新增 `ai_tasks`、`ai_task_items`（授权与 RLS），并给 `AtomicRule` 与结构化规则条目加 `ai_origin`、`ai_model`。
+
+维护记录：2026-10-10 · 统一执行模型与 AI 任务方案：记录两条执行路径的现状与统一后的领取、叫醒、巡检及持久化落点；实现及迁移不变。
+
+### 2026-10-10 统一执行模型 A1（已实施：批量评分）
+
+方案见 [AI 操作异步任务化与统一执行模型改造方案](docs/AI操作异步任务化改造方案.md) 第 6、11 节。本节取代 2026-09-15「持久化后台评分」、2026-10-08「自部署后台评分 worker」与「连接并发上限」里关于**执行路径**的描述（`dispatch_batch_scoring_job`、`_claim_queue_item`、`_ensure_connection_capacity`、`ConnectionAtCapacityError`、`next_runnable_batch_scoring_job_id`、按任务领取的线程池均已删除）；任务状态机、逐篇检查点、观察指标不变。
+
+模块边界（新增 `services/work_queue/`，与业务无关）：
+
+| 模块 | 职责 |
+|---|---|
+| `kinds` | 条目种类登记：`WorkKind`（条目表、父任务表、`begin` / `execute` / `abandon` / `made_progress` / `converge`）与 `ClaimedItem`（围栏号 `attempt`） |
+| `sources` | 来源键（`connection:<id>` / `platform`）、名额上限、来源行加锁（Postgres `FOR UPDATE`；SQLite 用不改值的写入拿库级写锁）、在跑/可执行计数 |
+| `claim` | `claim_next_item(source_key)`：锁来源 → 部分索引统计在跑条目 → `FOR UPDATE SKIP LOCKED` 按 `ordinal, created_at, id` 取下一个 → 条件更新为 running |
+| `runner` | `execute_next`：领取 → 15 秒心跳线程（带围栏的条件更新）→ 种类执行并落库 → 接力叫醒；`run_worker_loop`：N 个领取线程 + 主线程定期巡检 |
+| `sweep` | `sweep_stale_items`：心跳过期的条目按“有无新检查点”续评或在连续无进展 3 次后判失败；收敛父任务计数与状态；给“有待处理、有空位、没人在跑”的来源补发叫醒。`sweep_parent_on_read`（进度读取，每任务 30 秒一次）、`ensure_sweep_chain`（补投断掉的巡检链） |
+| `wake` / `messages` | 平台相关的一层：Vercel 上发 `pgs-work` 消息（`{source_key}` / `{sweep}`），worker 部署里全部空操作；消息处理与平台无关 |
+| `state` | `work_runtime_state`：最近一次全系统巡检、最近一次补投巡检链 |
+
+批量评分是第一个种类（`batch_scoring/jobs.py` 末尾的 `BATCH_SCORING_KIND`，优先级 20；A2 的 AI 条目优先级更高）。
+
+调用链：
+
+- **建任务** `POST /batches/{id}/score-jobs` → `create_batch_scoring_job` 写任务与条目（来源键、发起人、任务内序号）→ `wake_for_capacity`（Vercel：按 `min(空位, 可执行条目)` 发叫醒）→ `ensure_sweep_chain`。
+- **Vercel**：订阅 `pgs-work` 的 `handle_work_message` → `messages.handle_wake_payload` → `execute_next(source_key)`；`{sweep}` 先 `schedule_next_sweep`（下一个 2 分钟槽，幂等键 `sweep-<槽号>`）再 `run_global_sweep`。旧主题 `batch-scoring-items` 的 `score_batch_item` 保留一个发布周期，旧消息按“叫醒该条目所属来源”处理。
+- **内网/本地**：`run_batch_worker` → `run_worker_loop`：`--threads`（默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`，未设为 8）个线程循环 `run_worker_cycle` → `execute_next(None)`（依次尝试有可执行条目的来源）；主线程每 `--sweep-seconds`（默认 120）`run_global_sweep`。
+- **同步入口** `POST /batch-scoring-jobs/{id}/run`（非 Vercel）→ `run_batch_scoring_job`：先对本任务巡检，再开 `max_workers` 个线程调用 `execute_next(parent_id=job_id)`。同一个领取函数，只是限定在一个任务内。
+- **进度读取** `GET /batch-scoring-jobs/{id}`、`GET /batches/{id}/score-jobs/latest`（活动任务）→ `sweep_parent_on_read`：原子条件更新 `batch_scoring_jobs.last_swept_at`（不刷新 `updated_at`），抢到才巡检本任务。
+
+数据流与持久化边界：
+
+- 条目状态变化与任务计数在同一事务、任务行锁之下提交：领取 `pending→running`、写结果 `running→succeeded/skipped/failed` 用增量 SQL（`_shift_counts`，下限 0），取消、重试、巡检用按条目重新计数（`_recount`，没变就不写）。加锁顺序固定为 来源 → 条目 → 任务 → 批次；取消先改条目再锁任务。
+- 写结果带围栏：`status = 'running' AND attempt_count = <领取时的值>`，巡检重置后又被另一次执行领走时，旧执行迟到的结果丢弃（日志 `work_item_result_discarded`）。
+- 已死的执行写进 `attempt_history`（`status: "abandoned"`，无错误码）；连续无进展达到上限记 `WORK_ITEM_STALLED`。
+- “有进展”= 本篇有规则在本次领取之后判完（`RuleScoringTask.status = 'succeeded' AND finished_at >= started_at`）。
+- 任务心跳 `heartbeat_at` 只在领取与写结果时刷新；页面的 `heartbeat_state` 看在跑条目的心跳，新增 `waiting`（没有在跑、还有待处理）。运维页“停滞”同样看条目心跳，并在 `batch_jobs.sweep` 里给出最近一次巡检时间（有活动任务且超过两个周期未巡检为 fail）。
+
+迁移 0035：`batch_scoring_items` 加 `source_key`、`owner_id`、`ordinal`、`heartbeat_at`、`stall_count`、`not_before` 与两条部分索引（`status = 'pending'` 上的 `(source_key, ordinal, created_at)`、`status = 'running'` 上的 `(source_key, heartbeat_at)`）；`batch_scoring_jobs.last_swept_at`；新表 `work_runtime_state`（`pgs_app` 授权与 RLS）。
+
+维护记录：2026-10-10 · 统一执行模型 A1：新增 `services/work_queue`，批量评分在 Vercel 与 worker 上走同一个领取函数；记录调用链、加锁顺序、围栏与计数的持久化边界；迁移 head → 0035。
+
+### 2026-10-10 AI 任务 A2（已实施：起草扣分细则）
+
+方案见 [AI 操作异步任务化与统一执行模型改造方案](docs/AI操作异步任务化改造方案.md) 第 4–8 节。起草不再在请求里调用模型；`POST /rubrics/{id}/draft-deduction-rules` 返回 410。
+
+模块边界（新增 `services/ai_tasks/`）：
+
+| 模块 | 职责 |
+|---|---|
+| `handlers` | 操作种类登记：`TaskHandler(prepare, run_item, merge, on_item_success)`；`PreparedTask`（冻结输入、条目拆分、无需条目时的直接结果）；`TaskView`（执行时传给处理函数的任务快照） |
+| `rule_draft` | `rule_draft`：`prepare` 与原同步接口相同地分析输入（评分说明 + 人工归入的原文单元），用 `_draft_batches` 拆批；`run_item` 调一次 `_draft_deduction_rules_once`（`deadline=None`、`rate_limit_retries=0`）；`merge` 调 `merge_draft_batches`（同步路径与任务路径共用）；起草错误 → 处理方式（repair / retry / defer / fail） |
+| `service` | 锁定模型来源（`resolve_task_model`：显式或当前启用的私有连接，否则平台模型；mock 拒绝）、内容指纹、建任务（同指纹的进行中/已成功任务直接返回，`regenerate` 作废旧任务）、取消、只重试失败与被取消的条目、发布时清理；执行时 `task_scorer` 按锁定的连接 ID、密钥版本与快照重建客户端 |
+| `execution` | `work_queue` 的 `ai_task` 种类（优先级 10，先于批量评分）：领取钩子、一次执行一次模型调用、带围栏写结果、按处理方式回到待处理（429 设 `not_before` 并发延迟叫醒）或判失败（取消同任务剩余待处理条目）、全部成功后按序号合并 |
+| `state` | 任务行加锁、计数增量与重新计数 |
+
+调用链：
+
+- **提交** `POST /rubrics/{id}/ai-tasks {kind, params, ai_connection_id, regenerate}` → `create_ai_task`（prepare → 指纹 → 部分唯一索引兜底的插入）→ 新建返回 202，命中返回 200 → `wake_for_capacity`（Vercel）。
+- **执行**：`claim_next_item` → `ai_task` 种类 `_begin` → `_execute`（会话外调用模型）→ `_finish` → `settle_task`（全部成功 → `handler.merge` → `task.result`）。
+- **进度** `GET /ai-tasks/{id}`：活动任务先 `sweep_parent_on_read`（30 秒一次）；`GET /rubrics/{id}/ai-tasks?kind=&active=1` 找回进行中的任务；`POST /ai-tasks/{id}/cancel|retry`。
+- **前端**：`stores/rubrics.draftRules` 为每个评分项建任务；`RubricsView` 用 `createVisiblePoller(aiTaskInterval)` 轮询（前 30 秒 2 秒、之后 5 秒，页面隐藏暂停），成功结果进入原有确认面板；进入页面时 `resumeDraftTasks`。
+- **版本守卫**：每个响应带 `X-PGS-Contract`（`core/contract.py`）；前端 `api/contract.js` 不一致时在下一次写操作或路由切换前刷新（每个后端版本每个标签页最多一次）。
+
+数据与持久化边界：
+
+- `ai_tasks`：冻结输入、锁定的连接与模型名、计数、合并结果、根因错误；`(rubric_id, fingerprint)` 上的部分唯一索引覆盖 queued/running/succeeded。生命周期：评分标准发布时 `delete_rubric_ai_tasks` 在发布事务内删除；评分标准删除时 FK 级联。
+- `ai_task_items`：本批输入（含 `repair_code`）、输出、`attempt/stall/deferral/retry/repair` 计数、`attempt_history`（错误码与耗时，不含厂商正文）。
+- 规则来源：前端采用 AI 结果时在结构化条目上写 `ai_origin` / `ai_model`；编译（`pipeline._rule`，只在规则来自 AI 时写进编译图）落到 `AtomicRule.ai_origin` / `ai_model`；`atomic_recompile`、版本复制保留它们；`rule_origin.is_ai_rule` 读字段；`review_workspace` 返回它们，规则面板显示 “AI · 模型名”。两列**不进版本内容 hash**。
+
+维护记录：2026-10-10 · AI 任务 A2：新增 `services/ai_tasks` 与任务 API，起草迁移到任务，规则记录 AI 来源与模型名，版本守卫；迁移 head → 0036。
+
+### 2026-10-10 AI 任务 B（已实施：AI 归类）
+
+归类不再由前端调度（`lib/classification-batches.js` 已删除）；`POST /rubrics/{id}/unit-classifications` 返回 410。
+
+- `ai_tasks/unit_classification`：`prepare` 取当前可编辑草稿的预筛单元（`parse_state.classification_inputs`），默认剔除已有有效建议的单元（`suggested_unit_ids`；`rejudge=true` 时不剔除），再剔除其它进行中归类任务已负责的单元——全部被占用时返回那个任务；每 3 个单元一个条目。`run_item` 调 `classify_units(max_attempts=1, rate_limit_retries=0, repair=…)`，整批失败按原因映射为 defer / retry / repair / fail。`on_item_success` 调 `parse_state.merge_unit_classification`（锁草稿行 → 指纹校验 → 合并进 `raw_model_output.unit_classifications`），页面可以边跑边看到建议；原文或评分项在调用期间变化时该批以 `CLASSIFICATION_INPUT_CHANGED` 失败。`merge` 只汇总计数。
+- `execution._finish`：条目成功前先执行 `on_item_success`，它抛 `AITaskItemError` 时这次执行按失败处理。
+- `parse_state.run_unit_classification` 保留为同步函数（CLI 与并发合并测试），内部同样调用 `classification_inputs` + `merge_unit_classification`。
+- 前端：`stores/rubrics.classifyUnits` 建任务；`RubricsView` 轮询任务，`succeeded_count` 变化即刷新原文核对面板；`SourceReviewPanel` 的进度来自任务（`AITaskItemRead.unit_count` 累计），可“停止本轮”“重试失败的批次”；进入页面时找回进行中的归类任务。
+
+维护记录：2026-10-10 · AI 任务 B：归类迁移到任务，按单元去重，前端调度器删除；无迁移，契约版本 → `2026-10-10.ai-tasks-b`。
+
+### 2026-10-10 AI 任务 C（已实施：规则审查、表格结构识别）
+
+四类 AI 操作都已是任务；`POST /rubrics/{id}/rule-review`、`POST /rubrics/{id}/structure-suggestions`、`POST /rubrics/import-files/structure-suggestions` 返回 410。估算拆成单独的接口，不调用模型：`POST /rubrics/{id}/rule-review/estimate`、`POST /rubrics/{id}/structure-suggestions/estimate`、`POST /rubrics/import-files/structure-suggestions/estimate`。
+
+| 模块 | 职责 |
+|---|---|
+| `ai_tasks/rule_review` | `rule_review`：`prepare` 调 `review_state.prepare_rule_review`（前置检查、按范围挑评分项包、按全部规则算指纹）；每个评分项一个条目（`label`=评分项编号），两个以上评分项时再加跨项条目（`label=__cross__`）。`run_item` 调 `review.call_once`（传输层 `attempts_limit=1`、`rate_limit_retries=0`），问题校验沿用 `validate_criterion_issues` / `validate_cross_issues`；缺 issues 数组先修正一次，仍不合格就把这一项记入 `failed` 并照常成功（与同步审查相同）。`merge` 编号 F1…；`on_task_success` 调 `review_state.store_rule_review` 写进当前草稿 |
+| `ai_tasks/structure_suggestion` | `structure_suggestion`，一次模型调用一个条目，两种目标：`draft` 从草稿台账（`structure_state.draft_structure_request`）冻结发送内容，`on_item_success` 调 `store_structure_suggestion`（按识别出的结构重新解析、算差异、带指纹落库；识别期间草稿被换掉时以 `STRUCTURE_SOURCE_CHANGED` 失败）；`import` 由 `POST /ai-tasks/import-structure` 在服务端把上传文件解析成台账（`import_structure_request`，文件不落库），`run_item` 识别后用 `import_structure_preview` 试解析，结果只在任务里 |
+| `ai_tasks/provider_errors` | 厂商异常 → 处理方式（沿异常链找 `ProviderCallError` / `CircuitOpenError`：限流与熔断 defer，额度耗尽与请求被拒 fail，超时与 5xx retry）；起草、审查、结构识别共用 |
+| `handlers.TaskHandler.on_task_success` | 新钩子：全部条目成功、合并之后在同一事务里落库；抛 `AITaskItemError` 时任务判失败、结果不保留 |
+
+调用链：
+
+- **审查**：`RuleAuditPanel` 估算 → `POST /rubrics/{id}/ai-tasks {kind: rule_review, params: {scope}, regenerate}`（已有未过期结果时 `regenerate=true`）→ 轮询 → 成功后 `GET /rubrics/{id}/rule-review`。
+- **草稿结构识别**：`TableRecognitionPanel` 估算 → `POST /rubrics/{id}/ai-tasks {kind: structure_suggestion, params: {target: draft}}` → 轮询 → 成功后 `GET /parse-coverage` 里出现 `structure_suggestions`，合入/撤销接口不变。
+- **导入前结构识别**：导入报“未解析到有效评分项”时 → 估算（multipart）→ `POST /ai-tasks/import-structure`（multipart）→ 轮询 → `task.result.preview` 与 `override` → 用户确认后带 `structure_override` 走原导入接口。
+- **找回**：进入评分标准页时 `GET /rubrics/{id}/ai-tasks?active=1`，按种类恢复审查与结构识别任务的轮询；导入前识别没有评分标准，不找回（页面刷新后重新上传即可，同一文件按指纹复用已完成的任务）。
+
+数据与持久化边界：
+
+- 0037：`ai_tasks.rubric_id` 只对 `structure_suggestion` 可空（`ck_ai_tasks_rubric_scope`）；不挂评分标准的任务按 `(owner_id, fingerprint)` 部分唯一索引去重，只对建任务的用户可见（`_task_or_404`），同一用户发起新的导入前识别时删除其已结束的旧任务（`_prune_upload_tasks`），不会随发布清理。
+- 条目新增只读字段 `label`（来自条目输入），页面据此说明“哪个评分项失败”。
+
+维护记录：2026-10-10 · AI 任务 C：审查与结构识别迁移到任务，估算拆成独立接口，新增 `on_task_success` 钩子与共用的厂商错误分类；迁移 head → 0037；契约版本 → `2026-10-10.ai-tasks-c`。

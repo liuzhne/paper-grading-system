@@ -8,6 +8,8 @@
  *   并丢弃 version 落后的迟到响应，避免旧组织内容回灌新组织界面。
  */
 
+import { API_CONTRACT_HEADER, API_CONTRACT_VERSION } from "./contract.js";
+
 /**
  * 后端注入的运行配置；缺省时回落同源 /api。
  * 沿用旧 SPA 的 `window.__PGS_CONFIG__.apiBase` 约定，两个入口共用同一注入点，
@@ -54,6 +56,69 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 版本守卫（方案第 5 节）：后端响应的契约版本与本页面构建时的不一致，说明这是旧页面。
+ * 记下来，在下一次写操作或路由切换之前静默刷新，旧页面就不会去调已停用的接口。
+ */
+let contractStale = false;
+/** @type {string|null} */
+let serverContract = null;
+const RELOADED_KEY = "pgs-contract-reloaded";
+
+export function contractIsStale() {
+  return contractStale;
+}
+
+/** 测试用：恢复为未发现版本变化。 */
+export function resetContractGuard() {
+  contractStale = false;
+  serverContract = null;
+}
+
+function noteContract(response) {
+  const value = response?.headers?.get?.(API_CONTRACT_HEADER);
+  if (value && value !== API_CONTRACT_VERSION) {
+    contractStale = true;
+    serverContract = value;
+  }
+}
+
+/** 本标签页是否已为这个后端版本刷新过一次（刷新后仍不一致说明部署本身不一致）。 */
+function alreadyReloadedFor(version) {
+  try {
+    return globalThis.sessionStorage?.getItem(RELOADED_KEY) === version;
+  } catch {
+    return false;
+  }
+}
+
+function markReloadedFor(version) {
+  try {
+    globalThis.sessionStorage?.setItem(RELOADED_KEY, version);
+  } catch {
+    // 隐私模式等拿不到存储：照常刷新，只是失去“每个版本只刷新一次”的保护。
+  }
+}
+
+/**
+ * 页面已过期时刷新并返回 true。
+ *
+ * 每个后端版本在一个标签页里最多刷新一次：如果刷新后的页面仍与后端不一致（前端产物
+ * 没有随后端一起部署），继续刷新只会让每次操作都白点，不如照常请求，由后端返回明确错误。
+ * @param {() => void} [reload]
+ */
+export function reloadIfStale(reload = () => globalThis.location?.reload()) {
+  if (!contractStale || !serverContract) return false;
+  if (alreadyReloadedFor(serverContract)) {
+    console.warn(`页面接口版本 ${API_CONTRACT_VERSION} 与服务端 ${serverContract} 不一致，刷新后仍未更新；请检查前端产物是否随后端一起部署。`);
+    contractStale = false;
+    return false;
+  }
+  markReloadedFor(serverContract);
+  reload();
+  return true;
+}
+
 /** 组织上下文已切换，响应作废。调用方应静默忽略。 */
 export class StaleContextError extends Error {
   constructor() {
@@ -69,6 +134,11 @@ export class StaleContextError extends Error {
  *          headers?: Record<string,string>}} [options]
  */
 export async function request(path, options = {}) {
+  const method = options.method || "GET";
+  if (method !== "GET" && reloadIfStale()) {
+    // 写操作发出之前刷新：旧页面不该带着旧契约写数据。调用方按“上下文已切换”静默处理。
+    throw new StaleContextError();
+  }
   const version = contextVersion;
   const controller = new AbortController();
   inflight.add(controller);
@@ -97,7 +167,7 @@ export async function request(path, options = {}) {
   let response;
   try {
     response = await fetch(`${apiBase()}${path}`, {
-      method: options.method || "GET",
+      method,
       credentials: "same-origin",
       headers,
       body,
@@ -111,6 +181,7 @@ export async function request(path, options = {}) {
   }
 
   if (version !== contextVersion) throw new StaleContextError();
+  noteContract(response);
 
   if (response.status === 204) return null;
 

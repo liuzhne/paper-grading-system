@@ -214,7 +214,21 @@ def test_ai_rule_validator_rejects_non_monotonic_severity_points():
     assert exc_info.value.code == "SEVERITY_RULES_NOT_MONOTONIC"
 
 
-def test_draft_endpoint_rejects_mock_llm_with_actionable_problem(client):
+def _draft_task(client, rubric_id):
+    from backend.app.services.work_queue.runner import execute_next
+
+    created = client.post(
+        f"/api/rubrics/{rubric_id}/ai-tasks",
+        json={"kind": "rule_draft", "params": {"criterion": _criterion()}},
+    )
+    if created.status_code >= 400:
+        return created, None
+    while execute_next(client.session_factory) is not None:
+        pass
+    return created, client.get(f"/api/ai-tasks/{created.json()['id']}").json()
+
+
+def test_draft_task_rejects_mock_llm_with_actionable_problem(client):
     created = client.post(
         "/api/rubrics",
         json={
@@ -226,10 +240,7 @@ def test_draft_endpoint_rejects_mock_llm_with_actionable_problem(client):
     )
     assert created.status_code == 200, created.text
 
-    response = client.post(
-        f"/api/rubrics/{created.json()['id']}/draft-deduction-rules",
-        json={"criteria": [_criterion()]},
-    )
+    response, _task = _draft_task(client, created.json()["id"])
 
     assert response.status_code == 503
     detail = response.json()["detail"]
@@ -238,11 +249,11 @@ def test_draft_endpoint_rejects_mock_llm_with_actionable_problem(client):
     assert detail["retryable"] is False
 
 
-def test_draft_endpoint_returns_structured_suggestions_without_mutating_rubric(
+def test_draft_task_returns_structured_suggestions_without_mutating_rubric(
     client,
     monkeypatch,
 ):
-    from backend.app.api.routes import rubrics as rubric_routes
+    from backend.app.services.ai_tasks import service as ai_task_service
 
     created = client.post(
         "/api/rubrics",
@@ -288,15 +299,13 @@ def test_draft_endpoint_returns_structured_suggestions_without_mutating_rubric(
             ]
         }
     )
-    monkeypatch.setattr(rubric_routes, "get_llm_scorer", lambda *a, **k: scorer)
+    monkeypatch.setattr(ai_task_service, "get_llm_scorer", lambda *a, **k: scorer)
 
-    response = client.post(
-        f"/api/rubrics/{rubric_id}/draft-deduction-rules",
-        json={"criteria": [_criterion()]},
-    )
+    response, task = _draft_task(client, rubric_id)
 
-    assert response.status_code == 200, response.text
-    draft = response.json()["items"][0]["draft"]
+    assert response.status_code == 202, response.text
+    assert task["status"] == "succeeded"
+    draft = task["result"]["draft"]
     assert draft["requires_confirmation"] is True
     assert draft["generation_metadata"]["fingerprint"]
     assert all(
@@ -323,11 +332,11 @@ def test_ai_drafter_reports_non_retryable_provider_rejection_without_body():
     assert "groq" not in str(captured.value).lower()
 
 
-def test_draft_endpoint_maps_provider_rejection_to_safe_non_retryable_problem(
+def test_draft_task_fails_a_provider_rejection_without_retrying_or_exposing_the_body(
     client,
     monkeypatch,
 ):
-    from backend.app.api.routes import rubrics as rubric_routes
+    from backend.app.services.ai_tasks import service as ai_task_service
 
     created = client.post(
         "/api/rubrics",
@@ -340,19 +349,19 @@ def test_draft_endpoint_maps_provider_rejection_to_safe_non_retryable_problem(
     )
     assert created.status_code == 200, created.text
     monkeypatch.setattr(
-        rubric_routes, "get_llm_scorer", lambda *a, **k: _RejectedDraftScorer()
+        ai_task_service, "get_llm_scorer", lambda *a, **k: _RejectedDraftScorer()
     )
 
-    response = client.post(
-        f"/api/rubrics/{created.json()['id']}/draft-deduction-rules",
-        json={"criteria": [_criterion()]},
-    )
+    _response, task = _draft_task(client, created.json()["id"])
 
-    assert response.status_code == 502
-    detail = response.json()["detail"]
-    assert detail["code"] == "AI_DRAFT_PROVIDER_REJECTED"
-    assert detail["retryable"] is False
-    assert "测试当前 AI 连接" in detail["user_action"]
+    assert task["status"] == "failed"
+    assert task["error_code"] == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "测试当前 AI 连接" in task["error_message"]
+    assert "groq" not in task["error_message"].lower()
+    # 请求被拒（400）立即判失败，不再执行第二次；剩下的批次不再发出。
+    first, second = sorted(task["items"], key=lambda item: item["ordinal"])
+    assert (first["status"], first["attempt_count"]) == ("failed", 1)
+    assert (second["status"], second["attempt_count"]) == ("canceled", 0)
 
 
 def test_range_and_unconfirmed_ai_rules_remain_blocked_until_confirmation(client):

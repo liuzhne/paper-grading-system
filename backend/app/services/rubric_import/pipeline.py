@@ -27,6 +27,8 @@ from sqlalchemy.orm import Session
 
 from backend.app.db import models
 from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
+from backend.app.services.rubrics.rule_origin import entry_ai_model
+from backend.app.services.rubrics.rule_origin import is_ai_entry
 from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubric_import.compiler import is_multi_judgement
 from backend.app.services.rubric_import.classification.signals import profile_signal_terms
@@ -307,6 +309,8 @@ def _rule(
     applies_to: str = "global",
     creation_method: str = "compiler",
     source_rule_codes: list[str] | None = None,
+    ai_origin: bool = False,
+    ai_model: str | None = None,
 ) -> dict:
     normalized_evidence = deepcopy(dict(evidence_policy or {}))
     if not normalized_evidence:
@@ -319,7 +323,7 @@ def _rule(
             "requirement": "required",
             "minimum_coverage": "1",
         }
-    return {
+    rule = {
         "rule_code": rule_code,
         "criterion_code": criterion_code,
         "name": name,
@@ -347,6 +351,12 @@ def _rule(
         "levels": deepcopy(levels or []),
         "source_rule_codes": list(source_rule_codes or []),
     }
+    # 0036：来源记录只在规则来自 AI 时写进编译图。非 AI 规则的图（及其临时 hash、
+    # 解析快照）与 0036 之前逐字节相同；持久化时缺省按“不是 AI”处理。
+    if ai_origin or creation_method == "llm":
+        rule["ai_origin"] = True
+        rule["ai_model"] = ai_model
+    return rule
 
 
 def _base_graph(
@@ -1096,6 +1106,11 @@ def _assemble_file_graph(
                 applies_to=applies_to,
                 creation_method=creation_method,
                 source_rule_codes=[source_code],
+                ai_model=(
+                    str(getattr(scorer, "model_name", "") or "")[:200] or None
+                    if creation_method == "llm"
+                    else None
+                ),
             )
         )
 
@@ -1359,6 +1374,9 @@ def _manual_nodes(payload: Mapping[str, object]):
                         applies_to=projection["applies_to"],
                         creation_method="manual",
                         source_rule_codes=[code],
+                        # 采用 AI 结果时，前端在条目上写明 ai_origin 与生成模型名。
+                        ai_origin=is_ai_entry(deduction),
+                        ai_model=entry_ai_model(deduction) if is_ai_entry(deduction) else None,
                     )
                 )
             if compiled_count == 0:
@@ -2046,6 +2064,8 @@ def persist_prepared_import(
                     depends_on_rule_codes=deepcopy(value.get("depends_on_rule_codes") or []),
                     status="draft",
                     creation_method=value["creation_method"],
+                    ai_origin=bool(value.get("ai_origin") or value["creation_method"] == "llm"),
+                    ai_model=value.get("ai_model"),
                     reviewed_by=None,
                     reviewed_at=None,
                 )

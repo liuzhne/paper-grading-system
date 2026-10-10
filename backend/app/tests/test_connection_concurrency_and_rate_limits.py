@@ -258,13 +258,22 @@ def _limited_job(client, *, count, name, first_started_at, max_concurrency=1):
             session, batch_id=batch_id, rescore=False, max_workers=2,
             observation_policy=None, actor_id=settings.DEFAULT_DEV_USER_ID,
         )
-        items = sorted(job.items, key=lambda value: (value.created_at, value.id))
+        items = sorted(job.items, key=lambda value: value.ordinal)
         items[0].status = "running"
         items[0].attempt_count = 1
         items[0].started_at = first_started_at
+        items[0].heartbeat_at = first_started_at
         job.status = "running"
+        job.pending_count -= 1
+        job.running_count += 1
         session.commit()
         return job.id, job.max_workers, [item.id for item in items], rubric_id, paper_ids
+
+
+def _claim(client, **options):
+    from backend.app.services.work_queue.claim import claim_next_item
+
+    return claim_next_item(client.session_factory, **options)
 
 
 def test_local_worker_parallelism_follows_the_connection_declaration(client):
@@ -276,26 +285,20 @@ def test_local_worker_parallelism_follows_the_connection_declaration(client):
     assert (lowered, raised) == (1, 6)
 
 
-def test_queue_defers_items_while_the_connection_is_busy(client):
-    jobs = _jobs()
-    job_id, _, item_ids, _, _ = _limited_job(client, count=3, name="busy", first_started_at=utcnow())
+def test_a_full_connection_gets_no_claim_and_the_item_stays_pending(client):
+    _job_id, _, item_ids, _, _ = _limited_job(client, count=3, name="busy", first_started_at=utcnow())
 
-    with pytest.raises(jobs.ConnectionAtCapacityError) as next_in_line:
-        jobs.run_batch_scoring_item(client.session_factory, job_id=job_id, item_id=item_ids[1])
-    with pytest.raises(jobs.ConnectionAtCapacityError) as further_back:
-        jobs.run_batch_scoring_item(client.session_factory, job_id=job_id, item_id=item_ids[2])
-
-    # 排得越靠后等得越久，减少空转的函数调用。
-    assert next_in_line.value.retry_after_seconds == jobs.CONNECTION_WAIT_BASE_SECONDS
-    assert further_back.value.retry_after_seconds == 2 * jobs.CONNECTION_WAIT_BASE_SECONDS
+    # 名额已满：不领取，不计数，也不重新排队——等在跑的那篇结束时接力叫醒。
+    assert _claim(client) is None
     with client.session_factory() as session:
         waiting = session.get(models.BatchScoringItem, item_ids[1])
         assert (waiting.status, waiting.attempt_count) == ("pending", 0)
 
 
 def test_an_expired_lease_does_not_hold_the_connection(client):
-    jobs = _jobs()
-    job_id, _, item_ids, rubric_id, paper_ids = _limited_job(
+    from backend.app.services.work_queue.runner import execute_next
+
+    _job_id, _, item_ids, rubric_id, paper_ids = _limited_job(
         client, count=2, name="stale holder", first_started_at=datetime(2020, 1, 1),
     )
     with client.session_factory() as session:
@@ -306,34 +309,95 @@ def test_an_expired_lease_does_not_hold_the_connection(client):
         ))
         session.commit()
 
-    jobs.run_batch_scoring_item(client.session_factory, job_id=job_id, item_id=item_ids[1])
+    assert execute_next(client.session_factory) is not None
 
     with client.session_factory() as session:
         assert session.get(models.BatchScoringItem, item_ids[1]).status == "skipped"
 
 
-def test_queue_consumer_defers_with_a_fresh_delayed_message(monkeypatch):
-    queue = importlib.import_module("backend.app.services.batch_scoring.vercel_queue")
+def test_connection_limit_is_shared_across_jobs_and_checked_at_claim(client):
+    # 同一个连接的两个批次：跨任务也只按连接的同时请求数领取（以前 worker 路径不检查）。
+    first_job, _, first_items, *_ = _limited_job(
+        client, count=2, name="shared A", first_started_at=utcnow(), max_concurrency=2,
+    )
+    with client.session_factory() as session:
+        connection_id = session.get(
+            models.GradingBatch,
+            session.get(models.BatchScoringJob, first_job).grading_batch_id,
+        ).ai_connection_id
+        batch_id, _rubric_id, _paper_ids = _seed_batch(session, count=2, name="shared B")
+        session.get(models.GradingBatch, batch_id).ai_connection_id = connection_id
+        session.commit()
+        second, _ = _jobs().create_batch_scoring_job(
+            session, batch_id=batch_id, rescore=False, max_workers=2,
+            observation_policy=None, actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        second_job = second.id
+
+    claimed = _claim(client)
+    # 两个任务的第 1 篇都先于任何任务的第 2 篇：第一个批次已有 1 篇在跑，取的是第二个批次的第 1 篇。
+    assert claimed is not None and claimed.parent_id == second_job
+    assert _claim(client) is None
+
+
+def test_a_large_job_does_not_block_another_users_job(client):
+    from backend.app.services.work_queue.claim import claim_next_item
+
     jobs = _jobs()
-    sent = []
+    with client.session_factory() as session:
+        big_batch, _r1, _p1 = _seed_batch(session, count=6, name="big job")
+        small_batch, _r2, _p2 = _seed_batch(session, count=2, name="small job")
+        big, _ = jobs.create_batch_scoring_job(
+            session, batch_id=big_batch, rescore=False, max_workers=2,
+            observation_policy=None, actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        small, _ = jobs.create_batch_scoring_job(
+            session, batch_id=small_batch, rescore=False, max_workers=2,
+            observation_policy=None, actor_id="other-user",
+        )
+        big_id, small_id = big.id, small.id
 
-    async def fake_send(topic, payload, **options):
-        sent.append((topic, payload, options))
+    order = []
+    for _ in range(4):
+        claimed = claim_next_item(client.session_factory)
+        order.append(claimed.parent_id)
+    # 按任务内序号轮转：两个任务交替，而不是先评完先提交的大任务。
+    assert order == [big_id, small_id, big_id, small_id]
 
-    def at_capacity(*_args, **_kwargs):
-        raise jobs.ConnectionAtCapacityError(60)
 
-    monkeypatch.setattr(queue, "send", fake_send)
-    monkeypatch.setattr(jobs, "run_batch_scoring_item", at_capacity)
-    for _ in range(2):
-        asyncio.run(queue.score_batch_item({"job_id": "job-1", "item_id": "item-1"}))
+def test_platform_model_declaration_limits_unbound_batches(client):
+    from backend.app.services import platform_llm
 
-    assert [value[0] for value in sent] == [queue.SCORING_TOPIC] * 2
-    assert all(value[1] == {"job_id": "job-1", "item_id": "item-1"} for value in sent)
-    assert all(value[2]["delay"] == 60 for value in sent)
-    keys = [value[2]["idempotency_key"] for value in sent]
-    # 同键会被队列去重：延迟消息一旦被吞，这篇论文就再没人领。
-    assert all(key.startswith("score-item-1-wait-") for key in keys) and keys[0] != keys[1]
+    jobs = _jobs()
+    with client.session_factory() as session:
+        platform_llm.set_config(
+            session, provider_type="openai_compatible", base_url="https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+            model_name="openai.gpt-oss-120b-1:0", api_key="platform-test-key", configured_by="admin-1",
+            provider_options={"max_concurrency": 1},
+        )
+        batch_id, _rubric_id, _paper_ids = _seed_batch(session, count=2, name="platform busy")
+        job, _ = jobs.create_batch_scoring_job(
+            session, batch_id=batch_id, rescore=False, max_workers=2,
+            observation_policy=None, actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        assert job.max_workers == 1
+        assert {item.source_key for item in job.items} == {"platform"}
+
+    assert _claim(client) is not None
+    # 平台模型声明了 1：没有绑定连接的批次共用这一个名额。
+    assert _claim(client) is None
+
+
+@pytest.mark.parametrize(
+    "raw, expected", [(None, 8), ("", 8), ("16", 16), ("0", 1), ("99", 32), ("abc", 8)],
+)
+def test_queue_concurrency_is_configurable_and_bounded(monkeypatch, raw, expected):
+    queue = importlib.import_module("backend.app.services.batch_scoring.vercel_queue")
+    if raw is None:
+        monkeypatch.delenv("BATCH_SCORING_QUEUE_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("BATCH_SCORING_QUEUE_CONCURRENCY", raw)
+    assert queue.queue_concurrency() == expected
 
 
 # ---- 额度耗尽：同是 429，但等待不会恢复 ---------------------------------------
@@ -439,37 +503,29 @@ def test_repair_is_skipped_when_it_would_overrun_the_budget(monkeypatch):
     assert attempts[0]["deadline"] is not None  # 截止时间传给了调用，由适配器约束超时
 
 
-def test_draft_endpoint_shares_one_deadline_and_reports_budget_exhaustion(client, monkeypatch):
-    from backend.app.api.routes import rubrics as rubric_routes
-    from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValidationError
+def test_draft_task_items_call_once_without_a_request_budget_or_in_place_429_waits(monkeypatch):
+    # 起草改为 AI 任务后，每批是一次独立执行：没有整次请求的时间预算（同步接口的 260 秒
+    # 止血措施随旧接口停用），429 也不在执行里按 Retry-After 原地等，而是延后再领取。
+    from backend.app.services.ai_tasks import rule_draft
+    from backend.app.services.ai_tasks.handlers import TaskView
     from backend.app.tests.test_template_ai_rule_refactor import _criterion
 
-    created = client.post("/api/rubrics", json={
-        "name": "AI draft time budget", "version": "v1", "total_score": 20,
-        "criteria": [_criterion(scoring_mode="review_only")],
-    })
-    assert created.status_code == 200, created.text
-    deadlines = []
+    seen = {}
 
-    def out_of_time(**kwargs):
-        deadlines.append(kwargs["deadline"])
-        raise AIRuleDraftValidationError(
-            "AI_DRAFT_TIME_BUDGET_EXCEEDED", "该评分项需要分 4 批生成", "请调高该连接的并发上限",
-        )
+    def once(**kwargs):
+        seen.update(kwargs)
+        return {"rule_groups": []}
 
-    monkeypatch.setattr(rubric_routes, "get_llm_scorer", lambda *a, **k: object())
-    monkeypatch.setattr(rubric_routes, "draft_deduction_rules", out_of_time)
-    response = client.post(
-        f"/api/rubrics/{created.json()['id']}/draft-deduction-rules", json={"criteria": [_criterion()]},
+    monkeypatch.setattr(rule_draft, "_draft_deduction_rules_once", once)
+    view = TaskView(
+        id="t", kind="rule_draft", rubric_id="r", owner_id=None, organization_id=None, scope={},
+        input_snapshot={"criterion": _criterion(), "input_analysis": {}, "business_profile_key": "thesis"},
+        model_name="m",
     )
-
-    assert response.status_code == 503
-    detail = response.json()["detail"]
-    assert detail["code"] == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
-    # 原样重试还会撞上同一个上限，不能提示「稍后重试」。
-    assert detail["retryable"] is False
-    budget = settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
-    assert deadlines and 0 < deadlines[0] - time.monotonic() <= budget
+    rule_draft._run_item(view, {"analysis": {"batch_index": 1}, "repair_code": "AI_DRAFT_OUTPUT_INVALID"}, object())
+    assert seen["deadline"] is None
+    assert seen["rate_limit_retries"] == 0
+    assert seen["repair_code"] == "AI_DRAFT_OUTPUT_INVALID"
 
 
 # ---- 适配器：截止时间约束每次调用与重试 -------------------------------------------
@@ -526,44 +582,3 @@ def test_a_timeout_cut_short_by_the_budget_is_reported_as_budget_exhaustion(monk
         )
     assert excinfo.value.code == "AI_DRAFT_TIME_BUDGET_EXCEEDED"
     assert len(calls) == 1
-
-
-# ---- 平台默认模型与全局队列并发 ------------------------------------------------
-
-
-def test_platform_model_declaration_limits_unbound_batches(client):
-    from backend.app.services import platform_llm
-
-    jobs = _jobs()
-    with client.session_factory() as session:
-        platform_llm.set_config(
-            session, provider_type="openai_compatible", base_url="https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
-            model_name="openai.gpt-oss-120b-1:0", api_key="platform-test-key", configured_by="admin-1",
-            provider_options={"max_concurrency": 1},
-        )
-        batch_id, _rubric_id, _paper_ids = _seed_batch(session, count=2, name="platform busy")
-        job, _ = jobs.create_batch_scoring_job(
-            session, batch_id=batch_id, rescore=False, max_workers=2,
-            observation_policy=None, actor_id=settings.DEFAULT_DEV_USER_ID,
-        )
-        assert job.max_workers == 1
-        items = sorted(job.items, key=lambda value: (value.created_at, value.id))
-        items[0].status, items[0].attempt_count, items[0].started_at = "running", 1, utcnow()
-        job.status = "running"
-        session.commit()
-        job_id, waiting_id = job.id, items[1].id
-
-    with pytest.raises(jobs.ConnectionAtCapacityError):
-        jobs.run_batch_scoring_item(client.session_factory, job_id=job_id, item_id=waiting_id)
-
-
-@pytest.mark.parametrize(
-    "raw, expected", [(None, 8), ("", 8), ("16", 16), ("0", 1), ("99", 32), ("abc", 8)],
-)
-def test_queue_concurrency_is_configurable_and_bounded(monkeypatch, raw, expected):
-    queue = importlib.import_module("backend.app.services.batch_scoring.vercel_queue")
-    if raw is None:
-        monkeypatch.delenv("BATCH_SCORING_QUEUE_CONCURRENCY", raising=False)
-    else:
-        monkeypatch.setenv("BATCH_SCORING_QUEUE_CONCURRENCY", raw)
-    assert queue.queue_concurrency() == expected

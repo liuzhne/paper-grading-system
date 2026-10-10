@@ -123,6 +123,13 @@ function signalTone(status) {
   return { pass: "chip-ok", fail: "chip-danger", unavailable: "chip-warn" }[status] || "";
 }
 
+// 最近一次全系统巡检（找回卡住的条目）；超过两个周期没巡检时标红。
+function formatSweep(sweep) {
+  if (!sweep?.last_swept_at) return "尚无记录";
+  const date = new Date(`${sweep.last_swept_at}Z`);
+  return Number.isNaN(date.getTime()) ? sweep.last_swept_at : date.toLocaleString("zh-CN");
+}
+
 onMounted(async () => {
   await session.loadCapabilities();
   const jobs = [load("integrations", "/system/integrations", integrations)];
@@ -170,6 +177,12 @@ onMounted(async () => {
             <dt>心跳超时</dt>
             <dd class="mono" :class="{ danger: orgReadiness.signals.batch_jobs.stale_count }">
               {{ orgReadiness.signals.batch_jobs.stale_count }}
+            </dd>
+          </div>
+          <div>
+            <dt>最近巡检</dt>
+            <dd class="mono" :class="{ danger: orgReadiness.signals.batch_jobs.sweep?.status === 'fail' }">
+              {{ formatSweep(orgReadiness.signals.batch_jobs.sweep) }}
             </dd>
           </div>
           <div>
@@ -339,7 +352,10 @@ onMounted(async () => {
               <td class="muted detail">
                 <template v-if="name === 'disk'">剩余 {{ signal.free_gb }} GB / 下限 {{ signal.minimum_free_gb }}</template>
                 <template v-else-if="name === 'database'">{{ signal.dialect }} · {{ signal.size_gb ?? "—" }} GB / 上限 {{ signal.maximum_size_gb }}</template>
-                <template v-else-if="name === 'batch_jobs'">活动 {{ signal.active_count }} · 超时 {{ signal.stale_count }}</template>
+                <template v-else-if="name === 'batch_jobs'">
+                  活动 {{ signal.active_count }} · 超时 {{ signal.stale_count }} ·
+                  <span :class="{ danger: signal.sweep?.status === 'fail' }">最近巡检 {{ formatSweep(signal.sweep) }}</span>
+                </template>
                 <template v-else-if="name === 'security'">
                   {{ signal.issue_codes.length ? signal.issue_codes.join("、") : "无问题" }}
                 </template>
