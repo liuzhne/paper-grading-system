@@ -273,7 +273,8 @@ def test_0017_batch_scoring_job_migration_refuses_lossy_downgrade(
                     "total_items, pending_count, running_count, succeeded_count, "
                     "skipped_count, failed_count, canceled_count, observation_policy, "
                     "observation_policy_hash, created_at, updated_at) VALUES "
-                    "('job-m8', 'missing-batch', 1, 0, 1, 'queued', 0, 0, 0, 0, "
+                    # 已结束的任务：0035 只拒绝活动任务，这里验证的是 0017 自己的守卫。
+                    "('job-m8', 'missing-batch', 1, 0, 1, 'completed', 0, 0, 0, 0, "
                     "0, 0, 0, '{}', :digest, :now, :now)"
                 ),
                 {"digest": "a" * 64, "now": now},
@@ -1179,3 +1180,195 @@ def test_0034_downgrades_and_replays_without_claude_rows(monkeypatch, tmp_path):
         command.upgrade(config, "head")
     finally:
         engine.dispose()
+
+
+def _seed_0034_batch_jobs(url):
+    """At 0034: one bound batch with an active job, one unbound batch with a finished job."""
+    engine = create_engine(url)
+    base = datetime(2026, 10, 1, 8, 0, 0)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA foreign_keys = OFF"))
+            for batch_id, connection_id, owner in (
+                ("bound-batch", "conn-1", "batch-owner"),
+                ("unbound-batch", None, "batch-owner"),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO grading_batches (id, name, rubric_id, status, owner_id, "
+                        "ai_connection_id, state_version, created_at, updated_at) VALUES "
+                        "(:id, :id, 'rubric', 'scoring', :owner, :connection, 1, :now, :now)"
+                    ),
+                    {"id": batch_id, "connection": connection_id, "owner": owner, "now": base},
+                )
+            for job_id, batch_id, status, created_by in (
+                ("active-job", "bound-batch", "running", "starter"),
+                ("done-job", "unbound-batch", "completed", None),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO batch_scoring_jobs "
+                        "(id, grading_batch_id, generation, rescore, max_workers, status, "
+                        "total_items, pending_count, running_count, succeeded_count, "
+                        "skipped_count, failed_count, canceled_count, observation_policy, "
+                        "observation_policy_hash, created_by, created_at, updated_at) VALUES "
+                        "(:id, :batch, 1, 0, 1, :status, 0, 0, 0, 0, 0, 0, 0, '{}', :digest, "
+                        ":created_by, :now, :now)"
+                    ),
+                    {
+                        "id": job_id,
+                        "batch": batch_id,
+                        "status": status,
+                        "created_by": created_by,
+                        "digest": "b" * 64,
+                        "now": base,
+                    },
+                )
+            for item_id, job_id, status, minute in (
+                ("item-c", "active-job", "pending", 3),
+                ("item-a", "active-job", "running", 1),
+                ("item-b", "active-job", "pending", 2),
+                ("item-z", "done-job", "succeeded", 1),
+            ):
+                created = base.replace(minute=minute)
+                connection.execute(
+                    text(
+                        "INSERT INTO batch_scoring_items (id, job_id, paper_id, status, "
+                        "attempt_count, attempt_history, started_at, created_at, updated_at) "
+                        "VALUES (:id, :job, :paper, :status, 0, '[]', :started, :created, :created)"
+                    ),
+                    {
+                        "id": item_id,
+                        "job": job_id,
+                        "paper": "paper-" + item_id,
+                        "status": status,
+                        "started": created if status == "running" else None,
+                        "created": created,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+
+def test_0035_backfills_the_work_queue_columns_and_partial_indexes(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0035-backfill.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    _seed_0034_batch_jobs(url)
+    command.upgrade(config, "0035_unified_work_queue")
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            rows = {
+                row.id: row
+                for row in connection.execute(
+                    text(
+                        "SELECT id, source_key, owner_id, ordinal, heartbeat_at, stall_count, "
+                        "not_before FROM batch_scoring_items"
+                    )
+                )
+            }
+        assert {key: row.source_key for key, row in rows.items()} == {
+            "item-a": "connection:conn-1",
+            "item-b": "connection:conn-1",
+            "item-c": "connection:conn-1",
+            "item-z": "platform",
+        }
+        # 发起人优先，没有记录发起人时退回批次归属人。
+        assert rows["item-a"].owner_id == "starter"
+        assert rows["item-z"].owner_id == "batch-owner"
+        # 任务内序号按创建时间排列，每个任务从 0 开始。
+        assert [rows[key].ordinal for key in ("item-a", "item-b", "item-c")] == [0, 1, 2]
+        assert rows["item-z"].ordinal == 0
+        # 在跑的条目从此按心跳租约判断，回填为开始时间，过期后由巡检接手。
+        assert rows["item-a"].heartbeat_at is not None
+        assert rows["item-b"].heartbeat_at is None
+        assert all(row.stall_count == 0 and row.not_before is None for row in rows.values())
+
+        inspector = inspect(engine)
+        indexes = {value["name"]: value for value in inspector.get_indexes("batch_scoring_items")}
+        assert indexes["ix_batch_scoring_items_claim"]["column_names"] == [
+            "source_key",
+            "ordinal",
+            "created_at",
+        ]
+        assert indexes["ix_batch_scoring_items_running"]["column_names"] == [
+            "source_key",
+            "heartbeat_at",
+        ]
+        assert "last_swept_at" in {
+            column["name"] for column in inspector.get_columns("batch_scoring_jobs")
+        }
+        assert "work_runtime_state" in inspector.get_table_names()
+        with engine.connect() as connection:
+            plan = " ".join(
+                str(row[-1])
+                for row in connection.execute(
+                    text(
+                        "EXPLAIN QUERY PLAN SELECT id FROM batch_scoring_items "
+                        "WHERE source_key = 'platform' AND status = 'pending' "
+                        "ORDER BY ordinal, created_at LIMIT 1"
+                    )
+                )
+            )
+        assert "ix_batch_scoring_items_claim" in plan
+    finally:
+        engine.dispose()
+
+
+def test_0035_refuses_to_downgrade_while_a_job_is_active(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0035-guard.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    _seed_0034_batch_jobs(url)
+    command.upgrade(config, "0035_unified_work_queue")
+
+    with pytest.raises(RuntimeError, match="0035 downgrade refused: 1 batch scoring job"):
+        command.downgrade(config, "0034_anthropic_messages_provider")
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "0035_unified_work_queue"
+    finally:
+        engine.dispose()
+
+
+def test_0035_downgrades_and_replays_with_only_finished_jobs(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "0035-replay.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0034_anthropic_messages_provider")
+    _seed_0034_batch_jobs(url)
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE batch_scoring_jobs SET status = 'canceled' WHERE id = 'active-job'")
+            )
+    finally:
+        engine.dispose()
+    command.upgrade(config, "0035_unified_work_queue")
+    command.downgrade(config, "0034_anthropic_messages_provider")
+
+    engine = create_engine(url)
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"] for column in inspector.get_columns("batch_scoring_items")}
+        assert columns.isdisjoint({"source_key", "ordinal", "heartbeat_at", "stall_count"})
+        assert "work_runtime_state" not in inspector.get_table_names()
+        with engine.connect() as connection:
+            # 降级只删运行时列，不删条目本身。
+            assert connection.execute(
+                text("SELECT count(*) FROM batch_scoring_items")
+            ).scalar_one() == 4
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")

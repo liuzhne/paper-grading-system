@@ -505,8 +505,11 @@ def _seed_running_job(session, rubric, user):
     session.flush()
     session.add_all(
         [
-            BatchScoringItem(job_id=job.id, paper_id=papers[0].id, status="running", attempt_count=1),
-            BatchScoringItem(job_id=job.id, paper_id=papers[1].id, status="pending"),
+            BatchScoringItem(
+                job_id=job.id, paper_id=papers[0].id, status="running", attempt_count=1,
+                ordinal=0, started_at=datetime.utcnow(), heartbeat_at=datetime.utcnow(),
+            ),
+            BatchScoringItem(job_id=job.id, paper_id=papers[1].id, status="pending", ordinal=1),
         ]
     )
 

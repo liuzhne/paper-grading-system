@@ -1,19 +1,34 @@
-"""Vercel Queues transport for durable, per-paper scoring checkpoints."""
+"""Vercel Queues：执行模型在 Vercel 上的叫醒层。
+
+数据库是唯一的事实来源。订阅 ``pgs-work`` 的消息只带来源键（``{source_key}``）或巡检
+槽号（``{sweep}``），不带任务或条目：被叫醒的函数调用 ``claim_next_item`` 领取一个
+条目执行，取不到就退出。消息重复无害，丢失由巡检补发，所以队列的重投次数与条目
+状态无关——执行次数由数据库按“连续无进展”计数。
+
+旧主题 ``batch-scoring-items`` 的消费者保留一个发布周期：部署时队列里可能还有旧格式
+消息 ``{job_id, item_id}``，按“叫醒该条目所属来源”处理。
+
+本模块在 Vercel 构建期被导入以发现订阅，顶层只能依赖标准库与 vercel.queue。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from uuid import uuid4
-from vercel.queue import send
+
 from vercel.queue import subscribe
 
+
+WORK_TOPIC = "pgs-work"
+# 统一执行模型之前一篇一条消息的主题；只为消费部署前留下的旧消息。
 SCORING_TOPIC = "batch-scoring-items"
-# 全系统同时评分的论文数（所有用户共用一个消费组）。每个连接另有自己的名额检查
-# （_ensure_connection_capacity），限额小的连接不会因为这里调高而超限。
+CONSUMER_GROUP = "paper-grading-production"
+# 全系统同时执行的条目数（所有用户共用一个消费组）。每个来源另有自己的名额检查，
+# 限额小的连接不会因为这里调高而超限。worker 的线程数读同一个变量。
 DEFAULT_QUEUE_CONCURRENCY = 8
 MAX_QUEUE_CONCURRENCY = 32
+logger = logging.getLogger("batch-scoring-queue")
 
 
 def queue_concurrency() -> int:
@@ -26,7 +41,6 @@ def queue_concurrency() -> int:
     except ValueError:
         value = DEFAULT_QUEUE_CONCURRENCY
     return max(1, min(MAX_QUEUE_CONCURRENCY, value))
-logger = logging.getLogger("batch-scoring-queue")
 
 
 def vercel_queue_enabled() -> bool:
@@ -37,88 +51,47 @@ def vercel_queue_enabled() -> bool:
     return bool(os.getenv("VERCEL"))
 
 
-async def dispatch_batch_scoring_job(job) -> list[str | None]:
-    """Publish every pending item; idempotency makes redispatch safe."""
-    if not vercel_queue_enabled():
-        return []
-    pending = [item for item in job.items if item.status == "pending"]
-    results = []
-    for item in pending:
-        message_id = await send(
-            SCORING_TOPIC,
-            {"job_id": job.id, "item_id": item.id},
-            idempotency_key=f"score-{item.id}-{item.attempt_count}",
-            retention=86400,
-        )
-        results.append(str(message_id) if message_id is not None else None)
-    logger.info(
-        "batch_scoring_dispatched job_id=%s item_count=%s",
-        job.id,
-        len(pending),
-    )
-    return results
+async def _handle(payload) -> None:
+    # Vercel imports subscriber modules during build-time discovery.  Defer the
+    # application/runtime imports until an actual delivery so discovery stays
+    # independent of native database and Pydantic wheels.
+    from backend.app.db.session import SessionLocal
+    from backend.app.services.work_queue.messages import handle_wake_payload
+
+    await asyncio.to_thread(handle_wake_payload, SessionLocal, payload)
+
+
+@subscribe(
+    topic=WORK_TOPIC,
+    consumer_group=CONSUMER_GROUP,
+    retry_after=30,
+    max_concurrency=queue_concurrency(),
+    max_attempts=3,
+)
+async def handle_work_message(payload) -> None:
+    """一次叫醒执行一个条目（或一次巡检）；结束前按空位接力叫醒。"""
+
+    await _handle(payload)
 
 
 @subscribe(
     topic=SCORING_TOPIC,
-    consumer_group="paper-grading-production",
+    consumer_group=CONSUMER_GROUP,
     retry_after=30,
     max_concurrency=queue_concurrency(),
     max_attempts=12,
 )
 async def score_batch_item(payload) -> None:
-    """Consume one paper so a whole batch never occupies one function lifetime."""
-    # Vercel imports subscriber modules during build-time discovery.  Defer the
-    # application/runtime imports until an actual delivery so discovery stays
-    # independent of native database and Pydantic wheels.
-    from backend.app.db.session import SessionLocal
-    from backend.app.services.batch_scoring.jobs import ConnectionAtCapacityError
-    from backend.app.services.batch_scoring.jobs import run_batch_scoring_item
+    """旧格式消息：按“叫醒该条目所属来源”处理，不再按消息里的条目执行。"""
 
-    job_id = payload.get("job_id")
-    item_id = payload.get("item_id")
-    if not isinstance(job_id, str) or not isinstance(item_id, str):
-        raise ValueError("queue message requires job_id and item_id")
-    logger.info(
-        "batch_scoring_item_started job_id=%s item_id=%s",
-        job_id,
-        item_id,
-    )
-    try:
-        await asyncio.to_thread(
-            run_batch_scoring_item,
-            SessionLocal,
-            job_id=job_id,
-            item_id=item_id,
-        )
-    except ConnectionAtCapacityError as exc:
-        # 连接并发名额已满：另投一条延迟消息，再正常返回确认这一条。若靠抛错让队列
-        # 重投，排队等待会耗尽 max_attempts，消息被静默丢弃，任务卡在排队中。
-        # 幂等键每次唯一：同键会被服务端去重，延迟消息一旦被吞掉，这篇论文就再没人领。
-        await send(
-            SCORING_TOPIC,
-            {"job_id": job_id, "item_id": item_id},
-            idempotency_key=f"score-{item_id}-wait-{uuid4().hex}",
-            retention=86400,
-            delay=exc.retry_after_seconds,
-        )
-        logger.info(
-            "batch_scoring_item_deferred job_id=%s item_id=%s delay_seconds=%s",
-            job_id,
-            item_id,
-            exc.retry_after_seconds,
-        )
-        return
-    logger.info(
-        "batch_scoring_item_finished job_id=%s item_id=%s",
-        job_id,
-        item_id,
-    )
+    await _handle(payload)
 
 
 __all__ = [
     "SCORING_TOPIC",
-    "dispatch_batch_scoring_job",
+    "WORK_TOPIC",
+    "handle_work_message",
+    "queue_concurrency",
     "score_batch_item",
     "vercel_queue_enabled",
 ]

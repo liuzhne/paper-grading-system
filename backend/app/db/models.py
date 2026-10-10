@@ -2052,6 +2052,8 @@ class BatchScoringJob(Base):
     )
     runner_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 进度读取触发的单任务巡检用它限频（原子条件更新，每个任务 30 秒最多一次）。
+    last_swept_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id"), nullable=True
     )
@@ -2075,6 +2077,18 @@ class BatchScoringJob(Base):
     )
 
 
+class WorkRuntimeState(Base):
+    """执行模型的全局运行时记录（0035）：例如最近一次全系统巡检的时间。"""
+
+    __tablename__ = "work_runtime_state"
+
+    name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
 class BatchScoringItem(Base):
     """One durable, retryable paper checkpoint within a batch-scoring job."""
 
@@ -2092,7 +2106,27 @@ class BatchScoringItem(Base):
             "attempt_count >= 0",
             name="ck_batch_scoring_items_nonnegative_attempts",
         ),
+        CheckConstraint(
+            "ordinal >= 0 AND stall_count >= 0",
+            name="ck_batch_scoring_items_work_counters",
+        ),
         Index("ix_batch_scoring_items_job_status", "job_id", "status"),
+        # 0035：领取与名额统计只读待处理或在跑的少量行，与表的总行数无关。
+        Index(
+            "ix_batch_scoring_items_claim",
+            "source_key",
+            "ordinal",
+            "created_at",
+            sqlite_where=sql_text("status = 'pending'"),
+            postgresql_where=sql_text("status = 'pending'"),
+        ),
+        Index(
+            "ix_batch_scoring_items_running",
+            "source_key",
+            "heartbeat_at",
+            sqlite_where=sql_text("status = 'running'"),
+            postgresql_where=sql_text("status = 'running'"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -2106,6 +2140,16 @@ class BatchScoringItem(Base):
     )
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 0035 统一执行模型：模型来源键（"connection:<id>" 或 "platform"）、发起人、
+    # 任务内序号；条目自己的心跳、连续无进展次数与最早可执行时间。
+    source_key: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="platform"
+    )
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stall_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    not_before: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     scoring_run_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("scoring_runs.id", ondelete="RESTRICT"),

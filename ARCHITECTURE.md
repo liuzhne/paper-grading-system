@@ -1113,3 +1113,41 @@ Claude 适配器的调用链：
 - 持久化：迁移 0035 给 `batch_scoring_items` 加来源键、序号、心跳、无进展计数与部分索引；迁移 0036 新增 `ai_tasks`、`ai_task_items`（授权与 RLS），并给 `AtomicRule` 与结构化规则条目加 `ai_origin`、`ai_model`。
 
 维护记录：2026-10-10 · 统一执行模型与 AI 任务方案：记录两条执行路径的现状与统一后的领取、叫醒、巡检及持久化落点；实现及迁移不变。
+
+### 2026-10-10 统一执行模型 A1（已实施：批量评分）
+
+方案见 [AI 操作异步任务化与统一执行模型改造方案](docs/AI操作异步任务化改造方案.md) 第 6、11 节。本节取代 2026-09-15「持久化后台评分」、2026-10-08「自部署后台评分 worker」与「连接并发上限」里关于**执行路径**的描述（`dispatch_batch_scoring_job`、`_claim_queue_item`、`_ensure_connection_capacity`、`ConnectionAtCapacityError`、`next_runnable_batch_scoring_job_id`、按任务领取的线程池均已删除）；任务状态机、逐篇检查点、观察指标不变。
+
+模块边界（新增 `services/work_queue/`，与业务无关）：
+
+| 模块 | 职责 |
+|---|---|
+| `kinds` | 条目种类登记：`WorkKind`（条目表、父任务表、`begin` / `execute` / `abandon` / `made_progress` / `converge`）与 `ClaimedItem`（围栏号 `attempt`） |
+| `sources` | 来源键（`connection:<id>` / `platform`）、名额上限、来源行加锁（Postgres `FOR UPDATE`；SQLite 用不改值的写入拿库级写锁）、在跑/可执行计数 |
+| `claim` | `claim_next_item(source_key)`：锁来源 → 部分索引统计在跑条目 → `FOR UPDATE SKIP LOCKED` 按 `ordinal, created_at, id` 取下一个 → 条件更新为 running |
+| `runner` | `execute_next`：领取 → 15 秒心跳线程（带围栏的条件更新）→ 种类执行并落库 → 接力叫醒；`run_worker_loop`：N 个领取线程 + 主线程定期巡检 |
+| `sweep` | `sweep_stale_items`：心跳过期的条目按“有无新检查点”续评或在连续无进展 3 次后判失败；收敛父任务计数与状态；给“有待处理、有空位、没人在跑”的来源补发叫醒。`sweep_parent_on_read`（进度读取，每任务 30 秒一次）、`ensure_sweep_chain`（补投断掉的巡检链） |
+| `wake` / `messages` | 平台相关的一层：Vercel 上发 `pgs-work` 消息（`{source_key}` / `{sweep}`），worker 部署里全部空操作；消息处理与平台无关 |
+| `state` | `work_runtime_state`：最近一次全系统巡检、最近一次补投巡检链 |
+
+批量评分是第一个种类（`batch_scoring/jobs.py` 末尾的 `BATCH_SCORING_KIND`，优先级 20；A2 的 AI 条目优先级更高）。
+
+调用链：
+
+- **建任务** `POST /batches/{id}/score-jobs` → `create_batch_scoring_job` 写任务与条目（来源键、发起人、任务内序号）→ `wake_for_capacity`（Vercel：按 `min(空位, 可执行条目)` 发叫醒）→ `ensure_sweep_chain`。
+- **Vercel**：订阅 `pgs-work` 的 `handle_work_message` → `messages.handle_wake_payload` → `execute_next(source_key)`；`{sweep}` 先 `schedule_next_sweep`（下一个 2 分钟槽，幂等键 `sweep-<槽号>`）再 `run_global_sweep`。旧主题 `batch-scoring-items` 的 `score_batch_item` 保留一个发布周期，旧消息按“叫醒该条目所属来源”处理。
+- **内网/本地**：`run_batch_worker` → `run_worker_loop`：`--threads`（默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`，未设为 8）个线程循环 `run_worker_cycle` → `execute_next(None)`（依次尝试有可执行条目的来源）；主线程每 `--sweep-seconds`（默认 120）`run_global_sweep`。
+- **同步入口** `POST /batch-scoring-jobs/{id}/run`（非 Vercel）→ `run_batch_scoring_job`：先对本任务巡检，再开 `max_workers` 个线程调用 `execute_next(parent_id=job_id)`。同一个领取函数，只是限定在一个任务内。
+- **进度读取** `GET /batch-scoring-jobs/{id}`、`GET /batches/{id}/score-jobs/latest`（活动任务）→ `sweep_parent_on_read`：原子条件更新 `batch_scoring_jobs.last_swept_at`（不刷新 `updated_at`），抢到才巡检本任务。
+
+数据流与持久化边界：
+
+- 条目状态变化与任务计数在同一事务、任务行锁之下提交：领取 `pending→running`、写结果 `running→succeeded/skipped/failed` 用增量 SQL（`_shift_counts`，下限 0），取消、重试、巡检用按条目重新计数（`_recount`，没变就不写）。加锁顺序固定为 来源 → 条目 → 任务 → 批次；取消先改条目再锁任务。
+- 写结果带围栏：`status = 'running' AND attempt_count = <领取时的值>`，巡检重置后又被另一次执行领走时，旧执行迟到的结果丢弃（日志 `work_item_result_discarded`）。
+- 已死的执行写进 `attempt_history`（`status: "abandoned"`，无错误码）；连续无进展达到上限记 `WORK_ITEM_STALLED`。
+- “有进展”= 本篇有规则在本次领取之后判完（`RuleScoringTask.status = 'succeeded' AND finished_at >= started_at`）。
+- 任务心跳 `heartbeat_at` 只在领取与写结果时刷新；页面的 `heartbeat_state` 看在跑条目的心跳，新增 `waiting`（没有在跑、还有待处理）。运维页“停滞”同样看条目心跳，并在 `batch_jobs.sweep` 里给出最近一次巡检时间（有活动任务且超过两个周期未巡检为 fail）。
+
+迁移 0035：`batch_scoring_items` 加 `source_key`、`owner_id`、`ordinal`、`heartbeat_at`、`stall_count`、`not_before` 与两条部分索引（`status = 'pending'` 上的 `(source_key, ordinal, created_at)`、`status = 'running'` 上的 `(source_key, heartbeat_at)`）；`batch_scoring_jobs.last_swept_at`；新表 `work_runtime_state`（`pgs_app` 授权与 RLS）。
+
+维护记录：2026-10-10 · 统一执行模型 A1：新增 `services/work_queue`，批量评分在 Vercel 与 worker 上走同一个领取函数；记录调用链、加锁顺序、围栏与计数的持久化边界；迁移 head → 0035。

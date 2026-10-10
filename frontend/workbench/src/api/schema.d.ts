@@ -3206,12 +3206,24 @@ export interface components {
             error_message?: string | null;
             /** Finished At */
             finished_at?: string | null;
+            /** Heartbeat At */
+            heartbeat_at?: string | null;
             /** Id */
             id: string;
+            /**
+             * Ordinal
+             * @default 0
+             */
+            ordinal: number;
             /** Paper Id */
             paper_id: string;
             /** Scoring Run Id */
             scoring_run_id?: string | null;
+            /**
+             * Stall Count
+             * @default 0
+             */
+            stall_count: number;
             /** Started At */
             started_at?: string | null;
             /** Status */
@@ -3259,7 +3271,13 @@ export interface components {
             grading_batch_id: string;
             /** Heartbeat At */
             heartbeat_at?: string | null;
-            /** Heartbeat State */
+            /**
+             * Heartbeat State
+             * @description healthy / stale / waiting / inactive。
+             *
+             *     统一执行模型后心跳记在条目上：有在跑的条目就看它们最新的心跳；没有在跑、
+             *     但还有待处理条目时是 waiting（排队等模型名额或叫醒），不是“执行中断”。
+             */
             readonly heartbeat_state: string;
             /** Id */
             id: string;

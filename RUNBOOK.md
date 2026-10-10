@@ -1739,3 +1739,36 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 实施后的验证步骤（A1）：同一套测试同时覆盖 Vercel 叫醒与 worker 两种叫醒；多 worker 并发领取不超连接名额；一个大任务不挡住其它用户；强制终止后续评且不重复有效结果；连续无进展 3 次后标为失败且可重试；叫醒消息丢失后由巡检恢复；compose 冒烟通过；合并后在 Vercel 预览或生产环境验收叫醒与巡检。
 
 维护记录：2026-10-10 · 统一执行模型与 AI 任务方案：记录“任务一直评分中”与“内网多批次 429”的现有排查方法，以及 A1 的验证步骤；本次仅文档。
+
+### 2026-10-10 统一执行模型 A1（批量评分已实施）
+
+本节取代 2026-09-15「持久化后台评分」与 2026-10-08「自部署后台评分 worker」里关于投递、租约和执行次数的说明，以及上一节“当前行为（实施前排查用）”。
+
+运行与配置：
+- 内网/本地：`python -m backend.app.scripts.run_batch_worker [--threads N] [--sweep-seconds 120] [--poll-seconds 3]`。`--threads` 默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`（未设为 8），即这台 worker 同时执行的条目数；`--scale worker=N` 多开时，每个连接的同时请求数仍在领取时统一检查，不会超。compose 与 `start-web-pg.sh` 的命令不变。
+- Vercel：`pyproject.toml` 有两个订阅——`handle_work_message`（主题 `pgs-work`）与旧主题的 `score_batch_item`。构建日志里两个 subscriber 都要出现。消息只带来源键或巡检槽号；巡检链在首次建任务或进度读取时自动补投，不需要手工发消息。
+- 在真实 PostgreSQL 上跑并发领取用例：`PGS_TEST_POSTGRES_URL=postgresql+psycopg://…@127.0.0.1:5432/<可清空的空库> .venv/bin/python -m pytest -q backend/app/tests/test_unified_work_queue.py`（只接受本机地址；用例会 `drop_all` / `create_all`）。不设置时该参数化用例跳过，SQLite 版照常运行。
+
+日志关键字（只含 ID，不含原文或密钥）：`work_rung source=… reason=create|relay|sweep`、`work_item_claimed`、`work_source_full`、`work_item_finished` / `work_item_failed code=…`、`work_item_stalled stall_count=…`、`work_item_result_discarded`、`work_item_lease_lost`、`work_sweep_ran recovered=… failed=… converged=… rung=…`、`work_sweep_scheduled` / `work_sweep_revived`、`work_wake_failed`、`batch_scoring_job_finished`。
+
+排错：
+- **现象**：进度页显示“正在排队”（`heartbeat_state = waiting`），长时间不动。
+  - 报错指向：看起来像模型慢或后台没在跑。
+  - 真正原因：①该连接的同时请求数被别的任务占满（按任务内序号轮转，别的任务先评它们的第 1 篇）——日志里是 `work_source_full`；②Vercel 上叫醒全丢且巡检链断了——运维页“最近巡检”标红、日志没有 `work_sweep_ran`；③内网 worker 没启动——`docker compose ps` 看 `worker`。
+  - 处理：①调高连接的同时请求数或等待；②打开任一评分进度页即可补投巡检链（`work_sweep_revived`），检查 Vercel 是否识别了 `handle_work_message` 订阅；③启动 worker。
+- **现象**：某篇失败，错误码 `WORK_ITEM_STALLED`（“多次执行都没能推进”）。
+  - 报错指向：像是这篇论文本身有问题。
+  - 真正原因：连续 3 次执行都在写入任何新规则检查点之前死掉——函数超过 300 秒被平台终止、worker 进程被 OOM 杀掉、或数据库连接断开。日志按条目 ID 查 `work_item_stalled`，再看同一时段 Vercel 的函数超时或 worker 的退出记录。
+  - 处理：先排除平台原因再点“重试失败项”（会把连续无进展次数清零）；一篇反复卡死时检查单篇规则数与模型超时设置。
+- **现象**：内网升级后，同一连接的 429 明显变多。
+  - 报错指向：厂商限流。
+  - 真正原因：没声明同时请求数的连接以前在 worker 上按“每个任务 2 篇”执行，统一后只受全局并发（默认 8）约束。
+  - 处理：在账户页给该连接声明同时请求数（免费档通常为 1）。
+- **现象**：重试后某篇的尝试记录里多了 `abandoned`。
+  - 真正原因：那次执行的心跳超过 120 秒没更新（进程被杀或超时），巡检把它重置后续评；已经判完的规则会复用，不重复计费。属于正常恢复记录。
+
+验证（A1，本地已完成）：后端全量；`test_unified_work_queue.py`（Vercel 与 worker 两种叫醒同一套断言、多线程领取不超名额并在 PostgreSQL 16 上复跑、大任务不挡其它任务、强制终止后续评且不重复结果、连续无进展 3 次后失败且可重试、叫醒丢失后由巡检恢复、迟到结果被围栏丢弃）；0035 在 PostgreSQL 16 上的回填、部分索引、降级拒绝与 `verify_postgres_ops --exercise-ci-fixture`（含 `pgs_app` 授权与 RLS）；本机无 Docker，compose 冒烟以同等进程（uvicorn + `run_batch_worker` + PostgreSQL，`smoke_deployment --scoring fail-closed`）代替，CI 的 docker-compose-smoke 仍是门禁。**待做**：合并后在 Vercel 预览或生产环境验收叫醒、接力与巡检链（构建识别两个 subscriber；建任务后日志出现 `work_rung reason=create`；强制终止一篇后 2 分钟内出现 `work_item_stalled` 并续评）。
+
+回滚：先确认没有排队、评分中或取消中的批量评分任务（0035 降级会拒绝），再 `alembic downgrade 0034_anthropic_messages_provider` 并部署上一版本。
+
+维护记录：2026-10-10 · 统一执行模型 A1：新增 worker 参数、Vercel 订阅说明、PostgreSQL 并发用例的运行方法、日志关键字，以及“排队不动”“WORK_ITEM_STALLED”“内网 429 变多”的排查；迁移 head → 0035。

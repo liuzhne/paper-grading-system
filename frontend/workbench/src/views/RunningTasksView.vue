@@ -3,13 +3,15 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterLink } from "vue-router";
 
 import { api, StaleContextError } from "@/api/client.js";
-import { ACTIVE_JOB_STATUSES, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
+import { createVisiblePoller } from "@/lib/polling.js";
+import { ACTIVE_JOB_STATUSES, jobPercent, jobStatusLabel, lastHeartbeat } from "@/lib/score-jobs.js";
 
 const jobs = ref([]);
 const batches = ref([]);
 const loading = ref(true);
 const error = ref(null);
-let timer = null;
+// 页面隐藏时暂停轮询，回到前台立即刷新一次。
+const poller = createVisiblePoller(() => load({ quiet: true }), 5000);
 
 const batchById = computed(() => Object.fromEntries(batches.value.map((item) => [item.id, item])));
 const activeTotal = computed(() => jobs.value.filter((job) => ACTIVE_JOB_STATUSES.has(job.status)).length);
@@ -39,9 +41,9 @@ async function load({ quiet = false } = {}) {
 
 onMounted(async () => {
   await load();
-  timer = window.setInterval(() => load({ quiet: true }), 5000);
+  poller.start();
 });
-onBeforeUnmount(() => window.clearInterval(timer));
+onBeforeUnmount(() => poller.stop());
 </script>
 
 <template>
@@ -66,7 +68,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
             <td><span class="chip" :class="job.heartbeat_state === 'stale' || ['failed','completed_with_errors'].includes(job.status) ? 'chip-warn' : 'chip-ok'">{{ jobStatusLabel(job) }}</span></td>
             <td class="mono">{{ jobPercent(job) }}% · {{ job.succeeded_count + job.skipped_count }}/{{ job.total_items }}</td>
             <td class="mono" :class="{ danger: job.failed_count }">{{ job.failed_count }}</td>
-            <td class="mono faint">{{ formatTime(job.heartbeat_at || job.updated_at) }}</td>
+            <td class="mono faint">{{ formatTime(lastHeartbeat(job) || job.updated_at) }}</td>
             <td><RouterLink class="btn btn-sm" :to="{ name: 'task-run', params: { batchId: job.grading_batch_id } }">查看进度</RouterLink></td>
           </tr>
           <tr v-if="!jobs.length && !loading"><td colspan="6" class="table-empty">当前没有正在执行或需要处理的评分任务。</td></tr>
