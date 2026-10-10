@@ -1099,3 +1099,17 @@ Claude 适配器的调用链：
 - `batch_scoring/vercel_queue.queue_concurrency()` 在模块导入时读取 `BATCH_SCORING_QUEUE_CONCURRENCY`，作为 `@subscribe(max_concurrency=...)`。
 
 维护记录：2026-10-09 · 提高吞吐：并发来源从“只调低”改为“声明即生效”，平台模型加入名额检查；无数据模型变化。
+
+### 2026-10-10 统一执行模型与 AI 任务（方案确认，待实施）
+
+方案见 [AI 操作异步任务化与统一执行模型改造方案](docs/AI操作异步任务化改造方案.md)。
+
+现状（核对代码）：批量评分按部署环境走两条路径。`vercel_queue.vercel_queue_enabled()` 看 `BATCH_SCORING_DISPATCH` 或 `VERCEL`：Vercel 走 `score_batch_item` → `_claim_queue_item`，一篇一条消息、按篇领取；内网 compose 与本地走 `worker.run_worker_cycle` → `next_runnable_batch_scoring_job_id` → `run_batch_scoring_job`，按整个任务领取、线程池执行。起草、归类、规则审查、结构识别在请求里同步调用模型。
+
+目标结构：
+- 任务只在数据库里。批量评分条目与新的 `ai_task_items` 由同一个 `claim_next_item(source_key)` 领取：锁来源行做名额检查（部分索引只读在跑的几行）→ `SELECT … FOR UPDATE SKIP LOCKED` 取下一个条目（AI 条目优先，同类按任务内序号轮转）→ 置为 `running` 并写心跳。
+- 叫醒是唯一与平台相关的一层：Vercel 上的订阅 `pgs-work` 只收 `{source_key}`，被叫醒后领取一个条目执行，结束后再叫醒；内网与本地由 worker 循环调用同一个领取函数。
+- 巡检 `sweep_stale_items` 处理心跳过期、连续无进展达到上限、有空位却没人在跑的来源；由 Vercel 上 2 分钟一次的自续期消息、进度接口（只针对本任务、限频）和 worker 每一轮调用。
+- 持久化：迁移 0035 给 `batch_scoring_items` 加来源键、序号、心跳、无进展计数与部分索引；迁移 0036 新增 `ai_tasks`、`ai_task_items`（授权与 RLS），并给 `AtomicRule` 与结构化规则条目加 `ai_origin`、`ai_model`。
+
+维护记录：2026-10-10 · 统一执行模型与 AI 任务方案：记录两条执行路径的现状与统一后的领取、叫醒、巡检及持久化落点；实现及迁移不变。
