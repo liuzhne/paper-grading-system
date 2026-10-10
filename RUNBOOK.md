@@ -1748,7 +1748,7 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 
 运行与配置：
 - 内网/本地：`python -m backend.app.scripts.run_batch_worker [--threads N] [--sweep-seconds 120] [--poll-seconds 3]`。`--threads` 默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`（未设为 8），即这台 worker 同时执行的条目数；`--scale worker=N` 多开时，每个连接的同时请求数仍在领取时统一检查，不会超。compose 与 `start-web-pg.sh` 的命令不变。
-- Vercel：`pyproject.toml` 有两个订阅——`handle_work_message`（主题 `pgs-work`）与旧主题的 `score_batch_item`。构建日志里两个 subscriber 都要出现。消息只带来源键或巡检槽号；巡检链在首次建任务或进度读取时自动补投，不需要手工发消息。
+- Vercel：`pyproject.toml` 只有一条订阅声明（入口 `vercel_queue:score_batch_item`），它生成的函数挂两个触发器——`handle_work_message`（主题 `pgs-work`）与旧主题的 `score_batch_item`。同一模块不能写两条声明（见 2026-10-10 “发布 0035–0037”）。消息只带来源键或巡检槽号；巡检链在首次建任务或进度读取时自动补投，不需要手工发消息。
 - 在真实 PostgreSQL 上跑并发领取用例：`PGS_TEST_POSTGRES_URL=postgresql+psycopg://…@127.0.0.1:5432/<可清空的空库> .venv/bin/python -m pytest -q backend/app/tests/test_unified_work_queue.py`（只接受本机地址；用例会 `drop_all` / `create_all`）。不设置时该参数化用例跳过，SQLite 版照常运行。
 
 日志关键字（只含 ID，不含原文或密钥）：`work_rung source=… reason=create|relay|sweep`、`work_item_claimed`、`work_source_full`、`work_item_finished` / `work_item_failed code=…`、`work_item_stalled stall_count=…`、`work_item_result_discarded`、`work_item_lease_lost`、`work_sweep_ran recovered=… failed=… converged=… rung=…`、`work_sweep_scheduled` / `work_sweep_revived`、`work_wake_failed`、`batch_scoring_job_finished`。
@@ -1858,6 +1858,10 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 - **现象**：`pgs-production-migrate` 的“Verify with the runtime role”一直通过，但它没验 0035/0036 新建的 `work_runtime_state`、`ai_tasks`、`ai_task_items`。
   - 报错指向：没有报错——迁移与复验都绿，`test_the_runtime_check_covers_every_table_that_needed_a_grant` 也绿。
   - 真正原因：守护测试只认迁移里写成字面量的表名（`ON TABLE xxx TO pgs_app`、`TABLE = "xxx"`），0035/0036 用模块常量写授权（`% STATE`、`for table in (TASKS, ITEMS)`），于是被漏掉。已把三张表加进工作流清单，测试改为解析常量与 `op.create_table(...)`，并确认回退清单时测试会失败。
-- Vercel 上新增订阅 `pgs-work`（`pyproject.toml` 的第二个 `[[tool.vercel.subscribers]]`）；旧主题 `batch-scoring-items` 的订阅保留，部署时队列里残留的旧消息按“叫醒所属来源”处理。
+- Vercel 上新增主题 `pgs-work`：与旧主题 `batch-scoring-items` 同在 `vercel_queue` 模块里，由**同一条** `[[tool.vercel.subscribers]]` 声明生成的一个函数承接；部署时队列里残留的旧消息按“叫醒所属来源”处理。
+- **现象**：main 门禁全绿，`deploy-vercel-production` 在 `Deploying outputs...` 之后报 `Error: Unexpected error. Please try again later. ()`，重跑一次同样失败；生产停在旧代码。
+  - 报错指向：Vercel 服务端偶发故障（文案让人“稍后重试”）。
+  - 真正原因：`pyproject.toml` 给同一个模块写了两条 `[[tool.vercel.subscribers]]`。构建器给每条声明生成一个函数，触发器取模块里**全部** `@subscribe`（没写 `topics` 不过滤），两个函数于是重复注册了同一（主题、消费组），在服务端注册触发器时失败。改为一条声明；`test_each_vercel_subscriber_module_is_declared_once` 防回归。
+  - 本地核对生成的触发器：在干净 checkout 里写 `.vercel/project.json`（`settings.framework` 设为 `fastapi`，否则构建器不处理订阅），运行 `npx vercel@58.4.0 build --prod --yes`，看 `.vercel/output/functions/_py_subscribers/*/.vc-config.json` 的 `experimentalTriggers`：每个（主题、消费组）只能出现一次。
 
 维护记录：2026-10-10 · 发布 0035–0037：记录发布顺序、新代码上线判断方法，以及运行角色复验清单漏表的排查；补全工作流清单与守护测试。
