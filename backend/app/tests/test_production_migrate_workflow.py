@@ -135,18 +135,32 @@ def test_the_runtime_check_covers_every_table_that_needed_a_grant():
         pathlib.Path(__file__).resolve().parents[3] / "alembic" / "versions"
     )
 
+    def names(source, constants, fragment):
+        """`"ai_tasks"` 或模块常量 `TASKS`（0035/0036 用常量写授权，旧正则漏掉了它们）。"""
+        found = set(re.findall(r'"([^"]+)"', fragment))
+        for word in re.findall(r"\b([A-Z][A-Z_]*)\b", fragment):
+            if word in constants:
+                found.add(constants[word])
+        return found
+
     granted = set()
     for path in versions.glob("0*.py"):
         source = path.read_text(encoding="utf-8")
         if "TO pgs_app" not in source:
             continue
+        constants = dict(re.findall(r'^([A-Z][A-Z_]*)\s*=\s*"([^"]+)"', source, re.M))
         granted |= set(re.findall(r"ON TABLE (\w+) TO pgs_app", source))
+        for match in re.findall(r'ON TABLE %s TO pgs_app"\s*%\s*(\w+)', source):
+            granted |= names(source, constants, match)
         for match in re.findall(r'^TABLE\s*=\s*"([^"]+)"', source, re.M):
             granted.add(match)
         for match in re.findall(r'^TABLES\s*=\s*\(([^)]*)\)', source, re.M):
             granted |= set(re.findall(r'"([^"]+)"', match))
         for match in re.findall(r'for table in \(([^)]*)\)', source):
-            granted |= set(re.findall(r'"([^"]+)"', match))
+            granted |= names(source, constants, match)
+        # 本迁移新建、且同一文件里给了 pgs_app 授权的表。
+        for match in re.findall(r'op\.create_table\(\s*("[^"]+"|[A-Z][A-Z_]*)', source):
+            granted |= names(source, constants, match)
 
     missing = sorted(table for table in granted if table not in text)
     assert not missing, "迁移给这些表授了权，但工作流没验证运行角色能读：%s" % (

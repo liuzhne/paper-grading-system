@@ -814,6 +814,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-10 | 发布 0035–0037 | 先迁移后合并；运行角色复验清单补 `work_runtime_state`、`ai_tasks`、`ai_task_items`，守护测试改为识别常量写法的授权。 |
 | 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 新增审查/结构识别任务与三个估算接口，三个旧接口 410；迁移 head → 0037；新增改契约版本后须重建 `public/` 等排查。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 本地后端 1911 passed，后续总分补充修复专项 10 passed；前端 176 passed、类型与接口快照通过；浏览器 139 passed、3 skipped。主线完整 CI 和 production 部署通过，线上健康与资源已验证；待登录后的合成流程，不降级数据库。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 新增复现、状态区分、确认回归及发布/回滚检查；实施与验证进行中，尚未发布。 |
@@ -1849,3 +1850,14 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 验证（C，本地已完成）：`test_rubric_rule_review_api.py`（估算不调用模型、按评分项拆条目与双击复用、持久化与豁免、修正一次后记为失败项、额度失败后只重试失败项、mock 拒绝与旧接口 410、审查期间改规则显示过期、发布留痕与清理任务）；`test_rubric_structure_api.py`（导入前估算、导入前任务与按结构导入、修正一次、同文件复用与新任务清理旧任务、仅本人可见、旧接口 410、只有结构识别可不挂评分标准、草稿估算、差异合入与撤销、人工编辑后拒绝、识别期间草稿变化判失败）；`test_migrations.py` 的 0037 三项；Postgres 16 上 `alembic upgrade head` → `verify_postgres` → 降级 → 重放；前端 `RuleAuditPanel`、`TableRecognitionPanel`、`ai-tasks`、`rubrics-parse` 单元测试；Playwright `rubric-parse.spec.js` 新增三条（审查任务的进度/失败/重试/结果，导入前识别任务到按结构导入，草稿结构识别刷新后找回与取消）。待做：Vercel 预览或生产环境验收。
 
 维护记录：2026-10-10 · AI 任务 C：新增审查与结构识别任务接口、估算接口与 0037 说明，以及“改契约版本后 Playwright 超时”“REVIEW_OUTPUT_TRUNCATED”“未能审查的评分项”“STRUCTURE_SOURCE_CHANGED”“导入前识别刷新后不见了”“0037 降级被拒”的排查；迁移 head → 0037。
+
+### 2026-10-10 发布 0035–0037（统一执行模型与 AI 任务）
+
+- **先迁移、后合并**（同 10-07）：新代码启动即读 `batch_scoring_items.source_key` 等新列与 `ai_tasks`。`pgs-production-migrate` 从 PR 分支触发（`expected_head=0037_ai_task_upload_scope`，先 `dry_run=true`），正式迁移与运行角色复验通过后再合并。0035–0037 新增的非空列都有服务端默认值，迁移后到部署前旧代码仍能写入。
+- **判断新代码是否已上线**：未登录 `POST /api/ai-tasks/import-structure`。旧代码没有这条路由（404/405）；新代码返回 401。
+- **现象**：`pgs-production-migrate` 的“Verify with the runtime role”一直通过，但它没验 0035/0036 新建的 `work_runtime_state`、`ai_tasks`、`ai_task_items`。
+  - 报错指向：没有报错——迁移与复验都绿，`test_the_runtime_check_covers_every_table_that_needed_a_grant` 也绿。
+  - 真正原因：守护测试只认迁移里写成字面量的表名（`ON TABLE xxx TO pgs_app`、`TABLE = "xxx"`），0035/0036 用模块常量写授权（`% STATE`、`for table in (TASKS, ITEMS)`），于是被漏掉。已把三张表加进工作流清单，测试改为解析常量与 `op.create_table(...)`，并确认回退清单时测试会失败。
+- Vercel 上新增订阅 `pgs-work`（`pyproject.toml` 的第二个 `[[tool.vercel.subscribers]]`）；旧主题 `batch-scoring-items` 的订阅保留，部署时队列里残留的旧消息按“叫醒所属来源”处理。
+
+维护记录：2026-10-10 · 发布 0035–0037：记录发布顺序、新代码上线判断方法，以及运行角色复验清单漏表的排查；补全工作流清单与守护测试。
