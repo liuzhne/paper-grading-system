@@ -2340,6 +2340,12 @@ class AITaskItem(Base):
 
     task: Mapped["AITask"] = relationship(back_populates="items")
 
+    @property
+    def unit_count(self) -> int:
+        """本条目处理的原文单元数（归类）；其它种类为 0。页面据此显示“已获得 N/M 条”。"""
+
+        return len((self.input or {}).get("units") or [])
+
 
 class ScoringRun(Base):
     __tablename__ = "scoring_runs"

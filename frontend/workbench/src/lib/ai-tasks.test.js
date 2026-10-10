@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canRetryAiTask, draftTaskProgress, isActiveAiTask, isWaitingForRateLimit } from "./ai-tasks.js";
+import { canRetryAiTask, classificationTaskProgress, draftTaskProgress, isActiveAiTask, isWaitingForRateLimit } from "./ai-tasks.js";
 
 describe("AI 任务呈现", () => {
   it("进行中显示第几批", () => {
@@ -29,5 +29,20 @@ describe("AI 任务呈现", () => {
   it("不需要 AI 的评分项直接说明原因", () => {
     expect(draftTaskProgress({ status: "succeeded", total_items: 0, result: { status: "already_structured" } }))
       .toContain("无需 AI 补全");
+  });
+});
+
+describe("归类任务进度", () => {
+  it("按条目的单元数累计已完成与失败", () => {
+    const task = { status: "running", items: [
+      { status: "succeeded", unit_count: 3 }, { status: "failed", unit_count: 3 }, { status: "pending", unit_count: 2 },
+    ] };
+    expect(classificationTaskProgress(task)).toEqual({ completed: 3, failed: 3, total: 8, running: true, stopped: null, error: null });
+  });
+
+  it("失败的任务给出根因", () => {
+    const progress = classificationTaskProgress({ status: "failed", error_message: "额度已用完。", items: [] });
+    expect(progress.stopped).toBe("provider");
+    expect(progress.error).toBe("额度已用完。");
   });
 });

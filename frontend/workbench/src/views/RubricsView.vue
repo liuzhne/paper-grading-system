@@ -1,7 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch } from "vue";
 
-import { classifyInBatches } from "@/lib/classification-batches.js";
 import { api, currentContextVersion, StaleContextError } from "@/api/client.js";
 import RuleReviewPanel from "@/components/RuleReviewPanel.vue";
 import AtomicRuleEditor from "@/components/AtomicRuleEditor.vue";
@@ -17,7 +16,7 @@ import { importFilesError, stepOneGate } from "@/lib/parse-coverage.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
 import { draftRows, rowKey } from "@/lib/ai-draft.js";
-import { canRetryAiTask, draftTaskProgress, isActiveAiTask } from "@/lib/ai-tasks.js";
+import { canRetryAiTask, classificationTaskProgress, draftTaskProgress, isActiveAiTask } from "@/lib/ai-tasks.js";
 import { aiTaskInterval, createVisiblePoller } from "@/lib/polling.js";
 import { RouterLink, onBeforeRouteLeave } from "vue-router";
 
@@ -354,27 +353,48 @@ const acceptSuggestions = (actions) => parseAction(async (id) => {
   try { for (const action of groups.values()) await store.resolveUnits(id, action); }
   finally { store.lastDraft = { items: [] }; parseState.value = await store.loadParseCoverage(id); sourceWorkspace.value = await api.get(`/rubrics/${id}/source-workspace`); }
 });
-const classifyUnits = ({ unitIds }) => parseAction(async (id) => {
-  const contextVersion = currentContextVersion();
-  const connectionId = draftConnection.value || null;
-  const isCurrent = () => selected.value === id && currentContextVersion() === contextVersion;
-  // 厂商按 Key 限并发（免费档常见只允许 1 个），超出的请求会被 429 拒绝。
-  const declared = connections.value.find(item => item.id === connectionId)?.provider_options?.max_concurrency;
+// AI 归类是后台任务：提交即返回，进度与建议靠轮询（页面隐藏时暂停），关页面不中断。
+let classificationSeen = -1;
+const classificationPoller = createVisiblePoller(async () => {
+  const id = selected.value;
+  if (!id || !store.classificationTask) { classificationPoller.stop(); return; }
   try {
-    await classifyInBatches(unitIds, {
-      concurrency: declared || 3,
-      request: batch => store.classifyUnits(id, { unitIds: batch, connectionId }),
-      isCurrent,
-      onResult: result => { parseState.value = { ...parseState.value, unit_classifications: result }; },
-      onProgress: progress => { classificationProgress.value = progress; },
-    });
-  } finally {
-    if (isCurrent()) {
-      if (classificationProgress.value) classificationProgress.value = { ...classificationProgress.value, running: false };
+    const task = await store.refreshClassificationTask();
+    if (!task || selected.value !== id) return;
+    classificationProgress.value = classificationTaskProgress(task);
+    const finished = !isActiveAiTask(task);
+    // 批次成功即已合进建议：有新完成的批次就刷新一次原文核对面板。
+    if (task.succeeded_count !== classificationSeen || finished) {
+      classificationSeen = task.succeeded_count;
       const latest = await store.loadParseCoverage(id);
-      if (isCurrent()) parseState.value = latest;
+      if (selected.value === id) parseState.value = latest;
     }
+    if (finished) classificationPoller.stop();
+  } catch (err) {
+    if (!(err instanceof StaleContextError)) parseError.value = err instanceof Error ? err.message : "刷新归类进度失败";
   }
+}, aiTaskInterval);
+
+async function trackClassification(id, task) {
+  classificationPoller.stop();
+  classificationProgress.value = classificationTaskProgress(task);
+  classificationSeen = task?.succeeded_count ?? -1;
+  if (isActiveAiTask(task)) {
+    classificationPoller.start();
+  } else if (task) {
+    const latest = await store.loadParseCoverage(id);
+    if (selected.value === id) parseState.value = latest;
+  }
+}
+
+const classifyUnits = ({ unitIds, rejudge = false }) => parseAction(async (id) => {
+  // 并发由后端按连接的“同时请求数”在领取时控制，多个标签页也不会超限。
+  const task = await store.classifyUnits(id, { unitIds, connectionId: draftConnection.value || null, rejudge });
+  await trackClassification(id, task);
+});
+const classificationAction = (action) => parseAction(async (id) => {
+  const task = await store.classificationTaskAction(action);
+  await trackClassification(id, task);
 });
 const suggestStructure = ({ dryRun }) => parseAction(async (id) => {
   const result = await store.suggestStructure(id, { connectionId: draftConnection.value || null, dryRun });
@@ -923,7 +943,7 @@ async function saveAndValidate() {
   finally { saveBusy.value = false; }
 }
 watch(selected, async (id) => {
-  classificationProgress.value = null;
+  classificationProgress.value = null; classificationPoller.stop(); store.classificationTask = null;
   workspace.value = null; coverage.value = null; draft.value = null;
   selectedCriterion.value = null; sourceMode.value = true; sourceFilter.value = "pending"; chosenVisibility.value = null;
   excluded.value = new Set(); editForm.value = null; reviewError.value = null; reviewNotice.value = null;
@@ -936,9 +956,13 @@ watch(selected, async (id) => {
   nextEntryStep.value = 1;
   await refreshDetail(id);
   if (gate.value.blocked || (parseState.value?.triggers || []).length) step.value = 1;
-  // 刷新页面或换回这份标准时，找回仍在后台进行的起草任务。
+  // 刷新页面或换回这份标准时，找回仍在后台进行的起草与归类任务。
   if (id) {
-    try { await store.resumeDraftTasks(id); watchDraftTasks(); }
+    try {
+      await store.resumeDraftTasks(id); watchDraftTasks();
+      const classification = await store.resumeClassificationTask(id);
+      if (classification && selected.value === id) await trackClassification(id, classification);
+    }
     catch (err) { if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "读取起草任务失败"; }
   }
 });
@@ -958,7 +982,7 @@ watch(() => session.organizationId, async (next, previous) => {
   await loadRubrics(); await loadConnections();
 });
 onMounted(async () => { window.addEventListener("beforeunload", beforeUnload); await loadRubrics(); await loadConnections(); });
-onUnmounted(() => { loadSequence += 1; draftPoller.stop(); window.removeEventListener("beforeunload", beforeUnload); });
+onUnmounted(() => { loadSequence += 1; draftPoller.stop(); classificationPoller.stop(); window.removeEventListener("beforeunload", beforeUnload); });
 </script>
 
 <template>
@@ -1101,7 +1125,7 @@ onUnmounted(() => { loadSequence += 1; draftPoller.stop(); window.removeEventLis
           <template v-if="step === 2">
             <template v-if="sourceMode">
               <section class="card card-pad"><h2 class="card-title">待归类原文</h2><p class="card-note">把文档要求归入已有评分项，作为规则来源；归类不会新增评分项或自动产生扣分。</p></section>
-              <SourceReviewPanel v-model:filter="sourceFilter" :progress="classificationProgress" :state="parseState" :previews="[...(sourceWorkspace?.previews?.word || []), ...(sourceWorkspace?.previews?.excel || [])]" :criteria="coverage?.criteria || []" :busy="operationBusy" :editable="editable" :connection="connections.find(c => c.id === draftConnection)" @resolve="resolveUnits" @classify="classifyUnits" @accept-suggestions="acceptSuggestions" />
+              <SourceReviewPanel v-model:filter="sourceFilter" :progress="classificationProgress" :state="parseState" :previews="[...(sourceWorkspace?.previews?.word || []), ...(sourceWorkspace?.previews?.excel || [])]" :criteria="coverage?.criteria || []" :busy="operationBusy" :editable="editable" :connection="connections.find(c => c.id === draftConnection)" @resolve="resolveUnits" @classify="classifyUnits" @classification-action="classificationAction" @accept-suggestions="acceptSuggestions" />
             </template>
             <template v-else>
             <section v-if="activeCriterion" class="card card-pad criterion-overview">

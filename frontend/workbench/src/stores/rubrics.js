@@ -37,6 +37,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
     activeImportSession.value = null;
     lastDraft.value = { items: [] };
     draftTasks.value = {};
+    classificationTask.value = null;
   }
 
   async function load() {
@@ -257,15 +258,54 @@ export const useRubricsStore = defineStore("rubrics", () => {
   }
 
   /**
-   * 兜底分类器：结果只是建议，采纳仍走 resolveUnits。
+   * 最近一次 AI 归类任务（B 阶段）：后台每 3 个单元一批执行，批次成功即合进建议。
+   * @type {import('vue').Ref<any>}
+   */
+  const classificationTask = ref(null);
+
+  /**
+   * 兜底分类器：结果只是建议，采纳仍走 resolveUnits。提交即返回任务，并发由后端按
+   * 连接的同时请求数控制（前端不再自己分批调度）。
    * @param {string} rubricId
-   * @param {{unitIds?: string[]|null, connectionId: string|null}} input
+   * @param {{unitIds?: string[]|null, connectionId: string|null, rejudge?: boolean}} input
    */
   async function classifyUnits(rubricId, input) {
     requireConnection(input.connectionId);
-    return api.post(`/rubrics/${rubricId}/unit-classifications`, {
-      ...(input.unitIds ? { unit_ids: input.unitIds } : {}), ai_connection_id: input.connectionId,
+    const task = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
+      kind: "unit_classification",
+      params: { ...(input.unitIds ? { unit_ids: input.unitIds } : {}), rejudge: Boolean(input.rejudge) },
+      ai_connection_id: input.connectionId,
+      // 显式勾选重新判断：作废同内容的旧结果，否则同指纹直接复用。
+      regenerate: Boolean(input.rejudge),
     });
+    classificationTask.value = task;
+    return task;
+  }
+
+  /** 刷新当前归类任务。 */
+  async function refreshClassificationTask() {
+    const task = classificationTask.value;
+    if (!task) return null;
+    const fresh = await api.get(`/ai-tasks/${task.id}`);
+    if (classificationTask.value?.id === task.id) classificationTask.value = fresh;
+    return fresh;
+  }
+
+  /** 进入评分标准页时找回进行中的归类任务。 @param {string} rubricId */
+  async function resumeClassificationTask(rubricId) {
+    const tasks = (await api.get(`/rubrics/${rubricId}/ai-tasks?kind=unit_classification&active=1`)) || [];
+    classificationTask.value = tasks[0] || null;
+    return classificationTask.value;
+  }
+
+  /** @param {"cancel"|"retry"} action */
+  async function classificationTaskAction(action) {
+    const task = classificationTask.value;
+    if (!task) return null;
+    classificationTask.value = action === "cancel"
+      ? await api.post(`/ai-tasks/${task.id}/cancel`, {})
+      : await api.post(`/ai-tasks/${task.id}/retry`, {});
+    return classificationTask.value;
   }
 
   /**
@@ -530,6 +570,10 @@ export const useRubricsStore = defineStore("rubrics", () => {
     loadParseCoverage,
     resolveUnits,
     classifyUnits,
+    classificationTask,
+    refreshClassificationTask,
+    resumeClassificationTask,
+    classificationTaskAction,
     suggestStructure,
     mergeStructure,
     undoStructure,

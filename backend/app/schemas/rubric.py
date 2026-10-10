@@ -404,11 +404,6 @@ class StructureUndoRequest(BaseModel):
     reason: str = Field(min_length=1)
 
 
-class UnitClassificationRequest(BaseModel):
-    unit_ids: Optional[list[str]] = Field(default=None, max_length=500)
-    ai_connection_id: Optional[str] = None
-
-
 class SourceUnitBatchResolveRequest(BaseModel):
     unit_ids: list[str] = Field(min_length=1, max_length=500)
     action: Literal["assign", "not_rule", "restore"]

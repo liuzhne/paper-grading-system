@@ -28,6 +28,8 @@ class AITaskItemRead(BaseModel):
     status: str
     attempt_count: int
     deferral_count: int
+    # 归类条目处理的单元数（每批最多 3 个）；起草条目为 0。
+    unit_count: int = 0
     not_before: Optional[datetime] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None

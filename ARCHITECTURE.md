@@ -1181,3 +1181,14 @@ Claude 适配器的调用链：
 - 规则来源：前端采用 AI 结果时在结构化条目上写 `ai_origin` / `ai_model`；编译（`pipeline._rule`，只在规则来自 AI 时写进编译图）落到 `AtomicRule.ai_origin` / `ai_model`；`atomic_recompile`、版本复制保留它们；`rule_origin.is_ai_rule` 读字段；`review_workspace` 返回它们，规则面板显示 “AI · 模型名”。两列**不进版本内容 hash**。
 
 维护记录：2026-10-10 · AI 任务 A2：新增 `services/ai_tasks` 与任务 API，起草迁移到任务，规则记录 AI 来源与模型名，版本守卫；迁移 head → 0036。
+
+### 2026-10-10 AI 任务 B（已实施：AI 归类）
+
+归类不再由前端调度（`lib/classification-batches.js` 已删除）；`POST /rubrics/{id}/unit-classifications` 返回 410。
+
+- `ai_tasks/unit_classification`：`prepare` 取当前可编辑草稿的预筛单元（`parse_state.classification_inputs`），默认剔除已有有效建议的单元（`suggested_unit_ids`；`rejudge=true` 时不剔除），再剔除其它进行中归类任务已负责的单元——全部被占用时返回那个任务；每 3 个单元一个条目。`run_item` 调 `classify_units(max_attempts=1, rate_limit_retries=0, repair=…)`，整批失败按原因映射为 defer / retry / repair / fail。`on_item_success` 调 `parse_state.merge_unit_classification`（锁草稿行 → 指纹校验 → 合并进 `raw_model_output.unit_classifications`），页面可以边跑边看到建议；原文或评分项在调用期间变化时该批以 `CLASSIFICATION_INPUT_CHANGED` 失败。`merge` 只汇总计数。
+- `execution._finish`：条目成功前先执行 `on_item_success`，它抛 `AITaskItemError` 时这次执行按失败处理。
+- `parse_state.run_unit_classification` 保留为同步函数（CLI 与并发合并测试），内部同样调用 `classification_inputs` + `merge_unit_classification`。
+- 前端：`stores/rubrics.classifyUnits` 建任务；`RubricsView` 轮询任务，`succeeded_count` 变化即刷新原文核对面板；`SourceReviewPanel` 的进度来自任务（`AITaskItemRead.unit_count` 累计），可“停止本轮”“重试失败的批次”；进入页面时找回进行中的归类任务。
+
+维护记录：2026-10-10 · AI 任务 B：归类迁移到任务，按单元去重，前端调度器删除；无迁移，契约版本 → `2026-10-10.ai-tasks-b`。

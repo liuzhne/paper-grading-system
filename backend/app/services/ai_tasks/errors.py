@@ -35,4 +35,12 @@ class AITaskItemError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
-__all__ = ["AITaskItemError", "AITaskProblem", "DISPOSITIONS"]
+class AITaskReuse(Exception):
+    """建任务时发现要处理的内容全部已在进行中的任务里：直接返回那个任务。"""
+
+    def __init__(self, task_id):
+        super().__init__(task_id)
+        self.task_id = task_id
+
+
+__all__ = ["AITaskItemError", "AITaskProblem", "AITaskReuse", "DISPOSITIONS"]

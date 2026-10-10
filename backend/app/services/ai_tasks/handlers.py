@@ -45,7 +45,8 @@ class TaskHandler:
     run_item: Callable
     # (view, outputs_in_ordinal_order) -> dict
     merge: Callable
-    # (session, view, item_input, output) -> None：条目成功时增量落库（例如归类建议）
+    # (session, view, item_input, output) -> None：条目成功时增量落库（例如归类建议）。
+    # 抛 AITaskItemError 时这次执行按失败处理（例如归类期间原文已变化）。
     on_item_success: Callable | None = None
     # 页面上的操作名，用于错误提示
     label: str = "AI 操作"
@@ -55,6 +56,7 @@ class TaskHandler:
 _HANDLERS: dict[str, TaskHandler] = {}
 _HANDLER_MODULES = (
     "backend.app.services.ai_tasks.rule_draft",
+    "backend.app.services.ai_tasks.unit_classification",
 )
 
 

@@ -1801,3 +1801,21 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 回滚：先确认没有 AI 任务需要保留、没有规则记录生成模型（0036 降级会拒绝），再 `alembic downgrade 0035_unified_work_queue` 并部署上一版本；已打开的新页面会被旧版本的契约头触发一次刷新。
 
 维护记录：2026-10-10 · AI 任务 A2：新增起草任务接口、执行器要求、契约版本守卫的维护方法，以及“一直排队”“限流延后”“失败不重试”“连接变更”“点按钮就刷新”的排查；迁移 head → 0036。
+
+### 2026-10-10 AI 任务 B（AI 归类已改为后台任务）
+
+- 接口：`POST /api/rubrics/{id}/ai-tasks`，`kind=unit_classification`，`params={unit_ids?, rejudge?}`；`POST /api/rubrics/{id}/unit-classifications` 返回 410。契约版本 `2026-10-10.ai-tasks-b`（前后端同时修改）。
+- 进度：`GET /api/ai-tasks/{id}` 的条目带 `unit_count`；建议在每批成功时写进 `GET /parse-coverage` 的 `unit_classifications`。
+
+排错：
+- **现象**：点“继续为剩余 N 条给出归类建议”后提示已在处理，或马上显示完成、没有新建议。
+  - 报错指向：像是按钮没生效。
+  - 真正原因：按单元去重——这些单元已在另一个标签页（或刚才那次）的进行中任务里，返回的是那个任务；或这些单元已有有效建议，被续跑剔除（`result.skipped_unit_ids`）。需要重新判断时，在面板里勾选这些单元再点。
+- **现象**：某批失败，错误码 `CLASSIFICATION_INPUT_CHANGED`。
+  - 真正原因：模型调用期间原文或评分项被修改（重新上传、改评分项名称等），这批结果对应的输入已经变了，不会写入。重新点归类即可。
+- **现象**：多个标签页同时归类，厂商 429 却比以前少。
+  - 这是预期：并发改由后端按连接的同时请求数统一控制（AI 条目与批量评分共用名额），前端不再各自并发。
+
+验证（B，本地已完成）：`test_rubric_unit_classification_api.py`（持久化与重载、每 3 个单元一批、缩小范围、评分项变化后过期、mock 拒绝、无台账 404 / 无可归类 422、显式重新判断保留其它建议、续跑剔除已有建议、按单元去重、旧接口 410、429 延后后合并、调用期间原文变化判失败、多个任务共用连接名额）；`SourceReviewPanel` 与 `ai-tasks` 单元测试。
+
+维护记录：2026-10-10 · AI 任务 B：新增归类任务接口说明与“按单元去重看起来像没生效”“CLASSIFICATION_INPUT_CHANGED”的排查；无迁移。

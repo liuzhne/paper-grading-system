@@ -37,7 +37,6 @@ from backend.app.schemas.rubric import RuleReviewRequest
 from backend.app.schemas.rubric import StructureMergeRequest
 from backend.app.schemas.rubric import StructureSuggestionRequest
 from backend.app.schemas.rubric import StructureUndoRequest
-from backend.app.schemas.rubric import UnitClassificationRequest
 from backend.app.schemas.rubric import SourceUnitResolveRequest
 from backend.app.schemas.rubric import RubricCloneRequest
 from backend.app.schemas.rubric import AtomicRuleEditRequest
@@ -1314,29 +1313,11 @@ def _rubric_ai_scorer(db, principal, ai_connection_id: str | None):
     return get_llm_scorer(session=db)
 
 
-@router.post("/{rubric_id}/unit-classifications")
-def classify_source_units(
-    rubric_id: str,
-    payload: UnitClassificationRequest,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(current_user_id),
-    principal: CurrentPrincipal = Depends(current_principal),
-):
-    """用户确认后运行兜底分类器；结果只是建议，持久化到当前编译记录并带指纹。"""
+@router.post("/{rubric_id}/unit-classifications", include_in_schema=False)
+def classify_source_units(rubric_id: str):
+    """停用：归类改为 ``POST /rubrics/{id}/ai-tasks``（kind=unit_classification）。"""
 
-    ensure_dev_user(db)
-    _visible_rubric(db, rubric_id, principal)
-    require_organization_role(principal, "org_admin", "teacher")
-    try:
-        scorer = _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        result = parse_state.run_unit_classification(
-            db, rubric_id, scorer, unit_ids=payload.unit_ids, actor_id=user_id
-        )
-        db.commit()
-    except parse_state.ParseStateError as exc:
-        db.rollback()
-        raise _parse_state_problem(exc) from exc
-    return jsonable_encoder(result)
+    raise _retired_endpoint("unit_classification", "AI 归类")
 
 
 @router.post("/{rubric_id}/rule-review")

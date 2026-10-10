@@ -2102,26 +2102,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/rubrics/{rubric_id}/unit-classifications": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Classify Source Units
-         * @description 用户确认后运行兜底分类器；结果只是建议，持久化到当前编译记录并带指纹。
-         */
-        post: operations["classify_source_units_api_rubrics__rubric_id__unit_classifications_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/rubrics/{rubric_id}/units/resolve-batch": {
         parameters: {
             query?: never;
@@ -3035,6 +3015,11 @@ export interface components {
             started_at?: string | null;
             /** Status */
             status: string;
+            /**
+             * Unit Count
+             * @default 0
+             */
+            unit_count: number;
         };
         /** AITaskRead */
         AITaskRead: {
@@ -5447,13 +5432,6 @@ export interface components {
              * @default 人工生命周期操作
              */
             reason: string;
-        };
-        /** UnitClassificationRequest */
-        UnitClassificationRequest: {
-            /** Ai Connection Id */
-            ai_connection_id?: string | null;
-            /** Unit Ids */
-            unit_ids?: string[] | null;
         };
         /**
          * UploadPrecheckRequest
@@ -10246,45 +10224,6 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TemplateLinkReviewRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    classify_source_units_api_rubrics__rubric_id__unit_classifications_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-Organization-ID"?: string | null;
-            };
-            path: {
-                rubric_id: string;
-            };
-            cookie?: {
-                pgs_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UnitClassificationRequest"];
             };
         };
         responses: {

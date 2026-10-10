@@ -27,6 +27,7 @@ from backend.app.services.ai_connections import resolve_connection_runtime
 from backend.app.services.ai_connections import validate_outbound_base_url
 from backend.app.services.ai_tasks.errors import AITaskItemError
 from backend.app.services.ai_tasks.errors import AITaskProblem
+from backend.app.services.ai_tasks.errors import AITaskReuse
 from backend.app.services.ai_tasks.handlers import TaskView
 from backend.app.services.ai_tasks.handlers import get_handler
 from backend.app.services.ai_tasks.state import ACTIVE_TASK_STATUSES
@@ -264,7 +265,14 @@ def create_ai_task(db, *, rubric_id, kind, params, principal, ai_connection_id=N
     if handler.extra.get("requires_real_model") and model.provider.lower() == "mock":
         code, message, action = handler.extra["missing_model_problem"]
         raise AITaskProblem(503, code, message, action)
-    prepared = handler.prepare(db, rubric_id, params or {}, principal)
+    try:
+        prepared = handler.prepare(db, rubric_id, params or {}, principal)
+    except AITaskReuse as reuse:
+        # 要处理的内容已全部在进行中的任务里（例如另一个标签页正在归类同一批单元）。
+        existing = get_ai_task(db, reuse.task_id)
+        if existing is not None:
+            return existing, False
+        raise
     fingerprint = task_fingerprint(
         kind=kind,
         rubric_id=rubric_id,

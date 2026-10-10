@@ -185,6 +185,13 @@ def _finish(session_factory, claimed, *, output=None, error=None, latency_ms=0):
             "disposition": None,
         }
         delay = None
+        if error is None and task.status in ACTIVE_TASK_STATUSES:
+            handler = get_handler(task.kind)
+            if handler.on_item_success is not None:
+                try:
+                    handler.on_item_success(session, task_view(task), deepcopy(item.input), output)
+                except AITaskItemError as exc:
+                    error = exc
         if error is None:
             item.status = "succeeded"
             item.output = output
@@ -193,9 +200,6 @@ def _finish(session_factory, claimed, *, output=None, error=None, latency_ms=0):
             item.finished_at = now
             entry["status"] = "succeeded"
             shift_counts(session, task.id, running=-1, succeeded=1)
-            handler = get_handler(task.kind)
-            if handler.on_item_success is not None and task.status in ACTIVE_TASK_STATUSES:
-                handler.on_item_success(session, task_view(task), deepcopy(item.input), output)
         else:
             entry["error_code"] = error.code
             disposition = error.disposition

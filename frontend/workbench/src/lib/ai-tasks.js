@@ -53,3 +53,25 @@ export function draftTaskProgress(task, now = Date.now()) {
 export function canRetryAiTask(task) {
   return task?.status === "failed";
 }
+
+/**
+ * 归类任务 → 来源核对面板的进度：{completed, failed, total, running, stopped, error}。
+ * 单元数按条目累计（每批最多 3 个）。
+ * @param {any} task
+ */
+export function classificationTaskProgress(task) {
+  if (!task) return null;
+  const items = task.items || [];
+  const units = (/** @type {string[]} */ statuses) => items
+    .filter((/** @type {any} */ item) => statuses.includes(item.status))
+    .reduce((/** @type {number} */ sum, /** @type {any} */ item) => sum + (item.unit_count || 0), 0);
+  const total = items.reduce((/** @type {number} */ sum, /** @type {any} */ item) => sum + (item.unit_count || 0), 0);
+  return {
+    completed: units(["succeeded"]),
+    failed: units(["failed"]),
+    total,
+    running: isActiveAiTask(task),
+    stopped: task.status === "failed" ? "provider" : task.status === "canceled" ? "canceled" : null,
+    error: task.status === "failed" ? task.error_message || task.error_code || null : null,
+  };
+}
