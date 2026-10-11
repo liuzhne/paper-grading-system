@@ -1281,3 +1281,12 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 - 评分助手：开评确认说明类型；通用文档按标题称呼和定位材料；意图识别提示词改为“文档评分系统”，`ASSISTANT_PROMPT_VERSION` 升为 `assistant-intent@2`。
 
 维护记录：2026-10-11 · 通用文档评分：新增 `general_document` Profile 与工作台类型流转（导入、建批次、评分、解析、导出、报告、评分助手）；无迁移，head 仍为 `0038_assistant_conversations`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
+
+### 2026-10-11 生产核对问题修复（前端）
+
+- `App.vue`：首次导航（路由守卫等会话接口）完成前显示启动提示，超过 4 秒说明冷启动；`router.isReady()` 之后撤掉。
+- 评分进度页 `TaskRunView`：`GET /batches/{id}/score-jobs/latest` 的 404 视为“还没有作业”；有材料、未归档时显示原因与“开始评分”，调用共享的 `startScoringJob`。任务列表中“评分中”的阶段标签始终链接到评分进度页。
+- 评分工作区 `GradeView`、新建任务页 `NewTaskView`：数据返回前显示加载状态，不显示空状态；没有评分结果的材料链接到评分进度页。
+- 后端不变。
+
+维护记录：2026-10-11 · 生产核对问题修复：启动提示、加载状态与空状态分开、无作业批次可从评分进度页重新开始评分；后端与数据不变。
