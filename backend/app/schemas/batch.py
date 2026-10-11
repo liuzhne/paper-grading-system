@@ -60,6 +60,8 @@ class BatchRead(BaseModel):
     #: 空着，也不能让整页 500。
     rubric_name: Optional[str] = None
     rubric_version_label: Optional[str] = None
+    #: 文档类型，取自锁定的评分标准版本；旧批次为 thesis。决定评分页与导出的身份字段。
+    business_profile_key: str = "thesis"
     ai_connection_id: Optional[str] = None
     ai_connection_key_version: Optional[int] = None
     ai_connection_snapshot: Optional[dict] = None

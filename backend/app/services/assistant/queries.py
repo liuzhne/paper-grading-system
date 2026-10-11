@@ -20,6 +20,7 @@ from langgraph.runtime import Runtime
 from backend.app.services.assistant import tools
 from backend.app.services.assistant.context import RunContext
 from backend.app.services.assistant.views import overview_text
+from backend.app.services.assistant.views import paper_label
 from backend.app.services.assistant.views import papers_in_upload_order
 from backend.app.services.assistant.views import quick_actions_card
 from backend.app.services.assistant.views import resolve_paper
@@ -91,10 +92,10 @@ def query_progress(state: QueryState, runtime: Runtime[RunContext]):
     return {"next": END}
 
 
-def _show_paper(ctx: RunContext, batch_id: str, paper: dict, ordinal: int):
+def _show_paper(ctx: RunContext, batch_id: str, paper: dict, ordinal: int, profile_key: str):
     ctx.set_focus(paper_id=paper["paper_id"])
     ctx.show_workspace("/batches/%s/grade?paper=%s" % (batch_id, paper["paper_id"]))
-    name = paper.get("student_name") or paper.get("file_name")
+    name = paper_label(paper, profile_key)
     if not paper.get("latest_run_id"):
         ctx.say("第 %d 份《%s》还没有评分结果。" % (ordinal, name))
         return
@@ -112,6 +113,7 @@ def query_paper(state: QueryState, runtime: Runtime[RunContext]):
     batch_id = state["batch_id"]
     summary = tools.call(ctx, "batch_summary", batch_id=batch_id)
     papers = papers_in_upload_order(summary["papers"])
+    profile_key = summary.get("business_profile_key") or "thesis"
     if not papers:
         ctx.say("这个任务里还没有文件。")
         return {"next": END}
@@ -120,15 +122,15 @@ def query_paper(state: QueryState, runtime: Runtime[RunContext]):
         candidates = papers
     else:
         match, candidates = resolve_paper(papers, ordinal=state.get("ordinal"), name=state.get("name"),
-                                          text=state.get("text") or "")
+                                          text=state.get("text") or "", profile_key=profile_key)
     if match is not None:
-        _show_paper(ctx, batch_id, match, papers.index(match) + 1)
+        _show_paper(ctx, batch_id, match, papers.index(match) + 1, profile_key)
         return {"next": END}
     prompt = "这个任务只有 %d 份文件，要查哪一份？" % len(papers) if state.get("ordinal") else "要查哪一份？"
     ctx.say(prompt, [{
         "type": "choose_paper", "status": "proposed", "batch_id": batch_id,
         "papers": [{"paper_id": paper["paper_id"],
-                    "label": "%d. %s" % (papers.index(paper) + 1, paper.get("student_name") or paper.get("file_name"))}
+                    "label": "%d. %s" % (papers.index(paper) + 1, paper_label(paper, profile_key))}
                    for paper in candidates[:30]],
     }])
     return {"next": END}
@@ -141,9 +143,9 @@ def query_review(state: QueryState, runtime: Runtime[RunContext]):
     flagged = [paper for paper in summary["papers"] if paper.get("latest_need_manual_review")]
     ctx.show_workspace("/batches/%s/grade" % batch_id)
     if not flagged:
-        ctx.say("没有需要人工复核的论文。")
+        ctx.say("没有需要人工复核的材料。")
         return {"next": END}
-    ctx.say("有 %d 份论文需要人工复核。点开某一份可以看到具体是哪几项、为什么；复核请在右侧的评分工作区完成。" % len(flagged),
+    ctx.say("有 %d 份材料需要人工复核。点开某一份可以看到具体是哪几项、为什么；复核请在右侧的评分工作区完成。" % len(flagged),
             [{"type": "review_list", "batch_id": batch_id}], intent="query_review")
     return {"next": END}
 

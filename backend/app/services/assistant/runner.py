@@ -4,7 +4,7 @@
 1. 抢会话的运行锁（同一会话同一时间只有一个请求在推进流程，第二个 409）；
 2. 作废超过 7 天没回应的等待（M3）；
 3. 按类型处理：`message`（识别意图 → 查询图或开流程）、`resume`（恢复流程图）、
-   `select`（选择卡片：选任务、选论文、确认重试或取消）；
+   `select`（选择卡片：选任务、选材料、确认重试或取消）；
 4. 记下流程当前等待的中断，修剪状态快照（只留最近 10 份，M2）；
 5. 返回本次新增或更新的消息、当前等待的中断与焦点。
 """
@@ -177,7 +177,7 @@ def _start_flow(ctx: RunContext, saver: SqlCheckpointSaver, flow_input: dict) ->
     if ctx.conversation.thread_id:
         pending = ctx.conversation.pending or {}
         if pending.get("kind") in {"wait_job", "upload_papers"}:
-            ctx.say("这个会话里有一批论文正在上传或评分。要同时评另一批，请新开一个会话。",
+            ctx.say("这个会话里有一批材料正在上传或评分。要同时评另一批，请新开一个会话。",
                     [quick_actions_card(["query_progress"])])
             return
         # 还停在“等用户确认”这一类步骤：放弃旧流程，开始新的。
@@ -296,7 +296,7 @@ def _handle_select(ctx: RunContext, saver: SqlCheckpointSaver, card_id: str, val
     if kind == "choose_paper":
         paper = next((item for item in card.get("papers", []) if item["paper_id"] == value.get("paper_id")), None)
         if paper is None:
-            raise HTTPException(status_code=422, detail="请选择卡片里的论文")
+            raise HTTPException(status_code=422, detail="请选择卡片里的材料")
         ctx.update_card(message.id, card_id, "done", {"paper_id": paper["paper_id"]})
         _run_query(ctx, "query_paper", batch_id=card["batch_id"], paper_id=paper["paper_id"])
         return

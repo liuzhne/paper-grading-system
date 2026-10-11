@@ -9,9 +9,9 @@ from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import SpreadsheetWriteLog
-from backend.app.services.scoring.profiles.thesis import ThesisProfile
-from backend.app.services.spreadsheet.excel import DETAIL_HEADERS
-from backend.app.services.spreadsheet.excel import SUMMARY_HEADERS
+from backend.app.services.spreadsheet.excel import batch_profile
+from backend.app.services.spreadsheet.excel import detail_columns
+from backend.app.services.spreadsheet.excel import summary_columns
 
 
 class SpreadsheetWriteError(RuntimeError):
@@ -122,56 +122,33 @@ def _load_run(db, run_id):
 
 def _sheet_payload(db, run):
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
-    projection = ThesisProfile().build_spreadsheet_projection(
-        batch=run.paper.batch,
+    batch = run.paper.batch
+    # 表头随文档类型变化，与 Excel 导出同一份列定义（通用文档评分改造方案 §4.8）。
+    profile = batch_profile(batch)
+    projection = profile.build_spreadsheet_projection(
+        batch=batch,
         run=run,
         review_logs=review_logs,
     )
+    summary_spec = summary_columns(profile)
+    detail_spec = detail_columns(profile)
     return {
-        "summary_headers": SUMMARY_HEADERS,
-        "summary_row": _summary_row(projection["summary"]),
-        "detail_headers": DETAIL_HEADERS,
-        "detail_rows": [_detail_row(item) for item in projection["details"]],
+        "summary_headers": [header for header, _ in summary_spec],
+        "summary_row": _summary_row(projection["summary"], summary_spec),
+        "detail_headers": [header for header, _ in detail_spec],
+        "detail_rows": [_detail_row(item, detail_spec) for item in projection["details"]],
     }
 
 
-def _summary_row(row):
-    finished = row["finished_at"]
-    values = [
-        row["batch_name"],
-        row["student_id"],
-        row["student_name"],
-        row["department"],
-        row["major"],
-        row["title"],
-        row["rubric_version"],
-        row["ai_total"],
-        row["final_total"],
-        row["grade"],
-        row["main_deductions"],
-        row["changed"],
-        row["need_manual_review"],
-        finished.isoformat(sep=" ") if finished else "",
-        row["reviewer"],
-        row["review_notes"],
-        row["report_link"],
-    ]
-    return dict(zip(SUMMARY_HEADERS, values))
+def _summary_row(row, spec):
+    values = {}
+    for header, key in spec:
+        value = row[key]
+        if key == "finished_at":
+            value = value.isoformat(sep=" ") if value else ""
+        values[header] = value
+    return values
 
 
-def _detail_row(item):
-    values = [
-        item["student_id"],
-        item["student_name"],
-        item["title"],
-        item["criterion_name"],
-        item["max_score"],
-        item["ai_score"],
-        item["final_score"],
-        item["deductions"],
-        item["evidence_quotes"],
-        item["evidence_locations"],
-        item["suggestion"],
-        item["confidence"],
-    ]
-    return dict(zip(DETAIL_HEADERS, values))
+def _detail_row(item, spec):
+    return {header: item[key] for header, key in spec}

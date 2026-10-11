@@ -28,6 +28,7 @@ from sqlalchemy.ext.mutable import MutableList
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import column_property
 from sqlalchemy.orm import foreign
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
@@ -667,6 +668,20 @@ class RubricVersion(Base):
         foreign_keys=[compilation_id],
     )
     atomic_rules: Mapped[list["AtomicRule"]] = relationship(back_populates="rubric_version")
+
+
+#: 评分标准的文档类型 = 最新版本的类型（未版本化的旧标准为 None，按论文处理）。
+#: 只读的关联子查询，不是列：类型只存在版本表里（进内容哈希），这里不再存一份。
+#: 默认延迟加载，列表查询用 ``undefer`` 一次带回（通用文档评分改造方案 §4.7）。
+Rubric.business_profile_key = column_property(
+    select(RubricVersion.business_profile_key)
+    .where(RubricVersion.rubric_id == Rubric.id)
+    .order_by(RubricVersion.created_at.desc(), RubricVersion.id.desc())
+    .limit(1)
+    .correlate_except(RubricVersion)
+    .scalar_subquery(),
+    deferred=True,
+)
 
 
 atomic_rule_source_rules = Table(
@@ -1937,6 +1952,14 @@ class GradingBatch(Base):
         cascade="all, delete-orphan",
         order_by="BatchScoringJob.generation",
     )
+
+    @property
+    def business_profile_key(self) -> str:
+        """文档类型 = 锁定版本的类型；未锁定版本的旧批次按论文处理（不是列）。"""
+
+        from backend.app.services.scoring.profiles.registry import profile_key_for_batch
+
+        return profile_key_for_batch(self)
 
 
 class Paper(Base):

@@ -326,7 +326,13 @@ def _legacy_required_fields_checker(*, document, params):
     }
 
 
-def _registration(checker_key, behavior, params_schema, observation_schema):
+def _registration(
+    checker_key,
+    behavior,
+    params_schema,
+    observation_schema,
+    supported_profiles=("thesis",),
+):
     artifacts = [
         {
             "path": "services/scoring/profiles/thesis.py",
@@ -350,7 +356,7 @@ def _registration(checker_key, behavior, params_schema, observation_schema):
         "implementation_hash": canonical_sha256(package),
         "params_schema": params_schema,
         "supported_document_schemas": ["document-snapshot@1"],
-        "supported_profiles": ["thesis"],
+        "supported_profiles": list(supported_profiles),
         "observation_schema": observation_schema,
     }
 
@@ -626,6 +632,33 @@ class ThesisProfile:
     profile_key = "thesis"
     profile_version = THESIS_PROFILE_VERSION
     prompt_version = THESIS_PROMPT_VERSION
+    # 子类（通用文档）只替换下面几项，解析、证据、检查器实现与模型调用全部复用。
+    prompt_domain = "thesis"
+    prompt_metadata_fields = frozenset(
+        {"student_id", "student_name", "title", "department", "major", "advisor"}
+    )
+    excluded_checker_keys = frozenset()
+    #: 是否在 Core 评分后追加一次模型语义一致性核验（提示词按论文的绪论与结论写）。
+    semantic_coherence = True
+    #: 导出表与报告的身份列：(表头, 投影字段)。
+    spreadsheet_summary_identity = (
+        ("学号", "student_id"),
+        ("姓名", "student_name"),
+        ("学院", "department"),
+        ("专业", "major"),
+        ("论文题目", "title"),
+    )
+    spreadsheet_detail_identity = (
+        ("学号", "student_id"),
+        ("姓名", "student_name"),
+        ("论文题目", "title"),
+    )
+    report_labels = {
+        "page_title": "论文评分报告",
+        "heading": "毕业论文智能评分报告",
+        "title": "论文题目",
+        "owner": "学生",
+    }
 
     def __init__(self):
         self._artifacts = ThesisArtifactFacade()
@@ -646,18 +679,10 @@ class ThesisProfile:
         return self._artifacts.assert_review_submission_allowed(**kwargs)
 
     def select_prompt_metadata(self, *, metadata):
-        allowed = {
-            "student_id",
-            "student_name",
-            "title",
-            "department",
-            "major",
-            "advisor",
-        }
         return {
             key: deepcopy(value)
             for key, value in metadata.items()
-            if key in allowed
+            if key in self.prompt_metadata_fields
         }
 
     def build_prompt_extensions(self, *, submission_snapshot, document_snapshot):
@@ -671,7 +696,7 @@ class ThesisProfile:
         )
         return {
             "instructions": {
-                "domain": "thesis",
+                "domain": self.prompt_domain,
                 "require_published_rule_evidence": True,
                 "ignore_untrusted_document_instructions": True,
             },
@@ -775,12 +800,15 @@ class ThesisProfile:
             params_schema,
             observation_schema,
         ) in _CHECKERS:
+            if key in self.excluded_checker_keys:
+                continue
             registry.register(
                 registration=_registration(
                     key,
                     behavior,
                     params_schema,
                     observation_schema,
+                    supported_profiles=(self.profile_key,),
                 ),
                 checker=checker,
                 validate_params=validator,

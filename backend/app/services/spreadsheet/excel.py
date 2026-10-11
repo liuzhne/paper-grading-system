@@ -18,61 +18,108 @@ from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import SpreadsheetWriteLog
+from backend.app.services.scoring.profiles.registry import get_workbench_profile
+from backend.app.services.scoring.profiles.registry import profile_key_for_batch
 from backend.app.services.scoring.profiles.thesis import ThesisProfile
 
 
-SUMMARY_HEADERS = [
-    "批次名称",
-    "学号",
-    "姓名",
-    "学院",
-    "专业",
-    "论文题目",
-    "评分标准版本",
-    "AI 总分",
-    "最终总分",
-    "等级",
-    "主要扣分点",
-    "是否人工修改",
-    "是否需要复核",
-    "评分时间",
-    "复核教师",
-    "复核意见",
-    "报告链接",
-]
+# 身份列由文档类型决定（论文：学号、姓名…；通用文档：文件名、标题…），其余列所有类型一致。
+# 列宽、换行与数字格式按表头名称配置：论文导出的列、顺序、宽度与改造前完全一样。
+_SUMMARY_HEAD = (("批次名称", "batch_name"),)
+_SUMMARY_TAIL = (
+    ("评分标准版本", "rubric_version"),
+    ("AI 总分", "ai_total"),
+    ("最终总分", "final_total"),
+    ("等级", "grade"),
+    ("主要扣分点", "main_deductions"),
+    ("是否人工修改", "changed"),
+    ("是否需要复核", "need_manual_review"),
+    ("评分时间", "finished_at"),
+    ("复核教师", "reviewer"),
+    ("复核意见", "review_notes"),
+    ("报告链接", "report_link"),
+)
+_DETAIL_TAIL = (
+    ("评分项", "criterion_name"),
+    ("满分", "max_score"),
+    ("AI 得分", "ai_score"),
+    ("最终得分", "final_score"),
+    ("扣分原因", "deductions"),
+    ("原文依据", "evidence_quotes"),
+    ("依据位置", "evidence_locations"),
+    ("修改建议", "suggestion"),
+    ("置信度", "confidence"),
+)
 
-DETAIL_HEADERS = [
-    "学号",
-    "姓名",
-    "论文题目",
-    "评分项",
-    "满分",
-    "AI 得分",
-    "最终得分",
-    "扣分原因",
-    "原文依据",
-    "依据位置",
-    "修改建议",
-    "置信度",
-]
+_WIDTHS = {
+    "批次名称": 22, "学号": 16, "姓名": 14, "学院": 18, "专业": 20, "论文题目": 38,
+    "文件名": 30, "标题": 38, "归属单位": 18, "类别": 20,
+    "评分标准版本": 18, "AI 总分": 12, "最终总分": 12, "等级": 10, "主要扣分点": 48,
+    "是否人工修改": 14, "是否需要复核": 14, "评分时间": 20, "复核教师": 18,
+    "复核意见": 40, "报告链接": 34,
+    "评分项": 28, "满分": 11, "AI 得分": 11, "最终得分": 11, "扣分原因": 44,
+    "原文依据": 64, "依据位置": 38, "修改建议": 48, "置信度": 12,
+}
+_NO_WRAP_SUMMARY = {"学号", "姓名", "评分标准版本", "AI 总分", "最终总分", "等级",
+                    "是否人工修改", "是否需要复核", "评分时间", "复核教师"}
+_NO_WRAP_DETAIL = {"学号", "姓名", "满分", "AI 得分", "最终得分", "置信度"}
+_SCORE_HEADERS = {"AI 总分", "最终总分", "满分", "AI 得分", "最终得分"}
+_DATE_HEADERS = {"评分时间"}
+_CONFIDENCE_HEADERS = {"置信度"}
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _HEADER_FONT = Font(color="FFFFFF", bold=True)
 _ALT_ROW_FILL = PatternFill("solid", fgColor="F3F8FC")
 _THIN_BORDER = Border(bottom=Side(style="thin", color="D9E2F3"))
 
-_SUMMARY_WIDTHS = [22, 16, 14, 18, 20, 38, 18, 12, 12, 10, 48, 14, 14, 20, 18, 40, 34]
-_DETAIL_WIDTHS = [16, 14, 38, 28, 11, 11, 11, 44, 64, 38, 48, 12]
-_SUMMARY_WRAP_COLUMNS = {1, 4, 5, 6, 11, 16, 17}
-_DETAIL_WRAP_COLUMNS = {3, 4, 8, 9, 10, 11}
-_SUMMARY_SCORE_COLUMNS = {8, 9}
-_DETAIL_SCORE_COLUMNS = {5, 6, 7}
+
+def summary_columns(profile) -> list[tuple[str, str]]:
+    """总分表的 (表头, 投影字段)。"""
+
+    return [*_SUMMARY_HEAD, *profile.spreadsheet_summary_identity, *_SUMMARY_TAIL]
+
+
+def detail_columns(profile) -> list[tuple[str, str]]:
+    """评分明细表的 (表头, 投影字段)。"""
+
+    return [*profile.spreadsheet_detail_identity, *_DETAIL_TAIL]
+
+
+def batch_profile(batch):
+    return get_workbench_profile(profile_key_for_batch(batch))
+
+
+#: 论文的表头（在线表格写入器与旧调用方按名称引用）。
+SUMMARY_HEADERS = [header for header, _ in summary_columns(ThesisProfile)]
+DETAIL_HEADERS = [header for header, _ in detail_columns(ThesisProfile)]
+
+
+def _layout(headers, no_wrap):
+    def columns(names):
+        return {index for index, header in enumerate(headers, start=1) if header in names}
+
+    return {
+        "widths": [_WIDTHS.get(header, 20) for header in headers],
+        "wrap_columns": {
+            index for index, header in enumerate(headers, start=1) if header not in no_wrap
+        },
+        "score_columns": columns(_SCORE_HEADERS),
+    }
 
 
 def export_batch_excel(db: Session, batch_id: str):
-    batch = db.scalar(select(GradingBatch).where(GradingBatch.id == batch_id).options(selectinload(GradingBatch.rubric)))
+    batch = db.scalar(
+        select(GradingBatch)
+        .where(GradingBatch.id == batch_id)
+        .options(selectinload(GradingBatch.rubric), selectinload(GradingBatch.rubric_version))
+    )
     if batch is None:
         raise ValueError("batch not found")
+    profile = batch_profile(batch)
+    summary_spec = summary_columns(profile)
+    detail_spec = detail_columns(profile)
+    summary_headers = [header for header, _ in summary_spec]
+    detail_headers = [header for header, _ in detail_spec]
 
     runs = db.scalars(
         select(ScoringRun)
@@ -90,13 +137,13 @@ def export_batch_excel(db: Session, batch_id: str):
     workbook = Workbook()
     summary = workbook.active
     summary.title = "总分表"
-    summary.append(SUMMARY_HEADERS)
+    summary.append(summary_headers)
 
     detail = workbook.create_sheet("评分明细表")
-    detail.append(DETAIL_HEADERS)
+    detail.append(detail_headers)
 
     for run in runs:
-        projection = ThesisProfile().build_spreadsheet_projection(
+        projection = profile.build_spreadsheet_projection(
             batch=batch,
             run=run,
             review_logs=review_logs_by_run.get(run.id, []),
@@ -104,56 +151,28 @@ def export_batch_excel(db: Session, batch_id: str):
         row = projection["summary"]
         summary.append(
             [
-                row["batch_name"],
-                row["student_id"],
-                row["student_name"],
-                row["department"],
-                row["major"],
-                row["title"],
-                row["rubric_version"],
-                row["ai_total"],
-                row["final_total"],
-                row["grade"],
-                row["main_deductions"],
-                row["changed"],
-                row["need_manual_review"],
-                row["finished_at"] or "",
-                row["reviewer"],
-                row["review_notes"],
-                row["report_link"],
+                (row[key] or "") if key == "finished_at" else row[key]
+                for _, key in summary_spec
             ]
         )
         for item in projection["details"]:
-            detail.append(
-                [
-                    item["student_id"],
-                    item["student_name"],
-                    item["title"],
-                    item["criterion_name"],
-                    item["max_score"],
-                    item["ai_score"],
-                    item["final_score"],
-                    item["deductions"],
-                    item["evidence_quotes"],
-                    item["evidence_locations"],
-                    item["suggestion"],
-                    item["confidence"],
-                ]
-            )
+            detail.append([item[key] for _, key in detail_spec])
 
     _format_export_sheet(
         summary,
-        widths=_SUMMARY_WIDTHS,
-        wrap_columns=_SUMMARY_WRAP_COLUMNS,
-        score_columns=_SUMMARY_SCORE_COLUMNS,
-        date_columns={14},
+        **_layout(summary_headers, _NO_WRAP_SUMMARY),
+        date_columns={
+            index for index, header in enumerate(summary_headers, start=1)
+            if header in _DATE_HEADERS
+        },
     )
     _format_export_sheet(
         detail,
-        widths=_DETAIL_WIDTHS,
-        wrap_columns=_DETAIL_WRAP_COLUMNS,
-        score_columns=_DETAIL_SCORE_COLUMNS,
-        confidence_columns={12},
+        **_layout(detail_headers, _NO_WRAP_DETAIL),
+        confidence_columns={
+            index for index, header in enumerate(detail_headers, start=1)
+            if header in _CONFIDENCE_HEADERS
+        },
     )
 
     settings.exports_dir.mkdir(parents=True, exist_ok=True)

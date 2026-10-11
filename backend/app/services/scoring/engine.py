@@ -92,6 +92,8 @@ from backend.app.services.scoring.adapters.persistence import (
     CoreRunPersistence,
     LocalDocumentSnapshotStore,
 )
+from backend.app.services.scoring.profiles.registry import get_workbench_profile
+from backend.app.services.scoring.profiles.registry import profile_key_for_version
 from backend.app.services.scoring.profiles.thesis import ThesisProfile
 
 
@@ -451,6 +453,15 @@ def _published_core_version(*, db, paper, rubric, compilations):
     return candidates[0]
 
 
+def _workbench_profile(formal_version):
+    """按版本的文档类型取 Profile（通用文档评分改造方案 §4.3）。
+
+    技术方案没有 `adapt_paper`，`get_workbench_profile` 会明确拒绝。
+    """
+
+    return get_workbench_profile(profile_key_for_version(formal_version))
+
+
 def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
     paper = _load_scoreable_paper(db, paper_id)
     rubric = paper.batch.rubric
@@ -459,14 +470,6 @@ def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
     if not artifact_path.is_file():
         raise ValueError("paper source artifact is unavailable for Core replay")
     source_artifact_hash = hash_source_artifact(artifact_path.read_bytes())
-    profile = ThesisProfile()
-    paper_snapshots = profile.adapt_paper(
-        paper=paper,
-        parsed=parsed,
-        chunks=list(paper.chunks),
-        source_artifact_hash=source_artifact_hash,
-        submission_instance_key=paper.id,
-    )
     compilations = list(
         db.scalars(
             select(RubricCompilation).where(
@@ -474,13 +477,22 @@ def _core_request_context(db, paper_id, scorer, *, rescore_generation=0):
             )
         ).all()
     )
-    registry = profile.build_checker_registry()
     formal_version = _published_core_version(
         db=db,
         paper=paper,
         rubric=rubric,
         compilations=compilations,
     )
+    # 文档类型来自批次锁定的版本；没有正式版本的旧标准只会是论文。
+    profile = _workbench_profile(formal_version)
+    paper_snapshots = profile.adapt_paper(
+        paper=paper,
+        parsed=parsed,
+        chunks=list(paper.chunks),
+        source_artifact_hash=source_artifact_hash,
+        submission_instance_key=paper.id,
+    )
+    registry = profile.build_checker_registry()
     if formal_version is not None:
         rubric_snapshot = CompiledRubricSnapshotLoader().load_from_session(
             session=db,
@@ -596,7 +608,8 @@ def _score_paper_core(
     document_snapshot_ref = snapshot_store.put(request.document)
     parsed = read_json(paper.parsed_text_path)
     coherence_findings = list(parsed.get("coherence_findings", []) or [])
-    coherence_findings.extend(analyze_semantic_coherence(parsed, scorer))
+    if getattr(profile, "semantic_coherence", True):
+        coherence_findings.extend(analyze_semantic_coherence(parsed, scorer))
     format_findings = _compute_format_findings(paper, rubric)
     usage = (
         None

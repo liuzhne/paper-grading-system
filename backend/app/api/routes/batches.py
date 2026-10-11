@@ -3,6 +3,7 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Query
 from fastapi import Response
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -58,6 +59,7 @@ from backend.app.services.calibration.analytics import drift_monitor
 from backend.app.services.calibration.analytics import review_sample
 from backend.app.services.calibration.analytics import score_drift
 from backend.app.services.scoring.engine import score_batch
+from backend.app.services.scoring.profiles.registry import LEGACY_PROFILE_KEY
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 
@@ -85,7 +87,7 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
     return actions.create_batch(db, principal, user_id, payload)
 
 
-def _batch_with_rubric(batch: GradingBatch, name, version) -> dict:
+def _batch_with_rubric(batch: GradingBatch, name, version, profile_key=None) -> dict:
     """把批次投影成带标准标签的字典。
 
     直接改 ORM 对象的属性会把 `rubric_name` 当成待持久化的列；这里返回字典，
@@ -97,6 +99,7 @@ def _batch_with_rubric(batch: GradingBatch, name, version) -> dict:
     }
     payload["rubric_name"] = name
     payload["rubric_version_label"] = version
+    payload["business_profile_key"] = profile_key or batch.business_profile_key
     return payload
 
 
@@ -130,8 +133,14 @@ def list_batches(
     # 是列表里仅次于批次名的信息。按 id 逐个去查的话，一页 20 个批次就是 20 次往返。
     # outer 而不是 inner——标准被删时批次仍要出现在列表里。
     query = (
-        select(GradingBatch, Rubric.name, Rubric.version)
+        select(
+            GradingBatch,
+            Rubric.name,
+            Rubric.version,
+            func.coalesce(RubricVersion.business_profile_key, LEGACY_PROFILE_KEY),
+        )
         .outerjoin(Rubric, Rubric.id == GradingBatch.rubric_id)
+        .outerjoin(RubricVersion, RubricVersion.id == GradingBatch.rubric_version_id)
         .order_by(GradingBatch.created_at.desc())
     )
     if principal.organization_id is not None:
@@ -139,8 +148,8 @@ def list_batches(
     if status:
         query = query.where(GradingBatch.status.in_(status))
     return [
-        _batch_with_rubric(batch, name, version)
-        for batch, name, version in db.execute(query).all()
+        _batch_with_rubric(batch, name, version, profile_key)
+        for batch, name, version, profile_key in db.execute(query).all()
     ]
 
 
@@ -696,6 +705,7 @@ def update_batch(
         resolved_version = _resolve_batch_version(
             db, rubric, requested_version_id
         )
+        actions.require_workbench_version(resolved_version)
         # Assign the composite identity only after every check succeeds so a
         # cross-rubric or unfrozen request cannot leave a partial pin.
         batch.rubric_id = rubric.id

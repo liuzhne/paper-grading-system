@@ -8,6 +8,8 @@ from backend.app.core.config import settings
 from backend.app.db.models import ReviewLog
 from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
+from backend.app.services.scoring.profiles.registry import LEGACY_PROFILE_KEY
+from backend.app.services.scoring.profiles.registry import get_workbench_profile
 from backend.app.services.scoring.profiles.thesis import ThesisProfile
 from backend.app.services.storage.local import read_json
 
@@ -29,14 +31,16 @@ def generate_report(db: Session, run_id: str):
         raise ValueError("submission scoring runs require run-export@2")
 
     review_logs = db.scalars(select(ReviewLog).where(ReviewLog.scoring_run_id == run.id).order_by(ReviewLog.created_at)).all()
-    artifact = ThesisProfile().build_artifact_projection(
+    # 标题与身份行按这次评分实际用的文档类型（旧评分没有记录，按论文）。
+    profile = get_workbench_profile(run.business_profile_key or LEGACY_PROFILE_KEY)
+    artifact = profile.build_artifact_projection(
         run=run,
         review_logs=review_logs,
         section_summaries=_section_summaries_for(run.paper),
         coherence_findings=_coherence_for(run),
         format_findings=getattr(run, "format_findings", None) or [],
     )
-    html = _render_html(artifact)
+    html = _render_html(artifact, labels=profile.report_labels)
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
     path = settings.reports_dir / ("scoring_report_%s.html" % run.id)  # 用已校验的 DB 值，杜绝路径穿越
     path.write_text(html, encoding="utf-8")
@@ -64,7 +68,7 @@ def _render_section_summary(summaries):
     return "<table><tr><th>章节</th><th>段落数</th><th>字符数</th></tr>%s</table>" % rows
 
 
-def _render_html(artifact):
+def _render_html(artifact, labels=ThesisProfile.report_labels):
     paper = artifact["paper"]
     rubric = artifact["rubric"]
     scores = artifact["scores"]
@@ -77,7 +81,7 @@ def _render_html(artifact):
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>论文评分报告</title>
+  <title>{page_title}</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 40px; line-height: 1.6; color: #1f2933; }}
     h1, h2 {{ color: #102a43; }}
@@ -92,10 +96,10 @@ def _render_html(artifact):
   </style>
 </head>
 <body>
-  <h1>毕业论文智能评分报告</h1>
+  <h1>{heading}</h1>
   <div class="meta">
-    <div><strong>论文题目：</strong>{title}</div>
-    <div><strong>学生：</strong>{student_name}（{student_id}）</div>
+    <div><strong>{title_label}：</strong>{title}</div>
+    <div><strong>{owner_label}：</strong>{owner}</div>
     <div><strong>评分标准：</strong>{rubric} / {version}</div>
     <div class="score">最终总分：{final_total} / AI 初评分：{ai_total} / 等级：{grade}</div>
     <div><strong>需要复核：</strong>{need_review}</div>
@@ -114,9 +118,16 @@ def _render_html(artifact):
 </body>
 </html>
 """.format(
+        page_title=escape(labels["page_title"]),
+        heading=escape(labels["heading"]),
+        title_label=escape(labels["title"]),
+        owner_label=escape(labels["owner"]),
         title=escape(paper["title"] or ""),
-        student_name=escape(paper["student_name"] or ""),
-        student_id=escape(paper["student_id"] or ""),
+        owner=escape(
+            paper["file_name"] or ""
+            if "file_name" in paper
+            else "%s（%s）" % (paper["student_name"] or "", paper["student_id"] or "")
+        ),
         rubric=escape(rubric["name"]),
         version=escape(rubric["version"]),
         final_total=scores["final_total"],
