@@ -13,6 +13,7 @@ import { reactive, ref, watch } from "vue";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { MAX_FILES, TERMINAL_JOB_STATUSES, limitFiles } from "@/lib/assistant-flow.js";
+import { rememberDocumentType } from "@/lib/document-types.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useUploadStore } from "@/stores/upload.js";
 
@@ -271,8 +272,10 @@ export const useAssistantStore = defineStore("assistant", () => {
     try {
       const session = await rubrics.createImportSession({
         name: input.name, version: input.version || "v1.0",
+        businessProfileKey: input.businessProfileKey,
         rulesFile: input.rulesFile, templateFile: input.templateFile,
       });
+      rememberDocumentType(input.businessProfileKey);
       sessionId = session.id;
     } catch (err) {
       reportError(err, "导入失败");

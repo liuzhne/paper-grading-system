@@ -107,6 +107,19 @@ describe("grading store", () => {
     );
   }
 
+  it("打开批次时读取文档类型；读不到批次按论文显示", async () => {
+    stub({ "/batches/b1": { id: "b1", business_profile_key: "general_document" } });
+    const store = useGradingStore();
+    await store.openBatch("b1");
+    expect(store.documentType).toBe("general_document");
+
+    stub();
+    const fresh = useGradingStore();
+    await fresh.openBatch("b1");
+    expect(fresh.documentType).toBe("thesis");
+    expect(fresh.papers).toHaveLength(2);
+  });
+
   it("加载材料、当前 run、评分项与正文", async () => {
     stub();
     const store = useGradingStore();

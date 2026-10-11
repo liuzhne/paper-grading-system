@@ -9,6 +9,7 @@ import { computed, onMounted, ref, watch } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
 import { MAX_FILES, papersInUploadOrder, publishedRubrics, scoreOverview } from "@/lib/assistant-flow.js";
+import { DOCUMENT_TYPES, documentTypeLabel, rememberedDocumentType } from "@/lib/document-types.js";
 import { finishedCount, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
 import { useAssistantStore } from "@/stores/assistant.js";
 import { useUploadStore } from "@/stores/upload.js";
@@ -62,7 +63,7 @@ async function showRubricChoices() {
 }
 
 // --- 评分标准导入 ----------------------------------------------------------------
-const rubricForm = ref({ name: "", rulesFile: null, templateFile: null });
+const rubricForm = ref({ name: "", businessProfileKey: rememberedDocumentType(), rulesFile: null, templateFile: null });
 const rubricFormError = ref(null);
 function submitRubricFiles() {
   rubricFormError.value = null;
@@ -153,6 +154,7 @@ function evidenceLabel(view) {
     <template v-else-if="card.type === 'confirm_start'">
       <dl class="facts">
         <div><dt>评分标准</dt><dd>{{ card.rubric_name }} <span class="mono faint">{{ card.rubric_version }}</span></dd></div>
+        <div><dt>文档类型</dt><dd>{{ documentTypeLabel(card.business_profile_key) }}</dd></div>
         <div><dt>文件</dt><dd class="mono">{{ card.file_count }} 份</dd></div>
         <div><dt>评分模型</dt><dd>{{ card.connection_label }}</dd></div>
       </dl>
@@ -172,6 +174,7 @@ function evidenceLabel(view) {
                   :disabled="disabled || rubric.id === card.rubric_id"
                   @click="store.resume(card.id, { action: 'change_rubric', rubric_id: rubric.id })">
             {{ rubric.name }} <span class="mono faint">{{ rubric.version }}</span>
+            <span class="faint">· {{ documentTypeLabel(rubric.business_profile_key) }}</span>
           </button>
         </div>
       </template>
@@ -236,7 +239,7 @@ function evidenceLabel(view) {
       <button class="btn btn-sm" type="button" @click="store.showWorkspace(`/batches/${card.batch_id}/grade`)">在右侧查看每一份</button>
     </template>
 
-    <!-- 需要复核的论文 -->
+    <!-- 需要复核的材料 -->
     <template v-else-if="card.type === 'review_list'">
       <ul v-if="summary" class="plain-list">
         <li v-for="paper in flagged" :key="paper.paper_id">
@@ -248,7 +251,7 @@ function evidenceLabel(view) {
       </ul>
     </template>
 
-    <!-- 选择任务 / 选择论文 -->
+    <!-- 选择任务 / 选择材料 -->
     <template v-else-if="card.type === 'choose_batch' || card.type === 'choose_paper'">
       <div v-if="proposed" class="choices">
         <template v-if="card.type === 'choose_batch'">
@@ -304,7 +307,15 @@ function evidenceLabel(view) {
     <template v-else-if="card.type === 'pick_rubric_files'">
       <form v-if="waiting" class="rubric-form" @submit.prevent="submitRubricFiles">
         <label class="field"><span class="field-label">评分标准名称</span>
-          <input v-model="rubricForm.name" class="input" maxlength="100" placeholder="例如：2026 届毕业论文评分标准" /></label>
+          <input v-model="rubricForm.name" class="input" maxlength="100" placeholder="例如：2026 年采购方案评审标准" /></label>
+        <div class="field" role="radiogroup" aria-label="文档类型"><span class="field-label">文档类型（上传后不能再改）</span>
+          <div class="btn-row">
+            <label v-for="option in DOCUMENT_TYPES" :key="option.key" class="type-choice">
+              <input v-model="rubricForm.businessProfileKey" type="radio" name="assistant-document-type" :value="option.key" />
+              {{ option.label }}<span class="faint">（{{ option.hint }}）</span>
+            </label>
+          </div>
+        </div>
         <label class="field"><span class="field-label">评分规则文件</span>
           <input type="file" accept=".xlsx,.xls,.docx" @change="rubricForm.rulesFile = $event.target.files?.[0] || null" /></label>
         <label class="field"><span class="field-label">评分模板文件</span>
@@ -366,4 +377,5 @@ function evidenceLabel(view) {
 .rubric-form { display: grid; gap: 10px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 @media (max-width: 760px) { .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.type-choice { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; }
 </style>

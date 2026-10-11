@@ -38,9 +38,26 @@ describe("评分标准临时导入会话", () => {
 
     expect(calls[0].url).toMatch(/\/rubrics\/import-sessions$/);
     expect(calls[0].body).toBeInstanceOf(FormData);
+    expect(calls[0].body.has("business_profile_key")).toBe(false);
     expect(store.activeImportSession.id).toBe("s1");
     expect(store.lastImport.rubricId).toBeNull();
     expect(result.rubric_id).toBeNull();
+  });
+
+  it("上传时带上选择的文档类型", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", (url, init) => {
+      calls.push(init.body);
+      return response({ id: "s1", status: "draft", state_version: 1, criteria: [], business_profile_key: "general_document" }, 201);
+    });
+    const store = useRubricsStore();
+
+    await store.createImportSession({
+      name: "采购方案评审标准", version: "v1", businessProfileKey: "general_document",
+      rulesFile: new File(["x"], "评分表.xlsx"),
+    });
+
+    expect(calls[0].get("business_profile_key")).toBe("general_document");
   });
 
   it("确认时携带状态版本和幂等键", async () => {

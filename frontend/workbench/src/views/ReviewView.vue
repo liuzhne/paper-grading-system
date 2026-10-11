@@ -2,12 +2,17 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
+import { materialCode } from "@/lib/document-types.js";
 import { useBatchesStore } from "@/stores/batches.js";
 import { useReviewStore } from "@/stores/review.js";
 
 const batches = useBatchesStore();
 const review = useReviewStore();
 const selected = ref(null);
+/** 选中批次的文档类型：“材料”列显示学号还是文件名。 */
+const selectedType = computed(
+  () => batches.batches.find((b) => b.id === selected.value)?.business_profile_key,
+);
 
 /** 只有还需要复核的批次值得出现在选择器里。 */
 const candidates = computed(() =>
@@ -150,7 +155,7 @@ async function onComplete() {
                   v-if="entry.queue_type === 'blocking'"
                   class="chip chip-danger blocking"
                 >阻塞</span>
-                <span class="mono">{{ entry.student_id || "—" }}</span>
+                <span class="mono">{{ materialCode(entry, selectedType) }}</span>
               </td>
               <td>
                 <div>{{ entry.criterion_name || entry.criterion_code || "—" }}</div>

@@ -63,6 +63,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
    * 组合处理由后端决定：仅 Word 时 Word 为规则文档；两者都有时 Excel 为结构主干。
    *
    * @param {{name: string, version: string, description?: string, visibility?: string,
+   *          businessProfileKey?: string|null,
    *          rulesFile?: File|null, templateFile?: File|null, structureOverride?: object|null}} input
    */
   async function importFiles(input) {
@@ -75,6 +76,8 @@ export const useRubricsStore = defineStore("rubrics", () => {
     if (input.description) form.append("description", input.description);
     // D-026/V3-c：默认仅自己可见。扩大范围是发布时的显式动作，不在导入时顺手做掉。
     form.append("visibility", input.visibility || "private");
+    // 文档类型只在上传时定（上传后只读）；不传时后端按论文处理。
+    if (input.businessProfileKey) form.append("business_profile_key", input.businessProfileKey);
     if (input.rulesFile) form.append("rules_file", input.rulesFile);
     // 模板是可选的。不传时**不要**append 一个空值——后端按「有没有这个字段」
     // 判断要不要解析批注。
@@ -99,6 +102,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
   /**
    * 第一步确定性解析。只创建临时会话，确认前不得产生 Rubric。
    * @param {{name: string, version: string, description?: string, visibility?: string,
+   *          businessProfileKey?: string|null,
    *          rulesFile?: File|null, templateFile?: File|null, structureOverride?: object|null}} input
    */
   async function createImportSession(input) {
@@ -110,6 +114,8 @@ export const useRubricsStore = defineStore("rubrics", () => {
     form.append("version", input.version);
     if (input.description) form.append("description", input.description);
     form.append("visibility", input.visibility || "private");
+    // 文档类型只在上传时定（上传后只读）；不传时后端按论文处理。
+    if (input.businessProfileKey) form.append("business_profile_key", input.businessProfileKey);
     if (input.rulesFile) form.append("rules_file", input.rulesFile);
     if (input.templateFile) form.append("template_file", input.templateFile);
     if (input.structureOverride) form.append("structure_override", JSON.stringify(input.structureOverride));

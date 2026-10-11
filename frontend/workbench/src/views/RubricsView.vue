@@ -14,6 +14,7 @@ import SourceReviewPanel from '@/components/SourceReviewPanel.vue';
 import TableRecognitionPanel from '@/components/TableRecognitionPanel.vue';
 import RubricImportWorkspace from "@/components/RubricImportWorkspace.vue";
 import { importFilesError, stepOneGate } from "@/lib/parse-coverage.js";
+import { documentTypeLabel, rememberDocumentType, rememberedDocumentType } from "@/lib/document-types.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
 import { useSessionStore } from "@/stores/session.js";
 import { draftRows, rowKey } from "@/lib/ai-draft.js";
@@ -39,7 +40,7 @@ const session = useSessionStore();
 const importOpen = ref(false);
 const importBusy = ref(false);
 const importError = ref(null);
-const importForm = ref({ name: "", version: "v1.0", description: "" });
+const importForm = ref({ name: "", version: "v1.0", description: "", business_profile_key: rememberedDocumentType() });
 const rulesFile = ref(null);
 const templateFile = ref(null);
 const sourcePreview = ref(null);
@@ -54,6 +55,7 @@ const initialImport = computed(() => ({ ...importForm.value, total_score: 0, cri
 const stepOneSession = computed(() => ({
   ...sourceWorkspace.value,
   ...editForm.value,
+  business_profile_key: current.value?.business_profile_key ?? null,
   criteria: (editForm.value?.criteria || []).map(item => ({
     ...(sourceWorkspace.value?.criteria || []).find(source => source.code === item.code),
     ...item,
@@ -71,7 +73,7 @@ function beginImport() {
   sourcePreview.value = null;
   rulesFile.value = null;
   templateFile.value = null;
-  importForm.value = { name: "", version: "v1.0", description: "" };
+  importForm.value = { name: "", version: "v1.0", description: "", business_profile_key: rememberedDocumentType() };
 }
 
 function updateFirstStep(changes) {
@@ -221,10 +223,12 @@ async function submitImport(structureOverride = null) {
       name: importForm.value.name,
       version: importForm.value.version,
       description: importForm.value.description,
+      businessProfileKey: importForm.value.business_profile_key,
       rulesFile: rulesFile.value,
       templateFile: templateFile.value,
       structureOverride,
     });
+    rememberDocumentType(importForm.value.business_profile_key);
     importOpen.value = false;
     importStructure.value = { available: false, estimate: null, result: null };
     importStructureTracker.stop(); store.importStructureTask = null;
@@ -1086,6 +1090,7 @@ onUnmounted(() => {
         <div><h1 class="page-title">{{ importing ? store.activeImportSession?.name || importForm.name || '导入评分标准' : editForm?.name || current?.name || '评分标准' }}</h1>
           <p class="page-sub" v-if="importing"><span class="chip chip-warn">待确认</span> 上传文件并核对评分项，确认后进入评分规则。</p>
           <p v-else class="page-sub"><span v-if="current" class="chip chip-warn">{{ draft?.active_compilation?.version?.version || current.version }} · {{ { draft: '草稿', review: '审核中', published: '已发布' }[current.status] || current.status }}</span>
+            <span v-if="current?.business_profile_key" class="chip" data-test="rubric-document-type">{{ documentTypeLabel(current.business_profile_key) }}</span>
             {{ dirty ? '有未保存的修改 · 保存后重新校验' : step === 1 ? '核对评分标准文档与评分项，再配置评分规则。' : '条款确认即时保存；发布后版本不可变。' }}</p>
         </div>
         <div class="head-actions">

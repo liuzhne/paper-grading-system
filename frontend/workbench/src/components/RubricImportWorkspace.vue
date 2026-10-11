@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import { apiUrl } from "@/api/client";
+import { DOCUMENT_TYPES, documentTypeKey, documentTypeLabel } from "@/lib/document-types.js";
 
 const props = defineProps({
   session: { type: Object, required: true },
@@ -22,6 +23,7 @@ const emit = defineEmits([
   "confirm-reupload", "cancel-reupload", "close-source-preview", "save", "score-check",
 ]);
 
+const currentType = computed(() => documentTypeKey(props.session.business_profile_key));
 const activeTab = ref('table');
 const metadataOpen = ref(false);
 const checkedScores = ref(new Set());
@@ -261,6 +263,21 @@ function updateCriterion(index, field, event) {
         <label class="field"><span class="field-label">标准名称</span><input aria-label="标准名称" class="input" placeholder="填写评分标准名称" :value="session.name" :disabled="editingDisabled" @input="(initial || persisted) && updateMeta('name', $event)" @change="!initial && !persisted && updateMeta('name', $event)" /></label>
         <label v-if="!initial" class="field"><span class="field-label">满分</span><input aria-label="标准满分" class="input" type="number" min="1" step="1" :value="session.total_score" :disabled="editingDisabled" @change="updateMeta('total_score', $event)" /></label>
         <p v-else class="card-note">解析后按评分项计算满分，你可以核对并调整。</p>
+        <div v-if="initial" class="field" role="radiogroup" aria-label="文档类型">
+          <span class="field-label">文档类型</span>
+          <div class="type-options">
+            <button v-for="option in DOCUMENT_TYPES" :key="option.key" type="button" role="radio"
+              class="type-option" :class="{ selected: currentType === option.key }"
+              :aria-checked="currentType === option.key" :data-test="`document-type-${option.key}`"
+              :disabled="editingDisabled" @click="emit('update-session', { business_profile_key: option.key })">
+              <span>{{ option.label }}</span><small>{{ option.hint }}</small>
+            </button>
+          </div>
+          <span class="card-note">决定评分页与导出显示哪些信息。上传后不能再改，选错了取消重新导入。</span>
+        </div>
+        <p v-else-if="session.business_profile_key" class="field" data-test="document-type-readonly">
+          <span class="field-label">文档类型</span><span>{{ documentTypeLabel(session.business_profile_key) }}</span>
+        </p>
         <p v-if="initial" class="card-note">默认仅自己可见，发布时再选择分享范围。</p>
         <details class="more-info"><summary>更多信息</summary>
           <label class="field"><span class="field-label">版本</span><input aria-label="版本" class="input" :value="session.version" :disabled="editingDisabled" @input="(initial || persisted) && updateMeta('version', $event)" @change="!initial && !persisted && updateMeta('version', $event)" /></label>
@@ -325,4 +342,5 @@ function updateCriterion(index, field, event) {
 @media (max-width: 1100px) { .import-workspace { grid-template-columns: minmax(0, 1fr) 240px; gap: 16px; }.upload-card, .side-card { padding: 18px; }.file-row { padding: 14px; }.file-actions { gap: 6px; } }
 @media (max-width: 900px) { .import-workspace { grid-template-columns: minmax(0, 1fr); }.workspace-side { display: grid; grid-template-columns: minmax(0, 1fr); }.confirm-button, .cancel-button { width: 100%; } }
 @media (max-width: 640px) { .file-row, .criteria-head { align-items: flex-start; flex-direction: column; }.file-actions { width: 100%; flex-wrap: wrap; }.upload-card, .side-card { padding: 18px; } }
+.type-options { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }.type-option { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px 10px; border: 1px solid var(--border-input); border-radius: var(--radius); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }.type-option small { color: var(--text-muted); font-size: 11px; }.type-option.selected { border-color: var(--accent); background: var(--accent-selected); }.type-option:disabled { cursor: not-allowed; opacity: 0.6; }
 </style>

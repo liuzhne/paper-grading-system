@@ -7,6 +7,7 @@ import { compactTokens } from "@/lib/score-jobs.js";
 import { createBatch, loadActiveConnections, loadScoreEstimate, runUploadPrecheck, startScoringJob } from "@/lib/scoring-actions.js";
 import { requiresOwnConnection, uploadStatusLabel, useUploadStore } from "@/stores/upload.js";
 import { useSessionStore } from "@/stores/session.js";
+import { documentTypeKey, documentTypeLabel, isGeneralDocument, isWorkbenchType } from "@/lib/document-types.js";
 
 const router = useRouter();
 const route = useRoute();
@@ -22,8 +23,13 @@ const estimate = ref(null);
 const busy = ref(false);
 
 /** 只有已发布的评分标准可用于评分——草稿列出但不可选。 */
-const publishable = computed(() => rubrics.value.filter((r) => r.status === "published"));
-const drafts = computed(() => rubrics.value.filter((r) => r.status !== "published"));
+const publishable = computed(() =>
+  rubrics.value.filter((r) => r.status === "published" && isWorkbenchType(r.business_profile_key)));
+// 未发布的，以及工作台评不了的类型（技术方案只走提交接口），都列出来但不可选。
+const drafts = computed(() =>
+  rubrics.value.filter((r) => r.status !== "published" || !isWorkbenchType(r.business_profile_key)));
+const selectedType = computed(() =>
+  documentTypeKey(publishable.value.find((r) => r.id === form.rubric_id)?.business_profile_key));
 
 const canCreate = computed(() => batchId.value || (form.name.trim() && form.rubric_id));
 // `connectionMissing` 定义在下方（与连接加载放在一起），这里只做组合。
@@ -254,14 +260,20 @@ onMounted(async () => {
             <span>
               <span class="rubric-name">{{ rubric.name }}</span>
               <span class="chip chip-ok rubric-chip">{{ rubric.version }} 已发布</span>
+              <span class="chip rubric-chip" data-test="rubric-type">{{ documentTypeLabel(rubric.business_profile_key) }}</span>
             </span>
           </label>
+          <p v-if="form.rubric_id" class="faint type-note" data-test="type-note">
+            {{ isGeneralDocument(selectedType)
+              ? "按通用文档处理：评分页显示文件名与标题，导出不含学号、学院。"
+              : "按毕业论文处理：评分页显示学号与姓名，导出沿用原有列。" }}
+          </p>
           <p v-if="!publishable.length" class="faint">当前组织还没有已发布的评分标准。</p>
 
           <div v-for="rubric in drafts" :key="rubric.id" class="rubric muted-rubric">
             <span class="rubric-name">{{ rubric.name }}</span>
             <span class="chip chip-warn rubric-chip">{{ rubric.version }} {{ rubric.status }}</span>
-            <span class="faint rubric-note">未发布，不可用于评分</span>
+            <span class="faint rubric-note">{{ rubric.status === "published" ? `${documentTypeLabel(rubric.business_profile_key)}只能通过提交接口评分` : "未发布，不可用于评分" }}</span>
           </div>
         </section>
 
@@ -526,6 +538,11 @@ onMounted(async () => {
 
 .rubric-note {
   margin-left: auto;
+  font-size: 12px;
+}
+
+.type-note {
+  margin: 8px 0 0;
   font-size: 12px;
 }
 

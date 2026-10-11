@@ -17,6 +17,8 @@ import { api, StaleContextError } from "@/api/client.js";
 export const useGradingStore = defineStore("grading", () => {
   const batchId = ref(null);
   const papers = ref([]);
+  /** 批次的文档类型：决定列表与顶栏显示学号还是文件名（通用文档评分改造方案 §3）。 */
+  const documentType = ref("thesis");
   const currentPaperId = ref(null);
   const currentRunId = ref(null);
   /** 当前 run 的篇章一致性与格式发现（中栏页签，设计稿「篇章结构 / 格式发现」）。 */
@@ -79,7 +81,16 @@ export const useGradingStore = defineStore("grading", () => {
     loading.value = true;
     error.value = null;
     try {
-      papers.value = (await api.get(`/papers?batch_id=${id}`)) || [];
+      const [paperList, batch] = await Promise.all([
+        api.get(`/papers?batch_id=${id}`),
+        // 只为显示用；读不到批次时按论文显示，不挡住评分工作区。
+        api.get(`/batches/${id}`).catch((err) => {
+          if (err instanceof StaleContextError) throw err;
+          return null;
+        }),
+      ]);
+      papers.value = paperList || [];
+      documentType.value = batch?.business_profile_key || "thesis";
       // 指定的材料必须真的在这个批次里。复核队列的「查看原文」链接可能指向一份
       // 已被移出批次的材料，直接选中它会让列表**一项都不高亮**——界面看起来正常，
       // 只是没有任何一行是选中的，用户无从判断自己在看什么。
@@ -186,6 +197,7 @@ export const useGradingStore = defineStore("grading", () => {
     submitRunReview,
     batchId,
     papers,
+    documentType,
     currentPaperId,
     currentPaper,
     currentRunId,
