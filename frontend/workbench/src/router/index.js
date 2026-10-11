@@ -34,6 +34,13 @@ const routes = [
     component: () => import("@/views/ResetPasswordView.vue"),
     meta: { public: true, title: "重置密码" },
   },
+  // 评分助手自带三栏布局（会话列表 · 对话 · 工作区），不套工作台外壳。
+  {
+    path: "/assistant/:conversationId?",
+    name: "assistant",
+    component: () => import("@/views/AssistantView.vue"),
+    meta: { title: "评分助手", nav: "assistant" },
+  },
   {
     path: "/",
     component: () => import("@/layouts/AppShell.vue"),

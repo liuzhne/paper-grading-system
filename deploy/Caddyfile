@@ -9,7 +9,9 @@
     header {
         Strict-Transport-Security "max-age=31536000"
         X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
+        # 评分助手的工作区以同源 iframe 嵌入现有页面；跨站嵌入仍被禁止。
+        X-Frame-Options "SAMEORIGIN"
+        Content-Security-Policy "frame-ancestors 'self'"
         Referrer-Policy "same-origin"
     }
 

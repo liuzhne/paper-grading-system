@@ -85,12 +85,13 @@ export const useSessionStore = defineStore("session", () => {
    * 动态 import 避开循环依赖：那几个 store 反过来会用到 session。
    */
   async function clearOrganizationScopedStores() {
-    const [batches, grading, review, upload, rubrics] = await Promise.all([
+    const [batches, grading, review, upload, rubrics, assistant] = await Promise.all([
       import("@/stores/batches.js"),
       import("@/stores/grading.js"),
       import("@/stores/review.js"),
       import("@/stores/upload.js"),
       import("@/stores/rubrics.js"),
+      import("@/stores/assistant.js"),
     ]);
     // 先停上传调度再清：继续上传会把文件写进旧组织的批次。
     upload.useUploadStore().cancel();
@@ -99,6 +100,8 @@ export const useSessionStore = defineStore("session", () => {
     review.useReviewStore().reset();
     upload.useUploadStore().reset();
     rubrics.useRubricsStore().reset();
+    // 助手的会话、轮询与内存中的待评文件都属于旧组织。
+    assistant.useAssistantStore().reset();
   }
 
   async function logout() {

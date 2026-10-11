@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch } from "vue";
+import { useRoute } from "vue-router";
 
 import { classifyInBatches } from "@/lib/classification-batches.js";
 import { api, currentContextVersion, StaleContextError } from "@/api/client.js";
@@ -593,7 +594,8 @@ function visibilityLabel(value) {
 async function loadRubrics(preferredId = null) {
   try {
     rubrics.value = (await api.get("/rubrics")) || [];
-    selected.value = preferredId ?? selected.value ?? rubrics.value[0]?.id ?? null;
+    const preferred = rubrics.value.some((item) => item.id === preferredId) ? preferredId : null;
+    selected.value = preferred ?? selected.value ?? rubrics.value[0]?.id ?? null;
   } catch (err) {
     if (!(err instanceof StaleContextError)) error.value = err?.message || "加载失败";
   }
@@ -910,7 +912,20 @@ watch(() => session.organizationId, async (next, previous) => {
   draft.value = null; editForm.value = null; store.reset();
   await loadRubrics(); await loadConnections();
 });
-onMounted(async () => { window.addEventListener("beforeunload", beforeUnload); await loadRubrics(); await loadConnections(); });
+// `?rubric=` 定位到某一份：评分助手的工作区导入草稿后用它直接打开这份标准。
+const route = useRoute();
+onMounted(async () => {
+  window.addEventListener("beforeunload", beforeUnload);
+  const requested = typeof route.query.rubric === "string" ? route.query.rubric : null;
+  await loadRubrics(requested);
+  await loadConnections();
+  // `?import_session=` 打开助手里刚上传、尚未确认的导入会话，由用户在这里核对并确认。
+  const session = typeof route.query.import_session === "string" ? route.query.import_session : null;
+  if (session) {
+    try { await store.loadImportSession(session); }
+    catch (err) { importError.value = err instanceof Error ? err.message : "无法打开导入草稿"; }
+  }
+});
 onUnmounted(() => { loadSequence += 1; window.removeEventListener("beforeunload", beforeUnload); });
 </script>
 
