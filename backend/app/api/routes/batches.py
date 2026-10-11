@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from backend.app.services.ai_connections import active_connection_id
 
+from backend.app.api import actions
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
@@ -63,136 +65,24 @@ router = APIRouter(prefix="/batches", tags=["batches"])
 _TODO_STAGES = ("draft", "parsing", "scoring", "scored", "scored_with_errors")
 
 
-def _visible_batch(db: Session, batch_id: str, principal: CurrentPrincipal) -> GradingBatch:
-    batch = db.get(GradingBatch, batch_id)
-    if batch is None or (
-        principal.organization_id is not None and batch.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="batch not found")
-    return batch
+_visible_batch = guards.visible_batch
 
 
-def _visible_rubric(db: Session, rubric_id: str, principal: CurrentPrincipal) -> Rubric:
-    rubric = db.get(Rubric, rubric_id)
-    if rubric is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
-    if not auth_active() or principal.platform_role == "platform_admin":
-        return rubric
-    if rubric.visibility == "system":
-        return rubric
-    if rubric.visibility == "organization" and rubric.organization_id == principal.organization_id:
-        return rubric
-    if rubric.visibility == "private" and rubric.owner_id == principal.user_id:
-        return rubric
-    raise HTTPException(status_code=404, detail="rubric not found")
+_visible_rubric = guards.visible_rubric
 
 
-def _is_frozen_version(db: Session, rubric: Rubric, version: RubricVersion) -> bool:
-    compilation = db.get(RubricCompilation, version.compilation_id)
-    return bool(
-        rubric.status == "published"
-        and rubric.published_at is not None
-        and version.rubric_id == rubric.id
-        and compilation is not None
-        and compilation.rubric_id == rubric.id
-        and compilation.status == "validated"
-        and compilation.reviewed_by is not None
-        and compilation.reviewed_at is not None
-        and compilation.published_at is not None
-        and compilation.reviewed_at == compilation.published_at
-        and compilation.published_at == rubric.published_at
-        and compilation.final_version_hash == version.version_hash
-    )
+_is_frozen_version = actions.is_frozen_version
 
 
-def _resolve_batch_version(
-    db: Session,
-    rubric: Rubric,
-    requested_version_id: str | None,
-) -> RubricVersion | None:
-    if requested_version_id is not None:
-        version = db.get(RubricVersion, requested_version_id)
-        if version is None:
-            raise HTTPException(status_code=400, detail="rubric version not found")
-        if version.rubric_id != rubric.id:
-            raise HTTPException(
-                status_code=400,
-                detail="rubric version does not belong to selected rubric",
-            )
-        if not _is_frozen_version(db, rubric, version):
-            raise HTTPException(
-                status_code=400,
-                detail="rubric version is not a consistently frozen published version",
-            )
-        return version
-
-    formal_versions = db.scalars(
-        select(RubricVersion).where(RubricVersion.rubric_id == rubric.id)
-    ).all()
-    if not formal_versions:
-        return None
-    eligible = [
-        version
-        for version in formal_versions
-        if _is_frozen_version(db, rubric, version)
-    ]
-    if len(eligible) == 1:
-        return eligible[0]
-    if not eligible:
-        raise HTTPException(
-            status_code=400,
-            detail="formal rubric has no consistently frozen published version",
-        )
-    raise HTTPException(
-        status_code=400,
-        detail="multiple frozen versions exist; rubric_version_id is required",
-    )
+_resolve_batch_version = actions.resolve_batch_version
 
 
 @router.post("", response_model=BatchRead)
 def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: str = Depends(current_user_id), principal: CurrentPrincipal = Depends(current_principal)):
     ensure_dev_user(db)
     require_organization_role(principal, "org_admin", "teacher")
-    rubric = _visible_rubric(db, payload.rubric_id, principal)
-    rubric_version = _resolve_batch_version(
-        db, rubric, payload.rubric_version_id
-    )
-    connection_id = payload.ai_connection_id or active_connection_id(
-        db, owner_id=user_id, organization_id=principal.organization_id or "",
-    )
-    connection_snapshot = None
-    if connection_id is not None:
-        try:
-            connection_snapshot = connection_snapshot_for_owner(
-                db,
-                connection_id=connection_id,
-                owner_id=user_id,
-                organization_id=principal.organization_id or "",
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="AI connection not found") from exc
-    batch = GradingBatch(
-        name=payload.name,
-        department=payload.department,
-        major=payload.major,
-        academic_year=payload.academic_year,
-        paper_type=payload.paper_type,
-        rubric_id=payload.rubric_id,
-        rubric_version_id=(rubric_version.id if rubric_version else None),
-        ai_connection_id=connection_id,
-        ai_connection_key_version=(
-            connection_snapshot["key_version"] if connection_snapshot else None
-        ),
-        ai_connection_snapshot=connection_snapshot,
-        status="draft",
-        created_by=user_id,
-        owner_id=user_id,
-        organization_id=principal.organization_id,
-    )
-    db.add(batch)
-    db.commit()
-    db.refresh(batch)
-    return batch
+    # 与评分助手共用同一个动作（对话评分助手方案 T4）。
+    return actions.create_batch(db, principal, user_id, payload)
 
 
 def _batch_with_rubric(batch: GradingBatch, name, version) -> dict:
@@ -589,23 +479,7 @@ def batch_upload_precheck(
     _visible_batch(db, batch_id, principal)
     # 返回逐份材料的解析诊断（含文件名）；与批次其它写路径同一门控。
     require_organization_role(principal, "org_admin", "teacher")
-    requested = list(dict.fromkeys(payload.paper_ids))
-    papers = db.scalars(
-        select(Paper).where(Paper.id.in_(requested)).order_by(Paper.created_at, Paper.id)
-    ).all()
-    found = {paper.id for paper in papers}
-    if set(requested) - found or any(paper.batch_id != batch_id for paper in papers):
-        raise HTTPException(status_code=404, detail="paper not found in batch")
-
-    result = precheck.build_precheck(papers)
-    # 预计耗时（决策 12）。样本不足时返回「暂无估计」而不是编一个分钟数；
-    # §5-D 明写它只进展示，不能用于评分租约或超时判定。
-    result["duration_estimate"] = duration.estimate_scoring_duration(
-        db,
-        organization_id=principal.organization_id,
-        item_count=len(papers),
-    )
-    return result
+    return actions.upload_precheck(db, principal, batch_id, payload.paper_ids)
 
 
 @router.get("/{batch_id}/export-precheck")

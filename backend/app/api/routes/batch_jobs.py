@@ -9,6 +9,8 @@ from fastapi import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
+from backend.app.api import actions
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
@@ -49,28 +51,10 @@ async def _dispatch_or_503(job):
         ) from exc
 
 
-def _batch_or_404(
-    db: Session,
-    batch_id: str,
-    principal: CurrentPrincipal,
-) -> GradingBatch:
-    batch = db.get(GradingBatch, batch_id)
-    if batch is None or (
-        principal.organization_id is not None
-        and batch.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="batch not found")
-    return batch
+_batch_or_404 = guards.visible_batch
 
 
-def _job_or_404(db, job_id, principal: CurrentPrincipal):
-    job = get_batch_scoring_job(db, job_id)
-    if job is None or (
-        principal.organization_id is not None
-        and job.batch.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="batch scoring job not found")
-    return job
+_job_or_404 = guards.visible_job
 
 
 @router.get(
@@ -121,27 +105,10 @@ async def create_job(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
-    try:
-        _batch_or_404(db, batch_id, principal)
-        require_organization_role(principal, "org_admin", "teacher")
-        # An active job is returned idempotently below; only new work is
-        # checked against the configured input-token caps.
-        if not _has_active_job(db, batch_id):
-            assert_within_token_caps(db, batch_id, rescore=payload.rescore)
-        job, created = create_batch_scoring_job(
-            db,
-            batch_id=batch_id,
-            rescore=payload.rescore,
-            max_workers=payload.max_workers,
-            observation_policy=payload.observation_policy,
-            actor_id=user_id,
-        )
-    except TokenCapExceededError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        detail = str(exc)
-        status = 404 if detail == "batch not found" else 409 if "active" in detail else 400
-        raise HTTPException(status_code=status, detail=detail) from exc
+    _batch_or_404(db, batch_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    # 与评分助手共用同一个动作（对话评分助手方案 T4）；派发在这里异步完成。
+    job, created = actions.start_scoring_job(db, principal, user_id, batch_id, payload)
     await _dispatch_or_503(job)
     response.status_code = 201 if created else 200
     return job
@@ -184,12 +151,9 @@ def cancel_job(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    try:
-        _job_or_404(db, job_id, principal)
-        require_organization_role(principal, "org_admin", "teacher")
-        return cancel_batch_scoring_job(db, job_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _job_or_404(db, job_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    return actions.cancel_scoring_job(db, principal, job_id)
 
 
 @router.post(
@@ -201,29 +165,9 @@ async def retry_job(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    try:
-        existing = _job_or_404(db, job_id, principal)
-        require_organization_role(principal, "org_admin", "teacher")
-        retry_paper_ids = [
-            item.paper_id
-            for item in existing.items
-            if item.status in RETRYABLE_ITEM_STATUSES
-        ]
-        if retry_paper_ids:
-            # Retried papers reuse the decision ledger, so this usually only
-            # counts the rules that failed.
-            assert_within_token_caps(
-                db,
-                existing.grading_batch_id,
-                rescore=existing.rescore,
-                paper_ids=retry_paper_ids,
-            )
-        job = retry_batch_scoring_job(db, job_id)
-    except TokenCapExceededError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        status = 404 if "not found" in str(exc) else 409
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    _job_or_404(db, job_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    job = actions.retry_scoring_job(db, principal, job_id)
     await _dispatch_or_503(job)
     return job
 

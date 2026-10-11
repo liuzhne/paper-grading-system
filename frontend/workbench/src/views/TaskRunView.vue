@@ -4,6 +4,7 @@ import { RouterLink, useRoute } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { ACTIVE_JOB_STATUSES, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
+import { cancelScoringJob, canRetryJob, retryScoringJob } from "@/lib/scoring-actions.js";
 
 const route = useRoute();
 const batchId = String(route.params.batchId);
@@ -18,7 +19,7 @@ let timer = null;
 
 const paperById = computed(() => Object.fromEntries((summary.value?.papers || []).map((paper) => [paper.paper_id, paper])));
 const canCancel = computed(() => ACTIVE_JOB_STATUSES.has(job.value?.status));
-const canRetry = computed(() => ["completed_with_errors", "failed", "canceled"].includes(job.value?.status) && job.value?.items?.some((item) => ["failed", "canceled", "running"].includes(item.status)));
+const canRetry = computed(() => canRetryJob(job.value));
 const complete = computed(() => job.value?.status === "completed");
 
 function formatTime(value) {
@@ -56,9 +57,10 @@ async function act(action) {
   busy.value = true;
   feedback.value = null;
   try {
+    // 与评分助手共用同一个动作（lib/scoring-actions.js）。
     job.value = action === "cancel"
-      ? await api.post(`/batch-scoring-jobs/${job.value.id}/cancel`, {})
-      : await api.post(`/batch-scoring-jobs/${job.value.id}/retry`, {});
+      ? await cancelScoringJob(job.value.id)
+      : await retryScoringJob(job.value.id);
     feedback.value = action === "cancel" ? "已请求取消，正在完成已开始的材料。" : "失败项已重新排队。";
     await refresh({ quiet: true });
   } catch (err) {

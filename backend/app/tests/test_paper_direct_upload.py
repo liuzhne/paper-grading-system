@@ -359,3 +359,47 @@ def test_web_uses_file_level_direct_upload_tus_fallback_and_visible_recovery():
     assert 'api(`/papers/${target.dataset.deleteFailedUpload}`, { method: "DELETE" })' in script
     assert "删除这条失败上传记录" in script
     assert 'api("/papers/bulk-upload"' not in script
+
+
+def _failed_local_paper(client, batch_id, name="扫描件.pdf"):
+    path = Path(settings.STORAGE_ROOT) / "papers" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"%PDF-1.4 scanned")
+    with client.session_factory() as db:
+        paper = Paper(
+            batch_id=batch_id, file_name=name, file_path=str(path), status="failed",
+            error_message="scanned PDFs require OCR",
+        )
+        db.add(paper)
+        db.commit()
+        return paper.id, path
+
+
+def test_failed_parse_paper_that_was_never_scored_can_be_removed(client):
+    batch_id = _make_batch(client)
+    paper_id, path = _failed_local_paper(client, batch_id)
+
+    deleted = client.delete(f"/api/papers/{paper_id}")
+
+    assert deleted.status_code == 204, deleted.text
+    assert not path.exists()
+    with client.session_factory() as db:
+        assert db.get(Paper, paper_id) is None
+        log = db.scalars(select(AuditLog).where(AuditLog.event_type == "paper.failed_upload_deleted")).one()
+        assert log.event_metadata["status"] == "failed"
+
+
+def test_failed_parse_paper_with_parsed_content_cannot_be_removed(client):
+    from backend.app.db.models import PaperChunk
+
+    batch_id = _make_batch(client)
+    paper_id, path = _failed_local_paper(client, batch_id, name="曾经解析过.pdf")
+    with client.session_factory() as db:
+        db.add(PaperChunk(paper_id=paper_id, text="正文"))
+        db.commit()
+
+    rejected = client.delete(f"/api/papers/{paper_id}")
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "PAPER_DELETE_STATE_INVALID"
+    assert path.exists()

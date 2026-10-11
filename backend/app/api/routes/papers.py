@@ -13,13 +13,17 @@ from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from backend.app.api import actions
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import require_organization_role
 from backend.app.core.config import settings
+from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import Paper
 from backend.app.db.models import PaperChunk
+from backend.app.db.models import ScoringRun
 from backend.app.db.models import utcnow
 from backend.app.db.session import get_db
 from backend.app.schemas.paper import CompleteDirectUpload
@@ -76,22 +80,10 @@ def _paper_problem(
     )
 
 
-def _visible_paper(db: Session, paper_id: str, principal: CurrentPrincipal) -> Paper:
-    paper = db.get(Paper, paper_id)
-    if paper is None or (
-        principal.organization_id is not None and paper.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="paper not found")
-    return paper
+_visible_paper = guards.visible_paper
 
 
-def _visible_batch(db: Session, batch_id: str, principal: CurrentPrincipal) -> GradingBatch:
-    batch = db.get(GradingBatch, batch_id)
-    if batch is None or (
-        principal.organization_id is not None and batch.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="batch not found")
-    return batch
+_visible_batch = guards.visible_batch
 
 
 @router.get("", response_model=list[PaperRead])
@@ -358,44 +350,17 @@ def delete_incomplete_upload(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    """Discard a direct-upload reservation that never completed archival."""
+    """Discard a failed upload, or a material that failed to parse and was never scored.
 
-    paper = _visible_paper(db, paper_id, principal)
+    解析失败的材料（例如扫描件）会让预检一直阻断，整批无法开始评分；以前只能
+    放弃整个任务重建。现在允许移除它——前提是它从未进入评分：没有评分记录、
+    没有批任务条目、没有正文分块。已解析或已评分的材料仍然不能删。
+    """
+
+    _visible_paper(db, paper_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
-    if paper.status != "uploading":
-        _paper_problem(
-            409,
-            "PAPER_DELETE_STATE_INVALID",
-            "仅能删除尚未完成的失败上传记录。",
-            "已归档或已解析的材料请保留；如需移除，请使用对应的数据管理流程。",
-            retryable=False,
-        )
-
-    if paper.file_path.startswith("supabase://"):
-        try:
-            delete_private_object(paper.file_path)
-        except Exception as exc:
-            # Historical Unicode keys were rejected before an object could be
-            # created. Treat both that case and an already-missing object as a
-            # successful cleanup, while keeping the row on genuine outages.
-            if not (artifact_not_found(exc) or artifact_key_invalid(exc)):
-                _paper_problem(
-                    502,
-                    "FAILED_UPLOAD_CLEANUP_FAILED",
-                    "暂时无法清理私有存储中的失败上传。",
-                    "请稍后重试删除；当前记录和文件引用均已保留。",
-                    retryable=True,
-                )
-
-    audit(
-        db,
-        "paper.failed_upload_deleted",
-        actor_id=principal.user_id,
-        organization_id=paper.organization_id,
-        metadata={"paper_id": paper.id, "batch_id": paper.batch_id},
-    )
-    db.delete(paper)
-    db.commit()
+    # 与评分助手共用同一个动作（对话评分助手方案 T4）。
+    actions.delete_paper(db, principal, paper_id)
     return Response(status_code=204)
 
 

@@ -63,6 +63,7 @@ from backend.app.schemas.rubric import RubricAIRuleDraftRequest
 from backend.app.schemas.rubric import RubricExecutionDraftRead
 from backend.app.schemas.rubric import TemplateLinkReviewRequest
 from backend.app.schemas.rubric import RubricUpdate
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
@@ -149,51 +150,11 @@ def _visible_rubric(
     rubric_id: str,
     principal: CurrentPrincipal,
 ) -> Rubric:
-    rubric = _load_rubric(db, rubric_id)
-    if rubric is None:
-        raise HTTPException(status_code=404, detail="rubric not found")
-    allowed = (
-        not auth_active()
-        or principal.platform_role == "platform_admin"
-        or (
-            rubric.visibility == "system"
-            or rubric.visibility == "organization" and rubric.organization_id == principal.organization_id
-            or rubric.visibility == "private" and rubric.owner_id == principal.user_id
-        )
-    )
-    if not allowed:
-        raise HTTPException(status_code=404, detail="rubric not found")
-    return rubric
+    # 可见性口径在共享守卫里（对话评分助手方案 T4）；这里只换成预加载评分项的读取方式。
+    return guards.visible_rubric(db, rubric_id, principal, loader=_load_rubric)
 
 
-def _visible_import_session(
-    db: Session,
-    session_id: str,
-    principal: CurrentPrincipal,
-    *,
-    for_update: bool = False,
-) -> RubricImportSession:
-    query = select(RubricImportSession).where(RubricImportSession.id == session_id)
-    if for_update:
-        query = query.with_for_update()
-    row = db.scalar(query)
-    if row is None:
-        raise HTTPException(status_code=404, detail="rubric import session not found")
-    allowed = (
-        not auth_active()
-        or principal.platform_role == "platform_admin"
-        or row.owner_id == principal.user_id
-        or row.visibility == "organization"
-        and row.organization_id == principal.organization_id
-    )
-    if not allowed:
-        raise HTTPException(status_code=404, detail="rubric import session not found")
-    if row.status == "draft" and row.expires_at <= datetime.now(timezone.utc).replace(tzinfo=None):
-        row.status = "expired"
-        row.state_version += 1
-        db.commit()
-        raise HTTPException(status_code=410, detail="rubric import session has expired")
-    return row
+_visible_import_session = guards.visible_import_session
 
 
 @router.post("", response_model=RubricRead)
@@ -243,20 +204,9 @@ def list_rubrics(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     query = select(Rubric).options(selectinload(Rubric.criteria))
-    if auth_active() and principal.platform_role != "platform_admin":
-        query = query.where(
-            or_(
-                Rubric.visibility == "system",
-                and_(
-                    Rubric.visibility == "organization",
-                    Rubric.organization_id == principal.organization_id,
-                ),
-                and_(
-                    Rubric.visibility == "private",
-                    Rubric.owner_id == principal.user_id,
-                ),
-            )
-        )
+    visibility = guards.visible_rubrics_filter(principal)
+    if visibility is not None:
+        query = query.where(visibility)
     return db.scalars(query.order_by(Rubric.created_at.desc())).all()
 
 
