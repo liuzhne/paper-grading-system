@@ -1253,3 +1253,31 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 相关改动：`DELETE /papers/{id}` 允许删除解析失败且从未评分的材料；能力表新增 `abilities.use_assistant`；`RubricsView` 支持 `?rubric=` 与 `?import_session=`；安全头由 `X-Frame-Options: DENY` 改为 `SAMEORIGIN` 并加 `frame-ancestors 'self'`。
 
 维护记录：2026-10-11 · 评分助手一期：LangGraph 后端编排（流程图 + 查询图）、自写状态存储、共享守卫与共享动作、前端薄客户端；head 升为 `0038_assistant_conversations`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
+
+### 2026-10-11 通用文档评分（工作台按文档类型评分）
+
+方案见 [docs/通用文档评分改造方案.md](docs/通用文档评分改造方案.md)。工作台与评分助手除毕业论文外，可以评任意类型的文档。**不迁移**：类型只存在评分标准版本表（`rubric_versions.business_profile_key`，已进内容哈希），其余位置都由它推出。
+
+数据流：
+
+```
+导入表单 business_profile_key（thesis / general_document，上传后只读）
+  → prepared graph → rubric_versions.business_profile_key
+  → 建批次锁定版本（actions.create_batch 拒绝工作台评不了的类型）
+  → registry.profile_key_for_batch(batch) / profile_key_for_version(version)
+  → registry.get_workbench_profile(key)
+      ├─ engine._core_request_context：按锁定版本取 Profile（论文仍直接构造 ThesisProfile）
+      ├─ papers/ingestion：通用文档不从封面填学号、姓名、学院
+      ├─ spreadsheet/excel、writer：身份列由 Profile 声明
+      └─ report/generator：标题与身份行由 Profile 声明
+```
+
+模块边界：
+- `scoring/profiles/general_document.py`：`GeneralDocumentProfile` 继承 `ThesisProfile`，只替换领域说明（`document`）、送入提示词的元数据（只有标题）、检查器集合（去掉研究问题与结论呼应）、提示词版本、身份列与报告文案，并关闭模型语义一致性（`semantic_coherence = False`）。论文 Profile 为此把这几项改为类属性，取值不变。
+- `scoring/profiles/registry.py`：`WORKBENCH_PROFILE_KEYS = ("thesis", "general_document")`、`LEGACY_PROFILE_KEY`（未版本化的旧标准与旧批次按论文处理）、`get_workbench_profile`。技术方案仍只走 v2 提交接口。
+- `rubrics/executable_validator.py`：发布校验登记 `general_document`；复用的 6 个论文检查器与 `thesis.legacy_required_fields.v1` 的 `supported_profiles` 加入它。
+- 接口（全部追加）：`RubricRead.business_profile_key`（`Rubric` 上的只读关联子查询，默认延迟加载，列表 `undefer`）、`RubricImportSessionRead.business_profile_key`、`BatchRead.business_profile_key`（`GradingBatch` 上的只读属性，列表用外连接一次带回）、复核队列条目 `file_name`。
+- 前端 `lib/document-types.js`：类型名称、身份字段显示规则、上次选择的记忆；导入页与助手导入卡片选择类型，新建任务页显示类型并过滤，评分页、复核页按批次类型显示学号或文件名。
+- 评分助手：开评确认说明类型；通用文档按标题称呼和定位材料；意图识别提示词改为“文档评分系统”，`ASSISTANT_PROMPT_VERSION` 升为 `assistant-intent@2`。
+
+维护记录：2026-10-11 · 通用文档评分：新增 `general_document` Profile 与工作台类型流转（导入、建批次、评分、解析、导出、报告、评分助手）；无迁移，head 仍为 `0038_assistant_conversations`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。

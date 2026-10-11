@@ -94,7 +94,7 @@ uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx [-
 - 静态 Web 的“Rubric 严格审核与发布”面板与 CLI 共用上述 M4 lifecycle：导入后展示 warnings/template_summary 和 blocker，逐条完成规则/模板映射签核，并显式绑定活动 `compilation_id` 发布。
 - 正式标准的 batch 会锁定唯一已发布 `rubric_version_id`，评分时必然使用 AtomicRule Core；全局 `SCORING_ENGINE_MODE` 在 M8 前仍默认 `legacy`，只影响未版本化兼容路径。
 - 显式 `--profile` 走 v2 Submission→不可变 DocumentSnapshot→Core，Profile key/version 必须与数据库中唯一已发布 RubricVersion 的关联一致；用户在生产中建立关联，CLI 不猜测、不硬编码非论文默认。
-- 内置生产 Profile 包括 `thesis / thesis-legacy-profile@1` 与 `technical_proposal / technical-proposal-profile@1`。技术方案元数据严格为 `proposal_id`、`vendor_name`、`project_name`，其章节/checker/等级/扣分仍由用户审核发布的 RubricVersion 和 ScoringPolicy 绑定，不随代码预置业务评分数据。
+- 内置生产 Profile 包括 `thesis / thesis-legacy-profile@1`、`general_document / general-document-profile@1` 与 `technical_proposal / technical-proposal-profile@1`。工作台与评分助手评毕业论文和通用文档，类型在导入评分标准时选择（见 `docs/通用文档评分改造方案.md`）；通用文档复用论文 Profile 的解析、证据与检查器，身份字段为文件名与标题。技术方案元数据严格为 `proposal_id`、`vendor_name`、`project_name`，其章节/checker/等级/扣分仍由用户审核发布的 RubricVersion 和 ScoringPolicy 绑定，不随代码预置业务评分数据。
 - `pgs eval` 对正式标准自动锁定唯一一致发布的 RubricVersion，按其 ScoringPolicy 中的 GradeScale、总分和舍入规则计算动态 QWK 档位，并输出 Profile/Policy/GradeScale 可复现身份。
 - `pgs core-cutover-audit` 对活跃 GradingBatch/EvaluationBatch 稳定去重，重算 published provenance hash、加载 snapshot 并用生产 registry 构建 plan；legacy 只接受显式 direct/composite compatibility。报告通过只代表 Rubric inventory scope，`production_default_switch_authorized` 始终为 false，不能替代 GATE-03 与维护者发布批准。
 - 闭环：`score` → 拿 run_id（或 `pgs runs`）→ `pgs show <run_id>` 看逐项明细 → `pgs review` 改分/提交（写 ReviewLog、重算总分）→ `pgs report` 出报告。

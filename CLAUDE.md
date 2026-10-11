@@ -2,7 +2,7 @@
 
 > **⚠️ 最重要（MUST，优先级最高）：所有回答必须使用简体中文。** 无论提问用何种语言、涉及代码注释或技术术语，对话回复一律以简体中文输出。
 
-模板驱动的通用评分内核，兼容毕业论文评分并支持非论文 Profile。后端 FastAPI + SQLAlchemy + Alembic；默认 Mock LLM，配 env 切真实模型。当前生产 Profile 为 `thesis / thesis-legacy-profile@1` 与 `technical_proposal / technical-proposal-profile@1`。
+模板驱动的通用评分内核，兼容毕业论文评分并支持非论文 Profile。后端 FastAPI + SQLAlchemy + Alembic；默认 Mock LLM，配 env 切真实模型。当前生产 Profile 为 `thesis / thesis-legacy-profile@1`、`general_document / general-document-profile@1` 与 `technical_proposal / technical-proposal-profile@1`（工作台与评分助手评前两种，类型在导入评分标准时选择，见 `docs/通用文档评分改造方案.md`；技术方案只走 v2 接口）。
 
 生产部署、Supabase、鉴权、发布核验与安全待办见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md)；该文件不得记录任何密钥值。
 
