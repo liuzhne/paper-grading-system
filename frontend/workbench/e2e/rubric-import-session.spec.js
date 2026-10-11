@@ -107,3 +107,34 @@ test("确定性解析停在临时会话；换算、原文预览和重新上传�
   await formal.getByRole("button", { name: "确认替换草稿" }).click();
   expect((await successor).ok()).toBeTruthy();
 });
+
+test("导入时选择文档类型：上传后只读，下次默认上次的选择", async ({ page }) => {
+  await page.goto("/workbench/rubrics");
+  await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
+  const panel = page.locator(".import-panel");
+  const types = panel.getByRole("radiogroup", { name: "文档类型" });
+  await expect(types.getByRole("radio", { name: /毕业论文/ })).toHaveAttribute("aria-checked", "true");
+  await types.getByRole("radio", { name: /通用文档/ }).click();
+  await expect(types.getByRole("radio", { name: /通用文档/ })).toHaveAttribute("aria-checked", "true");
+
+  await panel.getByLabel("标准名称", { exact: true }).fill(`通用文档标准-${Date.now()}`);
+  await panel.getByLabel("评分表", { exact: true }).setInputFiles({
+    name: "rules.xlsx",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    buffer: workbook([60, 40]),
+  });
+  const parsed = page.waitForResponse((response) => response.url().endsWith("/rubrics/import-sessions") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "解析文件", exact: true }).click();
+  const created = await parsed;
+  expect(created.ok()).toBeTruthy();
+  expect((await created.json()).business_profile_key).toBe("general_document");
+
+  const workspace = page.locator("[data-test=rubric-import-workspace]");
+  await expect(workspace.locator("[data-test=document-type-readonly]")).toContainText("通用文档");
+  await expect(workspace.getByRole("radiogroup", { name: "文档类型" })).toHaveCount(0);
+
+  await page.goto("/workbench/rubrics");
+  await page.getByRole("button", { name: "新建评分标准", exact: true }).click();
+  await expect(page.locator(".import-panel").getByRole("radiogroup", { name: "文档类型" })
+    .getByRole("radio", { name: /通用文档/ })).toHaveAttribute("aria-checked", "true");
+});

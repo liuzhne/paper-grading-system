@@ -19,6 +19,15 @@ describe("助手展示用纯函数", () => {
     expect(list.map((item) => item.id)).toEqual(["new", "old"]);
   });
 
+  it("候选不列工作台评不了的类型（技术方案只走提交接口）", () => {
+    const list = publishedRubrics([
+      { id: "doc", status: "published", business_profile_key: "general_document", published_at: "2026-10-02T00:00:00" },
+      { id: "tp", status: "published", business_profile_key: "technical_proposal", published_at: "2026-10-03T00:00:00" },
+      { id: "legacy", status: "published", business_profile_key: null, published_at: "2026-10-01T00:00:00" },
+    ]);
+    expect(list.map((item) => item.id)).toEqual(["doc", "legacy"]);
+  });
+
   it("汇总按上传时间倒序返回，序号按上传顺序数", () => {
     expect(papersInUploadOrder([{ id: 3 }, { id: 2 }, { id: 1 }]).map((item) => item.id)).toEqual([1, 2, 3]);
   });

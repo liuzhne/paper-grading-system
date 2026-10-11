@@ -195,6 +195,8 @@ class RubricRead(BaseModel):
     created_at: datetime
     published_at: Optional[datetime] = None
     criteria: list[RubricCriterionRead] = Field(default_factory=list)
+    #: 最新版本的文档类型（thesis / general_document / …）；未版本化的旧标准为 None，按论文处理。
+    business_profile_key: Optional[str] = None
 
 
 class RubricImportResult(BaseModel):
@@ -244,6 +246,8 @@ class RubricImportSessionRead(BaseModel):
     coverage: dict = Field(default_factory=dict)
     conflicts: list[dict] = Field(default_factory=list)
     expires_at: datetime
+    #: 上传时选择的文档类型；上传后只读（通用文档评分改造方案 §3.1）。
+    business_profile_key: str = "thesis"
 
 
 class RubricImportSessionUpdate(BaseModel):

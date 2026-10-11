@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import undefer
 
 from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
@@ -42,6 +43,8 @@ from backend.app.services.batch_scoring.jobs import get_latest_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import retry_batch_scoring_job
 from backend.app.services.batches import duration
 from backend.app.services.papers import precheck
+from backend.app.services.scoring.profiles.registry import WORKBENCH_PROFILE_KEYS
+from backend.app.services.scoring.profiles.registry import profile_key_for_version
 from backend.app.services.scoring.usage_estimate import TokenCapExceededError
 from backend.app.services.scoring.usage_estimate import assert_within_token_caps
 from backend.app.services.storage.local import artifact_key_invalid
@@ -58,7 +61,7 @@ logger = logging.getLogger("batch-scoring-jobs")
 # --- 评分标准 --------------------------------------------------------------------
 
 def list_visible_rubrics(db: Session, principal: CurrentPrincipal) -> list[Rubric]:
-    query = select(Rubric)
+    query = select(Rubric).options(undefer(Rubric.business_profile_key))
     visibility = guards.visible_rubrics_filter(principal)
     if visibility is not None:
         query = query.where(visibility)
@@ -127,6 +130,20 @@ def resolve_batch_version(
     )
 
 
+def require_workbench_version(version: RubricVersion | None) -> None:
+    """批次只能锁定工作台能评的文档类型（通用文档评分改造方案 G5）。
+
+    建批次、改批次的评分标准、评分助手建批次都经过这里。
+    """
+
+    profile_key = profile_key_for_version(version)
+    if profile_key not in WORKBENCH_PROFILE_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail="该评分标准的文档类型（%s）不能在评分任务中使用，请通过提交接口评分。" % profile_key,
+        )
+
+
 # --- 批次 --------------------------------------------------------------------------
 
 def create_batch(db: Session, principal: CurrentPrincipal, user_id: str, payload) -> GradingBatch:
@@ -135,6 +152,7 @@ def create_batch(db: Session, principal: CurrentPrincipal, user_id: str, payload
     require_organization_role(principal, *WRITE_ROLES)
     rubric = guards.visible_rubric(db, payload.rubric_id, principal)
     rubric_version = resolve_batch_version(db, rubric, payload.rubric_version_id)
+    require_workbench_version(rubric_version)
     connection_id = payload.ai_connection_id or active_connection_id(
         db, owner_id=user_id, organization_id=principal.organization_id or "",
     )

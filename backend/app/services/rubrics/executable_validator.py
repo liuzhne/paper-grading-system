@@ -19,6 +19,9 @@ from sqlalchemy.orm import Session
 from backend.app.db import models
 from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.services.scoring.core.policy import validate_weight_configuration
+from backend.app.services.scoring.profiles.general_document import (
+    GENERAL_DOCUMENT_CHECKER_KEYS,
+)
 from backend.app.services.scoring.profiles.technical_proposal import (
     TECHNICAL_PROPOSAL_CHECKER_KEYS,
 )
@@ -58,7 +61,7 @@ class DefaultPublicationCheckerRegistry:
         },
         "thesis.legacy_required_fields.v1": {
             "checker_version": "1.0.0",
-            "supported_profiles": {"thesis"},
+            "supported_profiles": {"thesis", "general_document"},
         },
         **{
             key: {
@@ -67,10 +70,16 @@ class DefaultPublicationCheckerRegistry:
             }
             for key in TECHNICAL_PROPOSAL_CHECKER_KEYS.values()
         },
+        # 通用文档复用论文检查器的实现（研究问题与结论呼应除外，见
+        # 通用文档评分改造方案 §4.2）。
         **{
             key: {
                 "checker_version": "1.0.0",
-                "supported_profiles": {"thesis"},
+                "supported_profiles": (
+                    {"thesis", "general_document"}
+                    if key in GENERAL_DOCUMENT_CHECKER_KEYS
+                    else {"thesis"}
+                ),
             }
             for key in THESIS_CHECKER_KEYS.values()
         },
@@ -121,6 +130,10 @@ DEFAULT_BUSINESS_PROFILE_REGISTRY = {
         "profile_version": "technical-proposal-profile@1",
     },
     "thesis": {"profile_key": "thesis", "profile_version": "thesis-v1"},
+    "general_document": {
+        "profile_key": "general_document",
+        "profile_version": "general-document-profile@1",
+    },
 }
 DEFAULT_WORKFLOW_PROFILE_REGISTRY = {
     "template_driven": {

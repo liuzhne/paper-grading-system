@@ -64,3 +64,33 @@ it("开始评分前显示本地用量估算，超过上限时提前提示", asyn
   expect(wrapper.text()).toContain("12 条规则可复用");
   expect(wrapper.find("[data-test=estimate-over-cap]").exists()).toBe(true);
 });
+
+it("评分标准后显示文档类型；技术方案类型的标准不可选", async () => {
+  useSessionStore().capabilities = { llm: { platform_model_available: true } };
+  api.get.mockImplementation(async path => {
+    if (path === "/rubrics") return [
+      { id: "r1", name: "采购方案评审标准", version: "v1.0", status: "published", business_profile_key: "general_document" },
+      { id: "r2", name: "本科毕业论文评分标准", version: "v2.1", status: "published", business_profile_key: "thesis" },
+      { id: "r3", name: "技术方案", version: "v1", status: "published", business_profile_key: "technical_proposal" },
+    ];
+    if (path === "/system/capabilities") return { upload: { accepted_extensions: [".docx"], max_size_mb: 20 } };
+    return [];
+  });
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: "/", component: NewTaskView },
+    { path: "/tasks", name: "tasks", component: { template: "<div />" } },
+    { path: "/account", name: "account", component: { template: "<div />" } },
+  ] });
+  await router.push("/");
+  await router.isReady();
+  const wrapper = mount(NewTaskView, { global: { plugins: [router] } });
+  await flushPromises();
+  const radios = wrapper.findAll("input.rubric-radio");
+  expect(radios.map(radio => radio.element.value)).toEqual(["r1", "r2"]);
+  expect(wrapper.findAll('[data-test="rubric-type"]').map(chip => chip.text())).toEqual(["通用文档", "毕业论文"]);
+  expect(wrapper.text()).toContain("技术方案只能通过提交接口评分");
+  await radios[0].setValue(true);
+  expect(wrapper.get('[data-test="type-note"]').text()).toContain("按通用文档处理");
+  await radios[1].setValue(true);
+  expect(wrapper.get('[data-test="type-note"]').text()).toContain("按毕业论文处理");
+});

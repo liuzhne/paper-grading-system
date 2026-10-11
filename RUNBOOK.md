@@ -1927,3 +1927,34 @@ cd frontend/workbench && npx vitest run src/lib/assistant-flow.test.js src/store
 ```
 
 维护记录：2026-10-11 · 评分助手：本地运行步骤、LangSmith 追踪须关闭、八类排错（工作区空白、一直等待执行、迟迟不汇报、409、文件失效、会话并发、测试中批任务偶发失败、删除 409）与 0035 的发布、回滚说明。
+
+### 2026-10-11 通用文档评分
+
+使用：评分标准页“新建评分标准”时在基本信息里选“通用文档”，再上传文件；之后建任务、上传、评分、复核、导出与论文相同。类型上传后只读，选错了取消本次导入重新导入。
+
+排错：
+- **现象**：建任务返回 400“该评分标准的文档类型（technical_proposal）不能在评分任务中使用”。
+  - 报错指向：评分标准有问题。
+  - 真正原因：技术方案类型的标准只能走 v2 提交接口（`/api/v2/submissions`），工作台只评毕业论文与通用文档。
+- **现象**：导入返回 422“不支持的文档类型”。
+  - 真正原因：`business_profile_key` 只接受 `thesis`、`general_document`；旧客户端不传时按论文处理。
+- **现象**：通用文档评分页的“文件名”下面标题看起来像封面上的某一行。
+  - 真正原因：标题取解析器从正文开头识别的标题，没有才用文件名。需要时在评分页修改材料信息。
+- **现象**：通用文档的导出里没有学号、学院列，报告里没有“篇章一致性”的前后呼应发现。
+  - 真正原因：设计如此（方案 §3、§4.2）。通用文档不跑按论文写的语义一致性；需要“前后呼应”类检查就写进评分标准。
+- **现象**：老用户的导入页默认选中了“通用文档”。
+  - 真正原因：默认值是本浏览器上次的选择（`localStorage` 的 `pgs.documentType`）；第一次使用或读不到时默认毕业论文。
+
+发布：无迁移，Alembic head 仍为 `0038_assistant_conversations`；合入 `main` 后由 CI 门禁发布（§9.2）。发布后在生产核对：导入页出现“文档类型”，评分标准列表与新建任务页显示类型，已有论文批次的评分页、复核页与导出列不变。
+
+验证（全部离线，Mock 模型）：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_general_document.py backend/app/tests/test_api_core_flow.py backend/app/tests/test_assistant.py
+```
+
+```bash
+cd frontend/workbench && npx vitest run src/lib/document-types.test.js src/components/RubricImportWorkspace.test.js src/views/NewTaskView.test.js src/stores/grading.test.js
+```
+
+维护记录：2026-10-11 · 通用文档评分：使用方式、五类排错（建任务 400、导入 422、标题来源、导出与一致性差异、默认类型）、无迁移的发布与验证命令。

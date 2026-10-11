@@ -12,7 +12,7 @@ const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingm
 
 async function openAssistant(page) {
   await page.goto("/workbench/assistant");
-  await expect(page.getByRole("heading", { name: "今天要评哪些论文？" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "今天要评哪些材料？" })).toBeVisible();
 }
 
 async function ask(page, text) {

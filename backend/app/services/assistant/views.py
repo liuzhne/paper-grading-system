@@ -1,4 +1,4 @@
-"""评分助手的纯函数：论文定位、失败诊断、分数概览、文案。
+"""评分助手的纯函数：材料定位、失败诊断、分数概览、文案。
 
 “下一步做什么”由代码按服务器状态推出，提问与汇报用这里的模板生成，不调用模型
 （方案 §4、§6）。这里不读写数据库，便于单测。
@@ -15,7 +15,7 @@ HELP_TEXT = "\n".join([
     "我可以帮你完成整个评分：",
     "· 上传待评分的文件（一次最多 30 份），默认用最新发布的评分标准评分；",
     "· 用你自己的评分规则和模板：导入后在右侧核对并发布，发布后接着评分；",
-    "· 查询进度、每篇的得分、扣分点和证据、需要复核的内容、整体分数情况；",
+    "· 查询进度、每份的得分、扣分点和证据、需要复核的内容、整体分数情况；",
     "· 评分出错时说明原因，临时性错误会自动重试一次。",
     "评分过程的每一步都显示在右侧的页面上。改分请在评分工作区里完成。",
 ])
@@ -25,10 +25,18 @@ QUICK_ACTIONS = {
     "start_grading": ("开始评分", "开始评分"),
     "import_rubric": ("用我的评分规则和模板", "上传我的评分规则和模板"),
     "query_progress": ("评分进度", "评分进度"),
-    "query_paper": ("查某篇的扣分", "查询扣分"),
+    "query_paper": ("查某份的扣分", "查询扣分"),
     "query_review": ("需要复核的", "哪些需要复核"),
     "query_overview": ("整体情况", "整体分数情况"),
 }
+
+
+#: 评分标准的文档类型在对话里的叫法（通用文档评分改造方案 §4.10）。
+DOCUMENT_TYPE_LABELS = {"thesis": "毕业论文", "general_document": "通用文档"}
+
+
+def document_type_label(profile_key: str | None) -> str:
+    return DOCUMENT_TYPE_LABELS.get(profile_key or "thesis", profile_key or "")
 
 
 def quick_actions_card(intents: list[str] | None = None) -> dict:
@@ -54,10 +62,24 @@ def _stem(file_name: str) -> str:
     return name.rsplit(".", 1)[0] if "." in name else name
 
 
-def resolve_paper(papers: list[dict], *, ordinal: int | None = None, name: str | None = None, text: str = ""):
-    """定位用户说的是哪一篇：序号 → 姓名或文件名片段 → 原话里出现的姓名或文件名。
+def _owner_name(paper: dict, profile_key: str) -> str:
+    """材料的“名字”：论文是学生姓名；通用文档没有姓名，用标题。"""
 
-    唯一命中才算定位成功，返回 (论文, 候选)；否则返回 (None, 候选) 让用户选，不猜。
+    field = "title" if profile_key == "general_document" else "student_name"
+    return (paper.get(field) or "").strip()
+
+
+def paper_label(paper: dict, profile_key: str = "thesis") -> str:
+    """回复与选择卡片里怎么称呼一份材料。"""
+
+    return _owner_name(paper, profile_key) or paper.get("file_name") or "材料"
+
+
+def resolve_paper(papers: list[dict], *, ordinal: int | None = None, name: str | None = None, text: str = "",
+                  profile_key: str = "thesis"):
+    """定位用户说的是哪一份：序号 → 姓名（通用文档为标题）或文件名片段 → 原话里出现的姓名或文件名。
+
+    唯一命中才算定位成功，返回 (材料, 候选)；否则返回 (None, 候选) 让用户选，不猜。
     """
 
     if ordinal is not None:
@@ -67,7 +89,7 @@ def resolve_paper(papers: list[dict], *, ordinal: int | None = None, name: str |
         return None, papers
     name = (name or "").strip()
     if name:
-        hits = [p for p in papers if name in (p.get("student_name") or "") or name in _stem(p.get("file_name"))]
+        hits = [p for p in papers if name in _owner_name(p, profile_key) or name in _stem(p.get("file_name"))]
         if len(hits) == 1:
             return hits[0], hits
         if hits:
@@ -75,7 +97,7 @@ def resolve_paper(papers: list[dict], *, ordinal: int | None = None, name: str |
     if text:
         hits = []
         for paper in papers:
-            student = (paper.get("student_name") or "").strip()
+            student = _owner_name(paper, profile_key)
             stem = _stem(paper.get("file_name")).strip()
             if (len(student) >= 2 and student in text) or (len(stem) >= 2 and stem in text):
                 hits.append(paper)
@@ -119,7 +141,7 @@ DIAGNOSES = {
     "OUTPUT_REFUSED": ("模型拒答", "模型按其安全策略拒绝评判部分规则，这些规则需要人工复核。"),
     "AI_CONNECTION_CONFIG_CHANGED": ("连接配置已变更", "任务创建后连接配置被修改，原任务不能继续；请重新建一个评分任务。"),
     "AI_CONNECTION_KEY_CHANGED": ("连接密钥已变更", "任务创建后连接密钥被轮换，原任务不能继续；请重新建一个评分任务。"),
-    "TOKEN_BUDGET_EXCEEDED": ("单篇输入超过上限", "这篇论文的输入超过了单篇 token 上限，需要管理员调高上限后重试。"),
+    "TOKEN_BUDGET_EXCEEDED": ("单篇输入超过上限", "这份材料的输入超过了单篇 token 上限，需要管理员调高上限后重试。"),
     "RULE_EXECUTION_FAILED": ("系统错误", "评分规则执行失败，属于系统问题，已记录；请把任务名称告诉管理员。"),
 }
 

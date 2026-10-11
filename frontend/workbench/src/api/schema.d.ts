@@ -3555,6 +3555,11 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             /**
+             * Business Profile Key
+             * @default thesis
+             */
+            business_profile_key: string;
+            /**
              * Created At
              * Format: date-time
              */
@@ -3857,6 +3862,11 @@ export interface components {
         };
         /** Body_create_rubric_import_session_api_rubrics_import_sessions_post */
         Body_create_rubric_import_session_api_rubrics_import_sessions_post: {
+            /**
+             * Business Profile Key
+             * @default thesis
+             */
+            business_profile_key: string;
             /** Description */
             description?: string | null;
             /** Name */
@@ -3887,6 +3897,11 @@ export interface components {
         };
         /** Body_import_rubric_from_files_api_rubrics_import_files_post */
         Body_import_rubric_from_files_api_rubrics_import_files_post: {
+            /**
+             * Business Profile Key
+             * @default thesis
+             */
+            business_profile_key: string;
             /** Description */
             description?: string | null;
             /** Name */
@@ -5090,6 +5105,11 @@ export interface components {
         };
         /** RubricImportSessionRead */
         RubricImportSessionRead: {
+            /**
+             * Business Profile Key
+             * @default thesis
+             */
+            business_profile_key: string;
             /** Conflicts */
             conflicts?: {
                 [key: string]: unknown;
@@ -5210,6 +5230,8 @@ export interface components {
         };
         /** RubricRead */
         RubricRead: {
+            /** Business Profile Key */
+            business_profile_key?: string | null;
             /**
              * Created At
              * Format: date-time

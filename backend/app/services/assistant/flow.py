@@ -38,6 +38,7 @@ from backend.app.services.assistant.views import MAX_FILES
 from backend.app.services.assistant.views import batch_name
 from backend.app.services.assistant.views import blocking_findings
 from backend.app.services.assistant.views import diagnose_job
+from backend.app.services.assistant.views import document_type_label
 from backend.app.services.assistant.views import overview_text
 from backend.app.services.assistant.views import quick_actions_card
 from backend.app.services.assistant.views import score_overview
@@ -180,11 +181,15 @@ def propose_start(state: FlowState, runtime: Runtime[RunContext]):
     started = datetime.fromisoformat(state["flow_started_at"])
     card_id = new_card_id("start")
     source = "" if state.get("preset_rubric_id") else "（最新发布的评分标准，可以换）"
+    # 说明标准的文档类型：它决定评分页与导出显示学号还是文件名（通用文档评分改造方案 §3）。
+    kind = document_type_label(rubric.get("business_profile_key"))
     message = ctx.say(
-        "用《%s》%s%s评这 %d 份文件，评分模型：%s。开始吗？" % (rubric["name"], rubric["version"], source, count, label),
+        "用《%s》%s（%s）%s评这 %d 份文件，评分模型：%s。开始吗？"
+        % (rubric["name"], rubric["version"], kind, source, count, label),
         [{
             "id": card_id, "type": "confirm_start", "status": "proposed",
             "rubric_id": rubric["id"], "rubric_name": rubric["name"], "rubric_version": rubric["version"],
+            "business_profile_key": rubric.get("business_profile_key"),
             "file_count": count, "connection_label": label,
         }],
         intent="start_grading",
@@ -254,7 +259,7 @@ def wait_upload(state: FlowState, runtime: Runtime[RunContext]):
     paper_ids = list(dict.fromkeys(value.get("paper_ids") or []))[:MAX_FILES]
     if not paper_ids:
         return _fail(ctx, card, "文件都没能上传成功，可以检查文件后重新开始。")
-    # 不信任浏览器：每份论文都必须属于本批次、对当前用户可见。
+    # 不信任浏览器：每份材料都必须属于本批次、对当前用户可见。
     for paper_id in paper_ids:
         try:
             paper = guards.visible_paper(ctx.db, paper_id, ctx.principal)

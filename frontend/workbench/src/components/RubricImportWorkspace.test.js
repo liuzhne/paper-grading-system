@@ -22,6 +22,21 @@ const session = {
 
 
 describe("导入评分模板与评分项工作区", () => {
+  it("上传前选择文档类型：点选项把类型交给页面", async () => {
+    const wrapper = mount(RubricImportWorkspace, {
+      props: { session: { name: "", criteria: [], business_profile_key: "thesis" }, initial: true },
+    });
+    expect(wrapper.get('[data-test="document-type-thesis"]').attributes("aria-checked")).toBe("true");
+    await wrapper.get('[data-test="document-type-general_document"]').trigger("click");
+    expect(wrapper.emitted("update-session").at(-1)).toEqual([{ business_profile_key: "general_document" }]);
+  });
+  it("上传后文档类型只读显示", () => {
+    const wrapper = mount(RubricImportWorkspace, {
+      props: { session: { ...session, business_profile_key: "general_document" } },
+    });
+    expect(wrapper.find('[data-test="document-type-general_document"]').exists()).toBe(false);
+    expect(wrapper.get('[data-test="document-type-readonly"]').text()).toContain("通用文档");
+  });
   it("评分表区域提供现有 Excel 导入模板下载", () => {
     const wrapper = mount(RubricImportWorkspace, { props: { session, initial: true } });
     const link = wrapper.get('a[download="rubric_import_template.xlsx"]');

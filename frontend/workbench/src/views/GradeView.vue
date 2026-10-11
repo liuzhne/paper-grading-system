@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
+import { materialIdentity } from "@/lib/document-types.js";
 import { useGradingStore } from "@/stores/grading.js";
 
 const store = useGradingStore();
@@ -168,8 +169,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     <header class="topbar">
       <button class="back" type="button" @click="router.push({ name: 'tasks' })">←</button>
       <div class="ident">
-        <div class="faint mono">{{ store.currentPaper?.student_id || "—" }}</div>
-        <div class="title">{{ store.currentPaper?.title || store.currentPaper?.student_name || "未命名材料" }}</div>
+        <div class="faint mono">{{ materialIdentity(store.currentPaper, store.documentType).code }}</div>
+        <div class="title">{{ materialIdentity(store.currentPaper, store.documentType).title }}</div>
       </div>
       <div class="nav">
         <span class="mono faint">{{ position }}</span>
@@ -193,10 +194,10 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           @click="store.selectPaper(paper.id)"
         >
           <div class="material-top">
-            <span class="mono">{{ paper.student_id || "—" }}</span>
+            <span class="mono">{{ materialIdentity(paper, store.documentType).code }}</span>
             <span class="faint mono">{{ paper.status }}</span>
           </div>
-          <div class="faint material-title">{{ paper.title || paper.student_name || "—" }}</div>
+          <div class="faint material-title">{{ materialIdentity(paper, store.documentType, "—").title }}</div>
         </button>
       </aside>
 

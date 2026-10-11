@@ -27,6 +27,8 @@ from backend.app.services.assistant.context import RunContext
 from backend.app.services.assistant.views import MAX_FILES
 from backend.app.services.batch_scoring.jobs import get_latest_batch_scoring_job
 from backend.app.services.batches import get_batch_summary
+from backend.app.services.scoring.profiles.registry import LEGACY_PROFILE_KEY
+from backend.app.services.scoring.profiles.registry import WORKBENCH_PROFILE_KEYS
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,13 @@ class RecentBatchesParams(BaseModel):
 def _list_published_rubrics(ctx: RunContext, _params: NoParams):
     rubrics = [r for r in actions.list_visible_rubrics(ctx.db, ctx.principal) if r.status == "published"]
     rubrics.sort(key=lambda r: (r.published_at or r.created_at), reverse=True)
-    return [{"id": r.id, "name": r.name, "version": r.version} for r in rubrics]
+    # 只给工作台能评的类型：技术方案建批次会被拒绝，不该被默认选中（通用文档评分改造方案 G5）。
+    return [
+        {"id": r.id, "name": r.name, "version": r.version,
+         "business_profile_key": r.business_profile_key or LEGACY_PROFILE_KEY}
+        for r in rubrics
+        if (r.business_profile_key or LEGACY_PROFILE_KEY) in WORKBENCH_PROFILE_KEYS
+    ]
 
 
 @register("list_recent_batches", "列出当前组织最近的评分任务", RecentBatchesParams, read_only=True)
@@ -100,11 +108,12 @@ def _list_recent_batches(ctx: RunContext, params: RecentBatchesParams):
     return [{"id": b.id, "name": b.name} for b in ctx.db.scalars(query).all()]
 
 
-@register("batch_summary", "读取某个评分任务的论文与分数汇总", BatchParams, read_only=True)
+@register("batch_summary", "读取某个评分任务的材料与分数汇总", BatchParams, read_only=True)
 def _batch_summary(ctx: RunContext, params: BatchParams):
     guards.visible_batch(ctx.db, params.batch_id, ctx.principal)
     summary = get_batch_summary(ctx.db, params.batch_id)
-    return {"batch_id": params.batch_id, "batch_name": summary["batch"].name, "papers": summary["papers"]}
+    return {"batch_id": params.batch_id, "batch_name": summary["batch"].name, "papers": summary["papers"],
+            "business_profile_key": summary["batch"].business_profile_key}
 
 
 @register("latest_job", "读取某个评分任务最近一次的后台评分作业", BatchParams, read_only=True)
@@ -163,7 +172,7 @@ def _create_batch(ctx: RunContext, params: CreateBatchParams):
     return {"id": batch.id, "name": batch.name}
 
 
-@register("run_precheck", "对已上传的论文做解析预检", PrecheckParams, read_only=False)
+@register("run_precheck", "对已上传的材料做解析预检", PrecheckParams, read_only=False)
 def _run_precheck(ctx: RunContext, params: PrecheckParams):
     return actions.upload_precheck(ctx.db, ctx.principal, params.batch_id, params.paper_ids)
 
@@ -184,7 +193,7 @@ def _start_scoring(ctx: RunContext, params: BatchParams):
     return view
 
 
-@register("retry_scoring", "重试失败、取消或中断的论文；已成功的结果复用", JobParams, read_only=False)
+@register("retry_scoring", "重试失败、取消或中断的材料；已成功的结果复用", JobParams, read_only=False)
 def _retry_scoring(ctx: RunContext, params: JobParams):
     job = actions.retry_scoring_job(ctx.db, ctx.principal, params.job_id)
     view = _job_view(job)

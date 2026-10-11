@@ -30,7 +30,7 @@ defineProps({
         <p class="eyebrow mono">GRADING &amp; REVIEW WORKBENCH</p>
         <h1>每一个分数<br />都能回到原文那一段</h1>
         <p class="lede">
-          面向课程作业与学位论文的批量评审系统。评分标准以已发布版本固化，评分结果逐项标注证据出处，人工复核留痕后统一导出。
+          面向课程作业、学位论文与各类文档的批量评审系统。评分标准以已发布版本固化，评分结果逐项标注证据出处，人工复核留痕后统一导出。
         </p>
         <ol class="points">
           <li><span class="mono">01</span><span>评分标准经审核发布后不可变，全批次口径一致</span></li>

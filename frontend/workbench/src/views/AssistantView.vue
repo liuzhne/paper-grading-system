@@ -150,7 +150,7 @@ function timeText(value) {
         <p v-if="loadError" class="notice notice-danger">{{ loadError }}</p>
 
         <div v-if="!store.messages.length" class="welcome">
-          <h2>今天要评哪些论文？</h2>
+          <h2>今天要评哪些材料？</h2>
           <p class="faint">上传待评分的文件就能开始，默认用最新发布的评分标准。评分过程会显示在右侧的页面上；只有需要你决定的地方我才会问。</p>
           <div class="quick">
             <button v-for="action in QUICK_ACTIONS" :key="action.intent" class="btn btn-sm" type="button"

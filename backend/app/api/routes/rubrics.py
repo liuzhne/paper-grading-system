@@ -21,6 +21,7 @@ from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import undefer
 
 from backend.app.db.models import Rubric
 from backend.app.db.models import AtomicRule
@@ -82,6 +83,8 @@ from backend.app.services.rubric_import.source_workspace import read_source_work
 from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 from backend.app.services.rubrics.draft_graph import read_execution_draft
 from backend.app.services.ai_tasks.service import delete_rubric_ai_tasks
+from backend.app.services.scoring.profiles.registry import LEGACY_PROFILE_KEY
+from backend.app.services.scoring.profiles.registry import WORKBENCH_PROFILE_KEYS
 from backend.app.services.rubrics.review_workspace import read_review_workspace, confirm_rule
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
@@ -193,7 +196,10 @@ def list_rubrics(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    query = select(Rubric).options(selectinload(Rubric.criteria))
+    query = select(Rubric).options(
+        selectinload(Rubric.criteria),
+        undefer(Rubric.business_profile_key),
+    )
     visibility = guards.visible_rubrics_filter(principal)
     if visibility is not None:
         query = query.where(visibility)
@@ -219,6 +225,7 @@ def create_rubric_import_session(
     version: str = Form("v1.0"),
     description: Optional[str] = Form(None),
     visibility: str = Form("private"),
+    business_profile_key: str = Form(LEGACY_PROFILE_KEY),
     rules_file: Optional[UploadFile] = File(None),
     template_file: Optional[UploadFile] = File(None),
     structure_override: Optional[str] = Form(None),
@@ -236,6 +243,7 @@ def create_rubric_import_session(
         raise HTTPException(status_code=403, detail="only platform admins can create system rubrics")
     if visibility == "organization":
         require_organization_role(principal, "org_admin")
+    _require_workbench_profile(business_profile_key)
     if rules_file is None and template_file is None:
         raise HTTPException(status_code=400, detail="请至少上传一份评分标准文件（Word 或 Excel）")
     if rules_file is not None and not _is_excel_file(rules_file.filename or ""):
@@ -259,6 +267,7 @@ def create_rubric_import_session(
                 description=description,
                 rules_file_name=(rules_file.filename if rules_file else None),
                 template_file_name=(template_file.filename if template_file else None),
+                business_profile_key=business_profile_key,
             ),
             rules_bytes=rules_bytes,
             template_bytes=template_bytes,
@@ -433,6 +442,7 @@ def _prepare_import_session_reupload(
                 description=row.description,
                 rules_file_name=rules_name,
                 template_file_name=template_name,
+                business_profile_key=import_sessions.profile_key(row),
             ),
             rules_bytes=rules_bytes,
             template_bytes=template_bytes,
@@ -672,6 +682,7 @@ def _prepare_confirmed_rubric_reupload(
                 description=rubric.description,
                 rules_file_name=rules_name,
                 template_file_name=template_name,
+                business_profile_key=rubric.business_profile_key or LEGACY_PROFILE_KEY,
             ),
             rules_bytes=rules_bytes,
             template_bytes=template_bytes,
@@ -997,6 +1008,7 @@ def import_rubric_from_files(
     version: str = Form("v1.0"),
     description: Optional[str] = Form(None),
     visibility: str = Form("private"),
+    business_profile_key: str = Form(LEGACY_PROFILE_KEY),
     rules_file: Optional[UploadFile] = File(None),
     template_file: Optional[UploadFile] = File(None),
     structure_override: Optional[str] = Form(None),
@@ -1005,6 +1017,7 @@ def import_rubric_from_files(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     ensure_dev_user(db)
+    _require_workbench_profile(business_profile_key)
     override = None
     if structure_override:
         try:
@@ -1041,6 +1054,7 @@ def import_rubric_from_files(
                 description=description,
                 rules_file_name=(rules_file.filename or "rules.xlsx") if rules_file else None,
                 template_file_name=(template_file.filename if template_file else None),
+                business_profile_key=business_profile_key,
             ),
             rules_bytes=rules_bytes,
             template_bytes=template_bytes,
@@ -2082,6 +2096,15 @@ def _manual_recompile_command(
     }
 
 
+def _require_workbench_profile(business_profile_key: str) -> None:
+    if business_profile_key not in WORKBENCH_PROFILE_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail="不支持的文档类型：%s（可选：%s）"
+            % (business_profile_key, " / ".join(WORKBENCH_PROFILE_KEYS)),
+        )
+
+
 def _file_import_command(
     *,
     name: str,
@@ -2089,6 +2112,7 @@ def _file_import_command(
     description: str | None,
     rules_file_name: str | None,
     template_file_name: str | None,
+    business_profile_key: str = LEGACY_PROFILE_KEY,
 ) -> dict:
     return {
         "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
@@ -2097,7 +2121,7 @@ def _file_import_command(
             "name": name,
             "version": version,
             "description": description,
-            "business_profile_key": "thesis",
+            "business_profile_key": business_profile_key,
             "workflow_profile": (
                 "template_driven" if template_file_name else "manual_json"
             ),

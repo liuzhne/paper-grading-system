@@ -2,9 +2,11 @@
 /**
  * 评分助手前端的展示用纯函数。
  *
- * 流程判定、论文定位、失败诊断都在后端（`backend/app/services/assistant/`，以后端为准）；
+ * 流程判定、材料定位、失败诊断都在后端（`backend/app/services/assistant/`，以后端为准）；
  * 这里只留界面需要的：快捷按钮、文件数上限、换评分标准时的列表、概览卡片的统计。
  */
+
+import { isWorkbenchType } from "./document-types.js";
 
 /** 单个登录用户通过助手一次最多提交的文件数（维护者决定 U2）。 */
 export const MAX_FILES = 30;
@@ -33,18 +35,19 @@ export function limitFiles(files) {
 }
 
 /**
- * 已发布的评分标准，最新发布的在前（换评分标准时的候选）。
- * @param {Array<{status?: string, published_at?: string|null, created_at?: string}>} rubrics
+ * 已发布、且工作台能评的评分标准，最新发布的在前（换评分标准时的候选）。
+ * @param {Array<{status?: string, published_at?: string|null, created_at?: string, business_profile_key?: string|null}>} rubrics
  */
 export function publishedRubrics(rubrics) {
   return (rubrics || [])
-    .filter((item) => item.status === "published")
+    // 只列工作台能评的类型：技术方案建任务会被拒绝（通用文档评分改造方案 G5）。
+    .filter((item) => item.status === "published" && isWorkbenchType(item.business_profile_key))
     .slice()
     .sort((a, b) => String(b.published_at || b.created_at || "").localeCompare(String(a.published_at || a.created_at || "")));
 }
 
 /**
- * 批次汇总里的论文按上传顺序排列（接口按上传时间倒序返回）。“第 3 篇”按这个顺序数。
+ * 批次汇总里的材料按上传顺序排列（接口按上传时间倒序返回）。“第 3 份”按这个顺序数。
  * @template T
  * @param {T[]} papers
  * @returns {T[]}

@@ -168,7 +168,19 @@ def serialize(row: models.RubricImportSession) -> dict:
         "coverage": deepcopy(draft.get("coverage") or {}),
         "conflicts": deepcopy(draft.get("conflicts") or []),
         "expires_at": row.expires_at,
+        "business_profile_key": profile_key(row),
     }
+
+
+def profile_key(row: models.RubricImportSession) -> str:
+    """上传时选的文档类型，存在 prepared graph 里；旧会话没有记录时按论文处理。"""
+
+    graph = row.prepared_graph or {}
+    return (
+        (graph.get("rubric") or {}).get("business_profile_key")
+        or (graph.get("version") or {}).get("business_profile_key")
+        or "thesis"
+    )
 
 
 def update(row: models.RubricImportSession, payload: dict) -> None:

@@ -14,11 +14,18 @@ from backend.app.db.models import Paper
 from backend.app.db.models import PaperChunk
 from backend.app.services.document_parser.chunking import build_chunks
 from backend.app.services.document_parser.parser import parse_document
+from backend.app.services.scoring.profiles.registry import LEGACY_PROFILE_KEY
+from backend.app.services.scoring.profiles.registry import profile_key_for_batch
 from backend.app.services.storage.local import ensure_storage_dirs
 from backend.app.services.storage.local import materialize
 from backend.app.services.storage.local import safe_filename
 from backend.app.services.storage.local import store_binary
 from backend.app.services.storage.local import store_json
+
+
+def _is_thesis(paper: Paper) -> bool:
+    batch = paper.batch
+    return batch is None or profile_key_for_batch(batch) == LEGACY_PROFILE_KEY
 
 
 def parse_and_store(db: Session, paper: Paper):
@@ -36,12 +43,17 @@ def parse_and_store(db: Session, paper: Paper):
         parsed_path = store_json("parsed", "%s.json" % paper.id, parsed.to_dict())
         # 解析成功后才删旧 chunks / 更新元数据，避免重解析失败时永久丢失既有数据
         db.execute(delete(PaperChunk).where(PaperChunk.paper_id == paper.id))
-        paper.title = existing_title or parsed.title
-        paper.student_id = existing_student_id or parsed.student_id
-        paper.student_name = existing_student_name or parsed.student_name
-        paper.department = existing_department or parsed.department
-        paper.major = existing_major or parsed.major
-        paper.advisor = existing_advisor or parsed.advisor
+        if _is_thesis(paper):
+            paper.title = existing_title or parsed.title
+            paper.student_id = existing_student_id or parsed.student_id
+            paper.student_name = existing_student_name or parsed.student_name
+            paper.department = existing_department or parsed.department
+            paper.major = existing_major or parsed.major
+            paper.advisor = existing_advisor or parsed.advisor
+        else:
+            # 通用文档不从封面猜学号、姓名、学院（会张冠李戴）；标题没有就取文件名
+            # （通用文档评分改造方案 §4.6）。
+            paper.title = existing_title or parsed.title or Path(paper.file_name or "").stem or None
         paper.parsed_text_path = parsed_path
         paper.parse_quality = parsed.parse_quality
         paper.status = "parsed"
