@@ -17,6 +17,7 @@ class CapabilityAbilities(BaseModel):
     view_platform_ops: bool
     manage_members: bool
     manage_own_ai_connections: bool
+    use_assistant: bool = False
 
 
 class CapabilityUpload(BaseModel):

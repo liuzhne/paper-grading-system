@@ -148,6 +148,8 @@ def capabilities(
             "view_platform_ops": is_platform_admin,
             "manage_members": is_org_admin,
             "manage_own_ai_connections": True,
+            # 评分助手一期只面向老师与管理员（对话评分助手方案 U1）。
+            "use_assistant": dev_mode or is_platform_admin or principal.organization_role in {"org_admin", "teacher"},
         },
         "upload": {
             "provider": settings.STORAGE_PROVIDER,

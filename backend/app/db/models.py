@@ -2942,3 +2942,151 @@ class SpreadsheetWriteLog(Base):
     response: Mapped[dict] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class AssistantPreference(Base):
+    """评分助手用哪个模型：每人每组织一行；没有行即“尚未配置”。"""
+
+    __tablename__ = "assistant_preferences"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "organization_id", name="uq_assistant_preferences_user_org"
+        ),
+        CheckConstraint(
+            "model_source IN ('connection', 'platform')",
+            name="ck_assistant_preferences_model_source",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False
+    )
+    model_source: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 连接被删除后偏好仍在，读取时按“连接不可用”回落，而不是让外键挡住删除。
+    ai_connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ai_connections.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class AssistantConversation(Base):
+    """评分助手的一次会话，只对创建者可见。"""
+
+    __tablename__ = "assistant_conversations"
+    __table_args__ = (
+        Index(
+            "ix_assistant_conversations_owner_updated",
+            "owner_id",
+            "organization_id",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id"), nullable=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="新对话")
+    # 当前任务、评分标准与论文的 ID，供下一句话解析“第 3 篇”这类指代；另含工作区路径。
+    focus: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+    # 进行中的流程：LangGraph 线程编号（`<会话编号>:<流程序号>`）与它当前等待的中断。
+    # 每个会话同一时间最多一个进行中的流程（对话评分助手方案 §7.1）。
+    thread_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    flow_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    # 运行锁：同一会话同一时间只有一个请求在推进流程，第二个返回 409。
+    run_locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    messages: Mapped[list["AssistantMessage"]] = relationship(
+        back_populates="conversation",
+        # 由 ORM 逐条删除，不依赖数据库外键级联：SQLite 默认不开外键约束。
+        cascade="all, delete-orphan",
+        order_by="AssistantMessage.created_at",
+    )
+
+
+class AssistantMessage(Base):
+    """会话中的一条消息。卡片只存类型与引用 ID，分数与引文渲染时现取。"""
+
+    __tablename__ = "assistant_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('user', 'assistant')",
+            name="ck_assistant_messages_role",
+        ),
+        Index(
+            "ix_assistant_messages_conversation_created",
+            "conversation_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("assistant_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    cards: Mapped[list] = mapped_column(
+        MutableList.as_mutable(JSON), nullable=False, default=list
+    )
+    intent: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    conversation: Mapped["AssistantConversation"] = relationship(
+        back_populates="messages"
+    )
+
+
+class AssistantCheckpoint(Base):
+    """评分助手流程图的状态快照（自写 LangGraph 状态存储，方案 T3）。
+
+    只存流程走到哪一步与相关编号，不存对话全文、分数或引文（方案 §9）。
+    """
+
+    __tablename__ = "assistant_checkpoints"
+
+    thread_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    checkpoint_ns: Mapped[str] = mapped_column(String(255), primary_key=True, default="")
+    checkpoint_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    parent_checkpoint_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    checkpoint_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    metadata_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    metadata_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
+class AssistantCheckpointWrite(Base):
+    """状态快照的中间写入（LangGraph 的 pending writes）。"""
+
+    __tablename__ = "assistant_checkpoint_writes"
+
+    thread_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    checkpoint_ns: Mapped[str] = mapped_column(String(255), primary_key=True, default="")
+    checkpoint_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    idx: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(255), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    value_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    task_path: Mapped[str] = mapped_column(String(255), nullable=False, default="")

@@ -13,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import ProgrammingError
 
 from backend.app.api.deps import enforce_auth
+from backend.app.api.routes import assistant
 from backend.app.api.routes import auth
 from backend.app.api.routes import ai_connections
 from backend.app.api.routes import batches
@@ -133,6 +134,7 @@ def create_app():
     app.include_router(exports.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(system.router, prefix=settings.API_PREFIX)
     app.include_router(calibration.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(assistant.router, prefix=settings.API_PREFIX, dependencies=guarded)
 
     repo_root = Path(__file__).resolve().parents[2]
 

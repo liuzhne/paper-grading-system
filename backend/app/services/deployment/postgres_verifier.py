@@ -37,6 +37,7 @@ MIGRATION_SEQUENCE = (
     "0032_single_active_ai_connection",
     "0033_rule_decision_ledger",
     "0034_anthropic_messages_provider",
+    "0035_assistant_conversations",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -72,6 +73,11 @@ def verify_postgres(session):
         "manual_review_tasks",
         "rubric_import_sessions",
         "rule_decision_ledger",
+        "assistant_preferences",
+        "assistant_conversations",
+        "assistant_messages",
+        "assistant_checkpoints",
+        "assistant_checkpoint_writes",
     }
     missing = sorted(required_tables - tables)
     if missing:
@@ -132,6 +138,11 @@ def verify_postgres(session):
             "rule_scoring_tasks",
             "manual_review_tasks",
             "rule_decision_ledger",
+            "assistant_preferences",
+            "assistant_conversations",
+            "assistant_messages",
+            "assistant_checkpoints",
+            "assistant_checkpoint_writes",
         ):
             access = session.execute(
                 text(
