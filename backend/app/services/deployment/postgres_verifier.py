@@ -40,6 +40,7 @@ MIGRATION_SEQUENCE = (
     "0035_unified_work_queue",
     "0036_ai_tasks",
     "0037_ai_task_upload_scope",
+    "0038_assistant_conversations",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -89,6 +90,11 @@ def verify_postgres(session):
         "work_runtime_state",
         "ai_tasks",
         "ai_task_items",
+        "assistant_preferences",
+        "assistant_conversations",
+        "assistant_messages",
+        "assistant_checkpoints",
+        "assistant_checkpoint_writes",
     }
     missing = sorted(required_tables - tables)
     if missing:
@@ -174,6 +180,11 @@ def verify_postgres(session):
             "work_runtime_state",
             "ai_tasks",
             "ai_task_items",
+            "assistant_preferences",
+            "assistant_conversations",
+            "assistant_messages",
+            "assistant_checkpoints",
+            "assistant_checkpoint_writes",
         ):
             access = session.execute(
                 text(

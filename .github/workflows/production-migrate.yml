@@ -194,6 +194,11 @@ jobs:
                   "work_runtime_state",
                   "ai_tasks",
                   "ai_task_items",
+                  "assistant_preferences",
+                  "assistant_conversations",
+                  "assistant_messages",
+                  "assistant_checkpoints",
+                  "assistant_checkpoint_writes",
               ):
                   connection.execute(text('SELECT count(*) FROM "%s"' % table)).scalar_one()
                   print("runtime role can read:", table)

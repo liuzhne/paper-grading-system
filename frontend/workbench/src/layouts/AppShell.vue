@@ -15,6 +15,17 @@ const activeNav = computed(() => route.meta.nav || "");
 // 评分工作区是整屏三栏布局，不套用常规内容边距。
 const fullBleed = computed(() => route.meta.chrome === "full");
 
+// 在评分助手的工作区里（同源 iframe）运行时，不再显示外壳侧栏与模型引导弹窗：
+// 导航与模型设置由助手页面负责，工作区只放页面本身。
+const embedded = isEmbedded();
+function isEmbedded() {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
 // /auth/me 是 {auth_required, user, organization} 的嵌套结构；
 // 关闭鉴权的开发模式下 user 为 null，此时不能显示成「未登录」。
 const user = computed(() => session.identity?.user ?? null);
@@ -38,8 +49,8 @@ async function onLogout() {
 </script>
 
 <template>
-  <div class="shell">
-    <aside class="sidebar">
+  <div class="shell" :class="{ embedded }">
+    <aside v-if="!embedded" class="sidebar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff"
@@ -57,6 +68,9 @@ async function onLogout() {
 
       <nav class="nav" aria-label="主导航">
         <div class="nav-label">评审</div>
+        <RouterLink v-if="session.can('use_assistant')" class="nav-item" :to="{ name: 'assistant' }">
+          <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z M8 10h8 M8 13h5" /></svg>评分助手
+        </RouterLink>
         <RouterLink class="nav-item" :class="{ active: activeNav === 'home' }" :to="{ name: 'dashboard' }">
           <svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z" /></svg>工作台
         </RouterLink>
@@ -119,7 +133,7 @@ async function onLogout() {
   </div>
 
     <!-- 没有可用模型时阻断：整套评分能力都用不了，先说清楚再让用户去配置。 -->
-    <ModelSetupDialog />
+    <ModelSetupDialog v-if="!embedded" />
   </template>
 
 <style scoped>
@@ -308,6 +322,11 @@ async function onLogout() {
 .workspace:not(.full-bleed) {
   padding: 30px 36px 56px;
   max-width: var(--content-max);
+}
+
+/* 工作区内嵌：页面窄，内容边距收紧。 */
+.shell.embedded .workspace:not(.full-bleed) {
+  padding: 18px 20px 40px;
 }
 
 /* 窄屏折叠：设计三栏宽度不作为唯一布局（计划 §8）。 */

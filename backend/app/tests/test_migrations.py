@@ -1602,3 +1602,59 @@ def test_0037_downgrades_and_replays_with_only_rubric_tasks(monkeypatch, tmp_pat
     finally:
         engine.dispose()
     command.upgrade(config, "head")
+
+
+def test_0038_creates_assistant_tables_and_downgrades_when_empty(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "assistant-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0038_assistant_conversations")
+    engine = create_engine(url)
+    try:
+        tables = set(inspect(engine).get_table_names())
+        assert {
+            "assistant_preferences", "assistant_conversations", "assistant_messages",
+            "assistant_checkpoints", "assistant_checkpoint_writes",
+        } <= tables
+        indexes = {index["name"] for index in inspect(engine).get_indexes("assistant_messages")}
+        assert "ix_assistant_messages_conversation_created" in indexes
+        command.downgrade(config, "0037_ai_task_upload_scope")
+        assert "assistant_messages" not in set(inspect(engine).get_table_names())
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("table", ["assistant_preferences", "assistant_conversations", "assistant_checkpoints"])
+def test_0038_refuses_to_downgrade_with_assistant_data(monkeypatch, tmp_path, table):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / ("assistant-%s.db" % table))
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0038_assistant_conversations")
+    engine = create_engine(url)
+    try:
+        # SQLite 迁移库不开外键约束，这里只需要一行数据触发降级保护。
+        with engine.begin() as db:
+            if table == "assistant_preferences":
+                db.execute(text(
+                    "INSERT INTO assistant_preferences (id, user_id, model_source, created_at, updated_at) "
+                    "VALUES ('p1', 'u1', 'platform', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+            elif table == "assistant_conversations":
+                db.execute(text(
+                    "INSERT INTO assistant_conversations (id, owner_id, title, focus, flow_seq, created_at, updated_at) "
+                    "VALUES ('c1', 'u1', '新对话', '{}', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+            else:
+                db.execute(text(
+                    "INSERT INTO assistant_checkpoints (thread_id, checkpoint_ns, checkpoint_id, checkpoint_type,"
+                    " checkpoint_data, metadata_type, metadata_data, created_at)"
+                    " VALUES ('c1:1', '', 'k1', 'msgpack', x'00', 'msgpack', x'00', CURRENT_TIMESTAMP)"
+                ))
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match=table):
+        command.downgrade(config, "0037_ai_task_upload_scope")

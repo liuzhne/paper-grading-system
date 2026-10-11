@@ -15,7 +15,9 @@ def test_capabilities_projects_roles_and_limits(client):
         "view_platform_ops",
         "manage_members",
         "manage_own_ai_connections",
+        "use_assistant",
     }
+    assert payload["abilities"]["use_assistant"] is True  # 开发模式放行，与端点守卫一致
     assert payload["upload"]["max_size_mb"] == settings.DIRECT_UPLOAD_MAX_SIZE_MB
     assert payload["upload"]["tus_threshold_mb"] == settings.DIRECT_UPLOAD_TUS_THRESHOLD_MB
     assert payload["upload"]["accepted_extensions"] == [".docx", ".pdf"]

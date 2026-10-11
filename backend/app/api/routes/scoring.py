@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
@@ -36,28 +37,10 @@ from backend.app.services.scoring.engine import update_score_item
 router = APIRouter(tags=["scoring"])
 
 
-def _visible_paper(db: Session, paper_id: str, principal: CurrentPrincipal) -> Paper:
-    paper = db.get(Paper, paper_id)
-    if paper is None or (
-        principal.organization_id is not None
-        and paper.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="paper not found")
-    return paper
+_visible_paper = guards.visible_paper
 
 
-def _visible_run(
-    db: Session,
-    run_id: str,
-    principal: CurrentPrincipal,
-) -> ScoringRun:
-    run = db.get(ScoringRun, run_id)
-    if run is None or (
-        principal.organization_id is not None
-        and run.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="scoring run not found")
-    return run
+_visible_run = guards.visible_run
 
 
 def _visible_score_item(

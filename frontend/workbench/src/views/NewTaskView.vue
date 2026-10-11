@@ -4,6 +4,7 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { compactTokens } from "@/lib/score-jobs.js";
+import { createBatch, loadActiveConnections, loadScoreEstimate, runUploadPrecheck, startScoringJob } from "@/lib/scoring-actions.js";
 import { requiresOwnConnection, uploadStatusLabel, useUploadStore } from "@/stores/upload.js";
 import { useSessionStore } from "@/stores/session.js";
 
@@ -63,7 +64,7 @@ const connectionMissing = computed(
 
 async function loadConnections() {
   try {
-    connections.value = ((await api.get("/ai-connections")) || []).filter((item) => item.status === "active");
+    connections.value = await loadActiveConnections();
     form.ai_connection_id = connections.value[0]?.id || "";
   } catch (err) {
     if (!(err instanceof StaleContextError)) connections.value = [];
@@ -72,14 +73,13 @@ async function loadConnections() {
 
 async function ensureBatch() {
   if (batchId.value) return batchId.value;
-  const batch = await api.post("/batches", {
-    name: form.name.trim(),
-    rubric_id: form.rubric_id,
-    department: form.department || null,
-    major: form.major || null,
-    // 建批次时冻结连接：之后轮换密钥或改配置，旧批次会拒绝继续跑，而不是
-    // 悄悄换一个模型接着评。
-    ai_connection_id: form.ai_connection_id || null,
+  // 与评分助手共用同一个动作（lib/scoring-actions.js）。
+  const batch = await createBatch({
+    name: form.name,
+    rubricId: form.rubric_id,
+    department: form.department,
+    major: form.major,
+    aiConnectionId: form.ai_connection_id,
   });
   batchId.value = batch.id;
   await router.replace({ query: { ...route.query, batch: batch.id } });
@@ -114,9 +114,7 @@ async function runPrecheck() {
     precheck.value = null;
     return;
   }
-  precheck.value = await api.post(`/batches/${batchId.value}/upload-precheck`, {
-    paper_ids: upload.uploadedPaperIds,
-  });
+  precheck.value = await runUploadPrecheck(batchId.value, upload.uploadedPaperIds);
   // 不等待：批次较大时估算要逐条组装请求，不应拖慢预检结果的展示。
   loadEstimate();
 }
@@ -124,7 +122,7 @@ async function runPrecheck() {
 async function loadEstimate() {
   const requested = batchId.value;
   try {
-    const value = await api.get(`/batches/${requested}/score-estimate`);
+    const value = await loadScoreEstimate(requested);
     if (batchId.value === requested) estimate.value = value;
   } catch (err) {
     if (!(err instanceof StaleContextError)) estimate.value = null;
@@ -153,10 +151,7 @@ async function onStart() {
   busy.value = true;
   error.value = null;
   try {
-    await api.post(`/batches/${batchId.value}/score-jobs`, {
-      rescore: false,
-      max_workers: 2,
-    });
+    await startScoringJob(batchId.value);
     await router.push({ name: "task-run", params: { batchId: batchId.value } });
   } catch (err) {
     error.value = err instanceof ApiError ? err.detail || err.message : err?.message;

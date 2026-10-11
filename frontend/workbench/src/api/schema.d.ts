@@ -205,6 +205,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/assistant/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Conversations */
+        get: operations["list_conversations_api_assistant_conversations_get"];
+        put?: never;
+        /** Create Conversation */
+        post: operations["create_conversation_api_assistant_conversations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/assistant/conversations/{conversation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Conversation */
+        get: operations["read_conversation_api_assistant_conversations__conversation_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Conversation */
+        delete: operations["delete_conversation_api_assistant_conversations__conversation_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Conversation */
+        patch: operations["update_conversation_api_assistant_conversations__conversation_id__patch"];
+        trace?: never;
+    };
+    "/api/assistant/conversations/{conversation_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Run
+         * @description 推进一次：用户输入（message）、恢复流程（resume）或操作选择卡片（select）。
+         */
+        post: operations["create_run_api_assistant_conversations__conversation_id__runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/assistant/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Settings */
+        get: operations["read_settings_api_assistant_settings_get"];
+        /** Update Settings */
+        put: operations["update_settings_api_assistant_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/invitations/resolve": {
         parameters: {
             query?: never;
@@ -1191,7 +1266,11 @@ export interface paths {
         post?: never;
         /**
          * Delete Incomplete Upload
-         * @description Discard a direct-upload reservation that never completed archival.
+         * @description Discard a failed upload, or a material that failed to parse and was never scored.
+         *
+         *     解析失败的材料（例如扫描件）会让预检一直阻断，整批无法开始评分；以前只能
+         *     放弃整个任务重建。现在允许移除它——前提是它从未进入评分：没有评分记录、
+         *     没有批任务条目、没有正文分块。已解析或已评分的材料仍然不能删。
          */
         delete: operations["delete_incomplete_upload_api_papers__paper_id__delete"];
         options?: never;
@@ -3119,6 +3198,186 @@ export interface components {
              */
             updated_at: string;
         };
+        /**
+         * AssistantAttachments
+         * @description 附件只报数量与文件名：文件本身由浏览器直传（方案 T5）。
+         */
+        AssistantAttachments: {
+            /** Count */
+            count: number;
+            /** Names */
+            names?: string[];
+        };
+        /** AssistantConnectionOption */
+        AssistantConnectionOption: {
+            /** Id */
+            id: string;
+            /** Model Name */
+            model_name: string;
+            /** Name */
+            name: string;
+        };
+        /** AssistantConversationCreate */
+        AssistantConversationCreate: {
+            /** Title */
+            title?: string | null;
+        };
+        /** AssistantConversationDetail */
+        AssistantConversationDetail: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Focus */
+            focus: {
+                [key: string]: unknown;
+            };
+            /** Id */
+            id: string;
+            /** Messages */
+            messages: components["schemas"]["AssistantMessageRead"][];
+            pending?: components["schemas"]["AssistantPendingRead"] | null;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** AssistantConversationRead */
+        AssistantConversationRead: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Focus */
+            focus: {
+                [key: string]: unknown;
+            };
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** AssistantConversationUpdate */
+        AssistantConversationUpdate: {
+            /** Title */
+            title: string;
+        };
+        /** AssistantMessageRead */
+        AssistantMessageRead: {
+            /** Cards */
+            cards: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Intent */
+            intent?: string | null;
+            /** Model Name */
+            model_name?: string | null;
+            /** Role */
+            role: string;
+            /** Text */
+            text: string;
+        };
+        /** AssistantModelRead */
+        AssistantModelRead: {
+            /** Connection Id */
+            connection_id?: string | null;
+            /** Label */
+            label: string;
+            /** Notice */
+            notice?: string | null;
+            /** Slow */
+            slow: boolean;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "connection" | "platform" | "deployment" | "none";
+        };
+        /**
+         * AssistantPendingRead
+         * @description 流程当前等待的中断：哪张卡片、需要浏览器做什么。
+         */
+        AssistantPendingRead: {
+            /** Card Id */
+            card_id?: string | null;
+            /** Client */
+            client?: {
+                [key: string]: unknown;
+            };
+            /** Created At */
+            created_at?: string | null;
+            /** Kind */
+            kind: string;
+            /** Message Id */
+            message_id?: string | null;
+            /** Thread Id */
+            thread_id?: string | null;
+        };
+        /** AssistantRunCreate */
+        AssistantRunCreate: {
+            attachments?: components["schemas"]["AssistantAttachments"] | null;
+            /** Card Id */
+            card_id?: string | null;
+            /** Text */
+            text?: string | null;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "message" | "resume" | "select";
+            /** Value */
+            value?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** AssistantRunRead */
+        AssistantRunRead: {
+            conversation: components["schemas"]["AssistantConversationRead"];
+            /** Messages */
+            messages: components["schemas"]["AssistantMessageRead"][];
+            pending?: components["schemas"]["AssistantPendingRead"] | null;
+        };
+        /** AssistantSettingsRead */
+        AssistantSettingsRead: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /** Configured */
+            configured: boolean;
+            /** Connections */
+            connections: components["schemas"]["AssistantConnectionOption"][];
+            effective: components["schemas"]["AssistantModelRead"];
+            /** Model Source */
+            model_source?: ("connection" | "platform") | null;
+            /** Platform Available */
+            platform_available: boolean;
+        };
+        /** AssistantSettingsUpdate */
+        AssistantSettingsUpdate: {
+            /** Ai Connection Id */
+            ai_connection_id?: string | null;
+            /**
+             * Model Source
+             * @enum {string}
+             */
+            model_source: "connection" | "platform";
+        };
         /** AtomicRuleConfirmRequest */
         AtomicRuleConfirmRequest: {
             /** Compilation Id */
@@ -3758,6 +4017,11 @@ export interface components {
             manage_members: boolean;
             /** Manage Own Ai Connections */
             manage_own_ai_connections: boolean;
+            /**
+             * Use Assistant
+             * @default false
+             */
+            use_assistant: boolean;
             /** View Organization Ops */
             view_organization_ops: boolean;
             /** View Platform Ops */
@@ -6102,6 +6366,292 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AITaskRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_conversations_api_assistant_conversations_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversationRead"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_conversation_api_assistant_conversations_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AssistantConversationCreate"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_conversation_api_assistant_conversations__conversation_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                conversation_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_conversation_api_assistant_conversations__conversation_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                conversation_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_conversation_api_assistant_conversations__conversation_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                conversation_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantConversationUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversationRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_run_api_assistant_conversations__conversation_id__runs_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                conversation_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantRunCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantRunRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_settings_api_assistant_settings_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantSettingsRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_settings_api_assistant_settings_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantSettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantSettingsRead"];
                 };
             };
             /** @description Validation Error */

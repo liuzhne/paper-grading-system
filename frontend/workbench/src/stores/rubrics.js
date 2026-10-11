@@ -126,6 +126,26 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return result;
   }
 
+  /**
+   * 按 ID 打开一个仍在草稿状态的导入会话。评分助手在对话里上传规则与模板后，
+   * 工作区里的评分标准页用它接着核对（会话存在数据库里，不依赖内存）。
+   * @param {string} sessionId
+   */
+  async function loadImportSession(sessionId) {
+    const result = await api.get(`/rubrics/import-sessions/${sessionId}`);
+    if (result?.status !== "draft") return null;
+    activeImportSession.value = result;
+    lastImport.value = {
+      warnings: result.warnings || [],
+      templateSummary: result.template_summary || null,
+      rubricId: null,
+      coverage: result.coverage || null,
+      triggers: [],
+      conflicts: result.conflicts || [],
+    };
+    return result;
+  }
+
   /** @param {Record<string, unknown>} changes */
   async function updateImportSession(changes) {
     if (!activeImportSession.value?.id) throw new Error("当前没有待确认的导入会话。");
@@ -654,6 +674,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
     load,
     importFiles,
     createImportSession,
+    loadImportSession,
     updateImportSession,
     confirmImportSession,
     previewImportSource,
