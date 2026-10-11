@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { materialIdentity } from "@/lib/document-types.js";
 import { useGradingStore } from "@/stores/grading.js";
@@ -8,6 +8,9 @@ import { useGradingStore } from "@/stores/grading.js";
 const store = useGradingStore();
 const route = useRoute();
 const router = useRouter();
+
+/** 首次加载、材料还没回来：此时显示“0 份”“未命名材料”会被读成批次是空的。 */
+const firstLoad = computed(() => store.loading && !store.papers.length);
 
 const position = computed(() =>
   store.neighbors ? `${store.neighbors.position} / ${store.neighbors.total}` : "—",
@@ -169,8 +172,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     <header class="topbar">
       <button class="back" type="button" @click="router.push({ name: 'tasks' })">←</button>
       <div class="ident">
-        <div class="faint mono">{{ materialIdentity(store.currentPaper, store.documentType).code }}</div>
-        <div class="title">{{ materialIdentity(store.currentPaper, store.documentType).title }}</div>
+        <div class="faint mono">{{ firstLoad ? "" : materialIdentity(store.currentPaper, store.documentType).code }}</div>
+        <div class="title">{{ firstLoad ? "正在加载…" : materialIdentity(store.currentPaper, store.documentType).title }}</div>
       </div>
       <div class="nav">
         <span class="mono faint">{{ position }}</span>
@@ -184,7 +187,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     <div class="cols">
       <!-- 左：材料列表 -->
       <aside class="col materials">
-        <div class="col-head mono">材料 · {{ store.papers.length }}</div>
+        <div class="col-head mono">材料 · {{ firstLoad ? "…" : store.papers.length }}</div>
+        <p v-if="firstLoad" class="faint list-loading" role="status">正在加载材料…</p>
         <button
           v-for="paper in store.papers"
           :key="paper.id"
@@ -233,9 +237,17 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <div v-if="store.documentUnavailableReason" class="notice notice-danger">
             {{ store.documentUnavailableReason }}
           </div>
-          <div v-else-if="!store.documentBlocks.length" class="faint doc-empty">
-            {{ store.currentRunId ? "该材料没有可显示的正文。" : "该材料尚未评分。" }}
+          <div v-else-if="store.loading" class="faint doc-empty" role="status">正在加载…</div>
+          <div v-else-if="store.currentRunId && !store.documentBlocks.length" class="faint doc-empty">
+            该材料没有可显示的正文。
           </div>
+          <!-- 没有评分结果有两种来由：还没开始评，或评分失败没有产出。原因与重新评分都在评分进度页。 -->
+          <div v-else-if="!store.currentRunId && store.currentPaper" class="faint doc-empty" data-test="no-result">
+            该材料还没有评分结果。
+            <RouterLink :to="{ name: 'task-run', params: { batchId: route.params.batchId } }">到评分进度页</RouterLink>
+            查看原因或开始评分。
+          </div>
+          <div v-else-if="!store.documentBlocks.length" class="faint doc-empty">这个评分任务里还没有材料。</div>
 
           <article v-else class="paper">
             <div
@@ -592,6 +604,11 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
 .findings .deduct {
   margin-left: 6px;
+}
+
+.list-loading {
+  padding: 12px 14px;
+  font-size: 12px;
 }
 
 .doc-empty {
