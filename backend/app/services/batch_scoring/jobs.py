@@ -3,49 +3,57 @@
 Observation policy values are supplied by an authorized user and stored with
 the job.  This module validates and evaluates them but deliberately supplies no
 production thresholds and never authorizes the final Core default switch.
+
+Execution goes through the unified work queue (``services/work_queue``): one
+claimed item is one paper, on Vercel and on the intranet/local worker alike.
+This module is the ``batch_scoring`` work kind — it owns the job state machine,
+the per-paper checkpoint and what counts as progress for a dead execution.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from contextlib import nullcontext
-from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import wait
 from copy import deepcopy
-from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
 from decimal import InvalidOperation
+import logging
 from math import ceil
-from threading import Event
-from threading import Thread
 from time import monotonic
-import uuid
 
+from sqlalchemy import case
+from sqlalchemy import exists
 from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.orm import selectinload
 
-from backend.app.db.models import AIConnection
 from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
 from backend.app.services.batches import state as batch_state
 from backend.app.db.models import Paper
-from backend.app.db.models import PlatformLLMConfig
 from backend.app.db.models import RuleScoringTask
-from backend.app.db.models import ScoreItem
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import utcnow
 from backend.app.services.ai_connections import AIConnectionBindingError
-from backend.app.services.ai_connections import connection_max_concurrency
 from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.scoring.decision_ledger import bypass_ledger_reads
 from backend.app.services.scoring.core.canonical import canonical_sha256
+from backend.app.services.work_queue.kinds import ClaimedItem
+from backend.app.services.work_queue.kinds import WorkKind
+from backend.app.services.work_queue.kinds import register
+from backend.app.services.work_queue.limits import ITEM_LEASE_SECONDS
+from backend.app.services.work_queue.sources import resolve_source
+from backend.app.services.work_queue.sources import source_key_for_connection
 
 
+logger = logging.getLogger("batch-scoring-jobs")
+
+KIND = "batch_scoring"
 ACTIVE_JOB_STATUSES = ("queued", "running", "cancel_requested")
 TERMINAL_JOB_STATUSES = (
     "completed",
@@ -54,102 +62,34 @@ TERMINAL_JOB_STATUSES = (
     "failed",
 )
 RETRYABLE_ITEM_STATUSES = ("failed", "canceled", "running")
+ITEM_STATUSES = ("pending", "running", "succeeded", "skipped", "failed", "canceled")
 POLICY_SCHEMA_VERSION = "core-cutover-observation-policy@1"
 METRICS_SCHEMA_VERSION = "batch-observation-metrics@1"
-RUNNER_LEASE_SECONDS = 120
-RUNNER_HEARTBEAT_SECONDS = 15
-QUEUE_ITEM_LEASE_SECONDS = 330
+# 页面判断“执行中断”的租约：与条目心跳租约相同（统一执行模型后没有任务级执行者）。
+RUNNER_LEASE_SECONDS = ITEM_LEASE_SECONDS
 # 计入「模型失败率」的错误码；额度耗尽也是模型侧失败，不能算成检查器失败。
 LLM_FAILURE_CODES = ("timeout", "rate_limited", "quota_exhausted", "llm_failure")
-# 连接的并发名额已满时，队列消息延后再来；排得越靠后等得越久，减少空转的函数调用。
-CONNECTION_WAIT_BASE_SECONDS = 30
-CONNECTION_WAIT_MAX_SECONDS = 300
+STALLED_ERROR_CODE = "WORK_ITEM_STALLED"
+STALLED_ERROR_MESSAGE = (
+    "多次执行都没能推进（超过运行时间上限或进程中止）；请重试失败项，"
+    "仍然失败时检查这份材料或联系管理员。"
+)
 
 
-class ConnectionAtCapacityError(Exception):
-    """该批次所用连接正在评分的论文数已达上限；队列消费方应延后重投，而不是失败。"""
+def batch_source_key(batch) -> str:
+    """批次评分所用模型来源：私有连接按连接 ID，没有绑定连接的批次共用平台模型。"""
 
-    def __init__(self, retry_after_seconds: int):
-        super().__init__(f"AI connection is at its concurrency limit; retry in {retry_after_seconds}s")
-        self.retry_after_seconds = retry_after_seconds
-
-
-def _batch_model_source(session, batch):
-    """批次评分所用模型的并发声明：(上限, 加锁语句, 同源批次条件)；未声明返回 None。
-
-    私有连接按连接 ID 计算；没有绑定连接的批次用平台默认模型，所有这类批次共用一个名额池。
-    """
-
-    if batch is None:
-        return None
-    if batch.ai_connection_id:
-        options = session.scalar(
-            select(AIConnection.provider_options).where(AIConnection.id == batch.ai_connection_id)
-        )
-        limit = connection_max_concurrency(options)
-        if limit is None:
-            return None
-        return (
-            limit,
-            select(AIConnection.id).where(AIConnection.id == batch.ai_connection_id).with_for_update(),
-            GradingBatch.ai_connection_id == batch.ai_connection_id,
-        )
-    from backend.app.services import platform_llm
-
-    config = platform_llm.get_active_config(session)
-    limit = connection_max_concurrency(getattr(config, "provider_options", None))
-    if config is None or limit is None:
-        return None
-    return (
-        limit,
-        select(PlatformLLMConfig.id).where(PlatformLLMConfig.id == config.id).with_for_update(),
-        GradingBatch.ai_connection_id.is_(None),
-    )
+    return source_key_for_connection(getattr(batch, "ai_connection_id", None))
 
 
 def _batch_connection_limit(session, batch):
     """批次所用模型声明的同时请求数；没有声明时返回 None。"""
 
-    source = _batch_model_source(session, batch)
-    return source[0] if source else None
+    if batch is None:
+        return None
+    return resolve_source(session, batch_source_key(batch)).limit
 
 
-def _ensure_connection_capacity(session, *, job, item, batch, now):
-    """跨实例按连接限流：锁住连接行，再数它在所有批次里正在评分（租约未过期）的论文。
-
-    厂商的并发上限按 Key 计算；队列可能同时把同一连接的多篇论文投给不同实例。
-    名额已满就抛出 ConnectionAtCapacityError，由消费方投递延迟消息后正常确认，
-    不占用队列的重投次数。
-    """
-
-    source = _batch_model_source(session, batch)
-    if source is None:
-        return
-    limit, lock_statement, same_source = source
-    # 同一模型来源的领取在这里串行；任务行已在调用方锁住，加锁顺序固定为 任务 → 连接。
-    session.execute(lock_statement)
-    lease_cutoff = now - timedelta(seconds=QUEUE_ITEM_LEASE_SECONDS)
-    running = session.scalar(
-        select(func.count(BatchScoringItem.id))
-        .join(BatchScoringJob, BatchScoringJob.id == BatchScoringItem.job_id)
-        .join(GradingBatch, GradingBatch.id == BatchScoringJob.grading_batch_id)
-        .where(
-            same_source,
-            BatchScoringItem.status == "running",
-            BatchScoringItem.started_at > lease_cutoff,
-            BatchScoringItem.id != item.id,
-        )
-    )
-    if running < limit:
-        return
-    ahead = sum(
-        1
-        for other in job.items
-        if other.status == "pending"
-        and (other.created_at, other.id) < (item.created_at, item.id)
-    )
-    wait = min(CONNECTION_WAIT_MAX_SECONDS, CONNECTION_WAIT_BASE_SECONDS * (1 + ahead // limit))
-    raise ConnectionAtCapacityError(wait)
 ATTENTION_FAILURE_HOURS = 24
 
 _THRESHOLD_DIRECTIONS = {
@@ -346,79 +286,74 @@ def list_attention_batch_scoring_jobs(session, *, organization_id=None):
     return list(session.scalars(query).all())
 
 
-def next_runnable_batch_scoring_job_id(session):
-    """Return the oldest queued job, otherwise an expired runner lease."""
-    cutoff = utcnow() - timedelta(seconds=RUNNER_LEASE_SECONDS)
-    return session.scalar(
-        select(BatchScoringJob.id)
-        .where(
-            (BatchScoringJob.status == "queued")
-            | (
-                BatchScoringJob.status.in_(("running", "cancel_requested"))
-                & (
-                    (BatchScoringJob.heartbeat_at.is_(None))
-                    | (BatchScoringJob.heartbeat_at <= cutoff)
-                )
-            )
-        )
-        .order_by(BatchScoringJob.created_at, BatchScoringJob.id)
-        .limit(1)
-    )
 
 
-def finalize_batch_scoring_job_failure(session_factory, *, job_id):
-    """Persist a safe terminal state for an executor-level failure."""
-    with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
+def _shift_counts(session, job_id, **deltas):
+    """条目状态变化时增量更新任务计数（原子 SQL，不加载全部条目）。
+
+    计数变化与条目变化在同一事务里、都在任务行锁之下提交，所以任何已提交的
+    条目状态都已计入计数；巡检的重新计数据此可以安全地校正漂移。
+    """
+
+    values = {}
+    for status, delta in deltas.items():
+        if not delta:
+            continue
+        column = getattr(BatchScoringJob, "%s_count" % status)
+        # 历史数据的计数可能与条目不一致：不让减法撞上非负约束，漂移由收敛时的
+        # 重新计数校正。
+        values[column] = case((column + delta < 0, 0), else_=column + delta)
+    if values:
+        session.execute(
+            update(BatchScoringJob)
             .where(BatchScoringJob.id == job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
+            .values(values)
+            .execution_options(synchronize_session=False)
         )
-        if job is None or job.status in TERMINAL_JOB_STATUSES:
-            return job
-        now = utcnow()
-        for item in job.items:
-            if item.status not in ("pending", "running"):
-                continue
-            item.status = "failed"
-            item.error_code = "worker_failure"
-            item.error_message = "后台执行异常，请重试失败项或联系管理员。"
-            item.finished_at = now
-            history = list(item.attempt_history or [])
-            history.append(
-                {
-                    "attempt": item.attempt_count,
-                    "status": "failed",
-                    "error_code": "worker_failure",
-                    "failure_kind": "worker",
-                    "scoring_run_id": None,
-                    "latency_ms": 0,
-                }
-            )
-            item.attempt_history = history
-        _set_job_counts(job)
-        has_results = bool(job.succeeded_count or job.skipped_count)
-        job.status = "completed_with_errors" if has_results else "failed"
-        job.runner_token = None
-        job.heartbeat_at = now
-        job.finished_at = now
-        metrics = _aggregate_metrics(job)
-        job.metrics_snapshot = {
-            "schema_version": METRICS_SCHEMA_VERSION,
-            **metrics,
-            "gate": evaluate_observation_policy(job.observation_policy, metrics),
-        }
-        batch = session.get(GradingBatch, job.grading_batch_id)
-        if batch is not None and batch.status == "scoring":
-            if has_results:
-                batch_state.apply_event(
-                    session, batch, "finish_scoring", outcome="scored_with_errors"
-                )
-            else:
-                batch_state.apply_event(session, batch, "cancel")
-        session.commit()
-        return get_batch_scoring_job(session, job.id)
+
+
+def _recount(session, job_id):
+    """按条目重新计数（取消、重试、巡检收敛用）；返回各状态的条数。
+
+    计数没变就不写：写入会刷新 updated_at，而运维页按它判断任务是否停滞。
+    """
+
+    counts = {status: 0 for status in ITEM_STATUSES}
+    for status, value in session.execute(
+        select(BatchScoringItem.status, func.count(BatchScoringItem.id))
+        .where(BatchScoringItem.job_id == job_id)
+        .group_by(BatchScoringItem.status)
+    ):
+        counts[status] = int(value)
+    values = {
+        "total_items": sum(counts.values()),
+        **{"%s_count" % status: value for status, value in counts.items()},
+    }
+    current = session.execute(
+        select(*(getattr(BatchScoringJob, name) for name in values)).where(
+            BatchScoringJob.id == job_id
+        )
+    ).one_or_none()
+    if current is not None and tuple(current) != tuple(values.values()):
+        session.execute(
+            update(BatchScoringJob)
+            .where(BatchScoringJob.id == job_id)
+            .values(values)
+            .execution_options(synchronize_session=False)
+        )
+    return counts
+
+
+def _lock_job(session, job_id, *, with_items=False, skip_locked=False):
+    statement = (
+        select(BatchScoringJob)
+        .where(BatchScoringJob.id == job_id)
+        .with_for_update(skip_locked=skip_locked)
+        .execution_options(populate_existing=True)
+    )
+    if with_items:
+        statement = statement.options(selectinload(BatchScoringJob.items))
+    return session.scalar(statement)
 
 
 def create_batch_scoring_job(
@@ -444,8 +379,9 @@ def create_batch_scoring_job(
         raise ValueError("batch not found")
     if not batch.papers:
         raise ValueError("batch has no papers")
-    # 本地 worker 按 max_workers 并行评分。模型声明了同时请求数就以它为准：免费档调低到 1，
-    # Bedrock 等按配额调高；没声明时沿用请求里的值（工作台默认 2）。
+    # 同步执行入口（/run）按 max_workers 开线程。模型声明了同时请求数就以它为准：
+    # 免费档调低到 1，Bedrock 等按配额调高；没声明时沿用请求里的值（工作台默认 2）。
+    # 真正的并发上限在领取时按来源检查，跨任务、跨实例都生效。
     connection_limit = _batch_connection_limit(session, batch)
     if connection_limit is not None:
         max_workers = connection_limit
@@ -496,39 +432,49 @@ def create_batch_scoring_job(
     )
     session.add(job)
     session.flush()
-    for paper in sorted(batch.papers, key=lambda value: (value.created_at, value.id)):
+    source_key = batch_source_key(batch)
+    owner_id = actor_id or batch.owner_id
+    papers = sorted(batch.papers, key=lambda value: (value.created_at, value.id))
+    for ordinal, paper in enumerate(papers):
         session.add(
-            BatchScoringItem(job_id=job.id, paper_id=paper.id, status="pending")
+            BatchScoringItem(
+                job_id=job.id,
+                paper_id=paper.id,
+                status="pending",
+                source_key=source_key,
+                owner_id=owner_id,
+                ordinal=ordinal,
+            )
         )
     session.commit()
     return get_batch_scoring_job(session, job.id), True
 
 
 def cancel_batch_scoring_job(session, job_id):
-    job = session.scalar(
-        select(BatchScoringJob)
-        .where(BatchScoringJob.id == job_id)
-        .options(selectinload(BatchScoringJob.items))
-        .with_for_update()
-    )
+    """取消：未开始的条目直接取消，进行中的条目跑完后任务收尾为“已取消”。"""
+
+    job = session.get(BatchScoringJob, job_id)
     if job is None:
         raise ValueError("batch scoring job not found")
     if job.status in TERMINAL_JOB_STATUSES:
-        return job
+        return get_batch_scoring_job(session, job_id)
     now = utcnow()
-    job.cancel_requested_at = now
-    if job.status == "queued":
-        for item in job.items:
-            if item.status in ("pending", "running"):
-                item.status = "canceled"
-                item.finished_at = now
-        job.status = "canceled"
-        job.finished_at = now
-    else:
+    # 先改条目再锁任务行：与领取（条目 → 任务）的加锁顺序一致，避免死锁。
+    session.execute(
+        update(BatchScoringItem)
+        .where(BatchScoringItem.job_id == job_id, BatchScoringItem.status == "pending")
+        .values(status="canceled", finished_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    job = _lock_job(session, job_id)
+    if job.status not in TERMINAL_JOB_STATUSES:
+        job.cancel_requested_at = now
         job.status = "cancel_requested"
-    _set_job_counts(job)
+        session.flush()
+        _recount(session, job_id)
+        _finalize_if_settled(session, job_id, now)
     session.commit()
-    return get_batch_scoring_job(session, job.id)
+    return get_batch_scoring_job(session, job_id)
 
 
 def retry_batch_scoring_job(session, job_id):
@@ -553,6 +499,9 @@ def retry_batch_scoring_job(session, job_id):
         item.telemetry = None
         item.started_at = None
         item.finished_at = None
+        item.heartbeat_at = None
+        item.stall_count = 0
+        item.not_before = None
     job.status = "queued"
     job.cancel_requested_at = None
     job.finished_at = None
@@ -560,7 +509,6 @@ def retry_batch_scoring_job(session, job_id):
     _set_job_counts(job)
     session.commit()
     return get_batch_scoring_job(session, job.id)
-
 
 def _signal(actual, threshold, *, direction):
     if actual is None:
@@ -892,11 +840,6 @@ def _default_score_item(session, *, paper_id, job_id):
     }
 
 
-def _worker(session_factory, score_item, *, paper_id, job_id):
-    with session_factory() as session:
-        return score_item(session, paper_id=paper_id, job_id=job_id)
-
-
 def _classify_failure(exc):
     current = exc
     seen = set()
@@ -942,110 +885,6 @@ def _safe_failure_message(exc, code):
         return str(exc)
     exception_type = type(exc).__name__
     return f"评分执行失败（{code}; exception_type={exception_type}）"
-
-
-def _checkpoint_started(session_factory, item_id):
-    with session_factory() as session:
-        item = session.scalar(
-            select(BatchScoringItem)
-            .where(
-                BatchScoringItem.id == item_id,
-                BatchScoringItem.status == "pending",
-            )
-            .with_for_update()
-        )
-        if item is None:
-            return False
-        if item.attempt_count == 0:
-            item.baseline_scoring_run_id = session.scalar(
-                select(ScoringRun.id)
-                .where(ScoringRun.paper_id == item.paper_id)
-                .order_by(ScoringRun.created_at.desc(), ScoringRun.id.desc())
-                .limit(1)
-            )
-        item.status = "running"
-        item.attempt_count += 1
-        item.started_at = utcnow()
-        item.finished_at = None
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == item.job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
-        )
-        if job is not None:
-            _set_job_counts(job)
-        session.commit()
-        return True
-
-
-def _checkpoint_result(session_factory, item_id, *, result=None, error=None):
-    with session_factory() as session:
-        item = session.scalar(
-            select(BatchScoringItem)
-            .where(BatchScoringItem.id == item_id)
-            .with_for_update()
-        )
-        if item is None:
-            return
-        item.finished_at = utcnow()
-        if error is None:
-            result = result if isinstance(result, dict) else {}
-            status = result.get("status", "succeeded")
-            if status not in ("succeeded", "skipped"):
-                raise ValueError("score_item returned an unsupported status")
-            item.status = status
-            item.scoring_run_id = result.get("run_id")
-            item.telemetry = result.get("telemetry") or {}
-            item.error_code = None
-            item.error_message = None
-            history_entry = {
-                "attempt": item.attempt_count,
-                "status": status,
-                "error_code": None,
-                "scoring_run_id": item.scoring_run_id,
-                "latency_ms": int(item.telemetry.get("latency_ms") or 0),
-            }
-        else:
-            code, failure_kind = _classify_failure(error)
-            item.status = "failed"
-            item.error_code = code
-            item.error_message = _safe_failure_message(error, code)
-            item.telemetry = {
-                "score_item_count": 0,
-                "invalid_evidence_count": 0,
-                "rule_decision_count": 0,
-                "unauthorized_rule_count": 0,
-                "manual_review": False,
-                "cache_hits": 0,
-                "cache_misses": 0,
-                "checker_failures": 1 if failure_kind == "checker" else 0,
-                "llm_failures": 1 if failure_kind == "llm" else 0,
-                "latency_ms": 0,
-                "legacy_core_delta": None,
-                "profile_key": "unknown",
-                "rubric_version_id": "unknown",
-            }
-            history_entry = {
-                "attempt": item.attempt_count,
-                "status": "failed",
-                "error_code": code,
-                "failure_kind": failure_kind,
-                "scoring_run_id": None,
-                "latency_ms": 0,
-            }
-        history = list(item.attempt_history or [])
-        history.append(history_entry)
-        item.attempt_history = history
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == item.job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
-        )
-        if job is not None:
-            _set_job_counts(job)
-        session.commit()
 
 
 def _rate(numerator, denominator):
@@ -1175,223 +1014,379 @@ def _aggregate_metrics(job):
     return metrics
 
 
-def _cancel_pending_items(session_factory, job_id):
-    with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
-        )
-        if job is None or job.status != "cancel_requested":
-            return False
-        now = utcnow()
-        for item in job.items:
-            if item.status == "pending":
-                item.status = "canceled"
-                item.finished_at = now
-        _set_job_counts(job)
-        session.commit()
-        return True
 
 
-def _is_cancel_requested(session_factory, job_id):
-    with session_factory() as session:
-        status = session.scalar(
-            select(BatchScoringJob.status).where(BatchScoringJob.id == job_id)
-        )
-        return status == "cancel_requested"
+def _failure_telemetry(failure_kind):
+    return {
+        "score_item_count": 0,
+        "invalid_evidence_count": 0,
+        "rule_decision_count": 0,
+        "unauthorized_rule_count": 0,
+        "manual_review": False,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "checker_failures": 1 if failure_kind in ("checker", "worker") else 0,
+        "llm_failures": 1 if failure_kind == "llm" else 0,
+        "latency_ms": 0,
+        "legacy_core_delta": None,
+        "profile_key": "unknown",
+        "rubric_version_id": "unknown",
+    }
 
 
-def _heartbeat_job(session_factory, job_id, runner_token):
-    with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == job_id)
-            .with_for_update()
-        )
-        if job is None or job.runner_token != runner_token:
-            raise RuntimeError("batch scoring job runner lease was lost")
-        if job.status not in ("running", "cancel_requested"):
-            raise RuntimeError("batch scoring job is no longer executable")
-        job.heartbeat_at = utcnow()
-        session.commit()
+def _finalize_if_settled(session, job_id, now, *, touch=True):
+    """所有条目都结束时收尾任务：状态、观察指标、批次阶段。调用方已在事务里。
 
+    ``touch`` 表示这次调用伴随真实的执行活动（领取、写结果），顺带刷新任务心跳；
+    巡检收敛时不刷新，否则卡住的任务在运维页上永远显得“刚有活动”。
+    """
 
-def _heartbeat_queue_job(session_factory, job_id):
-    """Refresh the user-visible heartbeat for independently queued items."""
-    with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == job_id)
-            .with_for_update()
-        )
-        if job is None or job.status not in ("running", "cancel_requested"):
-            return False
-        job.heartbeat_at = utcnow()
-        session.commit()
-        return True
-
-
-def _finalize_queue_job_if_settled(session_factory, job_id):
-    """Aggregate one queue item's checkpoint and close a settled job."""
-    with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
-        )
-        if job is None:
-            raise ValueError("batch scoring job not found")
-        if job.status in TERMINAL_JOB_STATUSES:
-            return get_batch_scoring_job(session, job.id)
-
-        now = utcnow()
-        if job.status == "cancel_requested" and not any(
-            item.status == "running" for item in job.items
-        ):
-            for item in job.items:
-                if item.status == "pending":
-                    item.status = "canceled"
-                    item.finished_at = now
-
-        _set_job_counts(job)
-        if job.pending_count or job.running_count:
+    job = _lock_job(session, job_id)
+    if job is None or job.status in TERMINAL_JOB_STATUSES:
+        return job
+    if job.pending_count or job.running_count:
+        if touch:
             job.heartbeat_at = now
-            session.commit()
-            return get_batch_scoring_job(session, job.id)
+        return job
+    # 计数说已经结束：这时才加载全部条目（核对计数、汇总观察指标），每个任务一次。
+    job = _lock_job(session, job_id, with_items=True)
+    actual = Counter(item.status for item in job.items)
+    if actual["pending"] or actual["running"]:
+        # 计数漂移：以条目为准校正，不能在还有条目的时候收尾。
+        _set_job_counts(job)
+        return job
+    _set_job_counts(job)
+    if job.canceled_count:
+        job.status = "canceled"
+    elif job.failed_count:
+        job.status = "completed_with_errors"
+    elif job.succeeded_count or job.skipped_count:
+        job.status = "completed"
+    else:
+        job.status = "failed"
+    job.finished_at = now
+    job.runner_token = None
+    job.heartbeat_at = now
+    metrics = _aggregate_metrics(job)
+    job.metrics_snapshot = {
+        "schema_version": METRICS_SCHEMA_VERSION,
+        **metrics,
+        "gate": evaluate_observation_policy(job.observation_policy, metrics),
+    }
+    batch = session.get(GradingBatch, job.grading_batch_id)
+    # 只推进仍处在评分阶段的批次：巡检收敛历史任务时，批次可能早已被别的操作移走，
+    # 非法转移会让这个任务每次巡检都失败、永远收不了尾。
+    if batch is not None and batch.status == "scoring":
+        if job.status == "completed":
+            batch_state.apply_event(session, batch, "finish_scoring", outcome="scored")
+        elif job.status == "completed_with_errors":
+            batch_state.apply_event(
+                session, batch, "finish_scoring", outcome="scored_with_errors"
+            )
+        elif job.status in ("canceled", "failed"):
+            batch_state.apply_event(session, batch, "cancel")
+    logger.info(
+        "batch_scoring_job_finished job_id=%s status=%s succeeded=%s skipped=%s failed=%s canceled=%s",
+        job.id,
+        job.status,
+        job.succeeded_count,
+        job.skipped_count,
+        job.failed_count,
+        job.canceled_count,
+    )
+    return job
 
-        if job.canceled_count:
-            job.status = "canceled"
-        elif job.failed_count:
-            job.status = "completed_with_errors"
-        elif job.succeeded_count or job.skipped_count:
-            job.status = "completed"
-        else:
-            job.status = "failed"
-        job.finished_at = now
-        job.runner_token = None
-        job.heartbeat_at = now
-        metrics = _aggregate_metrics(job)
-        job.metrics_snapshot = {
-            "schema_version": METRICS_SCHEMA_VERSION,
-            **metrics,
-            "gate": evaluate_observation_policy(job.observation_policy, metrics),
-        }
-        batch = session.get(GradingBatch, job.grading_batch_id)
-        if batch is not None:
-            if job.status == "completed":
-                batch_state.apply_event(session, batch, "finish_scoring", outcome="scored")
-            elif job.status == "completed_with_errors":
-                batch_state.apply_event(
-                    session, batch, "finish_scoring", outcome="scored_with_errors"
-                )
-            elif job.status in ("canceled", "failed") and batch.status == "scoring":
-                batch_state.apply_event(session, batch, "cancel")
-        session.commit()
-        return get_batch_scoring_job(session, job.id)
 
+def _begin_item(session, item, now):
+    """领取钩子：锁任务行，校验任务仍在执行，把条目置为 running。"""
 
-def _claim_queue_item(session_factory, *, job_id, item_id):
-    """Claim one queue-delivered item, recovering a platform-timeout checkpoint."""
-    with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
+    job = _lock_job(session, item.job_id)
+    if job is None or job.status not in ("queued", "running"):
+        # 待处理条目只应出现在活动任务里；取消中或已结束任务的条目直接取消。
+        changed = session.execute(
+            update(BatchScoringItem)
+            .where(BatchScoringItem.id == item.id, BatchScoringItem.status == "pending")
+            .values(status="canceled", finished_at=now)
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        if changed and job is not None:
+            _shift_counts(session, job.id, pending=-1, canceled=1)
+            _finalize_if_settled(session, job.id, now)
+        return None
+    attempt = int(item.attempt_count or 0) + 1
+    changed = session.execute(
+        update(BatchScoringItem)
+        .where(
+            BatchScoringItem.id == item.id,
+            BatchScoringItem.status == "pending",
+            BatchScoringItem.attempt_count == item.attempt_count,
         )
-        if job is None:
-            raise ValueError("batch scoring job not found")
-        item = next((value for value in job.items if value.id == item_id), None)
+        .values(
+            status="running",
+            attempt_count=attempt,
+            started_at=now,
+            heartbeat_at=now,
+            finished_at=None,
+            not_before=None,
+        )
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if changed != 1:
+        # SQLite 没有行锁：另一个线程先领走了它。
+        return None
+    if attempt == 1:
+        baseline = session.scalar(
+            select(ScoringRun.id)
+            .where(ScoringRun.paper_id == item.paper_id)
+            .order_by(ScoringRun.created_at.desc(), ScoringRun.id.desc())
+            .limit(1)
+        )
+        session.execute(
+            update(BatchScoringItem)
+            .where(BatchScoringItem.id == item.id)
+            .values(baseline_scoring_run_id=baseline)
+            .execution_options(synchronize_session=False)
+        )
+    _shift_counts(session, job.id, pending=-1, running=1)
+    job.status = "running"
+    job.started_at = job.started_at or now
+    job.finished_at = None
+    job.heartbeat_at = now
+    batch = session.get(GradingBatch, job.grading_batch_id)
+    if batch is not None and batch.status != "scoring":
+        batch_state.apply_event(session, batch, "start_scoring")
+    return ClaimedItem(
+        kind=KIND,
+        item_id=item.id,
+        parent_id=job.id,
+        source_key=item.source_key,
+        attempt=attempt,
+        payload={"paper_id": item.paper_id},
+    )
+
+
+def _finish_item(session_factory, claimed, *, result=None, error=None):
+    """写一篇的结果。带围栏：条目已被巡检重置或被另一次执行领走时丢弃结果。"""
+
+    with session_factory() as session:
+        item = session.scalar(
+            select(BatchScoringItem)
+            .where(
+                BatchScoringItem.id == claimed.item_id,
+                BatchScoringItem.status == "running",
+                BatchScoringItem.attempt_count == claimed.attempt,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if item is None:
-            raise ValueError("batch scoring item not found")
-        if item.status in ("succeeded", "skipped", "failed", "canceled"):
-            return None
+            logger.warning(
+                "work_item_result_discarded kind=%s item_id=%s attempt=%s",
+                KIND,
+                claimed.item_id,
+                claimed.attempt,
+            )
+            return False
         now = utcnow()
-        if job.status in TERMINAL_JOB_STATUSES:
-            return None
-        if job.status == "cancel_requested":
+        item.finished_at = now
+        item.stall_count = 0
+        if error is None:
+            result = result if isinstance(result, dict) else {}
+            status = result.get("status", "succeeded")
+            if status not in ("succeeded", "skipped"):
+                raise ValueError("score_item returned an unsupported status")
+            item.status = status
+            item.scoring_run_id = result.get("run_id")
+            item.telemetry = result.get("telemetry") or {}
+            item.error_code = None
+            item.error_message = None
+            history_entry = {
+                "attempt": item.attempt_count,
+                "status": status,
+                "error_code": None,
+                "scoring_run_id": item.scoring_run_id,
+                "latency_ms": int(item.telemetry.get("latency_ms") or 0),
+            }
+        else:
+            code, failure_kind = _classify_failure(error)
+            status = "failed"
+            item.status = status
+            item.error_code = code
+            item.error_message = _safe_failure_message(error, code)
+            item.telemetry = _failure_telemetry(failure_kind)
+            history_entry = {
+                "attempt": item.attempt_count,
+                "status": "failed",
+                "error_code": code,
+                "failure_kind": failure_kind,
+                "scoring_run_id": None,
+                "latency_ms": 0,
+            }
+        history = list(item.attempt_history or [])
+        history.append(history_entry)
+        item.attempt_history = history
+        error_code = item.error_code
+        session.flush()
+        _shift_counts(session, item.job_id, running=-1, **{status: 1})
+        _finalize_if_settled(session, item.job_id, now)
+        session.commit()
+    if error is None:
+        logger.info(
+            "work_item_finished kind=%s item_id=%s status=%s", KIND, claimed.item_id, status
+        )
+    else:
+        logger.info(
+            "work_item_failed kind=%s item_id=%s code=%s", KIND, claimed.item_id, error_code
+        )
+    return True
+
+
+def _execute_item(session_factory, claimed, *, score_item=None, **_options):
+    """评一篇：沿用规则检查点，超过平台时长上限的由下一次执行续评。"""
+
+    score_item = score_item or _default_score_item
+    try:
+        with session_factory() as session:
+            result = score_item(
+                session,
+                paper_id=claimed.payload["paper_id"],
+                job_id=claimed.parent_id,
+            )
+    except Exception as exc:  # paper/provider failures are durable item results
+        _finish_item(session_factory, claimed, error=exc)
+    else:
+        _finish_item(session_factory, claimed, result=result)
+
+
+def _item_made_progress(session, item):
+    """这次执行有没有写入新的检查点：本篇有规则在本次领取之后判完。"""
+
+    if item.started_at is None:
+        return False
+    return bool(
+        session.scalar(
+            select(
+                exists().where(
+                    RuleScoringTask.scoring_run_id == ScoringRun.id,
+                    ScoringRun.paper_id == item.paper_id,
+                    RuleScoringTask.status == "succeeded",
+                    RuleScoringTask.finished_at >= item.started_at,
+                )
+            )
+        )
+    )
+
+
+def _abandon_item(session, item, now, *, progressed, exhausted):
+    """巡检发现这次执行已死：续评，或连续无进展达到上限后标为失败。"""
+
+    job = _lock_job(session, item.job_id)
+    history = list(item.attempt_history or [])
+    if exhausted:
+        item.status = "failed"
+        item.error_code = STALLED_ERROR_CODE
+        item.error_message = STALLED_ERROR_MESSAGE
+        item.telemetry = _failure_telemetry("worker")
+        item.finished_at = now
+        history.append(
+            {
+                "attempt": item.attempt_count,
+                "status": "failed",
+                "error_code": STALLED_ERROR_CODE,
+                "failure_kind": "worker",
+                "scoring_run_id": None,
+                "latency_ms": 0,
+            }
+        )
+    else:
+        history.append(
+            {
+                "attempt": item.attempt_count,
+                "status": "abandoned",
+                "error_code": None,
+                "progressed": bool(progressed),
+                "scoring_run_id": None,
+                "latency_ms": 0,
+            }
+        )
+        if job is not None and job.status == "cancel_requested":
             item.status = "canceled"
             item.finished_at = now
-            _set_job_counts(job)
-            session.commit()
-            return None
-        if item.status == "running":
-            lease_cutoff = now - timedelta(seconds=QUEUE_ITEM_LEASE_SECONDS)
-            if item.started_at is not None and item.started_at > lease_cutoff:
-                raise ValueError("batch scoring item lease is still active")
+        else:
+            # 租约过期 ≠ 条目失败：重置为待处理，由下一次执行按检查点续评。
             item.status = "pending"
             item.finished_at = None
-
-        batch = session.get(GradingBatch, job.grading_batch_id)
-        _ensure_connection_capacity(session, job=job, item=item, batch=batch, now=now)
-
-        if item.attempt_count == 0:
-            item.baseline_scoring_run_id = session.scalar(
-                select(ScoringRun.id)
-                .where(ScoringRun.paper_id == item.paper_id)
-                .order_by(ScoringRun.created_at.desc(), ScoringRun.id.desc())
-                .limit(1)
-            )
-        item.status = "running"
-        item.attempt_count += 1
-        item.started_at = now
-        item.finished_at = None
-        job.status = "running"
-        job.started_at = job.started_at or now
-        job.finished_at = None
-        job.heartbeat_at = now
-        if batch is not None and batch.status != "scoring":
-            batch_state.apply_event(session, batch, "start_scoring")
-        _set_job_counts(job)
-        paper_id = item.paper_id
-        session.commit()
-        return paper_id
+    item.heartbeat_at = None
+    item.attempt_history = history
+    session.flush()
+    if job is not None:
+        # 巡检路径很少走到，直接按条目重新计数，顺带校正历史数据的漂移。
+        _recount(session, job.id)
+        _finalize_if_settled(session, job.id, now, touch=False)
 
 
-def run_batch_scoring_item(
-    session_factory,
-    *,
-    job_id,
-    item_id,
-    score_item=None,
-):
-    """Run one idempotent queue checkpoint within a Vercel function."""
-    score_item = score_item or _default_score_item
-    paper_id = _claim_queue_item(
-        session_factory,
-        job_id=job_id,
-        item_id=item_id,
-    )
-    if paper_id is None:
-        return _finalize_queue_job_if_settled(session_factory, job_id)
+def _converge_jobs(session_factory, *, parent_ids=None, now=None, limit=200):
+    """收敛活动任务：校正计数漂移、取消“取消中”任务剩下的待处理条目、收尾已结束的任务。"""
 
-    stop_heartbeat = Event()
-
-    def heartbeat_loop():
-        while not stop_heartbeat.wait(RUNNER_HEARTBEAT_SECONDS):
-            if not _heartbeat_queue_job(session_factory, job_id):
-                return
-
-    heartbeat = Thread(target=heartbeat_loop, daemon=True)
-    heartbeat.start()
-    try:
-        result = _worker(
-            session_factory,
-            score_item,
-            paper_id=paper_id,
-            job_id=job_id,
+    now = now or utcnow()
+    with session_factory() as session:
+        statement = (
+            select(BatchScoringJob.id)
+            .where(BatchScoringJob.status.in_(ACTIVE_JOB_STATUSES))
+            .order_by(BatchScoringJob.updated_at, BatchScoringJob.id)
+            .limit(limit)
         )
-    except Exception as exc:  # paper/provider failures are durable item results
-        _checkpoint_result(session_factory, item_id, error=exc)
-    else:
-        _checkpoint_result(session_factory, item_id, result=result)
-    finally:
-        stop_heartbeat.set()
-        heartbeat.join(timeout=1)
-    return _finalize_queue_job_if_settled(session_factory, job_id)
+        if parent_ids is not None:
+            statement = statement.where(BatchScoringJob.id.in_(parent_ids))
+        job_ids = list(session.scalars(statement))
+    converged = 0
+    for job_id in job_ids:
+        with session_factory() as session:
+            job = _lock_job(session, job_id, skip_locked=True)
+            if job is None or job.status in TERMINAL_JOB_STATUSES:
+                session.rollback()
+                continue
+            before = (job.pending_count, job.running_count, job.status)
+            if job.status == "cancel_requested":
+                session.execute(
+                    update(BatchScoringItem)
+                    .where(
+                        BatchScoringItem.job_id == job_id,
+                        BatchScoringItem.status == "pending",
+                    )
+                    .values(status="canceled", finished_at=now)
+                    .execution_options(synchronize_session=False)
+                )
+            counts = _recount(session, job_id)
+            finalized = _finalize_if_settled(session, job_id, now, touch=False)
+            after = (counts["pending"], counts["running"], finalized.status if finalized else None)
+            session.commit()
+            if after != before:
+                converged += 1
+    return converged
+
+
+def _job_source(session, job_id):
+    return session.scalar(
+        select(BatchScoringItem.source_key).where(BatchScoringItem.job_id == job_id).limit(1)
+    )
+
+
+BATCH_SCORING_KIND = register(
+    WorkKind(
+        name=KIND,
+        priority=20,
+        model=BatchScoringItem,
+        parent_model=BatchScoringJob,
+        parent_column="job_id",
+        begin=_begin_item,
+        execute=_execute_item,
+        abandon=_abandon_item,
+        made_progress=_item_made_progress,
+        converge=_converge_jobs,
+        parent_source=_job_source,
+    )
+)
 
 
 def run_batch_scoring_job(
@@ -1401,141 +1396,46 @@ def run_batch_scoring_job(
     score_item=None,
     executor_factory=ThreadPoolExecutor,
 ):
-    score_item = score_item or _default_score_item
-    runner_token = str(uuid.uuid4())
+    """在当前进程里把一个任务跑完（本地 /run 入口与测试用）。
+
+    与 Vercel、worker 走同一个领取函数，只是把领取限制在这个任务内；名额检查不变，
+    来源满了的线程会提前退出，剩下的条目由仍在运行的线程继续领取。
+    """
+
+    from backend.app.services.work_queue.runner import execute_next
+    from backend.app.services.work_queue.sweep import sweep_stale_items
+
     with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
-        )
+        job = session.get(BatchScoringJob, job_id)
         if job is None:
             raise ValueError("batch scoring job not found")
-        now = utcnow()
-        resume_cancel = job.status == "cancel_requested"
-        if job.status in ("running", "cancel_requested"):
-            lease_cutoff = now - timedelta(seconds=RUNNER_LEASE_SECONDS)
-            if job.heartbeat_at is not None and job.heartbeat_at > lease_cutoff:
-                raise ValueError("batch scoring job is already running")
-            for item in job.items:
-                if item.status == "running":
-                    item.status = "pending"
-                    item.finished_at = None
-        elif job.status != "queued":
-            raise ValueError("batch scoring job is not queued")
-        job.status = "running"
-        job.runner_token = runner_token
-        job.heartbeat_at = now
-        job.started_at = job.started_at or now
-        job.finished_at = None
-        if resume_cancel:
-            for item in job.items:
-                if item.status == "pending":
-                    item.status = "canceled"
-                    item.finished_at = now
-        # 批次业务阶段随执行进入 scoring。恢复既有 running 任务时阶段已经是
-        # scoring，重复触发会被状态机判为非法转移，因此只在需要时推进。
-        batch = session.get(GradingBatch, job.grading_batch_id)
-        if batch is not None and batch.status != "scoring":
-            batch_state.apply_event(session, batch, "start_scoring")
-        pending = [(item.id, item.paper_id) for item in job.items if item.status == "pending"]
-        session.commit()
-        max_workers = job.max_workers
+        lanes = max(1, int(job.max_workers or 1))
+    # 先接手已死的执行（租约过期的条目重置后续评）并收敛“取消中”的任务。
+    sweep_stale_items(session_factory, parent_id=job_id, wake=False)
 
-    queue = iter(pending)
-    in_flight = {}
-    canceled = False
-    with executor_factory(max_workers=max_workers) as executor:
-        while True:
-            while not canceled and len(in_flight) < max_workers:
-                try:
-                    item_id, paper_id = next(queue)
-                except StopIteration:
-                    break
-                if not _checkpoint_started(session_factory, item_id):
-                    continue
-                future = executor.submit(
-                    _worker,
-                    session_factory,
-                    score_item,
-                    paper_id=paper_id,
-                    job_id=job_id,
-                )
-                in_flight[future] = item_id
-            if not in_flight:
-                break
-            completed, _ = wait(
-                tuple(in_flight),
-                timeout=RUNNER_HEARTBEAT_SECONDS,
-                return_when=FIRST_COMPLETED,
-            )
-            _heartbeat_job(session_factory, job_id, runner_token)
-            for future in completed:
-                item_id = in_flight.pop(future)
-                try:
-                    result = future.result()
-                except Exception as exc:  # isolated paper failure is persisted
-                    _checkpoint_result(session_factory, item_id, error=exc)
-                else:
-                    _checkpoint_result(session_factory, item_id, result=result)
-            canceled = _is_cancel_requested(session_factory, job_id)
-            if canceled:
-                _cancel_pending_items(session_factory, job_id)
+    def lane():
+        while execute_next(session_factory, parent_id=job_id, score_item=score_item) is not None:
+            pass
 
-    with session_factory() as session:
-        job = session.scalar(
-            select(BatchScoringJob)
-            .where(BatchScoringJob.id == job_id)
-            .options(selectinload(BatchScoringJob.items))
-            .with_for_update()
-        )
-        _set_job_counts(job)
-        if job.canceled_count:
-            job.status = "canceled"
-        elif job.failed_count:
-            job.status = "completed_with_errors"
-        elif job.succeeded_count or job.skipped_count:
-            job.status = "completed"
-        else:
-            job.status = "failed"
-        job.finished_at = utcnow()
-        job.runner_token = None
-        job.heartbeat_at = utcnow()
-        metrics = _aggregate_metrics(job)
-        job.metrics_snapshot = {
-            "schema_version": METRICS_SCHEMA_VERSION,
-            **metrics,
-            "gate": evaluate_observation_policy(job.observation_policy, metrics),
-        }
-        batch = session.get(GradingBatch, job.grading_batch_id)
-        if batch is not None:
-            if job.status == "completed":
-                batch_state.apply_event(session, batch, "finish_scoring", outcome="scored")
-            elif job.status == "completed_with_errors":
-                batch_state.apply_event(
-                    session, batch, "finish_scoring", outcome="scored_with_errors"
-                )
-            elif job.status in ("canceled", "failed") and batch.status == "scoring":
-                batch_state.apply_event(session, batch, "cancel")
-        session.commit()
-        job_id = job.id
+    with executor_factory(max_workers=lanes) as executor:
+        futures = [executor.submit(lane) for _ in range(lanes)]
+        for future in futures:
+            future.result()
     with session_factory() as session:
         return get_batch_scoring_job(session, job_id)
 
 
 __all__ = [
+    "BATCH_SCORING_KIND",
+    "batch_source_key",
     "cancel_batch_scoring_job",
     "create_batch_scoring_job",
     "default_observation_policy",
     "evaluate_observation_policy",
-    "finalize_batch_scoring_job_failure",
     "get_batch_scoring_job",
     "get_latest_batch_scoring_job",
     "list_attention_batch_scoring_jobs",
-    "next_runnable_batch_scoring_job_id",
     "retry_batch_scoring_job",
-    "run_batch_scoring_item",
     "run_batch_scoring_job",
     "validate_observation_policy",
 ]

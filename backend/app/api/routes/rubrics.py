@@ -7,7 +7,6 @@ from decimal import ROUND_HALF_UP
 from types import SimpleNamespace
 
 import json
-import time
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -23,7 +22,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
-from backend.app.core.config import settings
 from backend.app.db.models import Rubric
 from backend.app.db.models import AtomicRule
 from backend.app.db.models import RubricCompilation
@@ -35,11 +33,9 @@ from backend.app.services.rubrics.coverage import build_rule_coverage
 from backend.app.schemas.rubric import RubricCreate
 from backend.app.schemas.rubric import SourceUnitBatchResolveRequest
 from backend.app.schemas.rubric import FindingDismissRequest
-from backend.app.schemas.rubric import RuleReviewRequest
+from backend.app.schemas.rubric import RuleReviewEstimateRequest
 from backend.app.schemas.rubric import StructureMergeRequest
-from backend.app.schemas.rubric import StructureSuggestionRequest
 from backend.app.schemas.rubric import StructureUndoRequest
-from backend.app.schemas.rubric import UnitClassificationRequest
 from backend.app.schemas.rubric import SourceUnitResolveRequest
 from backend.app.schemas.rubric import RubricCloneRequest
 from backend.app.schemas.rubric import AtomicRuleEditRequest
@@ -59,7 +55,6 @@ from backend.app.schemas.rubric import RubricLifecycleReason
 from backend.app.schemas.rubric import RubricPublishRequest
 from backend.app.schemas.rubric import RubricRead
 from backend.app.schemas.rubric import RubricDraftRecompileRequest
-from backend.app.schemas.rubric import RubricAIRuleDraftRequest
 from backend.app.schemas.rubric import RubricExecutionDraftRead
 from backend.app.schemas.rubric import TemplateLinkReviewRequest
 from backend.app.schemas.rubric import RubricUpdate
@@ -84,15 +79,10 @@ from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.services.rubric_import import pipeline as rubric_pipeline
 from backend.app.services.rubric_import import import_sessions
 from backend.app.services.rubric_import.source_workspace import read_source_workspace
-from backend.app.services.rubric_import.ai_rule_drafter import (
-    AIRuleDraftValidationError,
-    draft_deduction_rules,
-)
-from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 from backend.app.services.rubrics.draft_graph import read_execution_draft
+from backend.app.services.ai_tasks.service import delete_rubric_ai_tasks
 from backend.app.services.rubrics.review_workspace import read_review_workspace, confirm_rule
-from backend.app.services.ai_connections import resolve_connection_runtime
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
@@ -1088,31 +1078,33 @@ def import_rubric_from_files(
     }
 
 
-@router.post("/import-files/structure-suggestions")
-def preview_import_structure(
+@router.post("/import-files/structure-suggestions/estimate")
+def estimate_import_structure(
     rules_file: Optional[UploadFile] = File(None),
     template_file: Optional[UploadFile] = File(None),
-    ai_connection_id: Optional[str] = Form(None),
-    dry_run: bool = Form(False),
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    """导入前结构预检：识别失败（E1/E7）时用 LLM 建议表格结构，不落库；
-    ``dry_run`` 只返回将发送的规模估算，供用户确认后再调用模型。"""
+    """导入前结构预检（E1/E7）的规模估算：不调用模型。确认后用
+    ``POST /ai-tasks/import-structure`` 提交识别任务。"""
 
     ensure_dev_user(db)
     require_organization_role(principal, "org_admin", "teacher")
     try:
-        scorer = None if dry_run else _rubric_ai_scorer(db, principal, ai_connection_id)
-        result = structure_state.preview_structure(
+        result = structure_state.estimate_import_structure(
             rules_bytes=rules_file.file.read() if rules_file else None,
             template_bytes=template_file.file.read() if template_file else None,
-            scorer=scorer,
-            dry_run=dry_run,
         )
     except parse_state.ParseStateError as exc:
         raise _parse_state_problem(exc) from exc
     return jsonable_encoder(result)
+
+
+@router.post("/import-files/structure-suggestions", include_in_schema=False)
+def preview_import_structure():
+    """停用：导入前结构识别改为 ``POST /ai-tasks/import-structure``。"""
+
+    raise _retired_endpoint("structure_suggestion", "导入前的表格结构识别", "POST /api/ai-tasks/import-structure")
 
 
 @router.post("/{rubric_id}/clone", response_model=RubricRead)
@@ -1250,75 +1242,38 @@ def _parse_state_problem(exc) -> HTTPException:
     )
 
 
-def _rubric_ai_scorer(db, principal, ai_connection_id: str | None):
-    """与 AI 起草共用的连接选择：显式或当前启用的私有连接优先，否则用平台默认模型。"""
+@router.post("/{rubric_id}/unit-classifications", include_in_schema=False)
+def classify_source_units(rubric_id: str):
+    """停用：归类改为 ``POST /rubrics/{id}/ai-tasks``（kind=unit_classification）。"""
 
-    from backend.app.services.ai_connections import active_connection_id
-
-    ai_connection_id = ai_connection_id or active_connection_id(
-        db, owner_id=principal.user_id, organization_id=principal.organization_id or "",
-    )
-    if ai_connection_id:
-        if not principal.organization_id:
-            raise parse_state.ParseStateError(503, "AI_CONNECTION_MISSING", "当前上下文不能使用私有 AI 连接。")
-        runtime = resolve_connection_runtime(
-            db,
-            connection_id=ai_connection_id,
-            owner_id=principal.user_id,
-            organization_id=principal.organization_id,
-        )
-        return get_llm_scorer(runtime)
-    return get_llm_scorer(session=db)
+    raise _retired_endpoint("unit_classification", "AI 归类")
 
 
-@router.post("/{rubric_id}/unit-classifications")
-def classify_source_units(
+@router.post("/{rubric_id}/rule-review/estimate")
+def estimate_rubric_rule_review(
     rubric_id: str,
-    payload: UnitClassificationRequest,
+    payload: RuleReviewEstimateRequest,
     db: Session = Depends(get_db),
-    user_id: str = Depends(current_user_id),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    """用户确认后运行兜底分类器；结果只是建议，持久化到当前编译记录并带指纹。"""
+    """规则审查的代码前置检查与规模估算：不调用模型。确认后提交 AI 任务（kind=rule_review）。"""
 
     ensure_dev_user(db)
     _visible_rubric(db, rubric_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
     try:
-        scorer = _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        result = parse_state.run_unit_classification(
-            db, rubric_id, scorer, unit_ids=payload.unit_ids, actor_id=user_id
-        )
-        db.commit()
+        result = review_state.estimate_rule_review(db, rubric_id, scope=payload.scope)
     except parse_state.ParseStateError as exc:
         db.rollback()
         raise _parse_state_problem(exc) from exc
     return jsonable_encoder(result)
 
 
-@router.post("/{rubric_id}/rule-review")
-def run_rubric_rule_review(
-    rubric_id: str,
-    payload: RuleReviewRequest,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(current_user_id),
-    principal: CurrentPrincipal = Depends(current_principal),
-):
-    """第二部分结束后的规则审查：代码前置检查 + LLM 审查（只报告，不修改规则）。"""
+@router.post("/{rubric_id}/rule-review", include_in_schema=False)
+def run_rubric_rule_review(rubric_id: str):
+    """停用：规则审查改为 ``POST /rubrics/{id}/ai-tasks``（kind=rule_review）。"""
 
-    ensure_dev_user(db)
-    _visible_rubric(db, rubric_id, principal)
-    require_organization_role(principal, "org_admin", "teacher")
-    try:
-        scorer = None if payload.dry_run else _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        result = review_state.run_rule_review(
-            db, rubric_id, scorer, scope=payload.scope, dry_run=payload.dry_run, actor_id=user_id
-        )
-        db.commit()
-    except parse_state.ParseStateError as exc:
-        db.rollback()
-        raise _parse_state_problem(exc) from exc
-    return jsonable_encoder(result)
+    raise _retired_endpoint("rule_review", "规则审查")
 
 
 @router.get("/{rubric_id}/rule-review")
@@ -1356,27 +1311,30 @@ def dismiss_rubric_rule_review_finding(
     return jsonable_encoder(finding)
 
 
-@router.post("/{rubric_id}/structure-suggestions")
-def suggest_rubric_structure(
+@router.post("/{rubric_id}/structure-suggestions/estimate")
+def estimate_rubric_structure(
     rubric_id: str,
-    payload: StructureSuggestionRequest,
     db: Session = Depends(get_db),
-    user_id: str = Depends(current_user_id),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    """用户确认后运行 LLM 结构识别，返回与当前草稿的差异；建议带指纹持久化。"""
+    """草稿结构建议的规模估算：不调用模型。确认后提交 AI 任务（kind=structure_suggestion）。"""
 
     ensure_dev_user(db)
     _visible_rubric(db, rubric_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
     try:
-        scorer = None if payload.dry_run else _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        result = structure_state.suggest_structure(db, rubric_id, scorer, dry_run=payload.dry_run, actor_id=user_id)
-        db.commit()
+        result = structure_state.estimate_draft_structure(db, rubric_id)
     except parse_state.ParseStateError as exc:
         db.rollback()
         raise _parse_state_problem(exc) from exc
     return jsonable_encoder(result)
+
+
+@router.post("/{rubric_id}/structure-suggestions", include_in_schema=False)
+def suggest_rubric_structure(rubric_id: str):
+    """停用：草稿结构建议改为 ``POST /rubrics/{id}/ai-tasks``（kind=structure_suggestion）。"""
+
+    raise _retired_endpoint("structure_suggestion", "表格结构识别")
 
 
 def _persist_structure(db, rubric_id, prepared, *, user_id, reason, action, status, details):
@@ -1519,108 +1477,30 @@ def resolve_source_unit(
     return jsonable_encoder(result)
 
 
-@router.post("/{rubric_id}/draft-deduction-rules")
-def draft_rubric_deduction_rules(
-    rubric_id: str,
-    payload: RubricAIRuleDraftRequest,
-    db: Session = Depends(get_db),
-    principal: CurrentPrincipal = Depends(current_principal),
-):
-    """Return non-persistent, human-confirmable AI rule suggestions."""
+def _retired_endpoint(
+    kind: str, label: str, replacement: str = "POST /api/rubrics/{rubric_id}/ai-tasks"
+) -> HTTPException:
+    """已改为异步任务的同步接口：直接停用（410），不等其它阶段。
 
-    _visible_rubric(db, rubric_id, principal)
-    # `_visible_rubric` 只查组织归属，不查角色。评分标准决定全组织的论文
-    # 怎么被打分，写它必须过角色门控（v3 §4.2）。
-    require_organization_role(principal, "org_admin", "teacher")
-    execution = read_execution_draft(session=db, rubric_id=rubric_id)
-    active = execution.get("active_compilation") or {}
-    version = active.get("version") or {}
-    try:
-        scorer = _rubric_ai_scorer(db, principal, payload.ai_connection_id)
-        # 整个请求共用一个截止时间：一次请求带多个评分项时，也不能超过平台的函数时长上限。
-        budget = settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
-        deadline = time.monotonic() + budget if budget > 0 else None
+    已经打开的旧页面由版本守卫在下一次操作前刷新，正常情况下到不了这里。
+    """
 
-        items = []
-        for criterion in payload.criteria:
-            criterion_value = criterion.model_dump(mode="json")
-            analysis = analyze_rule_input(
-                criterion_value.get("deduction_rules") or [],
-                criterion_code=criterion.code,
-            )
-            # A resolved paragraph is rule material, not a new criterion or an
-            # automatically authorized deduction. Feed its original locator to
-            # the existing non-persistent, human-confirmable draft pipeline.
-            assigned = parse_state.assigned_rule_sources(db, rubric_id, criterion.code)
-            if assigned:
-                if analysis["input_state"] == "absent" and criterion_value.get("description"):
-                    analysis["unresolved_segments"].append({
-                        "text": criterion_value["description"],
-                        "source_refs": ["/criterion/description"],
-                    })
-                analysis["unresolved_segments"].extend(assigned)
-                analysis["source_refs"].extend(ref for item in assigned for ref in item["source_refs"])
-                analysis["needs_ai_draft"] = True
-            if not (
-                analysis["needs_ai_draft"]
-                or analysis["needs_severity_expansion"]
-            ):
-                items.append(
-                    {
-                        "criterion_code": criterion.code,
-                        "input_analysis": analysis,
-                        "status": "already_structured",
-                        "draft": None,
-                    }
-                )
-                continue
-            items.append(
-                {
-                    "criterion_code": criterion.code,
-                    "input_analysis": analysis,
-                    "status": "pending_confirmation",
-                    "draft": draft_deduction_rules(
-                        criterion=criterion_value,
-                        input_analysis=analysis,
-                        scorer=scorer,
-                        deadline=deadline,
-                        business_profile_key=(
-                            version.get("business_profile_key") or "thesis"
-                        ),
-                    ),
-                }
-            )
-        return {"rubric_id": rubric_id, "items": items}
-    except AIRuleDraftValidationError as exc:
-        if exc.code == "AI_DRAFT_PROVIDER_REJECTED":
-            status_code = 502
-        elif exc.code in {
-            "AI_DRAFT_CONNECTION_MISSING",
-            "AI_DRAFT_PROVIDER_ERROR",
-            "AI_DRAFT_TIME_BUDGET_EXCEEDED",
-        }:
-            status_code = 503
-        else:
-            status_code = 422
-        raise HTTPException(
-            status_code=status_code,
-            detail=_rubric_problem(
-                code=exc.code,
-                message=exc.message,
-                user_action=exc.user_action,
-                retryable=exc.code == "AI_DRAFT_PROVIDER_ERROR",
-            ),
-        ) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=_rubric_problem(
-                code="AI_DRAFT_CONNECTION_MISSING",
-                message="当前没有可用于起草扣分细则的真实 AI 连接。",
-                user_action="请配置真实 AI 连接，或将评分项改为仅人工复核。",
-                retryable=False,
-            ),
-        ) from exc
+    return HTTPException(
+        status_code=410,
+        detail=_rubric_problem(
+            code="ENDPOINT_RETIRED",
+            message=f"{label}已改为后台任务，这个接口已停用。",
+            user_action="请刷新页面后重试。",
+            context={"replacement": replacement, "kind": kind},
+        ),
+    )
+
+
+@router.post("/{rubric_id}/draft-deduction-rules", include_in_schema=False)
+def draft_rubric_deduction_rules(rubric_id: str):
+    """停用：起草改为 ``POST /rubrics/{id}/ai-tasks``（kind=rule_draft）。"""
+
+    raise _retired_endpoint("rule_draft", "AI 起草扣分细则")
 
 
 @router.post("/{rubric_id}/submit-review", response_model=RubricRead)
@@ -2120,6 +2000,8 @@ def publish_rubric(
             compilation_id,
             user_id,
         )
+        # AI 任务的结果保留到发布为止（同指纹直接复用）；发布后一并清理。
+        delete_rubric_ai_tasks(db, rubric_id)
         db.commit()
     except rubric_lifecycle.RubricLifecycleError as exc:
         db.rollback()

@@ -3,7 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
-import { ACTIVE_JOB_STATUSES, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
+import { createVisiblePoller } from "@/lib/polling.js";
+import { ACTIVE_JOB_STATUSES, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel, lastHeartbeat } from "@/lib/score-jobs.js";
 import { cancelScoringJob, canRetryJob, retryScoringJob } from "@/lib/scoring-actions.js";
 
 const route = useRoute();
@@ -15,7 +16,8 @@ const loading = ref(true);
 const busy = ref(false);
 const error = ref(null);
 const feedback = ref(null);
-let timer = null;
+// 页面隐藏时暂停轮询，回到前台立即刷新一次。
+const poller = createVisiblePoller(() => refresh({ quiet: true }), 3000);
 
 const paperById = computed(() => Object.fromEntries((summary.value?.papers || []).map((paper) => [paper.paper_id, paper])));
 const canCancel = computed(() => ACTIVE_JOB_STATUSES.has(job.value?.status));
@@ -72,9 +74,9 @@ async function act(action) {
 
 onMounted(async () => {
   await refresh();
-  timer = window.setInterval(() => refresh({ quiet: true }), 3000);
+  poller.start();
 });
-onBeforeUnmount(() => window.clearInterval(timer));
+onBeforeUnmount(() => poller.stop());
 </script>
 
 <template>
@@ -96,12 +98,13 @@ onBeforeUnmount(() => window.clearInterval(timer));
     <p v-if="error" class="notice notice-danger" role="alert">{{ error }}</p>
     <p v-if="feedback" class="notice" role="status">{{ feedback }}</p>
     <p v-if="job?.heartbeat_state === 'stale'" class="notice notice-warn" role="status">执行中断，等待后台自动恢复。已有结果会保留，不会重复覆盖。</p>
+    <p v-else-if="job?.heartbeat_state === 'waiting'" class="notice" role="status">正在排队：模型的同时请求数已被占满，或在等后台执行器领取。各任务按顺序轮流执行。</p>
 
     <template v-if="job">
       <section class="card card-pad">
         <div class="run-head">
           <div><span class="chip" :class="tone(job.status)">{{ jobStatusLabel(job) }}</span><span class="mono percent">{{ jobPercent(job) }}%</span></div>
-          <div class="faint meta">开始 {{ formatTime(job.started_at || job.created_at) }} · 最后心跳 {{ formatTime(job.heartbeat_at) }}</div>
+          <div class="faint meta">开始 {{ formatTime(job.started_at || job.created_at) }} · 最后心跳 {{ formatTime(lastHeartbeat(job)) }}</div>
         </div>
         <div class="bar run-bar"><span class="fill" :style="{ width: `${jobPercent(job)}%` }"></span></div>
         <div class="stats">

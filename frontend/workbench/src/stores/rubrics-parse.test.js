@@ -49,14 +49,18 @@ describe("导入：Word / Excel 至少一份", () => {
     expect(JSON.parse(record.calls[0].body.get("structure_override"))).toEqual(override);
   });
 
-  it("导入前结构预检：先估算、确认后才调用模型", async () => {
-    const record = capture({ estimate: { calls: 1 } });
+  it("导入前结构预检：估算不调用模型，确认后提交识别任务", async () => {
+    const record = capture({ id: "t1", status: "queued", estimate: { calls: 1 } });
     const store = useRubricsStore();
-    await store.previewImportStructure({ rulesFile: new File(["x"], "a.xlsx"), connectionId: "c1", dryRun: true });
-    const form = record.calls[0].body;
-    expect(record.calls[0].url).toMatch(/\/rubrics\/import-files\/structure-suggestions$/);
-    expect(form.get("dry_run")).toBe("true");
-    expect(form.get("ai_connection_id")).toBe("c1");
+    await store.estimateImportStructure({ rulesFile: new File(["x"], "a.xlsx") });
+    expect(record.calls[0].url).toMatch(/\/rubrics\/import-files\/structure-suggestions\/estimate$/);
+    expect(record.calls[0].body.get("ai_connection_id")).toBeNull();
+    await expect(store.startImportStructure({ rulesFile: new File(["x"], "a.xlsx"), connectionId: null })).rejects.toThrow("AI 连接");
+    await store.startImportStructure({ rulesFile: new File(["x"], "a.xlsx"), connectionId: "c1" });
+    expect(record.calls[1].url).toMatch(/\/ai-tasks\/import-structure$/);
+    expect(record.calls[1].body.get("ai_connection_id")).toBe("c1");
+    expect(record.calls[1].body.get("rules_file")).toBeInstanceOf(File);
+    expect(store.importStructureTask.id).toBe("t1");
   });
 });
 
@@ -81,12 +85,45 @@ describe("未认领单元与 LLM 建议", () => {
     const record = capture({});
     const store = useRubricsStore();
     await expect(store.classifyUnits("r1", { unitIds: ["u1"], connectionId: null })).rejects.toThrow("AI 连接");
-    await expect(store.suggestStructure("r1", { connectionId: null })).rejects.toThrow("AI 连接");
-    await expect(store.runRuleReview("r1", { connectionId: null, scope: "all" })).rejects.toThrow("AI 连接");
+    await expect(store.startStructureSuggestion("r1", { connectionId: null })).rejects.toThrow("AI 连接");
+    await expect(store.startRuleReview("r1", { connectionId: null, scope: "all" })).rejects.toThrow("AI 连接");
     expect(record.calls).toHaveLength(0);
-    await store.suggestStructure("r1", { connectionId: null, dryRun: true });
-    await store.runRuleReview("r1", { connectionId: null, scope: "priority", dryRun: true });
-    expect(record.calls.map((c) => c.body)).toEqual([{ dry_run: true }, { scope: "priority", dry_run: true }]);
+    await store.estimateStructure("r1");
+    await store.estimateRuleReview("r1", { scope: "priority" });
+    expect(record.calls.map((c) => [c.url.replace(/^.*\/rubrics/, ""), c.body])).toEqual([
+      ["/r1/structure-suggestions/estimate", {}],
+      ["/r1/rule-review/estimate", { scope: "priority" }],
+    ]);
+  });
+
+  it("审查与结构识别提交为 AI 任务，可刷新、停止、重试与找回", async () => {
+    const record = capture({ id: "t1", kind: "rule_review", status: "running" });
+    const store = useRubricsStore();
+    await store.startRuleReview("r1", { connectionId: "c1", scope: "all", regenerate: true });
+    await store.startStructureSuggestion("r1", { connectionId: "c1" });
+    expect(record.calls.map((c) => c.body)).toEqual([
+      { kind: "rule_review", params: { scope: "all" }, ai_connection_id: "c1", regenerate: true },
+      { kind: "structure_suggestion", params: { target: "draft" }, ai_connection_id: "c1", regenerate: false },
+    ]);
+    await store.refreshAiTask("review");
+    await store.aiTaskAction("review", "cancel");
+    await store.aiTaskAction("structure", "retry");
+    expect(record.calls.slice(2).map((c) => [c.method, c.url.replace(/^.*\/api/, "")])).toEqual([
+      ["GET", "/ai-tasks/t1"], ["POST", "/ai-tasks/t1/cancel"], ["POST", "/ai-tasks/t1/retry"],
+    ]);
+  });
+
+  it("进入评分标准页时按种类找回进行中的审查与结构识别任务", async () => {
+    vi.stubGlobal("fetch", () => jsonResponse([
+      { id: "a", kind: "unit_classification", status: "running" },
+      { id: "b", kind: "rule_review", status: "running" },
+      { id: "c", kind: "structure_suggestion", status: "queued" },
+    ]));
+    const store = useRubricsStore();
+    const found = await store.resumeReviewTasks("r1");
+    expect([found.review.id, found.structure.id]).toEqual(["b", "c"]);
+    store.reset();
+    expect([store.ruleReviewTask, store.structureTask, store.importStructureTask]).toEqual([null, null, null]);
   });
 
   it("结构建议合入与撤销", async () => {

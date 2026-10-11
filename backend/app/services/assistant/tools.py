@@ -179,15 +179,24 @@ def _start_scoring(ctx: RunContext, params: BatchParams):
     job, _created = actions.start_scoring_job(
         ctx.db, ctx.principal, ctx.user_id, params.batch_id, BatchScoringJobCreate(),
     )
-    actions.dispatch_job_from_worker_thread(job)
-    return _job_view(job)
+    view = _job_view(job)
+    _wake(ctx, job, reason="create")
+    return view
 
 
 @register("retry_scoring", "重试失败、取消或中断的论文；已成功的结果复用", JobParams, read_only=False)
 def _retry_scoring(ctx: RunContext, params: JobParams):
     job = actions.retry_scoring_job(ctx.db, ctx.principal, params.job_id)
-    actions.dispatch_job_from_worker_thread(job)
-    return _job_view(job)
+    view = _job_view(job)
+    _wake(ctx, job, reason="retry")
+    return view
+
+
+def _wake(ctx: RunContext, job, *, reason: str) -> None:
+    # 叫醒会回滚请求会话里未提交的改动（见 `actions.session_factory`）：先把本次运行
+    # 已写的消息与焦点提交，再叫醒。状态快照在缓冲里，运行结束后才落库，不受影响。
+    ctx.db.commit()
+    actions.wake_job(ctx.db, job, reason=reason)
 
 
 @register("cancel_scoring", "取消剩余的评分；已完成的结果保留", JobParams, read_only=False)

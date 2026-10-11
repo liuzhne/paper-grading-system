@@ -36,6 +36,11 @@ export const useRubricsStore = defineStore("rubrics", () => {
     lastImport.value = { warnings: [], templateSummary: null, rubricId: null, coverage: null, triggers: [], conflicts: [] };
     activeImportSession.value = null;
     lastDraft.value = { items: [] };
+    draftTasks.value = {};
+    classificationTask.value = null;
+    ruleReviewTask.value = null;
+    structureTask.value = null;
+    importStructureTask.value = null;
   }
 
   async function load() {
@@ -238,23 +243,43 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return api.post(`/rubrics/${rubricId}/reupload-confirm`, undefined, { formData: form });
   }
 
-  /** @param {string|null|undefined} connectionId @param {boolean} [dryRun] */
-  function requireConnection(connectionId, dryRun) {
-    if (!dryRun && !connectionId) throw new Error("请先选择用于识别的 AI 连接。");
+  /** 调用模型的操作都要先选定自己的 AI 连接（D-027）；估算不调用模型，不需要。 @param {string|null|undefined} connectionId */
+  function requireConnection(connectionId) {
+    if (!connectionId) throw new Error("请先选择用于识别的 AI 连接。");
   }
 
-  /**
-   * 导入前结构预检（E1/E7）：`dryRun` 只估算发送规模，确认后再调用模型；不落库。
-   * @param {{rulesFile?: File|null, templateFile?: File|null, connectionId?: string|null, dryRun?: boolean}} input
-   */
-  async function previewImportStructure(input) {
-    requireConnection(input.connectionId, input.dryRun);
+  /** @param {{rulesFile?: File|null, templateFile?: File|null}} input */
+  function uploadForm(input) {
     const form = new FormData();
     if (input.rulesFile) form.append("rules_file", input.rulesFile);
     if (input.templateFile) form.append("template_file", input.templateFile);
+    return form;
+  }
+
+  /**
+   * 导入前结构预检（E1/E7）的规模估算：不调用模型。
+   * @param {{rulesFile?: File|null, templateFile?: File|null}} input
+   */
+  async function estimateImportStructure(input) {
+    return api.post("/rubrics/import-files/structure-suggestions/estimate", undefined, { formData: uploadForm(input) });
+  }
+
+  /**
+   * 最近一次导入前结构识别任务（还没有评分标准，只对自己可见）。
+   * @type {import('vue').Ref<any>}
+   */
+  const importStructureTask = ref(null);
+
+  /**
+   * 确认后提交导入前结构识别任务：提交即返回，结果（结构与将导入的评分项）在任务里。
+   * @param {{rulesFile?: File|null, templateFile?: File|null, connectionId?: string|null}} input
+   */
+  async function startImportStructure(input) {
+    requireConnection(input.connectionId);
+    const form = uploadForm(input);
     if (input.connectionId) form.append("ai_connection_id", input.connectionId);
-    form.append("dry_run", input.dryRun ? "true" : "false");
-    return api.post("/rubrics/import-files/structure-suggestions", undefined, { formData: form });
+    importStructureTask.value = await api.post("/ai-tasks/import-structure", undefined, { formData: form });
+    return importStructureTask.value;
   }
 
   /** @param {string} rubricId */
@@ -276,26 +301,81 @@ export const useRubricsStore = defineStore("rubrics", () => {
   }
 
   /**
-   * 兜底分类器：结果只是建议，采纳仍走 resolveUnits。
+   * 最近一次 AI 归类任务（B 阶段）：后台每 3 个单元一批执行，批次成功即合进建议。
+   * @type {import('vue').Ref<any>}
+   */
+  const classificationTask = ref(null);
+
+  /**
+   * 兜底分类器：结果只是建议，采纳仍走 resolveUnits。提交即返回任务，并发由后端按
+   * 连接的同时请求数控制（前端不再自己分批调度）。
    * @param {string} rubricId
-   * @param {{unitIds?: string[]|null, connectionId: string|null}} input
+   * @param {{unitIds?: string[]|null, connectionId: string|null, rejudge?: boolean}} input
    */
   async function classifyUnits(rubricId, input) {
     requireConnection(input.connectionId);
-    return api.post(`/rubrics/${rubricId}/unit-classifications`, {
-      ...(input.unitIds ? { unit_ids: input.unitIds } : {}), ai_connection_id: input.connectionId,
+    const task = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
+      kind: "unit_classification",
+      params: { ...(input.unitIds ? { unit_ids: input.unitIds } : {}), rejudge: Boolean(input.rejudge) },
+      ai_connection_id: input.connectionId,
+      // 显式勾选重新判断：作废同内容的旧结果，否则同指纹直接复用。
+      regenerate: Boolean(input.rejudge),
     });
+    classificationTask.value = task;
+    return task;
+  }
+
+  /** 刷新当前归类任务。 */
+  async function refreshClassificationTask() {
+    const task = classificationTask.value;
+    if (!task) return null;
+    const fresh = await api.get(`/ai-tasks/${task.id}`);
+    if (classificationTask.value?.id === task.id) classificationTask.value = fresh;
+    return fresh;
+  }
+
+  /** 进入评分标准页时找回进行中的归类任务。 @param {string} rubricId */
+  async function resumeClassificationTask(rubricId) {
+    const tasks = (await api.get(`/rubrics/${rubricId}/ai-tasks?kind=unit_classification&active=1`)) || [];
+    classificationTask.value = tasks[0] || null;
+    return classificationTask.value;
+  }
+
+  /** @param {"cancel"|"retry"} action */
+  async function classificationTaskAction(action) {
+    const task = classificationTask.value;
+    if (!task) return null;
+    classificationTask.value = action === "cancel"
+      ? await api.post(`/ai-tasks/${task.id}/cancel`, {})
+      : await api.post(`/ai-tasks/${task.id}/retry`, {});
+    return classificationTask.value;
   }
 
   /**
-   * 草稿结构建议（抽取器兜底）。
-   * @param {string} rubricId
-   * @param {{connectionId: string|null, dryRun?: boolean}} input
+   * 最近一次草稿结构识别任务（C 阶段）：成功时建议已写进草稿，重新读取解析台账即可看到差异。
+   * @type {import('vue').Ref<any>}
    */
-  async function suggestStructure(rubricId, input) {
-    requireConnection(input.connectionId, input.dryRun);
-    return api.post(`/rubrics/${rubricId}/structure-suggestions`, input.dryRun
-      ? { dry_run: true } : { ai_connection_id: input.connectionId });
+  const structureTask = ref(null);
+
+  /** 草稿结构建议的规模估算：不调用模型。 @param {string} rubricId */
+  async function estimateStructure(rubricId) {
+    return api.post(`/rubrics/${rubricId}/structure-suggestions/estimate`, {});
+  }
+
+  /**
+   * 草稿结构建议（抽取器兜底），确认估算后提交任务。
+   * @param {string} rubricId
+   * @param {{connectionId: string|null, regenerate?: boolean}} input
+   */
+  async function startStructureSuggestion(rubricId, input) {
+    requireConnection(input.connectionId);
+    structureTask.value = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
+      kind: "structure_suggestion",
+      params: { target: "draft" },
+      ai_connection_id: input.connectionId,
+      regenerate: Boolean(input.regenerate),
+    });
+    return structureTask.value;
   }
 
   /**
@@ -314,14 +394,72 @@ export const useRubricsStore = defineStore("rubrics", () => {
   }
 
   /**
-   * 规则审查（第二部分结束后）：只报告问题，不修改规则；可跳过，发布时留痕。
-   * @param {string} rubricId
-   * @param {{connectionId: string|null, scope: "priority"|"all", dryRun?: boolean}} input
+   * 最近一次规则审查任务：每个评分项一个条目，全部结束后写进草稿。
+   * @type {import('vue').Ref<any>}
    */
-  async function runRuleReview(rubricId, input) {
-    requireConnection(input.connectionId, input.dryRun);
-    return api.post(`/rubrics/${rubricId}/rule-review`, input.dryRun
-      ? { scope: input.scope, dry_run: true } : { scope: input.scope, ai_connection_id: input.connectionId });
+  const ruleReviewTask = ref(null);
+
+  /**
+   * 规则审查的代码前置检查与规模估算：不调用模型。
+   * @param {string} rubricId
+   * @param {{scope: "priority"|"all"}} input
+   */
+  async function estimateRuleReview(rubricId, input) {
+    return api.post(`/rubrics/${rubricId}/rule-review/estimate`, { scope: input.scope });
+  }
+
+  /**
+   * 规则审查（第二部分结束后）：只报告问题，不修改规则；可跳过，发布时留痕。
+   * 规则没变时同内容的任务直接复用；`regenerate` 表示用户明确要重新审查一遍。
+   * @param {string} rubricId
+   * @param {{connectionId: string|null, scope: "priority"|"all", regenerate?: boolean}} input
+   */
+  async function startRuleReview(rubricId, input) {
+    requireConnection(input.connectionId);
+    ruleReviewTask.value = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
+      kind: "rule_review",
+      params: { scope: input.scope },
+      ai_connection_id: input.connectionId,
+      regenerate: Boolean(input.regenerate),
+    });
+    return ruleReviewTask.value;
+  }
+
+  /** @param {"review"|"structure"|"import"} key */
+  function trackedTask(key) {
+    return key === "review" ? ruleReviewTask : key === "structure" ? structureTask : importStructureTask;
+  }
+
+  /** 刷新正在跟踪的审查 / 结构识别任务。 @param {"review"|"structure"|"import"} key */
+  async function refreshAiTask(key) {
+    const holder = trackedTask(key);
+    const task = holder.value;
+    if (!task) return null;
+    const fresh = await api.get(`/ai-tasks/${task.id}`);
+    if (holder.value?.id === task.id) holder.value = fresh;
+    return fresh;
+  }
+
+  /** @param {"review"|"structure"|"import"} key @param {"cancel"|"retry"} action */
+  async function aiTaskAction(key, action) {
+    const holder = trackedTask(key);
+    const task = holder.value;
+    if (!task) return null;
+    holder.value = action === "cancel"
+      ? await api.post(`/ai-tasks/${task.id}/cancel`, {})
+      : await api.post(`/ai-tasks/${task.id}/retry`, {});
+    return holder.value;
+  }
+
+  /**
+   * 进入评分标准页时找回进行中的审查与结构识别任务（刷新或关页面不影响执行）。
+   * @param {string} rubricId
+   */
+  async function resumeReviewTasks(rubricId) {
+    const tasks = (await api.get(`/rubrics/${rubricId}/ai-tasks?active=1`)) || [];
+    ruleReviewTask.value = tasks.find((/** @type {any} */ task) => task.kind === "rule_review") || null;
+    structureTask.value = tasks.find((/** @type {any} */ task) => task.kind === "structure_suggestion") || null;
+    return { review: ruleReviewTask.value, structure: structureTask.value };
   }
 
   /** @param {string} rubricId */
@@ -371,36 +509,99 @@ export const useRubricsStore = defineStore("rubrics", () => {
   const lastDraft = ref({ items: [] });
 
   /**
-   * AI 起草缺失的扣分细则（D-027）。
+   * 起草任务（方案 A2）：按评分项编号记录进行中或刚结束的任务。刷新页面后由
+   * `resumeDraftTasks` 找回进行中的；关页面不影响后台继续执行。
+   * @type {import('vue').Ref<Record<string, any>>}
+   */
+  const draftTasks = ref({});
+
+  /**
+   * 记下任务的最新状态；成功时把结果放进待确认的起草建议（每个任务只放一次）。
+   * @param {any} task
+   */
+  function rememberDraftTask(task) {
+    const code = task?.scope?.criterion_code;
+    if (!code) return;
+    const previous = draftTasks.value[code];
+    draftTasks.value = { ...draftTasks.value, [code]: task };
+    const justFinished = task.status === "succeeded" && task.result &&
+      !(previous?.id === task.id && previous?.status === "succeeded");
+    if (justFinished) {
+      const collection = lastDraft.value;
+      collection.items = [...collection.items.filter((item) => item.criterion_code !== code), task.result];
+    }
+  }
+
+  /** @param {any} task */
+  function isActiveTask(task) {
+    return task?.status === "queued" || task?.status === "running";
+  }
+
+  /**
+   * AI 起草缺失的扣分细则（D-027）：为每个评分项建一个后台任务，立即返回。
    *
    * **必须带上用户自己的连接**：留空会走平台默认，而平台是 mock 时得到的是编出来
    * 的规则，却以「AI 起草 · 待确认」呈现——确认之后它们进入正式发布的评分标准。
    *
+   * 同样的内容重复提交（双击、多个标签页）拿到同一个任务；`regenerate` 作废旧结果重新生成。
+   *
    * @param {string} rubricId
-   * @param {{criteria: any[], connectionId: string|null}} input
+   * @param {{criteria: any[], connectionId: string|null, regenerate?: boolean}} input
    */
   async function draftRules(rubricId, input) {
     if (!input.connectionId) {
       throw new Error("请先选择用于起草的 AI 连接。");
     }
-    // One criterion per request: a large template must not consume one function's
-    // entire time budget, and a later failure must not discard completed drafts.
     const collection = lastDraft.value;
+    const started = [];
     for (const criterion of input.criteria) {
       try {
-        const result = await api.post(`/rubrics/${rubricId}/draft-deduction-rules`, {
-          criteria: [criterion],
+        const task = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
+          kind: "rule_draft",
+          params: { criterion },
           ai_connection_id: input.connectionId,
+          regenerate: Boolean(input.regenerate),
         });
         if (lastDraft.value !== collection) throw new StaleContextError();
-        collection.items = [...collection.items.filter((item) => item.criterion_code !== criterion.code), ...(result.items || [])];
+        rememberDraftTask(task);
+        started.push(task);
       } catch (err) {
         if (err instanceof StaleContextError) throw err;
         const message = err instanceof Error ? err.message : "起草失败";
-        throw new Error(`评分项 ${criterion.code} 起草失败；已保留 ${collection.items.length} 项结果。${message}`);
+        throw new Error(`评分项 ${criterion.code} 起草任务提交失败；已提交 ${started.length} 项。${message}`);
       }
     }
-    return collection;
+    return started;
+  }
+
+  /** 刷新所有进行中的起草任务（由页面轮询调用，页面隐藏时暂停）。 */
+  async function refreshDraftTasks() {
+    const active = Object.values(draftTasks.value).filter(isActiveTask);
+    for (const task of active) {
+      rememberDraftTask(await api.get(`/ai-tasks/${task.id}`));
+    }
+    return Object.values(draftTasks.value).some(isActiveTask);
+  }
+
+  /** 进入评分标准页时找回进行中的起草任务。 @param {string} rubricId */
+  async function resumeDraftTasks(rubricId) {
+    const tasks = (await api.get(`/rubrics/${rubricId}/ai-tasks?kind=rule_draft&active=1`)) || [];
+    for (const task of tasks) rememberDraftTask(task);
+    return tasks;
+  }
+
+  /** @param {string} taskId */
+  async function cancelDraftTask(taskId) {
+    rememberDraftTask(await api.post(`/ai-tasks/${taskId}/cancel`, {}));
+  }
+
+  /** 只重试失败的批次，已成功的保留。 @param {string} taskId */
+  async function retryDraftTask(taskId) {
+    rememberDraftTask(await api.post(`/ai-tasks/${taskId}/retry`, {}));
+  }
+
+  function forgetDraftTasks() {
+    draftTasks.value = {};
   }
 
   /**
@@ -483,14 +684,27 @@ export const useRubricsStore = defineStore("rubrics", () => {
     cancelImportSession,
     previewRubricReupload,
     confirmRubricReupload,
-    previewImportStructure,
+    estimateImportStructure,
+    importStructureTask,
+    startImportStructure,
     loadParseCoverage,
     resolveUnits,
     classifyUnits,
-    suggestStructure,
+    classificationTask,
+    refreshClassificationTask,
+    resumeClassificationTask,
+    classificationTaskAction,
+    structureTask,
+    estimateStructure,
+    startStructureSuggestion,
     mergeStructure,
     undoStructure,
-    runRuleReview,
+    ruleReviewTask,
+    estimateRuleReview,
+    startRuleReview,
+    refreshAiTask,
+    aiTaskAction,
+    resumeReviewTasks,
     loadRuleReview,
     dismissFinding,
     clone,
@@ -498,7 +712,13 @@ export const useRubricsStore = defineStore("rubrics", () => {
     loadExecutionDraft,
     loadRubric,
     lastDraft,
+    draftTasks,
     draftRules,
+    refreshDraftTasks,
+    resumeDraftTasks,
+    cancelDraftTask,
+    retryDraftTask,
+    forgetDraftTasks,
     applyDraftRules,
   };
 });

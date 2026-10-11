@@ -6,6 +6,7 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Query
 from fastapi import Response
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -21,6 +22,7 @@ from backend.app.schemas.batch_job import BatchScoringJobCreate
 from backend.app.schemas.batch_job import BatchScoreEstimateRead
 from backend.app.schemas.batch_job import BatchScoringJobRead
 from backend.app.services.batch_scoring.jobs import ACTIVE_JOB_STATUSES
+from backend.app.services.batch_scoring.jobs import KIND as BATCH_SCORING_KIND
 from backend.app.services.batch_scoring.jobs import RETRYABLE_ITEM_STATUSES
 from backend.app.services.batch_scoring.jobs import cancel_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import create_batch_scoring_job
@@ -29,26 +31,34 @@ from backend.app.services.batch_scoring.jobs import get_latest_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import list_attention_batch_scoring_jobs
 from backend.app.services.batch_scoring.jobs import retry_batch_scoring_job
 from backend.app.services.batch_scoring.jobs import run_batch_scoring_job
-from backend.app.services.batch_scoring.vercel_queue import dispatch_batch_scoring_job
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.scoring.usage_estimate import TokenCapExceededError
 from backend.app.services.scoring.usage_estimate import assert_within_token_caps
 from backend.app.services.scoring.usage_estimate import estimate_batch
+from backend.app.services.work_queue.sweep import ensure_sweep_chain
+from backend.app.services.work_queue.sweep import sweep_parent_on_read
+from backend.app.services.work_queue.wake import wake_for_capacity
 
 
 router = APIRouter(tags=["batch-scoring-jobs"])
 logger = logging.getLogger("batch-scoring-jobs")
 
 
-async def _dispatch_or_503(job):
+# 叫醒与它用的会话工厂在共享动作里（对话评分助手方案 T4）：评分助手的图开评、重试后同样要叫醒。
+_session_factory = actions.session_factory
+
+
+_wake_job = actions.wake_job
+
+
+def _sweep_on_read(db, job_id):
+    """进度读取对本任务做一次限频巡检，让卡住的条目在用户刷新后几秒内恢复。"""
+
     try:
-        await dispatch_batch_scoring_job(job)
-    except Exception as exc:
-        logger.exception("batch_scoring_dispatch_failed job_id=%s", job.id)
-        raise HTTPException(
-            status_code=503,
-            detail="后台评分任务暂未进入执行队列，请稍后重新开始。",
-        ) from exc
+        sweep_parent_on_read(_session_factory(db), BATCH_SCORING_KIND, job_id)
+    except Exception:
+        logger.exception("batch_scoring_read_sweep_failed job_id=%s", job_id)
+    db.expire_all()
 
 
 _batch_or_404 = guards.visible_batch
@@ -86,9 +96,7 @@ def read_score_estimate(
     return estimate_batch(db, batch_id, rescore=rescore)
 
 
-def _has_active_job(db, batch_id) -> bool:
-    latest = get_latest_batch_scoring_job(db, batch_id)
-    return latest is not None and latest.status in ACTIVE_JOB_STATUSES
+_has_active_job = actions.has_active_job
 
 
 @router.post(
@@ -107,11 +115,11 @@ async def create_job(
     ensure_dev_user(db)
     _batch_or_404(db, batch_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
-    # 与评分助手共用同一个动作（对话评分助手方案 T4）；派发在这里异步完成。
+    # 与评分助手共用同一个动作（对话评分助手方案 T4）。
     job, created = actions.start_scoring_job(db, principal, user_id, batch_id, payload)
-    await _dispatch_or_503(job)
+    await run_in_threadpool(_wake_job, db, job, reason="create")
     response.status_code = 201 if created else 200
-    return job
+    return get_batch_scoring_job(db, job.id)
 
 
 @router.get(
@@ -127,6 +135,10 @@ def latest_job(
     job = get_latest_batch_scoring_job(db, batch_id)
     if job is None:
         raise HTTPException(status_code=404, detail="batch scoring job not found")
+    if job.status in ACTIVE_JOB_STATUSES:
+        job_id = job.id
+        _sweep_on_read(db, job_id)
+        job = get_batch_scoring_job(db, job_id)
     return job
 
 
@@ -139,7 +151,11 @@ def read_job(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    return _job_or_404(db, job_id, principal)
+    job = _job_or_404(db, job_id, principal)
+    if job.status in ACTIVE_JOB_STATUSES:
+        _sweep_on_read(db, job_id)
+        job = _job_or_404(db, job_id, principal)
+    return job
 
 
 @router.post(
@@ -168,8 +184,8 @@ async def retry_job(
     _job_or_404(db, job_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
     job = actions.retry_scoring_job(db, principal, job_id)
-    await _dispatch_or_503(job)
-    return job
+    await run_in_threadpool(_wake_job, db, job, reason="retry")
+    return get_batch_scoring_job(db, job.id)
 
 
 @router.post(
@@ -184,13 +200,11 @@ def run_job(
     if os.getenv("VERCEL"):
         raise HTTPException(
             status_code=409,
-            detail="生产评分由 Vercel 后台执行器通过队列逐份领取；请查看任务进度，无需在请求中启动。",
+            detail="生产评分由 Vercel 后台执行器逐份领取；请查看任务进度，无需在请求中启动。",
         )
     _job_or_404(db, job_id, principal)
     require_organization_role(principal, "org_admin", "teacher")
-    bind = db.get_bind()
-    db.rollback()
-    factory = sessionmaker(bind=bind, autocommit=False, autoflush=False)
+    factory = _session_factory(db)
     try:
         return run_batch_scoring_job(factory, job_id=job_id)
     except ValueError as exc:

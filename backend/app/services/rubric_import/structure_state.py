@@ -4,6 +4,8 @@
   ``structure_override`` 重新调用导入接口。
 - 草稿结构建议：从台账重建原文，LLM 识别结构，按该结构重新解析得到差异；
   建议连同指纹存入 ``raw_model_output.structure_suggestions``，刷新不丢失。
+- 两者的模型调用都由 AI 任务（``ai_tasks.structure_suggestion``）执行，这里只负责
+  冻结输入、估算、试解析与落库。
 - 合入 / 撤销：按确认后的结构重新解析生成新草稿（只增不删）；只允许在导入后
   尚未人工编辑的草稿上进行，否则重新解析会覆盖人工编辑。
 """
@@ -23,7 +25,6 @@ from backend.app.services.rubric_import.extraction.docx_extractor import table_s
 from backend.app.services.rubric_import.extraction.llm_structure import STRUCTURE_PROMPT_VERSION
 from backend.app.services.rubric_import.extraction.llm_structure import StructureError
 from backend.app.services.rubric_import.extraction.llm_structure import build_table_payload
-from backend.app.services.rubric_import.extraction.llm_structure import recognize_structure
 from backend.app.services.rubric_import.extraction.structure_override import StructureOverrideError
 from backend.app.services.rubric_import.extraction.structure_override import extract_with_override
 from backend.app.services.rubric_import.extraction.table_extractor import extract_table
@@ -50,7 +51,15 @@ def _structure_problem(exc: Exception) -> ParseStateError:
     return ParseStateError(503 if code in _SERVICE_UNAVAILABLE else 422, code, getattr(exc, "message", str(exc)))
 
 
-def preview_structure(*, rules_bytes, template_bytes, scorer, dry_run: bool, business_profile_key: str = "thesis"):
+def sheets_from_ledger_mapping(mapping: dict):
+    """从台账重建表格视图（Excel 工作表或 Word 表格）；AI 任务执行时据此校验模型输出。"""
+
+    return pipeline._override_sheets(SourceLedger.from_mapping(mapping))
+
+
+def import_structure_request(*, rules_bytes, template_bytes, business_profile_key: str = "thesis") -> dict:
+    """导入前识别的冻结输入：上传文件只解析成台账（不落库），连同失败码与发送内容。"""
+
     if not rules_bytes and not template_bytes:
         raise ParseStateError(400, "FILE_REQUIRED", "请至少上传一份评分标准文件（Word 或 Excel）")
     ledger = SourceLedger()
@@ -74,17 +83,27 @@ def preview_structure(*, rules_bytes, template_bytes, scorer, dry_run: bool, bus
     except ValueError:
         codes = [failure_code]
     try:
-        if dry_run:
-            request = build_table_payload(sheets, failure_codes=codes, known_mapping=known_mapping)
-            return {"failure_codes": codes, "estimate": request["estimate"]}
-        result = recognize_structure(sheets, scorer, failure_codes=codes, known_mapping=known_mapping)
-        fresh = SourceLedger.from_mapping(ledger.to_mapping())
-        preview = extract_with_override(sheets, fresh, result["override"])
-    except (StructureError, StructureOverrideError) as exc:
+        request = build_table_payload(sheets, failure_codes=codes, known_mapping=known_mapping)
+    except StructureError as exc:
         raise _structure_problem(exc) from exc
+    return {"ledger": ledger.to_mapping(), "failure_codes": codes, "request": request}
+
+
+def estimate_import_structure(*, rules_bytes, template_bytes, business_profile_key: str = "thesis") -> dict:
+    prepared = import_structure_request(
+        rules_bytes=rules_bytes, template_bytes=template_bytes, business_profile_key=business_profile_key
+    )
+    return {"failure_codes": prepared["failure_codes"], "estimate": prepared["request"]["estimate"]}
+
+
+def import_structure_preview(ledger_mapping: dict, result: dict, *, failure_codes) -> dict:
+    """按模型给出的结构试解析上传的表格，列出将导入的评分项（不落库）。"""
+
+    sheets = sheets_from_ledger_mapping(ledger_mapping)
+    preview = extract_with_override(sheets, SourceLedger.from_mapping(ledger_mapping), result["override"])
     return {
         **result,
-        "failure_codes": codes,
+        "failure_codes": list(failure_codes),
         "preview": [
             {"name": row.criterion.name, "max_score": row.criterion.max_score, "row_number": row.row_number}
             for row in preview.records
@@ -179,11 +198,12 @@ def _command(session: Session, rubric_id: str, compilation, *, model=None) -> di
     }
 
 
-def suggest_structure(session: Session, rubric_id: str, scorer, *, dry_run: bool, actor_id: str) -> dict:
+def draft_structure_request(session: Session, rubric_id: str) -> dict:
+    """草稿结构建议的冻结输入：从台账重建原文，连同失败码与发送内容。"""
+
     compilation = _require_reparse_source(session, rubric_id)
     raw = compilation.raw_parse_output
-    ledger = SourceLedger.from_mapping(raw["source_ledger"])
-    sheets = pipeline._override_sheets(ledger)
+    sheets = sheets_from_ledger_mapping(raw["source_ledger"])
     extraction = raw.get("extraction") or {}
     codes = [item["code"] for item in raw.get("triggers") or []]
     extra = [item["row_number"] for item in extraction.get("dropped_rows") or []]
@@ -192,22 +212,43 @@ def suggest_structure(session: Session, rubric_id: str, scorer, *, dry_run: bool
     options = {"failure_codes": codes, "known_mapping": extraction.get("mapping") or {},
                "extra_rows": {extraction.get("sheet_title"): extra}}
     try:
-        if dry_run:
-            return {"failure_codes": codes, "estimate": build_table_payload(sheets, **options)["estimate"]}
-        result = recognize_structure(sheets, scorer, **options)
-        reparsed = pipeline.prepare_structure_reparse(
-            command=_command(session, rubric_id, compilation, model=result["model"]), raw_parse_output=raw,
-            artifacts=_artifacts(compilation), structure_override=result["override"],
-        ).to_mapping()
-    except (StructureError, StructureOverrideError) as exc:
+        request = build_table_payload(sheets, **options)
+    except StructureError as exc:
         raise _structure_problem(exc) from exc
+    return {"compilation_id": compilation.id, "ledger": deepcopy(raw["source_ledger"]),
+            "failure_codes": codes, "request": request}
+
+
+def estimate_draft_structure(session: Session, rubric_id: str) -> dict:
+    prepared = draft_structure_request(session, rubric_id)
+    return {"failure_codes": prepared["failure_codes"], "estimate": prepared["request"]["estimate"]}
+
+
+def store_structure_suggestion(session: Session, rubric_id: str, result: dict, *, compilation_id: str,
+                               actor_id: str | None) -> dict:
+    """按模型给出的结构重新解析，算出与当前草稿的差异并带指纹存入草稿。
+
+    识别期间草稿被换掉（重新导入、合入或人工编辑）时拒绝：结构里的行列编号对应的是
+    旧台账。``StructureOverrideError`` 原样抛出，由 AI 任务按“输出不合格”处理。
+    """
+
+    compilation = _require_reparse_source(session, rubric_id)
+    if compilation.id != compilation_id:
+        raise ParseStateError(
+            409, "STRUCTURE_SOURCE_CHANGED", "识别期间草稿已变化（重新导入或合入了结构），请重新识别。"
+        )
+    raw = compilation.raw_parse_output
+    reparsed = pipeline.prepare_structure_reparse(
+        command=_command(session, rubric_id, compilation, model=result["model"]), raw_parse_output=raw,
+        artifacts=_artifacts(compilation), structure_override=result["override"],
+    ).to_mapping()
     rows = {item["name"]: item["row_number"]
             for item in reparsed["compilation"]["raw_parse_output"]["extraction"]["records"]}
     proposed = [{**item, "row_number": rows.get(item["name"])} for item in reparsed["criteria"]]
     current = _criteria_with_rows(session, rubric_id, raw, sheet=result["override"].get("sheet"))
     items = diff_criteria(current, proposed)
     stored = {
-        **result,
+        **deepcopy(result),
         "items": items,
         "fingerprint": structure_fingerprint(raw["source_ledger"], current, result["override"]),
         "previous_override": deepcopy(raw.get("structure_override")),

@@ -358,47 +358,50 @@ def test_worker_cycle_executes_a_queued_job(client):
     assert worker.run_worker_cycle(client.session_factory) is False
 
 
-def test_vercel_queue_dispatches_each_pending_item_with_stable_identity(
-    client, monkeypatch
-):
-    jobs = _jobs_module()
-    queue = importlib.import_module(
-        "backend.app.services.batch_scoring.vercel_queue"
-    )
-    with client.session_factory() as session:
-        batch_id, _rubric_id, _paper_ids = _seed_batch(
-            session, count=2, name="queue dispatch"
-        )
-        job, _ = jobs.create_batch_scoring_job(
-            session,
-            batch_id=batch_id,
-            rescore=False,
-            max_workers=2,
-            observation_policy=None,
-            actor_id=settings.DEFAULT_DEV_USER_ID,
-        )
-
+def _fake_wakes(monkeypatch):
+    """Capture Vercel wake messages instead of sending them."""
+    wake = importlib.import_module("backend.app.services.work_queue.wake")
     sent = []
 
-    async def fake_send(topic, payload, **options):
-        sent.append((topic, payload, options))
+    def fake_send(payload, *, idempotency_key, delay=None):
+        sent.append({"payload": payload, "key": idempotency_key, "delay": delay})
         return f"message-{len(sent)}"
 
     monkeypatch.setenv("BATCH_SCORING_DISPATCH", "vercel_queue")
-    monkeypatch.setattr(queue, "send", fake_send)
-    message_ids = asyncio.run(queue.dispatch_batch_scoring_job(job))
-
-    assert message_ids == ["message-1", "message-2"]
-    assert {value[1]["item_id"] for value in sent} == {
-        item.id for item in job.items
-    }
-    assert all(value[0] == queue.SCORING_TOPIC for value in sent)
-    assert all(value[2]["retention"] == 86400 for value in sent)
-    assert all(value[2]["idempotency_key"].endswith("-0") for value in sent)
+    monkeypatch.setattr(wake, "_send", fake_send)
+    return sent
 
 
-def test_vercel_queue_item_checkpoint_completes_job(client):
+def test_creating_a_job_wakes_its_source_once_per_free_slot(client, monkeypatch):
+    sent = _fake_wakes(monkeypatch)
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=2, name="queue wake on create"
+        )
+
+    created = client.post(
+        f"/api/batches/{batch_id}/score-jobs", json={"max_workers": 2}
+    )
+    assert created.status_code == 201, created.text
+    assert {item["ordinal"] for item in created.json()["items"]} == {0, 1}
+
+    wakes = [value for value in sent if "source_key" in value["payload"]]
+    # 消息只带来源键，不带任务或条目：一条叫醒对应一个空位上的一篇。
+    assert [value["payload"] for value in wakes] == [{"source_key": "platform"}] * 2
+    assert len({value["key"] for value in wakes}) == 2
+    # 首次部署没有巡检记录：顺带补投巡检链的第一条消息。
+    assert any("sweep" in value["payload"] for value in sent)
+
+    duplicate = client.post(
+        f"/api/batches/{batch_id}/score-jobs", json={"max_workers": 2}
+    )
+    assert duplicate.status_code == 200, duplicate.text
+
+
+def test_wake_message_executes_one_item_and_completes_job(client, monkeypatch):
     jobs = _jobs_module()
+    messages = importlib.import_module("backend.app.services.work_queue.messages")
+    sent = _fake_wakes(monkeypatch)
     with client.session_factory() as session:
         batch_id, rubric_id, paper_ids = _seed_batch(
             session, count=1, name="queue item"
@@ -424,24 +427,75 @@ def test_vercel_queue_item_checkpoint_completes_job(client):
             actor_id=settings.DEFAULT_DEV_USER_ID,
         )
         job_id = job.id
-        item_id = job.items[0].id
 
-    completed = jobs.run_batch_scoring_item(
-        client.session_factory,
-        job_id=job_id,
-        item_id=item_id,
+    claimed = messages.handle_wake_payload(
+        client.session_factory, {"source_key": "platform"}
     )
+    assert claimed is not None and claimed.parent_id == job_id
+    # 没有待处理条目了：不再接力叫醒。
+    assert sent == []
+    # 重复叫醒无害：取不到条目就退出。
+    assert messages.handle_wake_payload(
+        client.session_factory, {"source_key": "platform"}
+    ) is None
 
-    assert completed.status == "completed"
-    assert completed.skipped_count == 1
-    assert completed.pending_count == 0
-    assert completed.items[0].attempt_count == 1
     with client.session_factory() as session:
+        completed = jobs.get_batch_scoring_job(session, job_id)
+        assert completed.status == "completed"
+        assert completed.skipped_count == 1
+        assert completed.pending_count == 0
+        assert completed.running_count == 0
+        assert completed.items[0].attempt_count == 1
         assert session.get(models.GradingBatch, batch_id).status == "scored"
 
 
-def test_vercel_queue_reclaims_stale_item_without_duplicate_score(client):
+def test_legacy_item_message_wakes_the_items_source(client, monkeypatch):
     jobs = _jobs_module()
+    messages = importlib.import_module("backend.app.services.work_queue.messages")
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=2, name="legacy message"
+        )
+        job, _ = jobs.create_batch_scoring_job(
+            session,
+            batch_id=batch_id,
+            rescore=False,
+            max_workers=2,
+            observation_policy=None,
+            actor_id=settings.DEFAULT_DEV_USER_ID,
+        )
+        job_id = job.id
+        later_item = max(job.items, key=lambda value: value.ordinal).id
+
+    seen = []
+
+    def fake_score(_session, *, paper_id, job_id):
+        seen.append(paper_id)
+        raise RuntimeError("checker registry failure")
+
+    runner = importlib.import_module("backend.app.services.work_queue.runner")
+    original = runner.execute_next
+    monkeypatch.setattr(
+        runner,
+        "execute_next",
+        lambda session_factory, **options: original(
+            session_factory, score_item=fake_score, **options
+        ),
+    )
+    # 部署前留在旧主题里的 {job_id, item_id}：按“叫醒该条目所属来源”处理，
+    # 取的是该来源排在最前面的条目，而不是消息里点名的那一篇。
+    claimed = messages.handle_wake_payload(
+        client.session_factory, {"job_id": job_id, "item_id": later_item}
+    )
+    assert claimed is not None
+    assert claimed.item_id != later_item
+    assert len(seen) == 1
+
+
+def test_sweep_resets_an_expired_execution_and_resumes_without_duplicate_score(client):
+    jobs = _jobs_module()
+    sweep = importlib.import_module("backend.app.services.work_queue.sweep")
+    runner = importlib.import_module("backend.app.services.work_queue.runner")
     with client.session_factory() as session:
         batch_id, rubric_id, paper_ids = _seed_batch(
             session, count=1, name="queue stale recovery"
@@ -466,36 +520,47 @@ def test_vercel_queue_reclaims_stale_item_without_duplicate_score(client):
             actor_id=settings.DEFAULT_DEV_USER_ID,
         )
         item = job.items[0]
+        # 上一次执行在写完评分记录后、写条目结果前被平台终止。
         item.status = "running"
         item.attempt_count = 1
         item.baseline_scoring_run_id = None
         item.started_at = datetime(2020, 1, 1)
+        item.heartbeat_at = datetime(2020, 1, 1)
         job.status = "running"
+        job.pending_count = 0
+        job.running_count = 1
         job.batch.status = "scoring"
         session.commit()
         job_id = job.id
         item_id = item.id
         run_id = run.id
 
-    completed = jobs.run_batch_scoring_item(
-        client.session_factory,
-        job_id=job_id,
-        item_id=item_id,
-    )
-
-    assert completed.status == "completed"
-    assert completed.items[0].attempt_count == 2
-    assert completed.items[0].scoring_run_id == run_id
+    report = sweep.sweep_stale_items(client.session_factory)
+    assert (report.recovered, report.failed) == (1, 0)
     with client.session_factory() as session:
+        reset = session.get(models.BatchScoringItem, item_id)
+        assert (reset.status, reset.stall_count) == ("pending", 1)
+        assert reset.attempt_history[-1]["status"] == "abandoned"
+
+    assert runner.execute_next(client.session_factory) is not None
+    with client.session_factory() as session:
+        completed = jobs.get_batch_scoring_job(session, job_id)
+        assert completed.status == "completed"
+        assert completed.items[0].attempt_count == 2
+        assert completed.items[0].scoring_run_id == run_id
+        # 续评成功后连续无进展计数清零。
+        assert completed.items[0].stall_count == 0
         assert session.query(models.ScoringRun).count() == 1
 
 
-def test_worker_level_exception_persists_retryable_terminal_state(client, monkeypatch):
+def test_an_execution_that_never_progresses_fails_after_the_stall_limit(client, monkeypatch):
     jobs = _jobs_module()
-    worker = importlib.import_module("backend.app.services.batch_scoring.worker")
+    runner = importlib.import_module("backend.app.services.work_queue.runner")
+    sweep = importlib.import_module("backend.app.services.work_queue.sweep")
+    limits = importlib.import_module("backend.app.services.work_queue.limits")
     with client.session_factory() as session:
         batch_id, _rubric_id, _paper_ids = _seed_batch(
-            session, count=2, name="worker failure"
+            session, count=1, name="stalled paper"
         )
         job, _ = jobs.create_batch_scoring_job(
             session,
@@ -507,25 +572,41 @@ def test_worker_level_exception_persists_retryable_terminal_state(client, monkey
         )
         job_id = job.id
 
-    def explode(*_args, **_kwargs):
-        with client.session_factory() as session:
-            current = jobs.get_batch_scoring_job(session, job_id)
-            current.status = "running"
-            current.heartbeat_at = models.utcnow()
-            current.batch.status = "scoring"
-            session.commit()
-        raise RuntimeError("sensitive provider detail must stay in worker logs")
+    class ProcessKilled(BaseException):
+        """Stands in for the platform killing the function mid-paper."""
 
-    monkeypatch.setattr(worker, "run_batch_scoring_job", explode)
-    assert worker.run_worker_cycle(client.session_factory) is True
+    def crash(*_args, **_kwargs):
+        raise ProcessKilled()
+
+    monkeypatch.setattr(jobs, "_finish_item", crash)
+    clock = datetime(2030, 1, 1)
+    for attempt in range(1, limits.STALL_LIMIT + 1):
+        try:
+            runner.execute_next(client.session_factory, score_item=crash)
+        except ProcessKilled:
+            pass
+        clock = clock.replace(hour=attempt)
+        report = sweep.sweep_stale_items(client.session_factory, now=clock)
+        expected = (0, 1) if attempt == limits.STALL_LIMIT else (1, 0)
+        assert (report.recovered, report.failed) == expected
 
     with client.session_factory() as session:
         failed = jobs.get_batch_scoring_job(session, job_id)
-        assert failed.status == "failed"
-        assert failed.failed_count == 2
-        assert failed.batch.status == "draft"
-        assert all(item.error_code == "worker_failure" for item in failed.items)
-        assert all("sensitive provider detail" not in item.error_message for item in failed.items)
+        # 与逐篇失败相同：任务收敛为“部分失败”，页面上的“重试失败项”随之可用。
+        assert failed.status == "completed_with_errors"
+        assert failed.failed_count == 1
+        assert (failed.pending_count, failed.running_count) == (0, 0)
+        item = failed.items[0]
+        assert item.error_code == "WORK_ITEM_STALLED"
+        assert "多次执行都没能推进" in item.error_message
+        assert item.attempt_count == limits.STALL_LIMIT
+        assert failed.batch.status == "scored_with_errors"
+
+    monkeypatch.undo()
+    with client.session_factory() as session:
+        retried = jobs.retry_batch_scoring_job(session, job_id)
+        assert retried.status == "queued"
+        assert retried.items[0].stall_count == 0
 
 
 def test_stale_cancel_request_is_finalized_and_batch_leaves_scoring(client):

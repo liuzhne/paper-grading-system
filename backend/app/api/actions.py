@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 
 from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
@@ -45,8 +47,12 @@ from backend.app.services.scoring.usage_estimate import assert_within_token_caps
 from backend.app.services.storage.local import artifact_key_invalid
 from backend.app.services.storage.local import artifact_not_found
 from backend.app.services.storage.local import delete_private_object
+from backend.app.services.work_queue.sweep import ensure_sweep_chain
+from backend.app.services.work_queue.wake import wake_for_capacity
 
 WRITE_ROLES = ("org_admin", "teacher")
+
+logger = logging.getLogger("batch-scoring-jobs")
 
 
 # --- 评分标准 --------------------------------------------------------------------
@@ -260,8 +266,7 @@ def has_active_job(db: Session, batch_id: str) -> bool:
 def start_scoring_job(db: Session, principal: CurrentPrincipal, user_id: str, batch_id: str, payload):
     """建（或幂等返回进行中的）批量评分任务；`payload` 为 `BatchScoringJobCreate`。
 
-    只落库，不派发：路由在异步上下文里 `await` 派发，图在工作线程里调用
-    `dispatch_job_from_worker_thread`。
+    只落库，不叫醒：调用方提交自己的改动后再调用 `wake_job`（路由在线程池里调用）。
     """
 
     try:
@@ -287,7 +292,7 @@ def start_scoring_job(db: Session, principal: CurrentPrincipal, user_id: str, ba
 
 
 def retry_scoring_job(db: Session, principal: CurrentPrincipal, job_id: str):
-    """只重排失败、取消或中断的条目；只落库，不派发。"""
+    """只重排失败、取消或中断的条目；只落库，不叫醒（同上）。"""
 
     try:
         existing = guards.visible_job(db, job_id, principal)
@@ -322,24 +327,28 @@ def cancel_scoring_job(db: Session, principal: CurrentPrincipal, job_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-DISPATCH_FAILED_DETAIL = "后台评分任务暂未进入执行队列，请稍后重新开始。"
+def session_factory(db: Session):
+    """与请求同库的独立会话工厂：巡检与叫醒各自提交，不和请求的事务混在一起。
 
-
-def dispatch_job_from_worker_thread(job) -> None:
-    """在同步调用方（图的节点，运行于请求的工作线程）里派发 Vercel 队列消息。
-
-    与路由里的 `_dispatch_or_503` 同一语义：未启用队列时什么也不做（内网与本地由
-    worker 领取）；派发失败返回 503 同一文案。
+    会回滚调用方会话里未提交的改动：调用方必须先提交自己的改动再叫醒。
     """
 
-    from backend.app.services.batch_scoring.vercel_queue import dispatch_batch_scoring_job
-    from backend.app.services.batch_scoring.vercel_queue import vercel_queue_enabled
+    bind = db.get_bind()
+    db.rollback()
+    return sessionmaker(bind=bind, autocommit=False, autoflush=False)
 
-    if not vercel_queue_enabled():
-        return
-    import anyio
 
+def wake_job(db: Session, job, *, reason: str) -> None:
+    """按空闲名额叫醒（Vercel）；没发出去也不影响任务，巡检会补发。"""
+
+    source_key = next((item.source_key for item in job.items), None)
+    # 同一次提交的重放（双击、重试请求）得到同一个幂等键。
+    token = "%s-%s" % (job.id, job.updated_at.isoformat() if job.updated_at else "")
+    factory = session_factory(db)
     try:
-        anyio.from_thread.run(dispatch_batch_scoring_job, job)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=DISPATCH_FAILED_DETAIL) from exc
+        if source_key:
+            with factory() as session:
+                wake_for_capacity(session, source_key, reason=reason, token=token)
+        ensure_sweep_chain(factory)
+    except Exception:
+        logger.exception("batch_scoring_wake_failed job_id=%s", job.id)

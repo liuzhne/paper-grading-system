@@ -119,7 +119,18 @@ def _validate(items, batch_ids: set, codes: set, seen: set):
     return accepted, rejected
 
 
-def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
+def classify_units(
+    units: list[dict],
+    criteria: list[dict],
+    scorer,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    rate_limit_retries: int = CLASSIFIER_RATE_LIMIT_RETRIES,
+    max_attempts: int = 2,
+    repair: bool = False,
+) -> dict:
+    """``max_attempts=1, rate_limit_retries=0`` 是 AI 任务的一次执行：只调用一次模型，
+    429 不原地等，输出不合格的修正作为下一次执行（``repair=True`` 带上修正提示）。"""
     if scorer is None or str(getattr(scorer, "provider", "")).lower() == "mock":
         raise ClassificationError("AI_CONNECTION_MISSING", "当前没有可用于分类的真实 AI 连接。")
     criteria_payload = [
@@ -127,6 +138,7 @@ def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_siz
     ]
     codes = {c["code"] for c in criteria_payload}
     results, rejected, failed = [], [], []
+    failure_detail = None
     seen: set = set()
     for start in range(0, len(units), batch_size):
         batch = units[start : start + batch_size]
@@ -134,9 +146,10 @@ def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_siz
         batch_ids = {u["unit_id"] for u in batch}
         items = None
         failure = "invalid_output"
-        for attempt in range(2):
+        retry_after = None
+        for attempt in range(max(1, int(max_attempts))):
             instructions = CLASSIFIER_INSTRUCTIONS
-            if attempt:
+            if attempt or repair:
                 instructions += "\n上次输出未通过校验（缺少 items 数组）。请按上述格式重新输出完整 JSON。"
             try:
                 options = {}
@@ -145,7 +158,7 @@ def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_siz
                 if "attempts_limit" in inspect.signature(scorer.complete_json).parameters:
                     options["attempts_limit"] = 1
                 if "rate_limit_retries" in inspect.signature(scorer.complete_json).parameters:
-                    options["rate_limit_retries"] = CLASSIFIER_RATE_LIMIT_RETRIES
+                    options["rate_limit_retries"] = rate_limit_retries
                 if "default_timeout_seconds" in inspect.signature(scorer.complete_json).parameters:
                     options["default_timeout_seconds"] = CLASSIFIER_TIMEOUT_SECONDS
                 items = _envelope_items(scorer.complete_json(instructions, payload, **options))
@@ -154,6 +167,7 @@ def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_siz
                 failure = reason if reason in {"output_truncated", "invalid_json", "error_envelope", "invalid_envelope", "incomplete_output", "empty_content", "refused"} else project_provider_error(exc).code
                 if getattr(exc, "code", None) == "PROVIDER_CIRCUIT_OPEN":
                     failure = "circuit_open"
+                retry_after = getattr(getattr(exc, "error", None), "retry_after", None)
                 items = None
                 if reason == "invalid_json" and not attempt:
                     continue
@@ -161,6 +175,7 @@ def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_siz
             if items is not None:
                 break
         if items is None:
+            failure_detail = {"code": failure, "retry_after": retry_after}
             failed.extend(u["unit_id"] for u in batch)
             rejected.extend({"unit_id": u["unit_id"], "error": failure} for u in batch)
             break  # Keep completed batches; leave unsent units available for retry.
@@ -178,4 +193,6 @@ def classify_units(units: list[dict], criteria: list[dict], scorer, *, batch_siz
         "unclassified_unit_ids": [
             u["unit_id"] for u in units if u["unit_id"] not in classified and u["unit_id"] not in failed
         ],
+        # 整批失败的原因（错误码与 Retry-After），供 AI 任务决定延后、重试还是判失败。
+        "failure": failure_detail,
     }

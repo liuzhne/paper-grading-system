@@ -159,27 +159,50 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   expect(created.ok(), await created.text()).toBeTruthy();
   const rubric = await created.json();
   await page.route("**/api/ai-connections", (route) => route.fulfill({ json: [{ id: "synthetic", name: "合成测试连接", model_name: "fixture", status: "active" }] }));
+  // 起草是后台任务（方案 A2）：提交返回任务，页面轮询任务状态，成功后结果进入确认面板。
   const generatedCodes = [];
-  let failSecond = true;
-  await page.route(`**/api/rubrics/${rubric.id}/draft-deduction-rules`, async (route) => {
+  const tasks = new Map();
+  const draftFor = (code) => ({ criterion_code: code, status: "pending_confirmation",
+    draft: { criterion_code: code, generation_metadata: { provider: "fixture", model_name: "fixture", fingerprint: "f".repeat(64) },
+      rule_groups: [{ group_code: "G1", issue: "方案论证不足", cap_points: 6, mutex_group: `${code}-G1`, rules: [
+        { severity: "minor", trigger: "论证不充分", points: 2, reason: "轻微论证不足", source: "ai_interpreted_user_text", source_refs: ["原文扣分下限"] },
+        { severity: "severe", trigger: "没有论证", points: 6, reason: "严重论证不足", source: "ai_interpreted_user_text", source_refs: ["原文扣分上限"] },
+      ] }],
+    } });
+  const taskView = (task) => {
+    const base = { id: task.id, kind: "rule_draft", rubric_id: rubric.id, scope: { criterion_code: task.code },
+      total_items: 1, pending_count: 0, running_count: 0, succeeded_count: 0, failed_count: 0, canceled_count: 0,
+      state_version: 1, created_at: "2026-10-10T00:00:00", updated_at: "2026-10-10T00:00:00", items: [], result: null };
+    if (task.phase === "failed") return { ...base, status: "failed", failed_count: 1, error_code: "MUTEX_GROUP_MISSING", error_message: "缺少互斥标识。请重新生成。" };
+    if (task.phase === "running") return { ...base, status: "running", running_count: 1 };
+    return { ...base, status: "succeeded", succeeded_count: 1, result: draftFor(task.code) };
+  };
+  await page.route(`**/api/rubrics/${rubric.id}/ai-tasks**`, async (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: [] });
     const input = route.request().postDataJSON();
-    expect(input.criteria).toHaveLength(1);
-    generatedCodes.push(input.criteria[0].code);
-    if (input.criteria[0].code === "T02" && failSecond) {
-      failSecond = false;
-      await route.fulfill({ status: 422, json: { detail: { code: "MUTEX_GROUP_MISSING", message: "缺少互斥标识。", user_action: "请重新生成。" } } });
-      return;
+    const criterion = input.params.criterion;
+    expect(input.kind).toBe("rule_draft");
+    expect(criterion.deduction_rules).toEqual(["缺少方案论证扣2至6分"]);
+    expect(criterion.description).toBe("核对方案论证");
+    generatedCodes.push(criterion.code);
+    const task = { id: `task-${criterion.code}`, code: criterion.code, phase: "running", polls: 0 };
+    tasks.set(task.id, task);
+    await route.fulfill({ status: 202, json: taskView(task) });
+  });
+  await page.route("**/api/ai-tasks/**", async (route) => {
+    const [, taskId, action] = new URL(route.request().url()).pathname.match(/\/ai-tasks\/([^/]+)(?:\/(\w+))?/);
+    const task = tasks.get(taskId);
+    if (action === "retry") {
+      task.phase = "running";
+      task.retried = true;
+      return route.fulfill({ json: taskView(task) });
     }
-    expect(input.criteria[0].deduction_rules).toEqual(["缺少方案论证扣2至6分"]);
-    expect(input.criteria[0].description).toBe("核对方案论证");
-    await route.fulfill({ json: { items: input.criteria.map((c) => ({ criterion_code: c.code,
-      draft: { criterion_code: c.code, generation_metadata: { provider: "fixture", model_name: "fixture", fingerprint: "f".repeat(64) },
-        rule_groups: [{ group_code: "G1", issue: "方案论证不足", cap_points: 6, mutex_group: `${c.code}-G1`, rules: [
-          { severity: "minor", trigger: "论证不充分", points: 2, reason: "轻微论证不足", source: "ai_interpreted_user_text", source_refs: ["原文扣分下限"] },
-          { severity: "severe", trigger: "没有论证", points: 6, reason: "严重论证不足", source: "ai_interpreted_user_text", source_refs: ["原文扣分上限"] },
-        ] }],
-      },
-    })) } });
+    // 第一次轮询仍在进行；之后 T02 的第一个任务失败，重试后成功。
+    task.polls += 1;
+    if (task.phase === "running" && task.polls > 1) {
+      task.phase = task.code === "T02" && !task.retried ? "failed" : "succeeded";
+    }
+    await route.fulfill({ json: taskView(task) });
   });
   await page.goto("/workbench/rubrics");
   await expect(page.getByRole("heading", { level: 1, name: rubric.name })).toBeVisible();
@@ -187,11 +210,16 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
   await expect(page.locator(".coverage-panel")).toContainText("合成测试连接");
   await page.getByRole("button", { name: /生成全部缺失细则/ }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "已保留 1 项结果" })).toContainText("缺少互斥标识。");
-  await page.getByRole("button", { name: "生成全部缺失细则（1）", exact: true }).click();
-  await expect(page.getByRole("button", { name: /生成全部缺失细则|起草中/ })).toHaveCount(0);
-  expect(generatedCodes).toEqual(["T01", "T02", "T02"]);
   const panel = page.locator("[data-test=draft-panel]");
+  await expect(panel.locator("tbody tr")).toHaveCount(2);
+  expect(generatedCodes).toEqual(["T01", "T02"]);
+  // T02 的任务失败：在它自己的评分项下给出根因，并只重试失败的批次。
+  await page.locator(".criteria-nav .lib-item", { hasText: "T02" }).click();
+  await expect(page.locator("[data-test=draft-task-status]")).toContainText("缺少互斥标识");
+  await page.getByRole("button", { name: "重试失败的批次", exact: true }).click();
+  await expect(panel.locator("tbody tr")).toHaveCount(2);
+  expect(generatedCodes).toEqual(["T01", "T02"]);
+  await page.locator(".criteria-nav .lib-item", { hasText: "T01" }).click();
   await expect(panel.locator("tbody tr")).toHaveCount(2);
   await panel.getByRole("button", { name: "仅应用此条", exact: true }).first().click();
   await expect(page.getByRole("status").filter({ hasText: "已应用 1 条建议" })).toBeVisible();
@@ -210,6 +238,9 @@ test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用�
   const t01Id = full.criteria.find((criterion) => criterion.code === "T01").id;
   const finalRuleCount = review.rules.filter((rule) => rule.criterion_id === t01Id).length;
   const finalPanel = page.locator("[data-test=rule-review-panel]");
+  // 规则上写明“来自 AI”与生成模型名（0036）。
+  expect(review.rules.filter((rule) => rule.criterion_id === t01Id && rule.ai_origin && rule.ai_model === "fixture")).toHaveLength(2);
+  await expect(finalPanel.locator("[data-test=ai-origin]").first()).toContainText("AI · fixture");
   await finalPanel.getByRole("button", { name: /统一确认最终规则/ }).click();
   await expect(page.getByRole("status").filter({ hasText: `已确认 ${finalRuleCount} 条规则` })).toBeVisible();
   const confirmedReview = await (await request.get(`/api/rubrics/${rubric.id}/review-workspace`)).json();

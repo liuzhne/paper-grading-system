@@ -187,40 +187,61 @@ describe("AI 起草缺失扣分细则", () => {
     ).rejects.toThrow(/连接/);
   });
 
-  it("带连接时把 id 发给服务端", async () => {
-    let sent = null;
+  it("为每个评分项建后台任务，带上连接与评分项内容", async () => {
+    const sent = [];
     vi.stubGlobal("fetch", (url, init) => {
-      sent = JSON.parse(init.body);
-      return jsonResponse({ items: [] });
+      sent.push({ url, body: JSON.parse(init.body) });
+      return jsonResponse({ id: "task-1", status: "queued", scope: { criterion_code: "T01" }, items: [] });
     });
     const store = useRubricsStore();
 
-    await store.draftRules("r1", {
+    const tasks = await store.draftRules("r1", {
       criteria: [{ code: "T01" }],
       connectionId: "conn-1",
     });
 
-    expect(sent.ai_connection_id).toBe("conn-1");
+    expect(sent[0].url).toBe("/api/rubrics/r1/ai-tasks");
+    expect(sent[0].body).toEqual({
+      kind: "rule_draft", params: { criterion: { code: "T01" } }, ai_connection_id: "conn-1", regenerate: false,
+    });
+    expect(tasks.map((task) => task.id)).toEqual(["task-1"]);
+    // 提交只是建任务：结果出来之前没有待确认的建议。
+    expect(store.lastDraft.items).toEqual([]);
+    expect(store.draftTasks.T01.status).toBe("queued");
   });
 
-  it("起草结果标记为待确认，不直接进入可执行版本", async () => {
-    vi.stubGlobal("fetch", () =>
-      jsonResponse({
-        items: [
-          { criterion_code: "T01", rules: [{ issue: "缺少方法说明", deduct: 3 }] },
-        ],
-      }),
-    );
-    const store = useRubricsStore();
-
-    const result = await store.draftRules("r1", {
-      criteria: [{ code: "T01" }],
-      connectionId: "conn-1",
+  it("任务成功后把结果放进待确认建议，只放一次，不直接进入可执行版本", async () => {
+    const result = { criterion_code: "T01", status: "pending_confirmation", draft: { rule_groups: [{ rules: [] }] } };
+    const responses = [
+      { id: "task-1", status: "running", scope: { criterion_code: "T01" }, items: [] },
+      { id: "task-1", status: "succeeded", scope: { criterion_code: "T01" }, result, items: [] },
+    ];
+    const urls = [];
+    vi.stubGlobal("fetch", (url) => {
+      urls.push(url);
+      return jsonResponse(responses.shift());
     });
+    const store = useRubricsStore();
+    await store.draftRules("r1", { criteria: [{ code: "T01" }], connectionId: "conn-1" });
 
-    // 起草只是建议：确认之前不能改变任何已发布内容。
-    expect(result.items[0].criterion_code).toBe("T01");
-    expect(store.lastDraft.items).toHaveLength(1);
+    expect(await store.refreshDraftTasks()).toBe(false);
+    expect(urls[1]).toBe("/api/ai-tasks/task-1");
+    expect(store.lastDraft.items).toEqual([result]);
+    // 已结束的任务不再轮询。
+    expect(await store.refreshDraftTasks()).toBe(false);
+    expect(urls).toHaveLength(2);
+  });
+
+  it("刷新页面后找回进行中的起草任务", async () => {
+    let requested = null;
+    vi.stubGlobal("fetch", (url) => {
+      requested = url;
+      return jsonResponse([{ id: "task-9", status: "running", scope: { criterion_code: "T03" }, items: [] }]);
+    });
+    const store = useRubricsStore();
+    await store.resumeDraftTasks("r1");
+    expect(requested).toBe("/api/rubrics/r1/ai-tasks?kind=rule_draft&active=1");
+    expect(store.draftTasks.T03.id).toBe("task-9");
   });
 });
 
@@ -356,17 +377,17 @@ describe("确认后的 AI 规则落库（V3-2 闭环）", () => {
 });
 
 
-it("分项起草在后续失败时保留成功结果", async () => {
+it("分项提交在后续失败时保留已提交的任务", async () => {
   setActivePinia(createPinia());
   const calls = [];
   vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
-    calls.push(JSON.parse(init.body).criteria);
+    calls.push(JSON.parse(init.body).params.criterion.code);
     return calls.length === 1
-      ? jsonResponse({ items: [{ criterion_code: "T01", draft: { rule_groups: [] } }] })
-      : new Response(JSON.stringify({ detail: { message: "模型输出不完整。" } }), { status: 422 });
+      ? jsonResponse({ id: "task-1", status: "queued", scope: { criterion_code: "T01" }, items: [] })
+      : new Response(JSON.stringify({ detail: { message: "评分项内容不完整。" } }), { status: 422 });
   }));
   const store = useRubricsStore();
-  await expect(store.draftRules("r1", { criteria: [{ code: "T01" }, { code: "T02" }], connectionId: "c1" })).rejects.toThrow("已保留 1 项结果");
-  expect(calls.map((items) => items.length)).toEqual([1, 1]);
-  expect(store.lastDraft.items[0].criterion_code).toBe("T01");
+  await expect(store.draftRules("r1", { criteria: [{ code: "T01" }, { code: "T02" }], connectionId: "c1" })).rejects.toThrow("已提交 1 项");
+  expect(calls).toEqual(["T01", "T02"]);
+  expect(store.draftTasks.T01.id).toBe("task-1");
 });

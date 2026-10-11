@@ -21,6 +21,7 @@ function displayPoints(rule) {
 }
 function sourceLabel(rule) {
   if (rule.origin?.source === "ai_interpreted_user_text") return "AI 解读原文";
+  if (rule.ai_origin && !rule.origin?.source) return "AI 起草";
   if (["ai_inferred", "llm"].includes(rule.origin?.source)) return "AI 推断";
   return sources[rule.creation_method] || rule.creation_method;
 }
@@ -62,6 +63,8 @@ function sourceLabel(rule) {
             </td>
             <td class="rule-source">
               <span>{{ sourceLabel(rule) }}</span>
+              <!-- 规则上写明“来自 AI”与生成模型名（0036），对比新旧模型时按它区分。 -->
+              <span v-if="rule.ai_origin" class="chip chip-warn ai-origin" data-test="ai-origin">AI · {{ rule.ai_model || "模型未记录" }}</span>
               <p v-for="ref in rule.origin?.source_refs || []" :key="String(ref)" class="faint">{{ ref }}</p>
               <details v-if="rule.origin?.generation_fingerprint"><summary>生成记录</summary><p>{{ rule.origin.generation_metadata?.model_name }}</p><p>{{ rule.origin.generation_fingerprint }}</p></details>
               <details v-for="(source, index) in rule.sources" :key="index">
@@ -102,6 +105,7 @@ function sourceLabel(rule) {
 .table th:nth-child(5) { width: 22%; }
 .table th:nth-child(6) { width: 15%; }
 .rule-body, .rule-source { white-space: normal; overflow-wrap: anywhere; }
+.ai-origin { display: inline-block; margin-top: 4px; }
 .rule-actions, .review-foot { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
 .rule-actions { flex-wrap: wrap; gap: 6px; }
 .confirm { color: var(--accent, #185e52); }

@@ -16,6 +16,7 @@ from backend.app.api.deps import enforce_auth
 from backend.app.api.routes import assistant
 from backend.app.api.routes import auth
 from backend.app.api.routes import ai_connections
+from backend.app.api.routes import ai_tasks
 from backend.app.api.routes import batches
 from backend.app.api.routes import batch_jobs
 from backend.app.api.routes import calibration
@@ -28,6 +29,8 @@ from backend.app.api.routes import scoring
 from backend.app.api.routes import system
 from backend.app.api.routes import submissions_v2
 from backend.app.core.config import settings
+from backend.app.core.contract import API_CONTRACT_HEADER
+from backend.app.core.contract import API_CONTRACT_VERSION
 from backend.app.services.batches.state import BatchArchived
 from backend.app.services.batches.state import BatchStateConflict
 from backend.app.services.observability import begin_request_timing
@@ -73,6 +76,8 @@ def create_app():
             response.headers["Server-Timing"] = server_timing_header(
                 (perf_counter() - started_at) * 1000
             )
+            # 版本守卫：前端发现契约版本变了，会在下一次操作前刷新页面。
+            response.headers[API_CONTRACT_HEADER] = API_CONTRACT_VERSION
             return response
         finally:
             end_request_timing(token)
@@ -119,6 +124,7 @@ def create_app():
     app.include_router(batches.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(batch_jobs.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(rubrics.router, prefix=settings.API_PREFIX, dependencies=guarded)
+    app.include_router(ai_tasks.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(papers.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(
         release_gates.router,

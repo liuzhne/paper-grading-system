@@ -185,7 +185,10 @@ jobs:
             0032_single_active_ai_connection \
             0033_rule_decision_ledger \
             0034_anthropic_messages_provider \
-            0035_assistant_conversations
+            0035_unified_work_queue \
+            0036_ai_tasks \
+            0037_ai_task_upload_scope \
+            0038_assistant_conversations
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done

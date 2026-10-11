@@ -76,7 +76,7 @@ def test_drafter_repairs_fabricated_source_once():
 
 
 def _assigned_analysis():
-    """与 draft-deduction-rules 路由相同：评分说明 + 人工归入的原文单元。"""
+    """与 rule_draft 任务建立时的输入相同：评分说明 + 人工归入的原文单元。"""
     analysis = analyze_rule_input([], criterion_code="T01")
     assigned = [{"text": "需系统梳理国内外研究成果。", "source_refs": ["docx:p[101]"], "reason": "assigned_source"},
                 {"text": "界面需照顾老年人的视觉体验。", "source_refs": ["docx:p[117]"], "reason": "assigned_source"}]

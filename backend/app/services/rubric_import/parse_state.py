@@ -96,21 +96,34 @@ def require_editable_ledger(session: Session, rubric_id: str):
     return compilation
 
 
-def run_unit_classification(session: Session, rubric_id: str, scorer, *, unit_ids=None, actor_id: str) -> dict:
+def classification_inputs(session: Session, rubric_id: str, *, unit_ids=None):
+    """归类的输入：当前可编辑草稿、预筛后的未认领单元、评分项。不调用模型。"""
+
     compilation = require_editable_ledger(session, rubric_id)
     raw = compilation.raw_parse_output
     ledger = SourceLedger.from_mapping(raw["source_ledger"])
     units = select_units(ledger, _coverage(raw), unit_ids=unit_ids)
-    if not units:
-        raise ParseStateError(422, "NOTHING_TO_CLASSIFY", "没有需要分类的未认领内容。")
-    try:
-        result = classify_units(units, criteria_payload(session, rubric_id), scorer)
-    except ClassificationError as exc:
-        raise ParseStateError(503, exc.code, exc.message) from exc
-    # Provider calls run without holding the merge lock. Serialize only the short
-    # read/merge/write section, and refresh the identity map after waiting for a
-    # concurrent batch to commit.
-    compilation_id = compilation.id
+    return compilation, units, criteria_payload(session, rubric_id)
+
+
+def suggested_unit_ids(session: Session, rubric_id: str) -> set[str]:
+    """已有有效（未过期）AI 建议的单元。续跑时跳过它们，避免重复付费。"""
+
+    compilation = current_compilation(session, rubric_id)
+    if not has_ledger(compilation):
+        return set()
+    view = _classification_view(session, rubric_id, compilation, compilation.raw_parse_output)
+    if not view or view["stale"]:
+        return set()
+    return {item.get("unit_id") for item in view.get("results") or [] if item.get("unit_id")}
+
+
+def merge_unit_classification(session: Session, rubric_id: str, compilation_id: str, units, result, *, actor_id) -> dict:
+    """把一批模型结果合进当前草稿的归类建议：锁行 → 指纹校验 → 合并。
+
+    模型调用在锁外进行；这里只串行化短暂的读-合并-写，等待并发批次提交后刷新身份映射。
+    """
+
     # A no-op UPDATE obtains a write lock on both PostgreSQL (row) and
     # SQLite (database), where SELECT FOR UPDATE would otherwise be ignored.
     session.execute(
@@ -120,14 +133,17 @@ def run_unit_classification(session: Session, rubric_id: str, scorer, *, unit_id
         .execution_options(synchronize_session=False)
     )
     session.expire_all()
-    current = require_editable_ledger(session, rubric_id)
-    if current.id != compilation_id:
+    compilation = require_editable_ledger(session, rubric_id)
+    if compilation.id != compilation_id:
         raise ParseStateError(409, "CLASSIFICATION_INPUT_CHANGED", "评分标准已变化，请重新归类。")
     raw = compilation.raw_parse_output
     ledger = SourceLedger.from_mapping(raw["source_ledger"])
     fresh_units = select_units(ledger, _coverage(raw), unit_ids=[u["unit_id"] for u in units])
     if classification_fingerprint(fresh_units, criteria_payload(session, rubric_id)) != result["fingerprint"]:
         raise ParseStateError(409, "CLASSIFICATION_INPUT_CHANGED", "归类期间原文或评分项已变化，请重新归类。")
+    result = deepcopy(result)
+    result.pop("failure", None)
+    units = list(units)
     previous = _classification_view(session, rubric_id, compilation, raw)
     if previous and not previous["stale"]:
         requested = {u["unit_id"] for u in units}
@@ -151,6 +167,19 @@ def run_unit_classification(session: Session, rubric_id: str, scorer, *, unit_id
     compilation.raw_model_output = {**deepcopy(compilation.raw_model_output or {}), "unit_classifications": stored}
     session.flush()
     return {**deepcopy(stored), "stale": False}
+
+
+def run_unit_classification(session: Session, rubric_id: str, scorer, *, unit_ids=None, actor_id: str) -> dict:
+    """同步归类（CLI 与测试用；Web 已改为 AI 任务）。"""
+
+    compilation, units, criteria = classification_inputs(session, rubric_id, unit_ids=unit_ids)
+    if not units:
+        raise ParseStateError(422, "NOTHING_TO_CLASSIFY", "没有需要分类的未认领内容。")
+    try:
+        result = classify_units(units, criteria, scorer)
+    except ClassificationError as exc:
+        raise ParseStateError(503, exc.code, exc.message) from exc
+    return merge_unit_classification(session, rubric_id, compilation.id, units, result, actor_id=actor_id)
 
 
 def current_compilation(session: Session, rubric_id: str) -> models.RubricCompilation | None:

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { compactTokens, finishedCount, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel } from "./score-jobs.js";
+import { compactTokens, finishedCount, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel, lastHeartbeat } from "./score-jobs.js";
 
 describe("score job presentation", () => {
   it("distinguishes a stale runner from ordinary running", () => {
@@ -43,5 +43,24 @@ describe("compactTokens", () => {
     expect(compactTokens(null)).toBe("—");
     expect(compactTokens(0)).toBe("0");
     expect(compactTokens(84000)).toBe("8.4 万");
+  });
+});
+
+describe("unified work queue heartbeats", () => {
+  it("labels a running job that only has queued papers as waiting", () => {
+    expect(jobStatusLabel({ status: "running", heartbeat_state: "waiting" })).toBe("排队等待");
+    expect(jobStatusLabel({ status: "running", heartbeat_state: "stale" })).toBe("执行中断，等待恢复");
+  });
+
+  it("takes the freshest heartbeat of the job and its running papers", () => {
+    const job = {
+      heartbeat_at: "2026-10-10T08:00:00",
+      items: [
+        { status: "running", heartbeat_at: "2026-10-10T08:05:00" },
+        { status: "succeeded", heartbeat_at: "2026-10-10T09:00:00" },
+      ],
+    };
+    expect(lastHeartbeat(job)).toBe("2026-10-10T08:05:00");
+    expect(lastHeartbeat({ heartbeat_at: null, items: [] })).toBeNull();
   });
 });

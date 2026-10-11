@@ -814,6 +814,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-10 | 发布 0035–0037 | 先迁移后合并；运行角色复验清单补 `work_runtime_state`、`ai_tasks`、`ai_task_items`，守护测试改为识别常量写法的授权。 |
+| 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 新增审查/结构识别任务与三个估算接口，三个旧接口 410；迁移 head → 0037；新增改契约版本后须重建 `public/` 等排查。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 本地后端 1911 passed，后续总分补充修复专项 10 passed；前端 176 passed、类型与接口快照通过；浏览器 139 passed、3 skipped。主线完整 CI 和 production 部署通过，线上健康与资源已验证；待登录后的合成流程，不降级数据库。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 新增复现、状态区分、确认回归及发布/回滚检查；实施与验证进行中，尚未发布。 |
 | 2026-09-10 | 未配置模型的拦截修复 | 新增 §11.20（被静默弹回的排查顺序、模块级 ref 的测试污染）与 §11.21（能力表刷新时机表、反向的洞）。未运行生产操作。 |
@@ -1723,6 +1725,149 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 
 维护记录：2026-10-09 · 提高吞吐：新增 Bedrock 接入步骤、同时请求数与队列并发说明，以及“调高后仍不变快”的排查。
 
+### 2026-10-10 统一执行模型与 AI 任务（待实施验证）
+
+方案见 [AI 操作异步任务化与统一执行模型改造方案](docs/AI操作异步任务化改造方案.md)。本次仅文档，没有代码、迁移或部署。
+
+当前行为（实施前排查用）：
+- **现象**：批量评分任务一直显示“评分中”，进度不动，没有失败项。
+  - 报错指向：看起来像模型慢或 worker 挂了。
+  - 真正原因（Vercel）：某篇连续失败 12 次后，Vercel 队列丢弃了它的消息，条目停在 `running` 或 `pending`，数据库不知道消息已经没了（P0 第 4 项）。Vercel Logs 里按该条目 ID 查 `batch_scoring_item_*`，最后一条之后再无记录即属此类。
+  - 处理：目前**页面上无法自救**。“重试”只接受失败或已取消的任务（`retry_batch_scoring_job`）；“取消”只会把运行中的任务改为“取消中”，等后续消息来收尾，而消息已经没有了，所以会一直停在“取消中”。A1 上线前只能由维护者在数据库中处理；A1 的巡检会把这类条目重新叫醒，或在连续无进展达到上限后标为失败。
+  - 真正原因（内网/本地）：worker 按整个任务领取，前面有大任务时，后面的任务一直是 `queued`；或者 worker 进程没有启动（`docker compose ps` 看 `worker` 服务）。
+- **现象**：内网部署同一个连接同时跑两个批次，厂商频繁 429。
+  - 真正原因：worker 路径只在建任务时按单个任务限制线程数，任务之间不检查连接名额；Vercel 路径才有跨任务检查。临时处理：调低该连接的“同时请求数”。
+
+实施后的验证步骤（A1）：同一套测试同时覆盖 Vercel 叫醒与 worker 两种叫醒；多 worker 并发领取不超连接名额；一个大任务不挡住其它用户；强制终止后续评且不重复有效结果；连续无进展 3 次后标为失败且可重试；叫醒消息丢失后由巡检恢复；compose 冒烟通过；合并后在 Vercel 预览或生产环境验收叫醒与巡检。
+
+维护记录：2026-10-10 · 统一执行模型与 AI 任务方案：记录“任务一直评分中”与“内网多批次 429”的现有排查方法，以及 A1 的验证步骤；本次仅文档。
+
+### 2026-10-10 统一执行模型 A1（批量评分已实施）
+
+本节取代 2026-09-15「持久化后台评分」与 2026-10-08「自部署后台评分 worker」里关于投递、租约和执行次数的说明，以及上一节“当前行为（实施前排查用）”。
+
+运行与配置：
+- 内网/本地：`python -m backend.app.scripts.run_batch_worker [--threads N] [--sweep-seconds 120] [--poll-seconds 3]`。`--threads` 默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`（未设为 8），即这台 worker 同时执行的条目数；`--scale worker=N` 多开时，每个连接的同时请求数仍在领取时统一检查，不会超。compose 与 `start-web-pg.sh` 的命令不变。
+- Vercel：`pyproject.toml` 只有一条订阅声明（入口 `vercel_queue:score_batch_item`），它生成的函数挂两个触发器——`handle_work_message`（主题 `pgs-work`）与旧主题的 `score_batch_item`。同一模块不能写两条声明（见 2026-10-10 “发布 0035–0037”）。消息只带来源键或巡检槽号；巡检链在首次建任务或进度读取时自动补投，不需要手工发消息。
+- 在真实 PostgreSQL 上跑并发领取用例：`PGS_TEST_POSTGRES_URL=postgresql+psycopg://…@127.0.0.1:5432/<可清空的空库> .venv/bin/python -m pytest -q backend/app/tests/test_unified_work_queue.py`（只接受本机地址；用例会 `drop_all` / `create_all`）。不设置时该参数化用例跳过，SQLite 版照常运行。
+
+日志关键字（只含 ID，不含原文或密钥）：`work_rung source=… reason=create|relay|sweep`、`work_item_claimed`、`work_source_full`、`work_item_finished` / `work_item_failed code=…`、`work_item_stalled stall_count=…`、`work_item_result_discarded`、`work_item_lease_lost`、`work_sweep_ran recovered=… failed=… converged=… rung=…`、`work_sweep_scheduled` / `work_sweep_revived`、`work_wake_failed`、`batch_scoring_job_finished`。
+
+排错：
+- **现象**：进度页显示“正在排队”（`heartbeat_state = waiting`），长时间不动。
+  - 报错指向：看起来像模型慢或后台没在跑。
+  - 真正原因：①该连接的同时请求数被别的任务占满（按任务内序号轮转，别的任务先评它们的第 1 篇）——日志里是 `work_source_full`；②Vercel 上叫醒全丢且巡检链断了——运维页“最近巡检”标红、日志没有 `work_sweep_ran`；③内网 worker 没启动——`docker compose ps` 看 `worker`。
+  - 处理：①调高连接的同时请求数或等待；②打开任一评分进度页即可补投巡检链（`work_sweep_revived`），检查 Vercel 是否识别了 `handle_work_message` 订阅；③启动 worker。
+- **现象**：某篇失败，错误码 `WORK_ITEM_STALLED`（“多次执行都没能推进”）。
+  - 报错指向：像是这篇论文本身有问题。
+  - 真正原因：连续 3 次执行都在写入任何新规则检查点之前死掉——函数超过 300 秒被平台终止、worker 进程被 OOM 杀掉、或数据库连接断开。日志按条目 ID 查 `work_item_stalled`，再看同一时段 Vercel 的函数超时或 worker 的退出记录。
+  - 处理：先排除平台原因再点“重试失败项”（会把连续无进展次数清零）；一篇反复卡死时检查单篇规则数与模型超时设置。
+- **现象**：内网升级后，同一连接的 429 明显变多。
+  - 报错指向：厂商限流。
+  - 真正原因：没声明同时请求数的连接以前在 worker 上按“每个任务 2 篇”执行，统一后只受全局并发（默认 8）约束。
+  - 处理：在账户页给该连接声明同时请求数（免费档通常为 1）。
+- **现象**：重试后某篇的尝试记录里多了 `abandoned`。
+  - 真正原因：那次执行的心跳超过 120 秒没更新（进程被杀或超时），巡检把它重置后续评；已经判完的规则会复用，不重复计费。属于正常恢复记录。
+
+验证（A1，本地已完成）：后端全量；`test_unified_work_queue.py`（Vercel 与 worker 两种叫醒同一套断言、多线程领取不超名额并在 PostgreSQL 16 上复跑、大任务不挡其它任务、强制终止后续评且不重复结果、连续无进展 3 次后失败且可重试、叫醒丢失后由巡检恢复、迟到结果被围栏丢弃）；0035 在 PostgreSQL 16 上的回填、部分索引、降级拒绝与 `verify_postgres_ops --exercise-ci-fixture`（含 `pgs_app` 授权与 RLS）；本机无 Docker，compose 冒烟以同等进程（uvicorn + `run_batch_worker` + PostgreSQL，`smoke_deployment --scoring fail-closed`）代替，CI 的 docker-compose-smoke 仍是门禁。**待做**：合并后在 Vercel 预览或生产环境验收叫醒、接力与巡检链（构建识别两个 subscriber；建任务后日志出现 `work_rung reason=create`；强制终止一篇后 2 分钟内出现 `work_item_stalled` 并续评）。
+
+回滚：先确认没有排队、评分中或取消中的批量评分任务（0035 降级会拒绝），再 `alembic downgrade 0034_anthropic_messages_provider` 并部署上一版本。
+
+维护记录：2026-10-10 · 统一执行模型 A1：新增 worker 参数、Vercel 订阅说明、PostgreSQL 并发用例的运行方法、日志关键字，以及“排队不动”“WORK_ITEM_STALLED”“内网 429 变多”的排查；迁移 head → 0035。
+
+### 2026-10-10 AI 任务 A2（起草扣分细则已改为后台任务）
+
+运行与配置：
+- 起草需要执行器：Vercel 上由 `pgs-work` 叫醒；内网 compose 用 `worker` 服务；本地 `start-web.sh` 与 `start-web-pg.sh` 都会同时启动 `run_batch_worker`。只起 uvicorn（例如 README 的 SQLite 手工命令）时，另开终端运行 `python -m backend.app.scripts.run_batch_worker`。
+- 接口：`POST /api/rubrics/{id}/ai-tasks`（202 新建 / 200 复用）、`GET /api/ai-tasks/{id}`、`GET /api/rubrics/{id}/ai-tasks?kind=rule_draft&active=1`、`POST /api/ai-tasks/{id}/cancel|retry`。`POST /api/rubrics/{id}/draft-deduction-rules` 返回 410 `ENDPOINT_RETIRED`。
+- 每个响应带 `X-PGS-Contract`。停用或改变前端在用的接口时，同时修改 `backend/app/core/contract.py` 与 `frontend/workbench/src/api/contract.js`（`test_ai_tasks.py` 校验一致），并重新构建 `public/`。
+- 日志关键字：`ai_task_created`、`work_item_claimed kind=ai_task`、`work_item_deferred … code=… delay=…`、`work_item_requeued`、`work_item_failed kind=ai_task code=…`、`ai_task_finished … status=… code=…`、`ai_tasks_cleared`。
+
+排错：
+- **现象**：点“AI 根据规则来源起草”后一直显示“AI 起草排队中”。
+  - 报错指向：像是模型慢。
+  - 真正原因：没有执行器在领取——本地只起了 uvicorn、内网 `worker` 没启动，或 Vercel 上叫醒与巡检链都断了（运维页“最近巡检”标红）。也可能是该连接的同时请求数被批量评分占满（AI 条目优先，但不抢已在跑的名额）。
+  - 处理：启动 worker；Vercel 上打开任一评分进度页或起草页会补投巡检链。
+- **现象**：进度停在“模型限流，稍后自动继续”。
+  - 真正原因：厂商返回 429，条目按 Retry-After（默认 30 秒、5–300 秒之间）延后，最多延后 5 次后才判失败。不是卡住。长期如此请在账户页调低该连接的同时请求数。
+- **现象**：起草失败，提示“额度已用完”或“拒绝了请求”。
+  - 真正原因：额度耗尽、鉴权失败、请求被拒（400/401/403/404）立即判失败且不重试，同任务剩余批次被取消；“重试失败的批次”在问题解决前会再次失败。
+- **现象**：起草失败，错误码 `AI_CONNECTION_KEY_CHANGED` / `AI_CONNECTION_CONFIG_CHANGED`。
+  - 真正原因：任务创建后改了连接的密钥或配置；任务按创建时锁定的连接执行，不会换成新配置。处理：重新点起草（新任务锁定新配置）。
+- **现象**：用户反馈“点按钮页面就刷新了一下，操作没生效”。
+  - 报错指向：前端 bug。
+  - 真正原因：版本守卫——页面是旧版本，后端契约已更新，页面在写操作前刷新到新版本，需要再点一次。若刷新后仍然如此，控制台有“接口版本……不一致”的警告：前端产物没有随后端一起部署（`public/` 未重建或 Vercel 静态资源是旧的）。
+
+验证（A2，本地已完成）：后端全量（含 `test_ai_tasks.py`：提交即返回、去重、重新生成、429 延后、输出修正、永久失败只重试失败批次、超时重试一次、取消、连接变更、连续无进展、AI 条目优先且共用来源名额、旧接口 410、契约版本一致、发布清理、组织隔离、采用 AI 规则写入来源与模型名）；0036 迁移回填与降级守卫；前端单元、类型检查、OpenAPI 合同；Playwright `rubric-review.spec.js` 覆盖“提交 → 轮询 → 失败重试 → 应用 → 规则显示 AI · 模型名”。**待做**：Vercel 预览或生产上用并发 1 的连接起草 6 批，确认不超时、刷新后找回进度。
+
+回滚：先确认没有 AI 任务需要保留、没有规则记录生成模型（0036 降级会拒绝），再 `alembic downgrade 0035_unified_work_queue` 并部署上一版本；已打开的新页面会被旧版本的契约头触发一次刷新。
+
+维护记录：2026-10-10 · AI 任务 A2：新增起草任务接口、执行器要求、契约版本守卫的维护方法，以及“一直排队”“限流延后”“失败不重试”“连接变更”“点按钮就刷新”的排查；迁移 head → 0036。
+
+### 2026-10-10 AI 任务 B（AI 归类已改为后台任务）
+
+- 接口：`POST /api/rubrics/{id}/ai-tasks`，`kind=unit_classification`，`params={unit_ids?, rejudge?}`；`POST /api/rubrics/{id}/unit-classifications` 返回 410。契约版本 `2026-10-10.ai-tasks-b`（前后端同时修改）。
+- 进度：`GET /api/ai-tasks/{id}` 的条目带 `unit_count`；建议在每批成功时写进 `GET /parse-coverage` 的 `unit_classifications`。
+
+排错：
+- **现象**：点“继续为剩余 N 条给出归类建议”后提示已在处理，或马上显示完成、没有新建议。
+  - 报错指向：像是按钮没生效。
+  - 真正原因：按单元去重——这些单元已在另一个标签页（或刚才那次）的进行中任务里，返回的是那个任务；或这些单元已有有效建议，被续跑剔除（`result.skipped_unit_ids`）。需要重新判断时，在面板里勾选这些单元再点。
+- **现象**：某批失败，错误码 `CLASSIFICATION_INPUT_CHANGED`。
+  - 真正原因：模型调用期间原文或评分项被修改（重新上传、改评分项名称等），这批结果对应的输入已经变了，不会写入。重新点归类即可。
+- **现象**：多个标签页同时归类，厂商 429 却比以前少。
+  - 这是预期：并发改由后端按连接的同时请求数统一控制（AI 条目与批量评分共用名额），前端不再各自并发。
+
+验证（B，本地已完成）：`test_rubric_unit_classification_api.py`（持久化与重载、每 3 个单元一批、缩小范围、评分项变化后过期、mock 拒绝、无台账 404 / 无可归类 422、显式重新判断保留其它建议、续跑剔除已有建议、按单元去重、旧接口 410、429 延后后合并、调用期间原文变化判失败、多个任务共用连接名额）；`SourceReviewPanel` 与 `ai-tasks` 单元测试。
+
+维护记录：2026-10-10 · AI 任务 B：新增归类任务接口说明与“按单元去重看起来像没生效”“CLASSIFICATION_INPUT_CHANGED”的排查；无迁移。
+
+### 2026-10-10 AI 任务 C（规则审查、表格结构识别已改为后台任务）
+
+- 接口：`POST /api/rubrics/{id}/ai-tasks`，`kind=rule_review`（`params={scope: priority|all}`）或 `kind=structure_suggestion`（`params={target: draft}`）；导入前识别 `POST /api/ai-tasks/import-structure`（multipart：`rules_file` / `template_file` / `ai_connection_id`）。估算：`POST /api/rubrics/{id}/rule-review/estimate`、`POST /api/rubrics/{id}/structure-suggestions/estimate`、`POST /api/rubrics/import-files/structure-suggestions/estimate`（都不调用模型）。旧的 `POST …/rule-review`、`POST …/structure-suggestions`、`POST /api/rubrics/import-files/structure-suggestions` 返回 410。契约版本 `2026-10-10.ai-tasks-c`。
+- 迁移：`0037_ai_task_upload_scope` 只改 `ai_tasks`（`rubric_id` 对结构识别可空 + CHECK + 按用户去重的部分唯一索引），不建新表，`pgs_app` 授权不变。
+- 进度：审查任务的条目带 `label`（评分项编号，跨项为 `__cross__`）；审查结果在全部条目结束后写进 `GET /rule-review`；草稿结构建议在条目成功时写进 `GET /parse-coverage` 的 `structure_suggestions`；导入前识别的结果只在 `GET /api/ai-tasks/{id}` 的 `result`（`override` + `preview`）。
+
+排错：
+- **现象**：改了 `API_CONTRACT_VERSION` 之后，Playwright 大面积超时，`waitForResponse` 等不到请求，页面上点了按钮没有反应。
+  - 报错指向：测试或按钮本身。
+  - 真正原因：浏览器测的是已提交的 `public/`，它还是旧构建、带旧的契约版本；后端返回新版本，版本守卫在第一次写操作前刷新页面，请求从未发出。先运行 `python scripts/build_web_static.py --with-workbench` 再跑 Playwright（CI 的漂移门禁同样要求重建）。
+- **现象**：审查任务失败，错误码 `REVIEW_OUTPUT_TRUNCATED`。
+  - 报错指向：审查的模型输出。
+  - 真正原因：连接的输出 Token 上限太低，问题列表被截断；调高连接的输出上限后点“重试失败的评分项”（已完成的评分项不会重跑）。
+- **现象**：审查“完成”了，但面板提示某些评分项“未能审查”。
+  - 真正原因：这些评分项模型修正一次后仍没有按格式返回 issues 数组，按同步审查的规则记为失败项、其余照常写入；换模型或重新审查即可。这不是任务失败，所以没有“重试”按钮。
+- **现象**：草稿结构识别失败，错误码 `STRUCTURE_SOURCE_CHANGED`。
+  - 报错指向：结构识别。
+  - 真正原因：识别期间草稿被换掉（重新上传、合入了另一份结构建议、人工编辑后重新编译），模型给出的行列编号对应的是旧台账，不会写入。在当前草稿上重新识别。
+- **现象**：导入前识别完成后刷新了页面，结果不见了。
+  - 报错指向：像是任务丢了。
+  - 真正原因：导入前识别还没有评分标准，页面没有地方按评分标准找回它；任务仍在（只对本人可见）。重新选择同一文件、估算后点“确认调用 AI 识别结构”，会按指纹直接返回已完成的任务（200，不重复调用模型）。
+- **现象**：`alembic downgrade 0036_ai_tasks` 报 `0037 downgrade refused`。
+  - 报错指向：迁移脚本。
+  - 真正原因：库里有不挂评分标准的结构识别任务，`rubric_id` 无法恢复为非空。确认不再需要后先删除：`DELETE FROM ai_task_items WHERE task_id IN (SELECT id FROM ai_tasks WHERE rubric_id IS NULL); DELETE FROM ai_tasks WHERE rubric_id IS NULL;` 再降级。
+
+验证（C，本地已完成）：`test_rubric_rule_review_api.py`（估算不调用模型、按评分项拆条目与双击复用、持久化与豁免、修正一次后记为失败项、额度失败后只重试失败项、mock 拒绝与旧接口 410、审查期间改规则显示过期、发布留痕与清理任务）；`test_rubric_structure_api.py`（导入前估算、导入前任务与按结构导入、修正一次、同文件复用与新任务清理旧任务、仅本人可见、旧接口 410、只有结构识别可不挂评分标准、草稿估算、差异合入与撤销、人工编辑后拒绝、识别期间草稿变化判失败）；`test_migrations.py` 的 0037 三项；Postgres 16 上 `alembic upgrade head` → `verify_postgres` → 降级 → 重放；前端 `RuleAuditPanel`、`TableRecognitionPanel`、`ai-tasks`、`rubrics-parse` 单元测试；Playwright `rubric-parse.spec.js` 新增三条（审查任务的进度/失败/重试/结果，导入前识别任务到按结构导入，草稿结构识别刷新后找回与取消）。待做：Vercel 预览或生产环境验收。
+
+维护记录：2026-10-10 · AI 任务 C：新增审查与结构识别任务接口、估算接口与 0037 说明，以及“改契约版本后 Playwright 超时”“REVIEW_OUTPUT_TRUNCATED”“未能审查的评分项”“STRUCTURE_SOURCE_CHANGED”“导入前识别刷新后不见了”“0037 降级被拒”的排查；迁移 head → 0037。
+
+### 2026-10-10 发布 0035–0037（统一执行模型与 AI 任务）
+
+- **先迁移、后合并**（同 10-07）：新代码启动即读 `batch_scoring_items.source_key` 等新列与 `ai_tasks`。`pgs-production-migrate` 从 PR 分支触发（`expected_head=0037_ai_task_upload_scope`，先 `dry_run=true`），正式迁移与运行角色复验通过后再合并。0035–0037 新增的非空列都有服务端默认值，迁移后到部署前旧代码仍能写入。
+- **判断新代码是否已上线**：未登录 `POST /api/ai-tasks/import-structure`。旧代码没有这条路由（404/405）；新代码返回 401。
+- **现象**：`pgs-production-migrate` 的“Verify with the runtime role”一直通过，但它没验 0035/0036 新建的 `work_runtime_state`、`ai_tasks`、`ai_task_items`。
+  - 报错指向：没有报错——迁移与复验都绿，`test_the_runtime_check_covers_every_table_that_needed_a_grant` 也绿。
+  - 真正原因：守护测试只认迁移里写成字面量的表名（`ON TABLE xxx TO pgs_app`、`TABLE = "xxx"`），0035/0036 用模块常量写授权（`% STATE`、`for table in (TASKS, ITEMS)`），于是被漏掉。已把三张表加进工作流清单，测试改为解析常量与 `op.create_table(...)`，并确认回退清单时测试会失败。
+- Vercel 上新增主题 `pgs-work`：与旧主题 `batch-scoring-items` 同在 `vercel_queue` 模块里，由**同一条** `[[tool.vercel.subscribers]]` 声明生成的一个函数承接；部署时队列里残留的旧消息按“叫醒所属来源”处理。
+- **现象**：main 门禁全绿，`deploy-vercel-production` 在 `Deploying outputs...` 之后报 `Error: Unexpected error. Please try again later. ()`，重跑一次同样失败；生产停在旧代码。
+  - 报错指向：Vercel 服务端偶发故障（文案让人“稍后重试”）。
+  - 真正原因：`pyproject.toml` 给同一个模块写了两条 `[[tool.vercel.subscribers]]`。构建器给每条声明生成一个函数，触发器取模块里**全部** `@subscribe`（没写 `topics` 不过滤），两个函数于是重复注册了同一（主题、消费组），在服务端注册触发器时失败。改为一条声明；`test_each_vercel_subscriber_module_is_declared_once` 防回归。
+  - 本地核对生成的触发器：在干净 checkout 里写 `.vercel/project.json`（`settings.framework` 设为 `fastapi`，否则构建器不处理订阅），运行 `npx vercel@58.4.0 build --prod --yes`，看 `.vercel/output/functions/_py_subscribers/*/.vc-config.json` 的 `experimentalTriggers`：每个（主题、消费组）只能出现一次。
+
+- 发布结果：生产迁移 run 38057720904（0033 → 0037）；PR #18、#19 合并后 main run 38059626116 部署成功，新路由由 404 变为 401，线上产物与 `public/` 一致。登录后的叫醒、巡检与四类 AI 任务验收待维护者完成（见上线清单）。
+
+维护记录：2026-10-10 · 发布 0035–0037：记录发布顺序、新代码上线判断方法，以及运行角色复验清单漏表、同一模块两条订阅声明导致部署失败的排查；补全工作流清单与守护测试。
+
 ### 2026-10-11 评分助手
 
 本地运行（无 Docker）：
@@ -1767,7 +1912,7 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   - 真正原因：只能删除上传未完成的记录，或解析失败且从未评分（无评分记录、无批任务条目、无分块）的材料。
 
 发布：
-- 迁移 `0035_assistant_conversations` 新建五张表并在迁移内给 `pgs_app` 授权、建 RLS；生产按 D-025 审批工作流先迁移（`expected_head=0035_assistant_conversations`）再部署。`verify_postgres_ops` 与生产迁移工作流的运行角色检查覆盖这五张表。
+- 迁移 `0038_assistant_conversations` 新建五张表并在迁移内给 `pgs_app` 授权、建 RLS；生产按 D-025 审批工作流先迁移（`expected_head=0038_assistant_conversations`）再部署。`verify_postgres_ops` 与生产迁移工作流的运行角色检查覆盖这五张表。
 - 回滚：任一助手表有数据时 0035 拒绝降级；先删除会话与偏好再降级。
 - 安全头变化随部署生效；发布后在生产打开助手页，确认工作区能显示“评分进度”页。
 

@@ -321,7 +321,10 @@ def test_postgres_verifier_freezes_complete_migration_and_stable_order_contract(
         "0032_single_active_ai_connection",
         "0033_rule_decision_ledger",
         "0034_anthropic_messages_provider",
-        "0035_assistant_conversations",
+        "0035_unified_work_queue",
+        "0036_ai_tasks",
+        "0037_ai_task_upload_scope",
+        "0038_assistant_conversations",
     )
     assert stable_ordering_clause() == ("created_at", "id")
     script = (ROOT / "backend/app/scripts/verify_postgres_ops.py").read_text(

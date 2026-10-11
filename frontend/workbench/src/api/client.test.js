@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, request, resetContext, ApiError, StaleContextError } from "./client.js";
+import { api, contractIsStale, reloadIfStale, request, resetContext, resetContractGuard, ApiError, StaleContextError } from "./client.js";
+import { API_CONTRACT_HEADER, API_CONTRACT_VERSION } from "./contract.js";
 
 /** 组织隔离合同（计划 §2.1）的回归测试。 */
 describe("api client", () => {
@@ -111,7 +112,62 @@ it("结构化业务错误显示具体原因和操作建议", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
     detail: { code: "MUTEX_GROUP_MISSING", message: "缺少互斥标识。", user_action: "请重新生成。", context: { hidden: "不要显示" } },
   }), { status: 422 })));
-  await expect(api.post("/rubrics/r1/draft-deduction-rules", {})).rejects.toMatchObject({
+  await expect(api.post("/rubrics/r1/ai-tasks", {})).rejects.toMatchObject({
     status: 422, message: "缺少互斥标识。 请重新生成。",
   });
+});
+
+
+describe("版本守卫", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    resetContractGuard();
+    globalThis.sessionStorage?.clear();
+  });
+
+  function respond(version) {
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json", [API_CONTRACT_HEADER]: version },
+    });
+  }
+
+  it("后端契约版本一致时不刷新", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => respond(API_CONTRACT_VERSION)));
+    await api.get("/rubrics");
+    expect(contractIsStale()).toBe(false);
+    expect(reloadIfStale(() => { throw new Error("不应刷新"); })).toBe(false);
+  });
+
+  it("发现后端已更新：读请求照常返回，下一次写操作前先刷新且不发出请求", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => respond("newer-contract"));
+    vi.stubGlobal("fetch", fetchMock);
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+
+    await expect(api.get("/rubrics")).resolves.toEqual({ ok: true });
+    expect(contractIsStale()).toBe(true);
+    await expect(api.post("/rubrics/r1/ai-tasks", {})).rejects.toBeInstanceOf(StaleContextError);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("刷新后仍不一致时不再反复刷新，照常发出请求", async () => {
+  resetContractGuard();
+  globalThis.sessionStorage.clear();
+  const fetchMock = vi.fn().mockImplementation(() => new Response("{}", {
+    status: 200, headers: { [API_CONTRACT_HEADER]: "newer-contract" },
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  const reload = vi.fn();
+  vi.stubGlobal("location", { reload });
+
+  await api.get("/rubrics");
+  await expect(api.post("/x", {})).rejects.toBeInstanceOf(StaleContextError);
+  // 模拟刷新后的页面：内存状态清空，但本标签页记得已为这个版本刷新过。
+  resetContractGuard();
+  await api.get("/rubrics");
+  await expect(api.post("/x", {})).resolves.toEqual({});
+  expect(reload).toHaveBeenCalledTimes(1);
 });
