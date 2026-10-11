@@ -1722,3 +1722,63 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 ```
 
 维护记录：2026-10-09 · 提高吞吐：新增 Bedrock 接入步骤、同时请求数与队列并发说明，以及“调高后仍不变快”的排查。
+
+### 2026-10-11 评分助手
+
+本地运行（无 Docker）：
+
+```bash
+DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run alembic upgrade head
+```
+
+```bash
+DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts.seed_dev
+```
+
+```bash
+DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run uvicorn backend.app.main:app --port 8000
+```
+
+```bash
+DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts.run_batch_worker
+```
+
+打开 `http://localhost:8000/workbench/assistant`。改了前端要重新组装：`python scripts/build_web_static.py --with-workbench`。不要设置 `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`：LangGraph 会连带安装 `langsmith`，开了追踪就会把流程数据发到外部服务。
+
+排错：
+- **现象**：右侧工作区空白，浏览器控制台报 `Refused to display ... in a frame because it set 'X-Frame-Options' to 'deny'`。
+  - 报错指向：页面本身坏了。
+  - 真正原因：部署层的安全头还是 `DENY`。工作区以同源 iframe 嵌入现有页面，需要 `X-Frame-Options: SAMEORIGIN` 与 `frame-ancestors 'self'`（`vercel.json`、`deploy/Caddyfile`）；自建反向代理要同步修改。
+- **现象**：点了“开始评分”，进度一直是“等待执行”。
+  - 报错指向：助手卡住了。
+  - 真正原因：本地或内网没有启动后台评分 worker（与“新建评分任务”页发起的任务相同）。Vercel 上由队列执行。
+- **现象**：评完了但对话里迟迟没有汇报。
+  - 真正原因：汇报由对话页的进度轮询触发，页面隐藏时暂停；回到页面或重新打开会话就会继续。是否评完以服务器上的作业状态为准。
+- **现象**：`runs` 返回 409 `ASSISTANT_RUN_IN_PROGRESS` 或 `ASSISTANT_CARD_STALE`。
+  - 真正原因：前者是同一会话有另一个请求在推进流程（运行锁 120 秒自动过期）；后者是点了旧卡片、双击或另一个标签页已推进。刷新会话看最新消息即可。
+- **现象**：确认卡片提示“内存里的文件已失效”。
+  - 真正原因：待评文件只在页面内存里，刷新后丢失。属预期行为，重新选择文件即可。
+- **现象**：开发或测试中报 `Session is already flushing`，指向 `assistant/checkpointer.py` 或 `context.py`。
+  - 报错指向：数据库会话用法错了。
+  - 真正原因：LangGraph 在后台线程保存快照；状态存储若在 `put` / `put_writes` 里直接写会话，会与节点同时使用同一个会话。状态存储必须只写内存缓冲，由运行器在主线程 `persist()`。
+- **现象**：测试里跑批任务时论文偶发失败（`IndexError`、`InvalidRequestError`）。
+  - 真正原因：测试库是共享一个连接的内存 SQLite，`max_workers=2` 的多线程评分会互相踩。测试里先把作业的 `max_workers` 改成 1 再跑（见 `test_assistant.py` 的 `_run_job`）。
+- **现象**：删除一份材料返回 409 `PAPER_DELETE_STATE_INVALID`。
+  - 真正原因：只能删除上传未完成的记录，或解析失败且从未评分（无评分记录、无批任务条目、无分块）的材料。
+
+发布：
+- 迁移 `0035_assistant_conversations` 新建五张表并在迁移内给 `pgs_app` 授权、建 RLS；生产按 D-025 审批工作流先迁移（`expected_head=0035_assistant_conversations`）再部署。`verify_postgres_ops` 与生产迁移工作流的运行角色检查覆盖这五张表。
+- 回滚：任一助手表有数据时 0035 拒绝降级；先删除会话与偏好再降级。
+- 安全头变化随部署生效；发布后在生产打开助手页，确认工作区能显示“评分进度”页。
+
+验证（全部离线，Mock 模型）：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_assistant.py backend/app/tests/test_paper_direct_upload.py backend/app/tests/test_migrations.py
+```
+
+```bash
+cd frontend/workbench && npx vitest run src/lib/assistant-flow.test.js src/stores/assistant.test.js && npx playwright test e2e/assistant.spec.js --project=chromium
+```
+
+维护记录：2026-10-11 · 评分助手：本地运行步骤、LangSmith 追踪须关闭、八类排错（工作区空白、一直等待执行、迟迟不汇报、409、文件失效、会话并发、测试中批任务偶发失败、删除 409）与 0035 的发布、回滚说明。

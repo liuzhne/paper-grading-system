@@ -14,17 +14,19 @@
 - CI：`.github/workflows/ci.yml` 包含锁文件全量测试与 Postgres 16 的逐版本迁移、约束/排序、拒绝 lossy downgrade、备份恢复演练；本机 SQLite 通过不能替代真实 CI artifact。
 
 ## 当前发布边界
-- Alembic head：`0034_anthropic_messages_provider`（0023 规则检查点与人工复核任务；0024 批次七态约束 + `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0029 为 0026/0027 的新表补 `pgs_app` 授权与 RLS；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本 `rule_decision_ledger` 与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议 CHECK 加入 `anthropic_messages`）。**0024–0028、0031 有数据时一律拒绝降级**；0033 的账本是缓存，降级可删，但有 `decision_reused=true` 或 `group_call_id` 的任务时拒绝降级；0034 有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级。
+- Alembic head：`0035_assistant_conversations`（0023 规则检查点与人工复核任务；0024 批次七态约束 + `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0029 为 0026/0027 的新表补 `pgs_app` 授权与 RLS；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本 `rule_decision_ledger` 与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议 CHECK 加入 `anthropic_messages`；0035 评分助手的偏好、会话、消息三表，给 `pgs_app` 授权并建 RLS）。**0024–0028、0031 有数据时一律拒绝降级**；0033 的账本是缓存，降级可删，但有 `decision_reused=true` 或 `group_call_id` 的任务时拒绝降级；0034 有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级；0035 任一助手表有数据时拒绝降级。
 - **新建表必须在迁移里给 `pgs_app` 授权并建 RLS**（照 0023 的做法）。生产运行角色没有 DDL，也不会自动获得新表权限；漏了不会让迁移失败，而是让迁移成功之后应用 permission denied——本地与 CI 不建这个角色，两边都测不出来。
 - v1 `score_paper()` 与 v2 `score_generic_submission()` 并存；正式 RubricVersion 走 AtomicRule Core，未版本化标准只能走显式 compatibility。
 - `SCORING_ENGINE_MODE` 当前默认 `legacy`；它只控制未版本化兼容路径。真实 `GATE-03` 达到 `gating_eligible=true` 且取得维护者发布批准前，禁止改为默认 Core。
 
 ## 架构（backend/app/）
-- `api/routes/`：rubrics / batches / papers / submissions_v2 / scoring / exports / release_gates / system / calibration。
+- `api/routes/`：rubrics / batches / papers / submissions_v2 / scoring / exports / release_gates / system / calibration / assistant。
+- `api/guards.py` 共享可见性守卫、`api/actions.py` 共享写动作（建批次、预检、删论文、开评、重试、取消）：页面接口与评分助手的图调用同一组函数，路由里的 `_visible_*` 是它们的别名。
 - `services/`：
   - `rubric_import/`：三层解析（见 `docs/评分规则解析模块重构方案.md`）——`sources/` 格式适配器（Excel/Word → 原文单元台账 `SourceLedger`，不用 LLM）、`extraction/` 抽取器（确定性表格/Word 抽取、E1–E8 触发、用户确认的结构覆盖、LLM 结构识别兜底）、`classification/` 兜底分类器；`coverage` 覆盖率、`parse_state` 单元处理与发布门禁、`structure_state` 结构建议合入/撤销、`review`/`review_state` 规则审查；`pipeline` 只做组装与持久化；`compiler` 结构化扣分规则（`compile_criterion_rules` 旧 LLM 编译仅供 CLI）。
   - `document_parser/`：docx/PDF 解析(`parser`)、分块(`chunking`)、格式解析(`format_resolver`)、格式比对(`format_check`)。
   - `papers/ingestion`：解析+落库共享服务（路由与离线脚本复用）。
+  - `assistant/`：评分助手（见 `docs/对话评分助手改造方案.md`）。LangGraph 流程图 `flow` + 查询图 `queries`，运行器 `runner`，自写状态存储 `checkpointer`（写入先缓冲、主线程落库），工具登记 `tools`，意图识别 `intents`（规则优先）。评分权为零。
   - `scoring/engine`：评分编排（**核心**）；`rules` 总分/等级；`validator` 结构化输出校验+注入检测。
   - `batch_scoring/jobs`：数据库持久化批任务、论文级检查点、租约恢复/取消/定向重试、观察策略与 Core 切换信号；只做观察，不授予 GATE-03 发布权限。
   - `deployment/`：Core inventory、OPS readiness、Postgres verifier、带校验 manifest 的数据库+storage 备份恢复；OPS 报告同样不授予默认 Core。
@@ -79,7 +81,7 @@
 （迁移 head、命令、边界事实）；机器检不出来的部分靠这条约定。
 
 ## 约定
-- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0034_anthropic_messages_provider`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
+- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0035_assistant_conversations`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
 - 改 prompt/输入构造要 bump `cache/llm_cache.PROMPT_VERSION`。
 - 改评分逻辑后用 §15 QWK 留出集重新锚定基线。
 - 生产变更需完成 `docs/上线清单.md`；备份恢复必须先 verify，restore 只允许显式确认的数据库与空 storage 目标。

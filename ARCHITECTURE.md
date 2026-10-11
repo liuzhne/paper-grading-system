@@ -1099,3 +1099,37 @@ Claude 适配器的调用链：
 - `batch_scoring/vercel_queue.queue_concurrency()` 在模块导入时读取 `BATCH_SCORING_QUEUE_CONCURRENCY`，作为 `@subscribe(max_concurrency=...)`。
 
 维护记录：2026-10-09 · 提高吞吐：并发来源从“只调低”改为“声明即生效”，平台模型加入名额检查；无数据模型变化。
+
+### 2026-10-11 评分助手（LangGraph 编排 + 工作区）
+
+方案见 [docs/对话评分助手改造方案.md](docs/对话评分助手改造方案.md)。助手是**对话式的发起、查询与解释入口**，评分权为零：不判分、不改分、不审核或发布评分标准；评分仍由现有批任务执行。
+
+调用链：
+
+```
+AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/runs ──▶ services/assistant/runner.run
+    运行锁（条件更新 run_locked_until）→ 作废 7 天无回应的等待 → 按类型分派：
+    message ─▶ intents（规则优先，识别不了才 complete_json 一次）─▶ 查询图 / 开流程图
+    resume  ─▶ 校验恢复值（按中断类型的 Pydantic 模型）─▶ 流程图 Command(resume=…)
+    select  ─▶ 选择卡片（选任务、选论文、确认重试或取消）
+流程图节点 ─▶ tools（工具登记）─▶ api/actions.py（共享动作）+ api/guards.py（共享守卫）─▶ 现有服务
+```
+
+模块边界：
+- `api/guards.py`：可见性守卫（批次、论文、评分记录、作业、评分标准、导入草稿）。路由模块里的 `_visible_*`、`_batch_or_404`、`_job_or_404` 现在是这里的别名，同一个函数对象。
+- `api/actions.py`：共享写动作——建批次、预检、删除论文、开评、重试、取消（以及评分标准版本冻结判定）。每个函数自己执行守卫与角色校验；路由保留一行守卫给静态门禁测试看，业务逻辑只在这里一份。开评与重试只落库，路由在异步上下文里派发，图在工作线程里用 `dispatch_job_from_worker_thread` 派发。
+- `services/assistant/flow.py`：流程图（LangGraph `StateGraph`，有状态）。grading / import / watch 三种流程共用一张图；“等待”节点第一行就 `interrupt()`，有副作用的节点放在其后并幂等（建批次按“本人 + 批次名 + 流程开始时间”找回）。状态只有编号与标志位。
+- `services/assistant/queries.py`：查询图（无状态），流程等待时也能随时查询；重试、取消只给确认卡片。
+- `services/assistant/tools.py`：工具登记（名称、说明、Pydantic 参数可导出 JSON Schema、是否只读）；写工具必须 `allow_write=True`，只由流程节点或用户确认后的选择卡片调用，永不开放给模型。
+- `services/assistant/checkpointer.py`：自写 `BaseCheckpointSaver`，表 `assistant_checkpoints` / `assistant_checkpoint_writes`。**写入先进加锁的内存缓冲，运行结束后由运行器在主线程 `persist()`**：LangGraph 在后台线程保存快照，SQLAlchemy 会话不能跨线程并发使用。
+- `services/assistant/context.py`：一次运行的上下文（经 `context=` 传给节点，不进快照）：写消息、推进卡片、更新焦点与工作区（`focus.workspace` + `workspace_rev`）。
+- `services/assistant/model.py`、`intents.py`：助手模型的解析顺序与意图识别（模型输入只有本句、用户最近 3 句原话、任务名与评分标准名）。
+- 前端 `stores/assistant.js`：只发 `runs`、渲染、选文件与直传上传、轮询作业或评分标准状态后恢复；`lib/assistant-flow.js` 只剩展示用纯函数。`lib/scoring-actions.js` 供“新建评分任务”页与“评分进度”页使用。工作区是现有页面的同源 iframe，`AppShell` 在框架内隐藏侧栏与模型引导弹窗。
+
+持久化：迁移 `0035_assistant_conversations` 新增五张表（偏好、会话、消息、两张状态存储表），全部给 `pgs_app` 授权并建 RLS，有数据时拒绝降级；`postgres_verifier` 与生产迁移工作流的运行角色检查覆盖这五张表。会话表另有 `thread_id`、`flow_seq`、`pending`、`run_locked_until`。
+
+依赖：`langgraph==1.2.14`（连带 `langgraph-checkpoint`、`langchain-core`、`langsmith`）。只用图、中断与状态保存；不用 LangChain 模型封装与预制智能体，不用 LangGraph 官方服务端，不开 LangSmith 追踪。
+
+相关改动：`DELETE /papers/{id}` 允许删除解析失败且从未评分的材料；能力表新增 `abilities.use_assistant`；`RubricsView` 支持 `?rubric=` 与 `?import_session=`；安全头由 `X-Frame-Options: DENY` 改为 `SAMEORIGIN` 并加 `frame-ancestors 'self'`。
+
+维护记录：2026-10-11 · 评分助手一期：LangGraph 后端编排（流程图 + 查询图）、自写状态存储、共享守卫与共享动作、前端薄客户端；head 升为 `0035_assistant_conversations`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
