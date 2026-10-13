@@ -67,7 +67,7 @@ Lightsail 实例（ap-southeast-1，静态 IP）
 |---|---|---|
 | 实例 | Lightsail Linux，2 GB 内存 / 2 vCPU / 60 GB SSD，Ubuntu 24.04 LTS，新加坡 | 套餐内含公网 IPv4 和流量额度；静态 IP 绑定实例时免费 |
 | 内存 | web 1 个进程、worker 1 个进程，另开 2 GB swap 兜底 | 本机实测（2026-10-13，macOS）：加载全部模块后单进程常驻约 160 MB。加上 Caddy、Docker、系统和解析大文件时的峰值，预计 1–1.2 GB |
-| 容器 | 新增 `deploy/production/compose.yml`：`caddy`、`app`、`worker` 三个服务，不含数据库 | 与内网 compose 结构相同，只是数据库与存储换成 Supabase |
+| 容器 | 新增 `deploy/production/compose.yml`：`caddy`、`app`、`worker` 三个服务，不含数据库 | 与内网 compose 结构相同，只是数据库与存储换成 Supabase。app 与 worker 共用卷 `/app/storage`，放 L0 缓存（`llm_cache.sqlite`），发版换容器不丢 |
 | 防火墙 | Lightsail 防火墙只开 22、80、443；SSH 只允许密钥登录 | |
 | 日志 | Docker 日志按大小轮转（单文件 20 MB，保留 5 个），通过 SSH 查看 | 不花钱；代价是没有集中检索 |
 | 告警 | 免费的外部可用性监测（如 UptimeRobot）每 5 分钟请求 `/api/system/health`，失败发邮件；Lightsail 实例告警（CPU、状态检查）；AWS Budgets 月度预算告警 | 见 4.9 |
@@ -82,7 +82,7 @@ Lightsail 实例（ap-southeast-1，静态 IP）
 
 ### 4.2 发版时服务怎么停
 
-**worker。** 现在收到 SIGTERM 后主循环退出；领取线程是守护线程，进程直接结束。正在评的条目要等 120 秒租约过期，再由巡检重置续评。那次执行如果没写入新检查点，就记一次“无进展”，连续 3 次标为失败。每发一次版，正在评的条目就可能被记一次无进展。
+**worker。** 现在收到 SIGTERM 后主循环退出，每个领取线程最多再等一个轮询周期多一点（约 4 秒），进程就结束。正在评的条目要等 120 秒租约过期，再由巡检重置续评。那次执行如果没写入新检查点，就记一次“无进展”，连续 3 次标为失败。每发一次版，正在评的条目就可能被记一次无进展。
 
 改成：
 
@@ -100,7 +100,7 @@ Caddy 反向代理默认不限制响应时长，web 请求不再有 Vercel 的 3
 
 ### 4.4 安全头、缓存头、压缩
 
-新增生产用的 `deploy/production/Caddyfile`：
+新增生产用的 `deploy/production/caddy/Caddyfile`（compose 挂整个目录：部署时文件被替换成新的 inode，单文件挂载看不到新内容）：
 
 - 证书：Let's Encrypt 自动签发与续期（内网版用的是 `tls internal`）；
 - 安全头：照抄 `vercel.json` 的 5 个，HSTS 带 `includeSubDomains`；
@@ -136,7 +136,7 @@ Caddy 反向代理默认不限制响应时长，web 请求不再有 Vercel 的 3
 
 回滚：在实例上运行 `deploy/production/deploy.sh <上一个 SHA>`，把 `current` 指回旧镜像再重启，不需要重新构建。`deploy.sh --list` 列出实例上还留着的版本。
 
-GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例地址、实例的 SSH 主机指纹（防止中间人）。
+GitHub `production` 环境新增 3 个密钥：`PRODUCTION_SSH_KEY`（部署用的 SSH 私钥）、`PRODUCTION_SSH_HOST`（实例地址）、`PRODUCTION_SSH_KNOWN_HOSTS`（核对过的主机指纹，防止中间人）。仓库变量：`PRODUCTION_SITE_URL`（冒烟地址）、`LIGHTSAIL_DEPLOY_ENABLED`（设为 `true` 才部署）、`VERCEL_DEPLOY_ENABLED`（切流量前设为 `false`，否则下一次合并会把整个应用重新部署回 Vercel、盖掉跳转）。
 
 ### 4.8 密钥
 
@@ -149,7 +149,7 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 新增 `GET /api/system/health`，不需要登录，返回 200 或 503，响应里只有检查项名称与状态，没有任何业务数据：
 
 - 数据库能否连通；
-- worker 是否在巡检：有排队或执行中的任务、并且超过两个巡检周期（240 秒）没有巡检记录时，判为不健康。现有运维页的巡检信号用的就是这条规则，这里复用同一个判断。
+- worker 是否在巡检：超过两个巡检周期（240 秒）没有巡检记录，就判为不健康。worker 不论有没有活都每个周期巡检一次，所以**空闲时也判失败**，免得等有人提交任务才发现 worker 挂了。现有运维页的巡检信号没活时不判失败，因为它还服务没有 worker 的部署，所以两者不合并（实施时由“复用运维页的判断”改为此规则）。
 
 外部监测请求这个地址，所以“web 挂了”“数据库连不上”“worker 卡住了”三种情况都会发邮件。Lightsail 实例告警管机器层面（CPU 持续过高、状态检查失败）。费用告警见 4.12。
 

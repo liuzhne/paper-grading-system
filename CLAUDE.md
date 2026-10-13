@@ -6,6 +6,8 @@
 
 生产部署、Supabase、鉴权、发布核验与安全待办见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md)；该文件不得记录任何密钥值。
 
+生产正从 Vercel 迁到一台新加坡 AWS Lightsail 实例（`deploy/production/`：Caddy + app + worker，数据库与存储仍是 Supabase）。方案见 `docs/部署平台迁移到AWS方案.md`，准备、发布、回滚与切流量顺序见 RUNBOOK 9.4；切流量完成前 Vercel 仍是正式入口。
+
 ## 命令
 - 测试：`.venv/bin/python -m pytest -q`（或 `uv run pytest`）。**全套自包含**：内存 SQLite + Mock LLM，无需 Postgres/API Key/联网。
 - 本地起服务（无 Docker）：`DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run alembic upgrade head && ... uv run uvicorn backend.app.main:app --port 8000`（详见 README）。
@@ -29,7 +31,7 @@
   - `assistant/`：评分助手（见 `docs/对话评分助手改造方案.md`）。LangGraph 流程图 `flow` + 查询图 `queries`，运行器 `runner`，自写状态存储 `checkpointer`（写入先缓冲、主线程落库），工具登记 `tools`，意图识别 `intents`（规则优先）。评分权为零。
   - `scoring/engine`：评分编排（**核心**）；`rules` 总分/等级；`validator` 结构化输出校验+注入检测。
   - `batch_scoring/jobs`：数据库持久化批任务、论文级检查点、租约恢复/取消/定向重试、观察策略与 Core 切换信号；只做观察，不授予 GATE-03 发布权限。它是 `work_queue` 的一种条目。
-  - `work_queue/`：数据库即队列——`claim_next_item`（来源名额 + `SKIP LOCKED` + 任务内序号轮转）、条目心跳、`sweep_stale_items` 巡检（连续无进展上限）、叫醒（Vercel 上 `pgs-work` 只带来源键；内网/本地 worker 循环调用同一个领取函数）。
+  - `work_queue/`：数据库即队列——`claim_next_item`（来源名额 + `SKIP LOCKED` + 任务内序号轮转）、条目心跳、`sweep_stale_items` 巡检（连续无进展上限）、叫醒（Vercel 上 `pgs-work` 只带来源键；内网、本地与 Lightsail 生产由 worker 循环调用同一个领取函数）。
   - `ai_tasks/`：评分标准侧 AI 操作的异步任务（`rule_draft` 起草、`unit_classification` 归类、`rule_review` 审查、`structure_suggestion` 结构识别——导入前的识别不挂评分标准，按用户去重）。建任务时冻结输入、锁定连接、内容指纹去重；每次模型调用是一个 `ai_task_items` 条目，作为 `work_queue` 的 `ai_task` 种类（优先于批量评分）执行，429 延后、超时重试 1 次、输出不合格修正 1 次。旧同步接口全部返回 410，估算走单独的 `…/estimate` 接口（不调用模型）；`core/contract.py` 与前端 `api/contract.js` 的契约版本做版本守卫。
   - `deployment/`：Core inventory、OPS readiness、Postgres verifier、带校验 manifest 的数据库+storage 备份恢复；OPS 报告同样不授予默认 Core。
   - `checkers/`：确定性检查器(`deterministic`)、findings→扣分(`findings_checker`)。

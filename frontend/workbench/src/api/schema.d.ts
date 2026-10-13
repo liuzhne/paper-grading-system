@@ -2490,6 +2490,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Health
+         * @description 外部可用性监测用：不需要登录，只返回检查项与状态，不带任何业务数据。
+         *
+         *     200 表示 web、数据库与 worker 都在正常工作；任一项失败返回 503，监测据此报警。
+         */
+        get: operations["health_api_system_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system/integrations": {
         parameters: {
             query?: never;
@@ -11395,6 +11417,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    health_api_system_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };

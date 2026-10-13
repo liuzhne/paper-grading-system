@@ -182,8 +182,9 @@ sequenceDiagram
 - 本地 CLI：`pgs` 直接调用服务层，默认独立使用 `~/.paper-grading/cli.db` 与 `~/.paper-grading/storage`，不需要 Web 服务。
 - 内网 Compose：Caddy HTTPS -> FastAPI app -> PostgreSQL 16，Postgres、应用 storage、备份和 Caddy CA 使用独立 volume；app 启动先 `alembic upgrade head`。
 - Vercel 生产：`public/` 由构建脚本生成指纹化静态资源；Python API 使用 Supabase/Postgres 连接。Vercel Git 直部署关闭，生产只能由 GitHub Actions 门禁后执行 prebuilt deploy。
+- Lightsail 生产（迁移中，`docs/部署平台迁移到AWS方案.md`）：一台新加坡实例跑 `deploy/production/compose.yml`——Caddy（Let's Encrypt、压缩、安全头与缓存头）→ app（uvicorn 单进程）；worker 循环领取与巡检，与内网相同，不用 Vercel 队列。数据库与文件存储仍是 Supabase（6543 事务池）；app 与 worker 共用卷 `/app/storage` 存 L0 缓存。生产 compose 覆盖 Dockerfile 的 CMD，启动时不迁移。镜像由 GitHub Actions 构建后经 SSH 载入，`deploy.sh` 切换 `current` 标签。切换期 Vercel 与实例同时领取是安全的。
 
-FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在登录前可达，`ops-readiness` 单独要求鉴权。开启 `AUTH_ENABLED` 后，弱密码、弱 `AUTH_SECRET` 或原文 LLM debug 会使应用 fail closed。
+FastAPI 中数据路由受 `enforce_auth` 保护；auth、公开集成自检和健康检查 `/api/system/health`（只返回检查项与状态）在登录前可达，`ops-readiness` 单独要求鉴权。开启 `AUTH_ENABLED` 后，弱密码、弱 `AUTH_SECRET` 或原文 LLM debug 会使应用 fail closed。
 
 ## 7. 架构不变量与变更检查
 
@@ -579,6 +580,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增生产拓扑（Caddy + app + worker 单机，数据库与存储不变）；执行模型不变，生产的叫醒层改为 worker 循环；新增公开健康检查；无迁移。 |
 | 2026-10-10 | 发布 0035–0037 | 无架构变化；生产迁移工作流的运行角色复验覆盖 0035/0036 新表。 |
 | 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 四类 AI 操作全部改为任务；三个同步接口 410，估算拆为独立接口；0037 让导入前的结构识别任务不挂评分标准；新增 `on_task_success` 钩子与 `ai_tasks/provider_errors`。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 完成原子编辑、完整来源复制、AI 追加、锁内内容摘要复核及结构阻断展示；本地 1911 项后端与 139 项浏览器回归通过，后续总分补充修复的 10 项专项测试通过。主线 95d189f 经完整 CI 部署；数据库与默认 legacy 不变，线上资源一致、健康 200、未登录审核接口 401，待登录后业务验收。 |

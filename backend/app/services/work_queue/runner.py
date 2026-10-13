@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from threading import Event
 from threading import Thread
+from time import monotonic
 
 from sqlalchemy import update
 
@@ -111,11 +112,16 @@ def run_worker_loop(
     stop_event=None,
     threads=None,
     sweep_seconds=SWEEP_INTERVAL_SECONDS,
+    drain_seconds=0.0,
 ):
     """内网与本地的叫醒层：``threads`` 个线程各自循环领取，主线程定期巡检。
 
     线程数即全局并发（默认与 Vercel 订阅相同，读 BATCH_SCORING_QUEUE_CONCURRENCY）；
     每个来源的同时请求数在领取时检查，多开 worker 也不会超过。
+
+    停止后各线程不再领取新条目；``drain_seconds`` 内等它们把手上的条目做完再返回。
+    领取线程是守护线程，返回即进程退出：到时没做完的条目由租约与巡检续评。不等的
+    代价是每次发版都可能给正在评的条目记一次“无进展”。
     """
 
     from backend.app.services.work_queue.sweep import run_global_sweep
@@ -138,8 +144,16 @@ def run_worker_loop(
         except Exception:
             logger.exception("work_sweep_failed")
         stop.wait(sweep_seconds)
+    # 不设 drain_seconds 时只等一个轮询周期多一点，让空闲线程干净退出（原有行为）。
+    _drain(lanes, max(float(drain_seconds), poll_seconds + 1))
+
+
+def _drain(lanes, seconds):
+    deadline = monotonic() + seconds
     for thread in lanes:
-        thread.join(timeout=poll_seconds + 1)
+        thread.join(timeout=max(0.0, deadline - monotonic()))
+    running = sum(1 for thread in lanes if thread.is_alive())
+    logger.info("work_worker_stopped drained=%s still_running=%s", len(lanes) - running, running)
 
 
 __all__ = ["execute_next", "heartbeat", "relay", "run_worker_cycle", "run_worker_loop"]

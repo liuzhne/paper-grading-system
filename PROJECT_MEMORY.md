@@ -45,5 +45,6 @@
 
 - 2026-08-22 已将本次数据库、Supabase、鉴权、BYOK 和运行时 Production 变量同步为 Vercel `Sensitive`，并保存到受 Git 忽略、权限 `0600` 的 `.env.local`；未记录任何值。
 - 已移除代码未使用、指向旧项目的 Production `SUPABASE_JWT_SECRET`，避免保留过期凭据。
+- 部署平台迁移（2026-10-13 起）：生产将从 Vercel 迁到一台新加坡 AWS Lightsail 实例（`deploy/production/`，方案 `docs/部署平台迁移到AWS方案.md`）。实例上线并切流量之前，Vercel 仍是正式入口；切换步骤与开关见 RUNBOOK 9.4。实例上的 `/opt/pgs/.env` 由 `scripts/production_env.py` 从 `.env.local` 生成，权限 `0600`，同样不得记录任何值。
 - 生产函数自 2026-08-28（`d902e99`）起在 `sin1`（新加坡），与数据库、Storage 同区域（见 `docs/上线清单.md`）；大批评分仍受 Vercel 300 秒函数时限影响，应通过持久化批任务和运维监控处理，不应以默认 Core 切换作为缓解手段。
 - 任何历史上曾暴露于终端输出、日志或本机 shell 配置的第三方 API Key，仍应按其提供商流程轮换；当前生产不使用平台托管真实 LLM Key。

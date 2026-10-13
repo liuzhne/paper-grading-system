@@ -1,0 +1,318 @@
+"""Lightsail 生产部署：健康检查、worker 优雅退出，以及 deploy/production 的配置契约。"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from pathlib import Path
+from threading import Event
+from threading import Thread
+import time
+
+from sqlalchemy.exc import OperationalError
+
+from backend.app.db.models import utcnow
+from backend.app.services.deployment.readiness import build_health
+from backend.app.services.work_queue import runner
+from backend.app.services.work_queue import sweep
+from backend.app.services.work_queue.limits import SWEEP_INTERVAL_SECONDS
+from backend.app.services.work_queue.state import LAST_SWEEP
+from backend.app.services.work_queue.state import record_state
+
+
+ROOT = Path(__file__).resolve().parents[3]
+PRODUCTION = ROOT / "deploy" / "production"
+
+
+def test_health_fails_until_the_worker_has_swept(client):
+    response = client.get("/api/system/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "fail",
+        "checks": {"database": "pass", "worker": "fail"},
+    }
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_health_passes_with_a_recent_sweep_and_fails_when_it_goes_stale(client):
+    record_state(client.session_factory, LAST_SWEEP, utcnow())
+    fresh = client.get("/api/system/health")
+    assert fresh.status_code == 200
+    assert fresh.json() == {"status": "pass", "checks": {"database": "pass", "worker": "pass"}}
+
+    # 没有活动任务也要判失败：worker 空闲时同样每个周期巡检一次。
+    stale_at = utcnow() - timedelta(seconds=2 * SWEEP_INTERVAL_SECONDS + 5)
+    record_state(client.session_factory, LAST_SWEEP, stale_at)
+    stale = client.get("/api/system/health")
+    assert stale.status_code == 503
+    assert stale.json()["checks"]["worker"] == "fail"
+
+
+def test_health_reports_database_failure_without_details():
+    class BrokenSession:
+        def execute(self, *_args, **_kwargs):
+            raise OperationalError("SELECT 1", {}, Exception("password=secret host=db"))
+
+        def rollback(self):
+            raise OperationalError("ROLLBACK", {}, Exception("connection closed"))
+
+    healthy, payload = build_health(BrokenSession())
+
+    assert healthy is False
+    assert payload == {"status": "fail", "checks": {"database": "fail", "worker": "unknown"}}
+
+
+def test_health_is_public_when_auth_is_enabled(client, monkeypatch):
+    from backend.app.core.config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+    monkeypatch.setattr(settings, "AUTH_PASSWORD", "Strong-login-password-2026")
+    record_state(client.session_factory, LAST_SWEEP, utcnow())
+
+    assert client.get("/api/system/health").status_code == 200
+
+
+def _patch_loop(monkeypatch, cycle):
+    monkeypatch.setattr(runner, "run_worker_cycle", cycle)
+    monkeypatch.setattr(sweep, "run_global_sweep", lambda _factory: None)
+
+
+def test_worker_stops_claiming_and_waits_for_the_item_in_hand(monkeypatch):
+    started, release, finished, stop = Event(), Event(), Event(), Event()
+    calls = []
+
+    def cycle(_factory, **_options):
+        calls.append(time.monotonic())
+        if len(calls) == 1:
+            started.set()
+            release.wait(5)
+            finished.set()
+            return True
+        return False
+
+    _patch_loop(monkeypatch, cycle)
+    loop = Thread(
+        target=runner.run_worker_loop,
+        args=(None,),
+        kwargs={
+            "poll_seconds": 0.01,
+            "stop_event": stop,
+            "threads": 1,
+            "sweep_seconds": 0.01,
+            "drain_seconds": 5,
+        },
+    )
+    loop.start()
+    assert started.wait(2)
+
+    stop.set()
+    time.sleep(0.2)
+    assert loop.is_alive(), "停止后应等在执行的条目做完再返回"
+    release.set()
+    loop.join(2)
+
+    assert not loop.is_alive()
+    assert finished.is_set()
+    assert len(calls) == 1, "停止后不应再领取新条目"
+
+
+def test_worker_gives_up_after_the_drain_window(monkeypatch):
+    started, release, stop = Event(), Event(), Event()
+
+    def cycle(_factory, **_options):
+        started.set()
+        release.wait(5)
+        return True
+
+    _patch_loop(monkeypatch, cycle)
+    loop = Thread(
+        target=runner.run_worker_loop,
+        args=(None,),
+        kwargs={
+            "poll_seconds": 0.01,
+            "stop_event": stop,
+            "threads": 1,
+            "sweep_seconds": 0.01,
+            "drain_seconds": 0.1,
+        },
+    )
+    loop.start()
+    assert started.wait(2)
+    began = time.monotonic()
+    stop.set()
+    loop.join(2)
+    try:
+        assert not loop.is_alive()
+        assert time.monotonic() - began < 1.5
+    finally:
+        release.set()
+
+
+def test_worker_cli_rejects_a_negative_drain_window():
+    import pytest
+
+    from backend.app.scripts import run_batch_worker
+
+    with pytest.raises(SystemExit):
+        run_batch_worker.main(["--drain-seconds", "-1"])
+
+
+def _compose():
+    import yaml
+
+    return yaml.safe_load((PRODUCTION / "compose.yml").read_text(encoding="utf-8"))
+
+
+def test_production_compose_runs_app_worker_and_caddy_without_a_database():
+    services = _compose()["services"]
+    assert set(services) == {"caddy", "app", "worker"}
+    app, worker, caddy = services["app"], services["worker"], services["caddy"]
+
+    # 同一镜像、同一份配置；deploy.sh 把要上线的版本打成 current。
+    assert app["image"] == worker["image"] == "paper-grading-system:current"
+    assert app["env_file"] == worker["env_file"]
+    assert app["environment"] == worker["environment"]
+    # 生产运行角色没有 DDL：不能沿用 Dockerfile 里先迁移的 CMD。
+    assert "alembic" not in " ".join(app["command"])
+    assert app["command"][:2] == ["uvicorn", "backend.app.main:app"]
+    assert worker["command"] == [
+        "python", "-m", "backend.app.scripts.run_batch_worker", "--drain-seconds", "100",
+    ]
+    assert worker["stop_grace_period"] == "110s"
+    # 请求里同步跑整批评分会和 worker 抢条目。
+    assert app["environment"]["INLINE_JOB_RUN_ENABLED"] == "false"
+    assert app["environment"]["STORAGE_PROVIDER"] == "supabase"
+    assert app["environment"]["AUTH_ENABLED"] == "true"
+    # L0 缓存在卷里：发版换容器不丢，app 与 worker 共用。
+    assert app["environment"]["STORAGE_ROOT"] == "/app/storage"
+    assert "app_storage:/app/storage" in app["volumes"]
+    assert "app_storage:/app/storage" in worker["volumes"]
+    # Caddyfile 挂目录：部署替换文件后 reload 能读到新内容。
+    assert "./caddy:/etc/caddy:ro" in caddy["volumes"]
+    # app 端口只给 Caddy：信任转发头的前提。
+    assert "ports" not in app and "ports" not in worker
+    assert sorted(caddy["ports"]) == ["443:443", "443:443/udp", "80:80"]
+    # Caddy 拿不到应用密钥。
+    assert "env_file" not in caddy
+    for service in services.values():
+        assert service["restart"] == "unless-stopped"
+        assert service["logging"]["options"]["max-size"]
+
+
+def test_production_caddyfile_keeps_vercel_headers_and_cache_rules():
+    caddyfile = (PRODUCTION / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+    assert "tls internal" not in caddyfile
+    for marker in (
+        'Strict-Transport-Security "max-age=31536000; includeSubDomains"',
+        'X-Content-Type-Options "nosniff"',
+        'X-Frame-Options "SAMEORIGIN"',
+        "Content-Security-Policy \"frame-ancestors 'self'\"",
+        'Referrer-Policy "same-origin"',
+        '"public, max-age=31536000, immutable"',
+        '"public, max-age=0, must-revalidate"',
+        "encode zstd gzip",
+        "lb_try_duration",
+        "reverse_proxy app:8000",
+    ):
+        assert marker in caddyfile, marker
+
+
+def test_deploy_scripts_are_strict_and_never_print_the_env_file():
+    for name in ("bootstrap.sh", "deploy.sh"):
+        script = (PRODUCTION / name).read_text(encoding="utf-8")
+        assert script.startswith("#!/usr/bin/env bash\n")
+        assert "set -euo pipefail" in script
+        assert "cat .env" not in script and "cat /opt/pgs/.env" not in script
+
+
+def _env_script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("production_env", ROOT / "scripts" / "production_env.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SECRET = "s3cr3t-value-never-printed"
+
+
+def _source(tmp_path, **extra):
+    values = {
+        "DATABASE_URL": "postgresql+psycopg://pgs_app:%s@pooler.supabase.com:6543/postgres" % _SECRET,
+        "AUTH_SECRET": _SECRET,
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SECRET_KEY": _SECRET,
+        "BYOK_MASTER_KEY": _SECRET,
+        "VERCEL_OIDC_TOKEN": "vercel-only",
+        "BATCH_SCORING_DISPATCH": "vercel_queue",
+        "STORAGE_PROVIDER": "supabase",
+        "STORAGE_ROOT": "/tmp/storage",
+    }
+    values.update(extra)
+    path = tmp_path / "source.env"
+    path.write_text("".join('%s="%s"\n' % item for item in values.items()), encoding="utf-8")
+    return path
+
+
+def test_production_env_drops_platform_and_compose_managed_variables(tmp_path, capsys):
+    script = _env_script()
+    output = tmp_path / "pgs.env"
+
+    code = script.main(
+        ["--source", str(_source(tmp_path)), "--site-address", "pgs.duckdns.org", "--output", str(output)]
+    )
+
+    assert code == 0
+    assert output.stat().st_mode & 0o777 == 0o600
+    written = output.read_text(encoding="utf-8")
+    names = [line.split("=", 1)[0] for line in written.splitlines() if "=" in line]
+    assert names[0] == "PGS_SITE_ADDRESS"
+    assert set(names) == {
+        "PGS_SITE_ADDRESS",
+        "DATABASE_URL",
+        "AUTH_SECRET",
+        "SUPABASE_URL",
+        "SUPABASE_SECRET_KEY",
+        "BYOK_MASTER_KEY",
+    }
+    assert "AUTH_SECRET='%s'" % _SECRET in written
+    printed = capsys.readouterr()
+    assert _SECRET not in printed.out + printed.err
+    assert "AUTH_SECRET" in printed.out
+
+
+def test_production_env_refuses_session_pool_missing_secrets_and_overwrite(tmp_path, capsys):
+    script = _env_script()
+    output = tmp_path / "pgs.env"
+    session_pool = _source(
+        tmp_path,
+        DATABASE_URL="postgresql+psycopg://pgs_app:%s@pooler.supabase.com:5432/postgres" % _SECRET,
+        AUTH_SECRET="",
+    )
+
+    code = script.main(["--source", str(session_pool), "--site-address", "pgs.duckdns.org", "--output", str(output)])
+
+    assert code == 1
+    assert not output.exists()
+    errors = capsys.readouterr().err
+    assert "6543" in errors and "AUTH_SECRET" in errors
+    assert _SECRET not in errors
+
+    output.write_text("existing", encoding="utf-8")
+    import pytest
+
+    with pytest.raises(SystemExit):
+        script.main(["--source", str(_source(tmp_path)), "--site-address", "pgs.duckdns.org", "--output", str(output)])
+    assert output.read_text(encoding="utf-8") == "existing"
+
+
+def test_production_env_rejects_values_compose_cannot_quote(tmp_path, capsys):
+    script = _env_script()
+    output = tmp_path / "pgs.env"
+    quoted = _source(tmp_path, LANGFUSE_SECRET_KEY="it's-%s" % _SECRET)
+
+    assert script.main(["--source", str(quoted), "--site-address", "pgs.duckdns.org", "--output", str(output)]) == 1
+    assert not output.exists()
+    errors = capsys.readouterr().err
+    assert "LANGFUSE_SECRET_KEY" in errors and _SECRET not in errors

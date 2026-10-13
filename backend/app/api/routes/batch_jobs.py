@@ -16,6 +16,7 @@ from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
 from backend.app.api.deps import require_organization_role
+from backend.app.core.config import settings
 from backend.app.db.models import GradingBatch
 from backend.app.db.session import get_db
 from backend.app.schemas.batch_job import BatchScoringJobCreate
@@ -197,10 +198,10 @@ def run_job(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    if os.getenv("VERCEL"):
+    if os.getenv("VERCEL") or not settings.INLINE_JOB_RUN_ENABLED:
         raise HTTPException(
             status_code=409,
-            detail="生产评分由 Vercel 后台执行器逐份领取；请查看任务进度，无需在请求中启动。",
+            detail="生产评分由后台执行器逐份领取；请查看任务进度，无需在请求中启动。",
         )
     _job_or_404(db, job_id, principal)
     require_organization_role(principal, "org_admin", "teacher")

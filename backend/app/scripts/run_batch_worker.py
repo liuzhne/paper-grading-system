@@ -1,7 +1,8 @@
 """Run the work-queue worker (batch scoring and AI tasks) outside HTTP requests.
 
 内网与本地的叫醒层：``--threads`` 个线程循环调用与 Vercel 相同的领取函数，主线程每
-``--sweep-seconds`` 巡检一次（找回已死的执行、收敛任务状态）。
+``--sweep-seconds`` 巡检一次（找回已死的执行、收敛任务状态）。收到 SIGTERM 后不再领取，
+最多等 ``--drain-seconds`` 让在执行的条目做完。
 """
 
 import argparse
@@ -25,6 +26,12 @@ def main(argv=None):
         help="同时执行的条目数（默认读 BATCH_SCORING_QUEUE_CONCURRENCY，未设置为 8）",
     )
     parser.add_argument("--sweep-seconds", type=float, default=float(SWEEP_INTERVAL_SECONDS))
+    parser.add_argument(
+        "--drain-seconds",
+        type=float,
+        default=0.0,
+        help="收到停止信号后最多等多少秒让在执行的条目做完（生产 compose 传 100；默认不等）",
+    )
     args = parser.parse_args(argv)
     if args.poll_seconds <= 0:
         parser.error("--poll-seconds must be positive")
@@ -32,6 +39,8 @@ def main(argv=None):
         parser.error("--sweep-seconds must be positive")
     if args.threads is not None and args.threads < 1:
         parser.error("--threads must be at least 1")
+    if args.drain_seconds < 0:
+        parser.error("--drain-seconds must not be negative")
 
     logging.basicConfig(level=logging.INFO)
     stop = Event()
@@ -47,6 +56,7 @@ def main(argv=None):
         stop_event=stop,
         threads=args.threads or queue_concurrency(),
         sweep_seconds=args.sweep_seconds,
+        drain_seconds=args.drain_seconds,
     )
     return 0
 
