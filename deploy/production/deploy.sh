@@ -4,7 +4,7 @@
 #   deploy.sh <提交 SHA>   切到这个版本（镜像须已 docker load 到本机）
 #   deploy.sh --list       列出本机还留着的版本，标出正在运行的那个
 #
-# CI 先把镜像经 SSH 载入、把 compose.yml、caddy/ 和本脚本同步到 /opt/pgs，再调用它。
+# CI 先把镜像经 SSH 载入、把 compose.yml、caddy/ 和本脚本同步到 /opt/pgs、写好 .env，再调用它。
 # 回滚就是用 --list 里的旧 SHA 再调用一次，不需要重新构建。
 set -euo pipefail
 
@@ -48,7 +48,7 @@ if ! docker image inspect "$IMAGE:$tag" >/dev/null 2>&1; then
 	exit 1
 fi
 if [[ ! -f .env ]]; then
-	echo "缺少 /opt/pgs/.env：先按 RUNBOOK 用 scripts/production_env.py 生成并上传。" >&2
+	echo "缺少 /opt/pgs/.env：部署任务会在调用本脚本前写好它；手工部署见 RUNBOOK 9.4。" >&2
 	exit 1
 fi
 

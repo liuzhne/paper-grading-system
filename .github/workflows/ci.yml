@@ -269,9 +269,25 @@ jobs:
             | tee pgs_ops_artifacts/restored-postgres-verification.json
           diff pgs_ops_storage/uploads/fixture.docx pgs_ops_restored/uploads/fixture.docx
           cp "$package/manifest.json" pgs_ops_artifacts/backup-manifest.json
+      # 全新环境（Lightsail 生产）的初始化脚本：空库上建运行角色、跑迁移、补齐 0023 之前那批表
+      # 的授权与行级安全，再以运行角色读写一遍。平时本地与 CI 都不建 pgs_app，这是唯一用真实
+      # PostgreSQL 验证这条路径的地方。放在最后：之后的步骤不会因为角色存在而改变行为。
+      - name: Initialize an empty database and use it as the runtime role
+        env:
+          MIGRATION_DATABASE_URL: postgresql+psycopg://paper:ci-only-postgres-password@127.0.0.1:5432/pgs_init_check
+          PGS_APP_PASSWORD: CiRuntimeRolePassword2026abcdef
+        run: |
+          set -euo pipefail
+          createdb -h 127.0.0.1 -U paper pgs_init_check
+          uv run python -m backend.app.scripts.init_database | tee pgs_ops_artifacts/init-database.log
+          # 重跑必须无副作用：角色与策略已存在时跳过，不报 already exists。
+          uv run python -m backend.app.scripts.init_database | tee -a pgs_ops_artifacts/init-database.log
+          DATABASE_URL="postgresql+psycopg://pgs_app:${PGS_APP_PASSWORD}@127.0.0.1:5432/pgs_init_check" \
+            uv run python -m backend.app.scripts.verify_postgres_ops --exercise-ci-fixture \
+            | tee pgs_ops_artifacts/init-runtime-verification.json
       - name: Reject secret leakage in persisted CI evidence
         run: |
-          if grep -R -E 'ci-only-postgres-password|PGPASSWORD|AUTH_SECRET|OPENAI(_COMPATIBLE)?_API_KEY' pgs_ops_artifacts
+          if grep -R -E 'ci-only-postgres-password|CiRuntimeRolePassword|PGPASSWORD|AUTH_SECRET|OPENAI(_COMPATIBLE)?_API_KEY' pgs_ops_artifacts
           then
             echo "secret-like material detected in OPS evidence"
             exit 1
@@ -545,10 +561,19 @@ jobs:
           PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
           PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+          RUNTIME_DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+          BYOK_MASTER_KEY: ${{ secrets.BYOK_MASTER_KEY }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
         run: |
           set -euo pipefail
           missing=0
-          for name in PRODUCTION_SSH_KEY PRODUCTION_SSH_HOST PRODUCTION_SSH_KNOWN_HOSTS SITE_URL
+          for name in PRODUCTION_SSH_KEY PRODUCTION_SSH_HOST PRODUCTION_SSH_KNOWN_HOSTS SITE_URL \
+            RUNTIME_DATABASE_URL BYOK_MASTER_KEY AUTH_SECRET AUTH_PASSWORD SUPABASE_SECRET_KEY \
+            SUPABASE_URL AUTH_USERNAME
           do
             if [[ -z "${!name:-}" ]]
             then
@@ -589,6 +614,25 @@ jobs:
           docker save "$IMAGE" | gzip -1 | ssh pgs 'gunzip | docker load'
           tar -C deploy/production -czf - compose.yml deploy.sh caddy \
             | ssh pgs 'tar -xzf - -C /opt/pgs && chmod 0755 /opt/pgs/deploy.sh'
+      # 实例上的 .env 每次部署都由这里重新生成：生产密钥只存在 GitHub production 环境里，
+      # 改密钥就是改 GitHub 上的值再部署一次。经 SSH 的标准输入写入，不落在命令行里。
+      - name: Write the runtime environment
+        env:
+          DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+          BYOK_MASTER_KEY: ${{ secrets.BYOK_MASTER_KEY }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
+        run: |
+          set -euo pipefail
+          host="${SITE_URL#https://}"
+          host="${host%%/*}"
+          env_file="$RUNNER_TEMP/pgs.env"
+          trap 'rm -f "$env_file"' EXIT
+          python3 scripts/production_env.py --from-environment --site-address "$host" --output "$env_file"
+          ssh pgs 'umask 077 && cat > /opt/pgs/.env.new && mv /opt/pgs/.env.new /opt/pgs/.env' < "$env_file"
       - name: Switch to this version
         run: ssh pgs "/opt/pgs/deploy.sh ${GITHUB_SHA}"
       - name: Smoke test through the public address

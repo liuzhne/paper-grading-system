@@ -3,7 +3,8 @@
 # 数据库与文件存储在 Supabase，这里没有数据库服务。镜像也不在这里构建：CI 构建后
 # 经 SSH 载入实例，deploy.sh 把要上线的版本打成 current 标签。
 #
-# 密钥在同目录的 .env（权限 0600，不进仓库，由 scripts/production_env.py 生成）。
+# 密钥在同目录的 .env（权限 0600，不进仓库）：每次部署由 CI 用 GitHub production 环境的
+# 密钥生成（scripts/production_env.py --from-environment）。
 # 下面 environment 里的是不含密钥的生产配置，随仓库评审；同名变量以这里为准。
 
 x-app-environment: &app-environment

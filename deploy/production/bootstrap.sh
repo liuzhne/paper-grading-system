@@ -7,7 +7,7 @@
 # deploy（只用密钥登录，属于 docker 组）、建 /opt/pgs、只装安全更新且不自动重启、
 # 关闭 SSH 密码登录。可以重复运行。
 #
-# 实例上没有需要备份的数据：数据库与文件在 Supabase，密钥以本机 .env.local 为准，
+# 实例上没有需要备份的数据：数据库与文件在 Supabase，密钥在 GitHub production 环境里，
 # 证书可以重新签发。实例坏了就新建一台，再跑一遍本脚本和一次部署。
 set -euo pipefail
 
@@ -95,4 +95,4 @@ SSH
 sshd -t
 systemctl reload ssh
 
-echo "完成。下一步：上传 /opt/pgs/.env（scripts/production_env.py），然后在 GitHub 触发部署。"
+echo "完成。下一步：在 GitHub production 环境配好密钥与变量（RUNBOOK 9.4），然后部署。"

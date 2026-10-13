@@ -241,6 +241,7 @@ def _source(tmp_path, **extra):
     values = {
         "DATABASE_URL": "postgresql+psycopg://pgs_app:%s@pooler.supabase.com:6543/postgres" % _SECRET,
         "AUTH_SECRET": _SECRET,
+        "AUTH_PASSWORD": _SECRET,
         "SUPABASE_URL": "https://example.supabase.co",
         "SUPABASE_SECRET_KEY": _SECRET,
         "BYOK_MASTER_KEY": _SECRET,
@@ -272,6 +273,7 @@ def test_production_env_drops_platform_and_compose_managed_variables(tmp_path, c
         "PGS_SITE_ADDRESS",
         "DATABASE_URL",
         "AUTH_SECRET",
+        "AUTH_PASSWORD",
         "SUPABASE_URL",
         "SUPABASE_SECRET_KEY",
         "BYOK_MASTER_KEY",
@@ -316,3 +318,149 @@ def test_production_env_rejects_values_compose_cannot_quote(tmp_path, capsys):
     assert not output.exists()
     errors = capsys.readouterr().err
     assert "LANGFUSE_SECRET_KEY" in errors and _SECRET not in errors
+
+
+class _Rows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    """记录执行过的 SQL；按语句开头返回预设结果。"""
+
+    def __init__(self, *, role=False, tables=("alembic_version", "papers"), policies=(), storage=True, bucket=None):
+        self.role, self.tables, self.policies = role, list(tables), set(policies)
+        self.storage, self.bucket = storage, bucket
+        self.statements = []
+
+    def execute(self, query, params=None):
+        text = query if isinstance(query, str) else query.as_string(None)
+        self.statements.append(text)
+        if text.startswith("SELECT 1 FROM pg_roles"):
+            return _Rows([(1,)] if self.role else [])
+        if text.startswith("SELECT tablename FROM pg_tables"):
+            return _Rows([(name,) for name in self.tables])
+        if text.startswith("SELECT 1 FROM pg_policies"):
+            return _Rows([(1,)] if params[0] in self.policies else [])
+        if text.startswith("SELECT to_regclass"):
+            return _Rows([("storage.buckets" if self.storage else None,)])
+        if text.startswith("SELECT public FROM storage.buckets"):
+            return _Rows([] if self.bucket is None else [(self.bucket,)])
+        return _Rows([])
+
+
+def _init_script():
+    from backend.app.scripts import init_database
+
+    return init_database
+
+
+def test_init_creates_the_runtime_role_once_without_printing_the_password(capsys):
+    script = _init_script()
+    password = "A1b2C3d4E5f6G7h8J9k0L1m2N3"
+    conn = _FakeConn()
+
+    assert script.ensure_runtime_role(conn, lambda: password) is True
+    create = [s for s in conn.statements if s.startswith("CREATE ROLE")]
+    assert create == [
+        'CREATE ROLE "pgs_app" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
+        "NOREPLICATION NOBYPASSRLS PASSWORD '%s'" % password
+    ]
+    assert password not in capsys.readouterr().out
+
+    existing = _FakeConn(role=True)
+    asked = []
+    assert script.ensure_runtime_role(existing, lambda: asked.append(1) or password) is False
+    assert asked == [], "角色已存在时不该再要密码，也不改密码"
+    assert not any(s.startswith("CREATE ROLE") for s in existing.statements)
+
+
+def test_init_rejects_passwords_that_break_connection_strings():
+    import pytest
+
+    script = _init_script()
+    for weak in ("short1", "has%percent-and-dash-1234567890", "a" * 23):
+        with pytest.raises(SystemExit):
+            script.ensure_runtime_role(_FakeConn(), lambda weak=weak: weak)
+
+
+def test_init_grants_every_table_like_the_0023_migrations():
+    script = _init_script()
+    conn = _FakeConn(tables=("alembic_version", "papers", "rubrics"), policies=("rubrics",))
+
+    assert script.grant_runtime_access(conn) == 3
+    statements = conn.statements
+    assert 'GRANT USAGE ON SCHEMA public TO "pgs_app"' in statements
+    assert 'GRANT SELECT ON TABLE "public"."alembic_version" TO "pgs_app"' in statements
+    assert 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."papers" TO "pgs_app"' in statements
+    for table in ("alembic_version", "papers", "rubrics"):
+        assert 'ALTER TABLE "public"."%s" ENABLE ROW LEVEL SECURITY' % table in statements
+    policies = [s for s in statements if s.startswith("CREATE POLICY")]
+    # rubrics 已有策略：重跑不报 “already exists”。
+    assert policies == [
+        'CREATE POLICY "pgs_app_dml" ON "public"."alembic_version" FOR ALL TO "pgs_app" USING (true) WITH CHECK (true)',
+        'CREATE POLICY "pgs_app_dml" ON "public"."papers" FOR ALL TO "pgs_app" USING (true) WITH CHECK (true)',
+    ]
+    assert 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "pgs_app"' in statements
+
+
+def test_init_bucket_is_private_created_once_and_skipped_outside_supabase():
+    import pytest
+
+    script = _init_script()
+    assert script.ensure_private_bucket(_FakeConn(storage=False), "b") == "skipped"
+    created = _FakeConn()
+    assert script.ensure_private_bucket(created, "b") == "created"
+    assert any(s.startswith("INSERT INTO storage.buckets") and "false" in s for s in created.statements)
+    assert script.ensure_private_bucket(_FakeConn(bucket=False), "b") == "exists"
+    with pytest.raises(SystemExit):
+        script.ensure_private_bucket(_FakeConn(bucket=True), "b")
+
+
+def test_init_normalizes_urls_for_psycopg():
+    import pytest
+
+    script = _init_script()
+    assert script.driver_url("postgresql+psycopg://u:p@h:5432/d") == "postgresql://u:p@h:5432/d"
+    assert script.driver_url("postgres://u:p@h:5432/d") == "postgresql://u:p@h:5432/d"
+    with pytest.raises(SystemExit):
+        script.driver_url("sqlite:///x.db")
+
+
+def test_production_env_from_environment_takes_only_the_allowlist(tmp_path, monkeypatch, capsys):
+    # 部署任务的环境里有 GITHUB_TOKEN 等无关变量：只取名单里的，写进实例的 .env。
+    script = _env_script()
+    for name, value in {
+        "DATABASE_URL": "postgresql://pgs_app.ref:%s@pooler.supabase.com:6543/postgres" % _SECRET,
+        "AUTH_SECRET": _SECRET,
+        "AUTH_PASSWORD": _SECRET,
+        "BYOK_MASTER_KEY": _SECRET,
+        "SUPABASE_URL": "https://new.supabase.co",
+        "SUPABASE_SECRET_KEY": _SECRET,
+        "AUTH_USERNAME": "admin",
+        "SUPABASE_STORAGE_BUCKET": "",
+        "GITHUB_TOKEN": "ghs_never_copied",
+    }.items():
+        monkeypatch.setenv(name, value)
+    output = tmp_path / "pgs.env"
+
+    assert script.main(["--from-environment", "--site-address", "pgs.duckdns.org", "--output", str(output)]) == 0
+    written = output.read_text(encoding="utf-8")
+    assert "GITHUB_TOKEN" not in written and "ghs_never_copied" not in written
+    # 空值（GitHub 上没设的变量）不写，应用用默认值。
+    assert "SUPABASE_STORAGE_BUCKET" not in written
+    assert "AUTH_USERNAME='admin'" in written
+    printed = capsys.readouterr()
+    assert _SECRET not in printed.out + printed.err
+
+    monkeypatch.delenv("BYOK_MASTER_KEY")
+    output.unlink()
+    assert script.main(["--from-environment", "--site-address", "pgs.duckdns.org", "--output", str(output)]) == 1
+    assert "BYOK_MASTER_KEY" in capsys.readouterr().err
+    assert not output.exists()

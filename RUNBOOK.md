@@ -348,38 +348,48 @@ docker compose --env-file .env.intranet logs -f app worker caddy
 
 ### 9.4 Lightsail 生产（迁移中）
 
-方案：`docs/部署平台迁移到AWS方案.md`。一台新加坡 Lightsail 实例跑 `deploy/production/compose.yml`（caddy + app + worker），数据库与文件存储仍是 Supabase。切换完成前 Vercel 仍是正式入口，两边可以同时领取评分条目（领取、名额、无进展计数都在数据库里）。
+方案：`docs/部署平台迁移到AWS方案.md`。一台新加坡 Lightsail 实例跑 `deploy/production/compose.yml`（caddy + app + worker），数据库与文件存储是**新建的** Supabase 项目 `grading-system`（`mfkmbwkuiimhaytkazvk`，新加坡）。旧项目的数据经维护者确认不保留（2026-10-13），所以没有数据迁移，也没有新旧并行：新环境验证好后直接切流量，最后删除旧项目。切换前 Vercel 仍是正式入口，连的是旧库。
 
 一次性准备（S0，维护者执行）：
 
-1. AWS 账号升级为付费计划；AWS Budgets 设两条告警：账号总额每月 40 美元、Bedrock 每月 28 美元。
-2. 在 DuckDNS 注册子域名。Lightsail 新加坡区域创建 Ubuntu 24.04 LTS、2 GB 实例，绑定静态 IP；防火墙只开 TCP 22、80、443 和 UDP 443。DuckDNS 的 A 记录指向静态 IP。
-3. 本机生成部署密钥，跑 bootstrap：
+1. **AWS 账号**：维护者决定先用 Free 计划，6 个月后再定（2026-10-13）。Free 计划在开户满 6 个月**或额度用完**时结束，服务立即停止，所以要在 Billing 控制台看清剩余额度与到期日；AWS Budgets 的告警要按额度抵扣前的用量计算，否则额度用完前一直显示 0。
+2. **实例与域名**：Lightsail 新加坡 Ubuntu 24.04 LTS 2 GB 实例 `grading-sg`，静态 IP `3.1.190.143`，防火墙 TCP 22/80/443、UDP 443（2026-10-13 已建）。在 DuckDNS 注册子域名，A 记录指向静态 IP。
+3. **初始化新库**（只跑一次，重跑无副作用）：
+
+   ```bash
+   uv run python -m backend.app.scripts.init_database
+   ```
+
+   脚本会提示输入两项（不回显）：owner 连接串（Supabase「Connect → Session pooler」那条，端口 5432；事务池 6543 跑不了迁移里的 DDL）和 `pgs_app` 的新密码（24 位以上，只能是字母和数字）。它依次建运行角色 `pgs_app`、跑现有迁移到 head、给 `public` 下所有表授权并开启行级安全、建私有存储桶 `paper-grading-private`、逐表核对。不加新迁移：0023 之前那批表当初是手工授权的，这一步把那次操作固定在脚本里。
+4. **GitHub `production` 环境的密钥**（值只在 GitHub 网页或管道里出现，不要贴到对话或终端历史里）：
+   - 更新 `MIGRATION_DATABASE_URL`：新项目 owner 的 Session pooler 连接串（端口 5432）。
+   - 更新 `RUNTIME_DATABASE_URL`：`postgresql://pgs_app.<项目 ref>:<pgs_app 密码>@<pooler 主机>:6543/postgres`。部署任务把它写成实例上的 `DATABASE_URL`，不是 6543 会直接报错。
+   - 新增 `BYOK_MASTER_KEY`、`AUTH_SECRET`：随机生成，例如 `openssl rand -hex 32 | gh secret set BYOK_MASTER_KEY --env production`，值不会出现在屏幕上。`BYOK_MASTER_KEY` 加密数据库里所有模型 API Key，换掉它就要把这些 Key 重新填一遍。
+   - 新增 `AUTH_PASSWORD`：**首个平台管理员的登录密码**（新库第一次用 `AUTH_USERNAME` 登录时用它建账号），12 位以上，自己保管。
+   - 新增 `SUPABASE_SECRET_KEY`：新项目「API Keys」页新建的 secret key。
+   - 新增 `PRODUCTION_SSH_KEY`、`PRODUCTION_SSH_HOST`、`PRODUCTION_SSH_KNOWN_HOSTS`：见第 5 步。
+5. **部署密钥与 bootstrap**：
 
    ```bash
    ssh-keygen -t ed25519 -N '' -C pgs-deploy -f ~/.ssh/pgs_deploy
-   scp deploy/production/bootstrap.sh ubuntu@<静态 IP>:
-   ssh ubuntu@<静态 IP> "sudo bash bootstrap.sh --deploy-key '$(cat ~/.ssh/pgs_deploy.pub)'"
+   scp -i ~/.ssh/lightsail-sg.pem deploy/production/bootstrap.sh ubuntu@3.1.190.143:
+   ssh -i ~/.ssh/lightsail-sg.pem ubuntu@3.1.190.143 "sudo bash bootstrap.sh --deploy-key '$(cat ~/.ssh/pgs_deploy.pub)'"
+   gh secret set PRODUCTION_SSH_KEY --env production < ~/.ssh/pgs_deploy
    ```
 
-4. 生成并上传 `.env`（只打印变量名，不打印值；上传后删掉本地文件）：
+   `~/.ssh/lightsail-sg.pem` 是 Lightsail 控制台「账户 → SSH 密钥」下载的新加坡默认密钥。主机指纹：在 Lightsail 浏览器 SSH 里运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`，与本机下面第二条命令的输出比对，一致才把第一条的输出存进 `PRODUCTION_SSH_KNOWN_HOSTS`：
 
    ```bash
-   uv run python scripts/production_env.py --source .env.local --site-address <名字>.duckdns.org --output /tmp/pgs.env
-   scp /tmp/pgs.env deploy@<静态 IP>:/opt/pgs/.env && ssh deploy@<静态 IP> chmod 600 /opt/pgs/.env && rm /tmp/pgs.env
-   ```
-
-5. 核对主机指纹后写进 GitHub。在 Lightsail 控制台的浏览器 SSH 里运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`，与本机下面第二条命令的输出比对，一致才用第一条命令的输出：
-
-   ```bash
-   ssh-keyscan -t ed25519 <静态 IP> > /tmp/pgs_known_hosts
+   ssh-keyscan -t ed25519 3.1.190.143 > /tmp/pgs_known_hosts
    ssh-keygen -lf /tmp/pgs_known_hosts
    ```
 
-   GitHub `production` 环境的密钥：`PRODUCTION_SSH_KEY`（`~/.ssh/pgs_deploy` 私钥全文）、`PRODUCTION_SSH_HOST`（静态 IP）、`PRODUCTION_SSH_KNOWN_HOSTS`（`/tmp/pgs_known_hosts` 全文）。仓库变量：`PRODUCTION_SITE_URL=https://<名字>.duckdns.org`、`LIGHTSAIL_DEPLOY_ENABLED=true`。
-6. 外部可用性监测（如 UptimeRobot）每 5 分钟请求 `https://<名字>.duckdns.org/api/system/health`，失败发邮件；Lightsail 控制台给实例加 CPU 与状态检查告警。
+6. **仓库变量**（必须是仓库级：部署任务的 `if` 在进入 `production` 环境之前求值，读不到环境级变量）：`SUPABASE_URL=https://<项目 ref>.supabase.co`、`AUTH_USERNAME`（首个管理员用户名）、`PRODUCTION_SITE_URL=https://<名字>.duckdns.org`；以上全部就绪后再设 `LIGHTSAIL_DEPLOY_ENABLED=true`。
+7. **监测**：外部可用性监测（如 UptimeRobot）每 5 分钟请求 `https://<名字>.duckdns.org/api/system/health`，失败发邮件；Lightsail 控制台给实例加 CPU 与状态检查告警。
 
-日常发布：合并到 `main` 后，`deploy-lightsail-production` 在门禁通过、`production` 环境审批后构建镜像，经 SSH 载入实例并运行 `/opt/pgs/deploy.sh <SHA>`：先换 app（Caddy 让空档期间的请求等着），健康后再换 worker（最多等 100 秒让在执行的条目做完），最后热加载 Caddy。迁移顺序不变：需要迁移的版本先跑 `production-migrate.yml`。
+首次部署后（S2）：用 `AUTH_USERNAME` / `AUTH_PASSWORD` 登录（第一次登录会建平台管理员），在平台模型设置里填 Bedrock API Key，再邀请用户。
+
+日常发布：合并到 `main` 后，`deploy-lightsail-production` 在门禁通过、`production` 环境审批后构建镜像，经 SSH 载入实例，用 GitHub 上的密钥与变量重新生成实例的 `/opt/pgs/.env`，再运行 `/opt/pgs/deploy.sh <SHA>`：先换 app（Caddy 让空档期间的请求等着），健康后再换 worker（最多等 100 秒让在执行的条目做完），最后热加载 Caddy。迁移顺序不变：需要迁移的版本先跑 `production-migrate.yml`。
 
 在实例上（`ssh deploy@<静态 IP>`）：
 
@@ -389,18 +399,21 @@ cd /opt/pgs
 ./deploy.sh <上一个 SHA>                  # 回滚，不需要重新构建
 docker compose -p pgs -f compose.yml ps
 docker compose -p pgs -f compose.yml logs --tail 200 worker
-docker compose -p pgs -f compose.yml up -d --force-recreate app worker   # 只改了 .env 时
 ```
+
+改密钥：改 GitHub `production` 环境里的值，再部署一次（重跑最近一次 main 的部署任务即可），实例上的 `.env` 由部署任务重新生成。不要在实例上手改 `.env`，下一次部署会覆盖。
 
 每月挑低峰手动重启一次让内核更新生效（`sudo reboot`，服务约 1 分钟后自动恢复）；系统安全更新由 `unattended-upgrades` 自动安装、不自动重启。
 
-切流量（S3）：先把仓库变量 `VERCEL_DEPLOY_ENABLED` 设为 `false`，再把 Vercel 项目改为只有 308 跳转规则的部署，跳到新域名并保留路径与查询参数。顺序不能反：变量没关时，下一次合并会把整个应用重新部署回 Vercel，盖掉跳转。
+切流量（S3）：先把仓库变量 `VERCEL_DEPLOY_ENABLED` 设为 `false`，再把 Vercel 项目改为只有 308 跳转规则的部署，跳到新域名并保留路径与查询参数。顺序不能反：变量没关时，下一次合并会把整个应用重新部署回 Vercel，盖掉跳转。新地址稳定后，由维护者在 Supabase 后台删除旧项目 `euizniwqisnhfhxwiqsg`（不可恢复；数据已确认不保留），旧项目的数据库密码与 API 密钥随之失效。
 
 排错：
 
 - **部署任务卡在 `docker load`，报 `permission denied ... docker.sock`。** 报错指向 Docker，真正原因是部署用户不在 `docker` 组：`bootstrap.sh` 没跑，或者跑之前已经用 `deploy` 登录过（组成员要新登录才生效）。重跑 `bootstrap.sh`。
 - **冒烟请求报 TLS 错误，Caddy 日志里是 ACME 校验失败。** 报错指向证书，真正原因通常是 DuckDNS 的 A 记录没指向静态 IP，或者防火墙没开 80 端口（Let's Encrypt 的 HTTP 校验走 80）。首次部署签证书要几十秒，冒烟会重试 60 秒。
-- **`/api/system/health` 返回 503，`worker` 为 `fail`，但 `docker compose ps` 里 worker 在运行。** 报错指向 worker，真正原因常在数据库：`.env` 里的 `DATABASE_URL` 不通或不是 6543 事务池，worker 每次巡检都失败（日志里是 `work_sweep_failed`）。切换前（S2）Vercel 的巡检链也会写巡检时间，所以这时健康检查是绿的不代表实例上的 worker 在跑，要看 `ps` 和日志。
+- **`/api/system/health` 返回 503，`worker` 为 `fail`，但 `docker compose ps` 里 worker 在运行。** 报错指向 worker，真正原因常在数据库：`RUNTIME_DATABASE_URL` 不通（密码、`pgs_app.<项目 ref>` 用户名格式），worker 每次巡检都失败（日志里是 `work_sweep_failed`）。
+- **新库上应用报 `permission denied for table …`，但迁移是成功的。** 报错像代码问题，真正原因是只跑了迁移、没跑 `init_database`：0023 之前那批表没有给 `pgs_app` 授权。在新库上运行 `init_database`（重跑无副作用），它最后会逐表核对。以后新增表仍然要在迁移里授权（0023 的做法），这个脚本只管新环境的初始化。
+- **部署任务在 “Write the runtime environment” 失败，提示缺少变量或不是 6543。** 报错指向脚本，真正原因是 GitHub `production` 环境里少配了密钥，或 `RUNTIME_DATABASE_URL` 用的是 Session pooler（5432）。输出里只有变量名，按名字补齐。
 - **app 反复重启，日志里是 `permission denied` 或 `must be owner`，出现在 `alembic upgrade head` 之后。** 报错像数据库权限问题，真正原因是生产 compose 的 `command` 被删掉了，容器回到了 Dockerfile 的 CMD，在启动时迁移；生产运行角色 `pgs_app` 没有 DDL。迁移只走 `production-migrate.yml`。
 
 ## 10. 回滚
@@ -872,6 +885,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-13 | 全新环境：新 Supabase 项目、初始化脚本、密钥放 GitHub | 9.4 改写：新项目 `grading-system` 用 `init_database` 初始化（运行角色、迁移、全表授权与行级安全、私有桶、逐表核对）；运行时密钥存 GitHub `production` 环境，部署任务生成实例 `.env`；AWS 先用 Free 计划；切流量后删除旧项目；新增三条排错。 |
 | 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增 9.4：实例准备、`.env` 生成、部署与回滚、切流量顺序和四条排错；新增 `GET /api/system/health`、`INLINE_JOB_RUN_ENABLED`、worker `--drain-seconds`；CI 新增 `production-config` 与默认关闭的 `deploy-lightsail-production`，Vercel 部署任务可用 `VERCEL_DEPLOY_ENABLED=false` 关闭。 |
 | 2026-10-10 | 发布 0035–0037 | 先迁移后合并；运行角色复验清单补 `work_runtime_state`、`ai_tasks`、`ai_task_items`，守护测试改为识别常量写法的授权。 |
 | 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 新增审查/结构识别任务与三个估算接口，三个旧接口 410；迁移 head → 0037；新增改契约版本后须重建 `public/` 等排查。 |
