@@ -2062,3 +2062,39 @@ cd frontend/workbench && npx vitest run src/App.test.js src/views/TaskRunView.te
 ```
 
 维护记录：2026-10-11 · 生产核对问题：首次打开空白（冷启动）、新建任务页与评分页把加载中显示成空、旧批次没有作业时无恢复入口；记录原因与处理，导出列与通用文档真实效果两项待决。
+
+### 2026-10-13 PostgreSQL 运行角色完整权限校验
+
+症状：应用写表报 `permission denied`，但旧 `verify_postgres_ops` 返回通过。原因是旧查询的 `has_table_privilege(..., 'SELECT,INSERT,UPDATE,DELETE')` 在任何一项权限存在时就返回 true；另有四张迁移授权表未列入运行角色检查。修复后任一项缺失都会报 `runtime role access/RLS is incomplete for <table>`，定位到具体表。
+
+诊断：在已配置运行角色 `DATABASE_URL` 的安全环境运行下述只读检查；不要把含密码的连接串放进命令行或日志。
+
+```bash
+uv run python -m backend.app.scripts.verify_postgres_ops
+```
+
+核对失败时分别查目标表的 SELECT、INSERT、UPDATE、DELETE、RLS 开关与 `pgs_app_dml` 策略。全新环境按照 §9.4 运行 `init_database` 补齐授权；已有生产环境按 D-025 的审批流程诊断和补齐相应授权，校验器不会自行修复数据库。`init_database` 的逐项全表检查原已正确，无需变更它。
+
+本地自包含验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_postgres_runtime_access.py backend/app/tests/test_production_migrate_workflow.py backend/app/tests/test_m8_ops_readiness.py backend/app/tests/test_production_deployment.py
+```
+
+真实 PostgreSQL 验证由 CI 的 `Initialize an empty database and use it as the runtime role` 步骤执行：在已初始化的本地 `pgs_init_check` 库逐表逐项撤去 DML，确认拒绝后回滚保存点，最后再次确认完整授权通过。该测试仅接受显式 `PGS_TEST_POSTGRES_VERIFIER_URL`、本机地址与 `pgs_init_check` 库名；本地未设置时跳过，不能以 SQLite 结果替代真实 PostgreSQL 证据。查看 `pgs-postgres-migration-restore-evidence` 中的 `init-runtime-privilege-regressions.log` 和 `init-runtime-verification.json`。
+
+发布：无迁移，head 仍为 `0038_assistant_conversations`；按当前部署门禁发布，并重新运行只读 verifier。回滚：如需撤回代码改动，按既有部署回滚流程恢复上一版本，但旧 verifier 不能作为完整权限证明；保留逐项人工核对或本版检查脚本。测试撤权仅在 CI 临时库内进行，禁止在生产复现撤权步骤；无需降级数据库或回滚业务数据。
+
+维护记录：2026-10-13 · PostgreSQL 运行角色完整权限校验：记录误放行症状、只读诊断、逐项权限复验、CI 证据位置与无迁移发布/回滚步骤。
+
+### 2026-10-13 初始化连接串编码与凭据保护
+
+症状：含特殊字符的 owner 密码对应连接串曾触发 `invalid interpolation syntax`，或无效 URL 编码导致初始化失败。修复后，合法 URL 编码可正常传入驱动；非法编码、数据库权限或连接错误仅显示异常类别和 SQLSTATE，迁移失败仅显示退出码。不要将旧版完整 traceback、连接串或角色密码粘贴到日志、工单或聊天。
+
+诊断与操作：从新项目 Connect 页复制 Session pooler（5432）连接串，按 PostgreSQL URI 规则编码密码中的保留字符；在仓库根目录运行 `uv run python -m backend.app.scripts.init_database`，通过隐藏提示输入。连接类错误核对项目状态、主机、端口及密码；权限类错误确认使用 owner；不要改用应用运行角色执行 DDL。失败后可按相同入口重跑，已存在角色不会重置密码。
+
+验证：`.venv/bin/python -m pytest -q backend/app/tests/test_init_database_credentials.py backend/app/tests/test_production_deployment.py backend/app/tests/test_migrations.py`（本次 64 passed）。与权限校验修复合并后的完整后端测试为 2700 passed、2 skipped；真实 PostgreSQL 撤权负向验证仍须以新提交 CI artifact 为准。
+
+发布与回滚：无新迁移，head 保持 `0038_assistant_conversations`。先更新初始化入口，再接收真实凭据并运行；随后按 §9.4 核对数据库、私有桶及运行角色，再开启部署。若回滚业务版本，保留安全初始化脚本用于运维，不恢复会输出凭据的旧初始化入口；无需数据库降级或业务数据回滚。
+
+维护记录：2026-10-13 · 初始化连接串编码与凭据保护：新增安全错误诊断、隐藏输入、合成凭据回归与无迁移发布/回滚步骤。

@@ -8,7 +8,9 @@ from backend.app.core.config import settings
 from backend.app.db.models import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# ConfigParser 会把 URL 编码里的 % 当作插值符号；不转义既阻断迁移，
+# 还会在 ValueError 中带出完整连接串。读取配置时 %% 会还原成原来的 %。
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -46,4 +48,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

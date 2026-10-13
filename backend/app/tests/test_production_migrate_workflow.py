@@ -166,3 +166,10 @@ def test_the_runtime_check_covers_every_table_that_needed_a_grant():
     assert not missing, "迁移给这些表授了权，但工作流没验证运行角色能读：%s" % (
         ", ".join(missing)
     )
+
+    from backend.app.services.deployment.postgres_verifier import RUNTIME_ACCESS_TABLES
+
+    missing = sorted(granted - set(RUNTIME_ACCESS_TABLES))
+    assert not missing, "迁移给这些表授了权，但 PostgreSQL verifier 没验证完整 DML 与 RLS：%s" % (
+        ", ".join(missing)
+    )

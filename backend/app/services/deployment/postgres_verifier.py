@@ -55,10 +55,49 @@ AI_TASK_FINGERPRINT_INDEXES = {
     "ix_ai_tasks_one_live_fingerprint": "succeeded",
     "ix_ai_tasks_one_live_upload_fingerprint": "rubric_id IS NULL",
 }
+RUNTIME_ACCESS_TABLES = (
+    "rule_scoring_tasks",
+    "manual_review_tasks",
+    "review_command_receipts",
+    "export_events",
+    "platform_llm_config",
+    "rubric_import_sessions",
+    "rule_decision_ledger",
+    "work_runtime_state",
+    "ai_tasks",
+    "ai_task_items",
+    "assistant_preferences",
+    "assistant_conversations",
+    "assistant_messages",
+    "assistant_checkpoints",
+    "assistant_checkpoint_writes",
+)
 
 
 def stable_ordering_clause():
     return ("created_at", "id")
+
+
+def _verify_runtime_table_access(session, table):
+    access = session.execute(
+        text(
+            "SELECT c.relrowsecurity, "
+            # A comma-separated privilege list means ANY privilege, not ALL.
+            # Use the public table's OID so search_path cannot select another table.
+            "has_table_privilege('pgs_app', c.oid, 'SELECT') AND "
+            "has_table_privilege('pgs_app', c.oid, 'INSERT') AND "
+            "has_table_privilege('pgs_app', c.oid, 'UPDATE') AND "
+            "has_table_privilege('pgs_app', c.oid, 'DELETE'), "
+            "EXISTS (SELECT 1 FROM pg_policies p "
+            "WHERE p.schemaname = 'public' AND p.tablename = :table "
+            "AND p.policyname = 'pgs_app_dml') "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = :table"
+        ),
+        {"table": table},
+    ).one_or_none()
+    if access != (True, True, True):
+        raise RuntimeError("runtime role access/RLS is incomplete for %s" % table)
 
 
 def verify_postgres(session):
@@ -173,36 +212,8 @@ def verify_postgres(session):
         )
     )
     if runtime_role_exists:
-        for table in (
-            "rule_scoring_tasks",
-            "manual_review_tasks",
-            "rule_decision_ledger",
-            "work_runtime_state",
-            "ai_tasks",
-            "ai_task_items",
-            "assistant_preferences",
-            "assistant_conversations",
-            "assistant_messages",
-            "assistant_checkpoints",
-            "assistant_checkpoint_writes",
-        ):
-            access = session.execute(
-                text(
-                    "SELECT c.relrowsecurity, "
-                    "has_table_privilege('pgs_app', :table, "
-                    "'SELECT,INSERT,UPDATE,DELETE'), "
-                    "EXISTS (SELECT 1 FROM pg_policies p "
-                    "WHERE p.schemaname = 'public' AND p.tablename = :table "
-                    "AND p.policyname = 'pgs_app_dml') "
-                    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                    "WHERE n.nspname = 'public' AND c.relname = :table"
-                ),
-                {"table": table},
-            ).one_or_none()
-            if access != (True, True, True):
-                raise RuntimeError(
-                    "runtime role access/RLS is incomplete for %s" % table
-                )
+        for table in RUNTIME_ACCESS_TABLES:
+            _verify_runtime_table_access(session, table)
     ordered_rows = session.execute(
         text(
             "SELECT id, created_at FROM batch_scoring_items "

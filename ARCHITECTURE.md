@@ -1293,3 +1293,18 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 - 后端不变。
 
 维护记录：2026-10-11 · 生产核对问题修复：启动提示、加载状态与空状态分开、无作业批次可从评分进度页重新开始评分；后端与数据不变。
+
+### 2026-10-13 PostgreSQL 运行角色完整权限校验
+
+- `scripts/verify_postgres_ops` → `services/deployment/postgres_verifier.verify_postgres`：若 `pgs_app` 存在，按 `RUNTIME_ACCESS_TABLES` 对每张表同时验证四项 DML、RLS 开关和 `pgs_app_dml` 策略存在；权限查询使用已定位的 `public` 表 OID，不依赖 `search_path`。PostgreSQL 的逗号分隔权限参数表示“任一项满足”，因此必须逐项调用并用 `AND` 合并。
+- 校验清单覆盖现有迁移中授予 `pgs_app` 的 15 张表，补齐 `review_command_receipts`、`export_events`、`platform_llm_config`、`rubric_import_sessions`；迁移授权扫描契约同时约束生产迁移工作流与 verifier 的清单。
+- `init_database.verify` 的全表 `bool_and` 逐项核对原已正确，保持不变。CI 在该脚本初始化的本地空库上，逐表逐项临时撤权，证明完整 verifier 拒绝；每次撤权都以保存点回滚。
+- 核对范围：初始化、生产迁移复验与 CI 门禁；业务调用链、评分语义、权限授予方式和表结构均不变。未新增迁移，head 仍为 `0038_assistant_conversations`；不授予默认 Core 发布权限。
+
+维护记录：2026-10-13 · PostgreSQL 运行角色完整权限校验：修复“任一 DML 即通过”，补齐四张遗漏表，增加迁移清单契约与真实 PostgreSQL 负向门禁；初始化与评分边界不变。
+
+### 2026-10-13 初始化连接串编码与凭据保护
+
+核对 `init_database → Alembic env.py → SQLAlchemy/psycopg` 的 owner 连接链路。Alembic 写入 ConfigParser 前将 `%` 转义为 `%%`，读取后仍使用原始 URL 编码，支持 owner 密码包含特殊字符。初始化入口的数据库异常只报告异常类别和 SQLSTATE；迁移子进程输出由入口捕获，失败只报告退出码，不向终端转发可能含连接串或角色密码的 traceback。连接来源仍为隐藏输入或环境变量，现有五步初始化、授权/RLS 策略、head `0038_assistant_conversations` 与评分边界不变。
+
+维护记录：2026-10-13 · 初始化连接串编码与凭据保护：核对连接串编码、失败输出与凭据边界；不新增迁移。

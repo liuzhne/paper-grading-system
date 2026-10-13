@@ -285,6 +285,10 @@ jobs:
           DATABASE_URL="postgresql+psycopg://pgs_app:${PGS_APP_PASSWORD}@127.0.0.1:5432/pgs_init_check" \
             uv run python -m backend.app.scripts.verify_postgres_ops --exercise-ci-fixture \
             | tee pgs_ops_artifacts/init-runtime-verification.json
+          # 逐表、逐项撤掉 DML 权限，验证门禁拒绝；每次都回滚，不留下权限变化。
+          PGS_TEST_POSTGRES_VERIFIER_URL="$MIGRATION_DATABASE_URL" \
+            uv run pytest -q backend/app/tests/test_postgres_runtime_access.py \
+            | tee pgs_ops_artifacts/init-runtime-privilege-regressions.log
       - name: Reject secret leakage in persisted CI evidence
         run: |
           if grep -R -E 'ci-only-postgres-password|CiRuntimeRolePassword|PGPASSWORD|AUTH_SECRET|OPENAI(_COMPATIBLE)?_API_KEY' pgs_ops_artifacts

@@ -32,8 +32,8 @@ import sys
 ROLE = "pgs_app"
 POLICY = "pgs_app_dml"
 DEFAULT_BUCKET = "paper-grading-private"
-# 只用字母和数字：密码要原样放进连接串，特殊字符得做 URL 编码，而 Alembic 的配置解析
-# 又会把 % 当作插值符号，两头都容易出错。
+# 只用字母和数字：新运行角色的密码可以原样放进连接串，避免手工 URL 编码出错。
+# owner 的既有密码允许特殊字符；其连接串仍须按 PostgreSQL URI 规则编码。
 _PASSWORD = re.compile(r"^[A-Za-z0-9]{24,}$")
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -84,12 +84,22 @@ def ensure_runtime_role(conn, password_source) -> bool:
 def run_migrations(owner_url: str) -> None:
     env = dict(os.environ)
     env["DATABASE_URL"] = "postgresql+psycopg://" + owner_url[len("postgresql://"):]
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        cwd=ROOT,
-        env=env,
-        check=True,
-    )
+    try:
+        # 失败 traceback 可能包含连接串或 SQL 字面量，不向终端转发子进程输出。
+        # 本脚本的步骤输出仍说明正在执行哪一步；详细迁移诊断走已有运维入口。
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=ROOT,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "Alembic 迁移失败（退出码 %s）；请核对 owner 连接串、Session pooler（5432）"
+            "与 DDL 权限后重试。为保护凭据，未输出原始错误。" % exc.returncode
+        ) from None
 
 
 def public_tables(conn) -> list[str]:
@@ -180,7 +190,7 @@ def migration_head() -> str:
     return ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini"))).get_current_head()
 
 
-def main(argv=None) -> int:
+def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bucket", default=DEFAULT_BUCKET, help="私有存储桶名（默认 %(default)s）")
     args = parser.parse_args(argv)
@@ -214,6 +224,25 @@ def main(argv=None) -> int:
         return 1
     print("5/5 核对通过：%d 张表都已授权、开启行级安全并有 %s 策略" % (count, POLICY))
     return 0
+
+
+def main(argv=None) -> int:
+    import psycopg
+
+    try:
+        return _main(argv)
+    except psycopg.Error as exc:
+        # libpq 的解析错误会回显无效的密码片段；SQL 错误也可能含角色密码。
+        # 仅保留固定异常类型和标准 SQLSTATE，不输出原始错误或 traceback。
+        detail = type(exc).__name__
+        if exc.sqlstate and re.fullmatch(r"[0-9A-Z]{5}", exc.sqlstate):
+            detail += "；SQLSTATE " + exc.sqlstate
+        print(
+            "数据库初始化失败（%s）；请核对 owner 连接串、URL 编码、项目状态和权限后重试。"
+            "为保护凭据，未输出原始错误。" % detail,
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":
