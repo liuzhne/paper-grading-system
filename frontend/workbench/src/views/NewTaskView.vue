@@ -15,6 +15,9 @@ const upload = useUploadStore();
 
 const form = reactive({ name: "", department: "", major: "", rubric_id: "", ai_connection_id: "" });
 const rubrics = ref([]);
+// 列表回来之前不能说“没有”：冷启动时接口要十几秒，空列表读起来就是“还没有发布过标准”。
+const rubricsLoading = ref(true);
+const connectionsLoading = ref(true);
 const batchId = ref(null);
 const precheck = ref(null);
 const error = ref(null);
@@ -52,6 +55,8 @@ async function loadRubrics() {
     rubrics.value = (await api.get("/rubrics")) || [];
   } catch (err) {
     if (!(err instanceof StaleContextError)) rubrics.value = [];
+  } finally {
+    rubricsLoading.value = false;
   }
 }
 
@@ -74,6 +79,8 @@ async function loadConnections() {
     form.ai_connection_id = connections.value[0]?.id || "";
   } catch (err) {
     if (!(err instanceof StaleContextError)) connections.value = [];
+  } finally {
+    connectionsLoading.value = false;
   }
 }
 
@@ -268,7 +275,8 @@ onMounted(async () => {
               ? "按通用文档处理：评分页显示文件名与标题，导出不含学号、学院。"
               : "按毕业论文处理：评分页显示学号与姓名，导出沿用原有列。" }}
           </p>
-          <p v-if="!publishable.length" class="faint">当前组织还没有已发布的评分标准。</p>
+          <p v-if="rubricsLoading" class="faint" role="status">正在加载评分标准…</p>
+          <p v-else-if="!publishable.length" class="faint">当前组织还没有已发布的评分标准。</p>
 
           <div v-for="rubric in drafts" :key="rubric.id" class="rubric muted-rubric">
             <span class="rubric-name">{{ rubric.name }}</span>
@@ -293,7 +301,7 @@ onMounted(async () => {
               </option>
             </select>
           </label>
-          <p v-if="connectionRequired && !connections.length" class="notice notice-warn">
+          <p v-if="connectionRequired && !connectionsLoading && !connections.length" class="notice notice-warn">
             你还没有可用的 AI 连接。请先在
             <RouterLink :to="{ name: 'account' }">账户与连接</RouterLink>
             启用一个连接，否则无法开始评分。

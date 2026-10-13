@@ -5,7 +5,7 @@ import { RouterLink, useRoute } from "vue-router";
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { createVisiblePoller } from "@/lib/polling.js";
 import { ACTIVE_JOB_STATUSES, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel, lastHeartbeat } from "@/lib/score-jobs.js";
-import { cancelScoringJob, canRetryJob, retryScoringJob } from "@/lib/scoring-actions.js";
+import { cancelScoringJob, canRetryJob, retryScoringJob, startScoringJob } from "@/lib/scoring-actions.js";
 
 const route = useRoute();
 const batchId = String(route.params.batchId);
@@ -23,6 +23,34 @@ const paperById = computed(() => Object.fromEntries((summary.value?.papers || []
 const canCancel = computed(() => ACTIVE_JOB_STATUSES.has(job.value?.status));
 const canRetry = computed(() => canRetryJob(job.value));
 const complete = computed(() => job.value?.status === "completed");
+/**
+ * 没有任何后台评分记录、但有材料：可以从这里开始评分。
+ * 旧版本的同步评分请求中断后，批次可能停在“评分中”或“部分失败”且没有作业，
+ * 以前这里只报 `batch scoring job not found`，页面上也没有任何地方能重新开始。
+ */
+const canStart = computed(() =>
+  !loading.value && !job.value && batch.value && batch.value.status !== "archived" &&
+  (summary.value?.papers || []).length > 0);
+const noJobNote = computed(() => {
+  const status = batch.value?.status;
+  if (status === "scoring") {
+    return "这个评分任务显示“评分中”，但没有后台评分记录：它来自改为后台评分之前的旧版本，当时的评分请求中断后阶段没有收尾。重新开始评分即可恢复，已有结果会保留。";
+  }
+  if (status === "scored" || status === "scored_with_errors" || status === "reviewed") {
+    return "这个评分任务没有后台评分记录（来自改为后台评分之前的旧版本）。重新开始评分只评还没有结果的材料，已有结果会保留。";
+  }
+  return "尚未开始评分。";
+});
+
+/** “还没有作业”是正常状态，不是错误：只把 404 当成没有，其它错误照常显示。 */
+async function loadLatestJob() {
+  try {
+    return await api.get(`/batches/${batchId}/score-jobs/latest`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
 
 function formatTime(value) {
   if (!value) return "—";
@@ -42,7 +70,7 @@ async function refresh({ quiet = false } = {}) {
     const [batchData, summaryData, jobData] = await Promise.all([
       api.get(`/batches/${batchId}`),
       api.get(`/batches/${batchId}/summary`),
-      api.get(`/batches/${batchId}/score-jobs/latest`),
+      loadLatestJob(),
     ]);
     batch.value = batchData;
     summary.value = summaryData;
@@ -55,15 +83,21 @@ async function refresh({ quiet = false } = {}) {
   }
 }
 
+const FEEDBACK = {
+  cancel: "已请求取消，正在完成已开始的材料。",
+  retry: "失败项已重新排队。",
+  start: "已开始评分，进度会在这里自动更新。",
+};
+
 async function act(action) {
   busy.value = true;
   feedback.value = null;
   try {
     // 与评分助手共用同一个动作（lib/scoring-actions.js）。
-    job.value = action === "cancel"
-      ? await cancelScoringJob(job.value.id)
-      : await retryScoringJob(job.value.id);
-    feedback.value = action === "cancel" ? "已请求取消，正在完成已开始的材料。" : "失败项已重新排队。";
+    if (action === "cancel") job.value = await cancelScoringJob(job.value.id);
+    else if (action === "retry") job.value = await retryScoringJob(job.value.id);
+    else job.value = await startScoringJob(batchId);
+    feedback.value = FEEDBACK[action];
     await refresh({ quiet: true });
   } catch (err) {
     error.value = err instanceof ApiError ? err.detail || err.message : err?.message;
@@ -134,12 +168,16 @@ onBeforeUnmount(() => poller.stop());
         </table>
       </section>
     </template>
-    <p v-else-if="!loading && !error" class="notice">尚未创建后台评分任务。</p>
+    <div v-else-if="!loading && !error" class="notice" data-test="no-job">
+      <p>{{ noJobNote }}</p>
+      <button v-if="canStart" class="btn btn-primary btn-sm start-btn" type="button" :disabled="busy" @click="act('start')">开始评分</button>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .back { display: inline-block; margin-bottom: 18px; font-size: 13px; }
+.start-btn { margin-top: 10px; }
 .run-head { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; }
 .percent { margin-left: 12px; font-size: 20px; }
 .meta { font-size: 12px; }

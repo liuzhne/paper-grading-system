@@ -94,3 +94,29 @@ it("评分标准后显示文档类型；技术方案类型的标准不可选", a
   await radios[1].setValue(true);
   expect(wrapper.get('[data-test="type-note"]').text()).toContain("按毕业论文处理");
 });
+
+it("评分标准与连接还在加载时不说“没有”", async () => {
+  useSessionStore().capabilities = { llm: { platform_model_available: false } };
+  let releaseRubrics;
+  api.get.mockImplementation(path => {
+    if (path === "/rubrics") return new Promise(resolve => { releaseRubrics = () => resolve([]); });
+    if (path === "/ai-connections") return new Promise(() => {});
+    if (path === "/system/capabilities") return Promise.resolve({ upload: { accepted_extensions: [".docx"], max_size_mb: 20 } });
+    return Promise.resolve([]);
+  });
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: "/", component: NewTaskView },
+    { path: "/tasks", name: "tasks", component: { template: "<div />" } },
+    { path: "/account", name: "account", component: { template: "<div />" } },
+  ] });
+  await router.push("/");
+  await router.isReady();
+  const wrapper = mount(NewTaskView, { global: { plugins: [router] } });
+  await flushPromises();
+  expect(wrapper.text()).toContain("正在加载评分标准");
+  expect(wrapper.text()).not.toContain("还没有已发布的评分标准");
+  expect(wrapper.text()).not.toContain("你还没有可用的 AI 连接");
+  releaseRubrics();
+  await flushPromises();
+  expect(wrapper.text()).toContain("还没有已发布的评分标准");
+});

@@ -199,7 +199,7 @@ onMounted(async () => {
               </td>
               <td>
                 <RouterLink
-                  v-if="batch.status === 'scoring' && store.progressFor(batch.id)?.job"
+                  v-if="batch.status === 'scoring'"
                   class="chip chip-ok stage-link"
                   :to="{ name: 'task-run', params: { batchId: batch.id } }"
                   @click.stop
