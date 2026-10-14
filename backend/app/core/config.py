@@ -157,6 +157,9 @@ class Settings(BaseSettings):
     # diagnostics must be explicitly opted into; protected deployments reject
     # the setting altogether.
     LLM_DEBUG_LOG_ENABLED: bool = False
+    # 进程日志级别（core/log_config.py）：DEBUG / INFO / WARNING / ERROR，大小写不限。
+    # 只影响应用自己的日志；模型请求原文仍由 LLM_DEBUG_LOG_ENABLED 单独控制。
+    LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     LLM_DEBUG_LOG_MAX_CHARS: int = 12000
     LLM_OBSERVABILITY_ENABLED: bool = False
     LLM_OBSERVABILITY_EXPORTER: Literal["none", "langfuse"] = "none"
@@ -233,6 +236,11 @@ class Settings(BaseSettings):
     # variables still take precedence, so container/platform deployments keep
     # using their injected configuration rather than any checked-out files.
     model_config = SettingsConfigDict(env_file=env_files_for_settings(), extra="ignore")
+
+    @field_validator("LOG_LEVEL", mode="before")
+    @classmethod
+    def _upper_log_level(cls, value):
+        return str(value or "INFO").strip().upper()
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

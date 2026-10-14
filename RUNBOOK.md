@@ -150,6 +150,7 @@ v2 通用 Profile：
 - 云模型：`openai` 或 `openai_compatible`，仅在已批准数据边界下配置 Key。
 - 真实评估/门禁：`LLM_FALLBACK_TO_MOCK=false`、`LLM_DEBUG_LOG_ENABLED=false`，使用不可变模型身份。
 - 多用户受保护部署：平台共享模型默认关闭；优先使用用户私有 BYOK，并配置独立 `BYOK_MASTER_KEY`。
+- 日志：`LOG_LEVEL`（`DEBUG` / `INFO` / `WARNING` / `ERROR`，默认 `INFO`）控制 app 与 worker 的应用日志。它与 `LLM_DEBUG_LOG_ENABLED` 无关：后者记录模型请求原文，生产禁止开启。
 
 自检：
 
@@ -401,6 +402,24 @@ docker compose -p pgs -f compose.yml ps
 docker compose -p pgs -f compose.yml logs --tail 200 worker
 ```
 
+看日志（2026-10-14 起 app 与 worker 都按“时间 级别 来源 消息”输出，级别由 `LOG_LEVEL` 控制，默认 `INFO`）：
+
+```bash
+ssh -i ~/.ssh/pgs_deploy -o UserKnownHostsFile=~/.ssh/pgs_known_hosts deploy@3.1.190.143
+cd /opt/pgs
+docker compose -p pgs -f compose.yml logs -t --tail 200 app          # -f 持续跟踪；把 app 换成 worker、caddy
+docker compose -p pgs -f compose.yml logs app | grep -E " (WARNING|ERROR) "
+docker compose -p pgs -f compose.yml logs app | grep ai_connection_test_failed   # 测试连接为什么失败
+```
+
+临时调高级别排查（只影响这台实例，下次部署恢复 `INFO`）：
+
+```bash
+LOG_LEVEL=DEBUG docker compose -p pgs -f compose.yml up -d --force-recreate app worker
+```
+
+调到 `DEBUG` 也不会记录模型请求原文、API Key 或论文正文：原文日志由 `LLM_DEBUG_LOG_ENABLED` 单独控制，受保护部署禁止开启；`httpx`、Supabase 客户端等第三方库固定只记 `WARNING` 以上（它们在低级别会记请求地址与存储对象路径）。
+
 改密钥：改 GitHub `production` 环境里的值，再部署一次（重跑最近一次 main 的部署任务即可），实例上的 `.env` 由部署任务重新生成。不要在实例上手改 `.env`，下一次部署会覆盖。
 
 每月挑低峰手动重启一次让内核更新生效（`sudo reboot`，服务约 1 分钟后自动恢复）；系统安全更新由 `unattended-upgrades` 自动安装、不自动重启。
@@ -414,6 +433,7 @@ docker compose -p pgs -f compose.yml logs --tail 200 worker
 - **`/api/system/health` 返回 503，`worker` 为 `fail`，但 `docker compose ps` 里 worker 在运行。** 报错指向 worker，真正原因常在数据库：`RUNTIME_DATABASE_URL` 不通（密码、`pgs_app.<项目 ref>` 用户名格式），worker 每次巡检都失败（日志里是 `work_sweep_failed`）。
 - **新库上应用报 `permission denied for table …`，但迁移是成功的。** 报错像代码问题，真正原因是只跑了迁移、没跑 `init_database`：0023 之前那批表没有给 `pgs_app` 授权。在新库上运行 `init_database`（重跑无副作用），它最后会逐表核对。以后新增表仍然要在迁移里授权（0023 的做法），这个脚本只管新环境的初始化。
 - **运行角色复验或应用连库时报 `invalid connection option "pgbouncer"`。** 报错像驱动或连接池问题，真正原因是 `RUNTIME_DATABASE_URL` 是从 Supabase 复制的 Prisma 版连接串，末尾带 `?pgbouncer=true`，psycopg 不认这个参数。去掉它（连接串以 `:6543/postgres` 结尾）后重设密钥。2026-10-14 首次配置时遇到过；部署任务生成 `.env` 时现在会直接拦下。
+- **页面上测试连接只显示“连接测试失败”，看不出原因。** 报错指向连接配置，真正的原因要看 app 日志里的 `ai_connection_test_failed … status=… error_type=…`：Bedrock 的错误类型来自 `x-amzn-errortype` 头。`status=400 error_type=ValidationException` 多半是模型 ID 不对（要和 Bedrock 控制台一字不差，新加坡区域不少模型要用 `apac.` / `global.` 推理配置前缀）；`403 AccessDeniedException` 是 Key 无权限或模型没开通；`404` 是地址或协议不对；`status=- error_type=ConnectTimeout` 是网络或地址不通。2026-10-14 之前 web 进程没有配置日志，这一行根本不会出现。
 - **部署任务在 “Write the runtime environment” 失败，提示缺少变量或不是 6543。** 报错指向脚本，真正原因是 GitHub `production` 环境里少配了密钥，或 `RUNTIME_DATABASE_URL` 用的是 Session pooler（5432）。输出里只有变量名，按名字补齐。
 - **app 反复重启，日志里是 `permission denied` 或 `must be owner`，出现在 `alembic upgrade head` 之后。** 报错像数据库权限问题，真正原因是生产 compose 的 `command` 被删掉了，容器回到了 Dockerfile 的 CMD，在启动时迁移；生产运行角色 `pgs_app` 没有 DDL。迁移只走 `production-migrate.yml`。
 
@@ -886,6 +906,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-14 | 日志级别与测试连接诊断 | 新增 `LOG_LEVEL`（默认 INFO）；app 在启动时、worker 在入口统一配置日志格式；测试连接失败记 `ai_connection_test_failed`（状态码与错误类型）；9.4 增加看日志、临时调高级别的命令与一条排错。 |
 | 2026-10-14 | 首次配置新库连接串 | 新增排错：`RUNTIME_DATABASE_URL` 带 Prisma 的 `?pgbouncer=true` 时 psycopg 拒绝连接；`production_env.py` 生成 `.env` 时直接拦下。 |
 | 2026-10-13 | 全新环境：新 Supabase 项目、初始化脚本、密钥放 GitHub | 9.4 改写：新项目 `grading-system` 用 `init_database` 初始化（运行角色、迁移、全表授权与行级安全、私有桶、逐表核对）；运行时密钥存 GitHub `production` 环境，部署任务生成实例 `.env`；AWS 先用 Free 计划；切流量后删除旧项目；新增三条排错。 |
 | 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增 9.4：实例准备、`.env` 生成、部署与回滚、切流量顺序和四条排错；新增 `GET /api/system/health`、`INLINE_JOB_RUN_ENABLED`、worker `--drain-seconds`；CI 新增 `production-config` 与默认关闭的 `deploy-lightsail-production`，Vercel 部署任务可用 `VERCEL_DEPLOY_ENABLED=false` 关闭。 |
