@@ -29,6 +29,7 @@ from backend.app.api.routes import scoring
 from backend.app.api.routes import system
 from backend.app.api.routes import submissions_v2
 from backend.app.core.config import settings
+from backend.app.core.log_config import configure_logging
 from backend.app.core.contract import API_CONTRACT_HEADER
 from backend.app.core.contract import API_CONTRACT_VERSION
 from backend.app.services.batches.state import BatchArchived
@@ -41,6 +42,8 @@ from backend.app.services.storage.local import ensure_storage_dirs
 
 @asynccontextmanager
 async def lifespan(app):
+    # 在服务启动时配置，而不是导入时：pytest 与离线脚本也会导入本模块。
+    configure_logging(settings.LOG_LEVEL)
     ensure_storage_dirs()
     yield
 

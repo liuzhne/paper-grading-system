@@ -6,10 +6,11 @@
 """
 
 import argparse
-import logging
 import signal
 from threading import Event
 
+from backend.app.core.config import settings
+from backend.app.core.log_config import configure_logging
 from backend.app.db.session import SessionLocal
 from backend.app.services.work_queue.limits import SWEEP_INTERVAL_SECONDS
 from backend.app.services.work_queue.runner import run_worker_loop
@@ -42,7 +43,7 @@ def main(argv=None):
     if args.drain_seconds < 0:
         parser.error("--drain-seconds must not be negative")
 
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(settings.LOG_LEVEL)
     stop = Event()
 
     def request_stop(_signum, _frame):

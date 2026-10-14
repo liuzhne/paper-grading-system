@@ -3,6 +3,8 @@
 import base64
 import hashlib
 import ipaddress
+import logging
+import re
 import secrets
 import socket
 import threading
@@ -28,7 +30,10 @@ from backend.app.services.ai_connection_protocol import PROTOCOLS
 from backend.app.services.ai_connection_protocol import ProtocolEndpointMissing
 from backend.app.services.ai_connection_protocol import normalize_base_url
 from backend.app.services.ai_connection_protocol import split_endpoint_suffix
+from backend.app.services.llm.call_log import _field as _log_field
 
+
+logger = logging.getLogger("paper_grading.ai_connections")
 
 _ALLOWED_OPTION_KEYS = {
     "timeout_seconds",
@@ -515,9 +520,17 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
             response = client.post(endpoint, json=payload, headers=headers)
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
         # 404/405 只说明这个协议的接口不在该地址下，协议识别据此改试另一种协议；
         # 其它状态照常按测试失败处理。两者对调用方都是 ValueError，行为不变。
-        if exc.response.status_code in (404, 405):
+        _log_test_failure(
+            runtime,
+            base_url,
+            status=status,
+            error_type=_provider_error_type(exc.response),
+            level=logging.INFO if status in (404, 405) else logging.WARNING,
+        )
+        if status in (404, 405):
             raise ProtocolEndpointMissing("AI connection test failed") from exc
         if runtime.provider_type == MESSAGES and exc.response.status_code == 400:
             # Claude 的 400 多半是参数组合不被该模型或端点接受（新模型拒收 temperature，
@@ -530,8 +543,49 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
     except httpx.HTTPError as exc:
         # The caller records only a stable code; provider bodies may include
         # customer or key-adjacent diagnostics and must never leave this layer.
+        _log_test_failure(runtime, base_url, status=None, error_type=type(exc).__name__)
         raise ValueError("AI connection test failed") from exc
     return {"provider_type": runtime.provider_type, "model_name": runtime.model_name}
+
+
+_ERROR_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+
+
+def _provider_error_type(response) -> str | None:
+    """厂商给的错误类型名，只取名字、不取正文。
+
+    Bedrock 放在 ``x-amzn-errortype`` 头里（``ValidationException:http://…``）；Anthropic
+    与 OpenAI 兼容接口放在 JSON 的 ``error.type`` / ``error.code``。
+    """
+
+    candidate = (response.headers.get("x-amzn-errortype") or "").split(":", 1)[0].strip()
+    if not candidate:
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            candidate = str(error.get("type") or error.get("code") or "")
+    match = _ERROR_TYPE.fullmatch(candidate or "")
+    return match.group(0) if match else None
+
+
+def _log_test_failure(runtime, base_url, *, status, error_type, level=logging.WARNING):
+    """测试连接失败时记一行：协议、主机、模型、HTTP 状态与错误类型。
+
+    不记 Key、请求体和厂商返回的正文——那里可能带着账号信息或回显的输入。
+    """
+
+    logger.log(
+        level,
+        "ai_connection_test_failed provider_type=%s host=%s model=%s status=%s error_type=%s",
+        _log_field(runtime.provider_type),
+        _log_field(urlsplit(base_url).hostname),
+        _log_field(runtime.model_name),
+        _log_field(status),
+        _log_field(error_type),
+    )
 
 
 _CLAUDE_API_VERSION = "2023-06-01"
