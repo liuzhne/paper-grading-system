@@ -464,3 +464,19 @@ def test_production_env_from_environment_takes_only_the_allowlist(tmp_path, monk
     assert script.main(["--from-environment", "--site-address", "pgs.duckdns.org", "--output", str(output)]) == 1
     assert "BYOK_MASTER_KEY" in capsys.readouterr().err
     assert not output.exists()
+
+
+def test_production_env_rejects_the_prisma_pgbouncer_flag(tmp_path, capsys):
+    # 2026-10-14：从 Supabase 复制了给 Prisma 的事务池连接串，psycopg 报
+    # invalid connection option "pgbouncer"。部署前就要拦下，并且不回显连接串。
+    script = _env_script()
+    output = tmp_path / "pgs.env"
+    prisma = _source(
+        tmp_path,
+        DATABASE_URL="postgresql://pgs_app.ref:%s@pooler.supabase.com:6543/postgres?pgbouncer=true" % _SECRET,
+    )
+
+    assert script.main(["--source", str(prisma), "--site-address", "pgs.duckdns.org", "--output", str(output)]) == 1
+    errors = capsys.readouterr().err
+    assert "pgbouncer=true" in errors and _SECRET not in errors
+    assert not output.exists()

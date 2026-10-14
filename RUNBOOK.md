@@ -413,6 +413,7 @@ docker compose -p pgs -f compose.yml logs --tail 200 worker
 - **冒烟请求报 TLS 错误，Caddy 日志里是 ACME 校验失败。** 报错指向证书，真正原因通常是 DuckDNS 的 A 记录没指向静态 IP，或者防火墙没开 80 端口（Let's Encrypt 的 HTTP 校验走 80）。首次部署签证书要几十秒，冒烟会重试 60 秒。
 - **`/api/system/health` 返回 503，`worker` 为 `fail`，但 `docker compose ps` 里 worker 在运行。** 报错指向 worker，真正原因常在数据库：`RUNTIME_DATABASE_URL` 不通（密码、`pgs_app.<项目 ref>` 用户名格式），worker 每次巡检都失败（日志里是 `work_sweep_failed`）。
 - **新库上应用报 `permission denied for table …`，但迁移是成功的。** 报错像代码问题，真正原因是只跑了迁移、没跑 `init_database`：0023 之前那批表没有给 `pgs_app` 授权。在新库上运行 `init_database`（重跑无副作用），它最后会逐表核对。以后新增表仍然要在迁移里授权（0023 的做法），这个脚本只管新环境的初始化。
+- **运行角色复验或应用连库时报 `invalid connection option "pgbouncer"`。** 报错像驱动或连接池问题，真正原因是 `RUNTIME_DATABASE_URL` 是从 Supabase 复制的 Prisma 版连接串，末尾带 `?pgbouncer=true`，psycopg 不认这个参数。去掉它（连接串以 `:6543/postgres` 结尾）后重设密钥。2026-10-14 首次配置时遇到过；部署任务生成 `.env` 时现在会直接拦下。
 - **部署任务在 “Write the runtime environment” 失败，提示缺少变量或不是 6543。** 报错指向脚本，真正原因是 GitHub `production` 环境里少配了密钥，或 `RUNTIME_DATABASE_URL` 用的是 Session pooler（5432）。输出里只有变量名，按名字补齐。
 - **app 反复重启，日志里是 `permission denied` 或 `must be owner`，出现在 `alembic upgrade head` 之后。** 报错像数据库权限问题，真正原因是生产 compose 的 `command` 被删掉了，容器回到了 Dockerfile 的 CMD，在启动时迁移；生产运行角色 `pgs_app` 没有 DDL。迁移只走 `production-migrate.yml`。
 
@@ -885,6 +886,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-14 | 首次配置新库连接串 | 新增排错：`RUNTIME_DATABASE_URL` 带 Prisma 的 `?pgbouncer=true` 时 psycopg 拒绝连接；`production_env.py` 生成 `.env` 时直接拦下。 |
 | 2026-10-13 | 全新环境：新 Supabase 项目、初始化脚本、密钥放 GitHub | 9.4 改写：新项目 `grading-system` 用 `init_database` 初始化（运行角色、迁移、全表授权与行级安全、私有桶、逐表核对）；运行时密钥存 GitHub `production` 环境，部署任务生成实例 `.env`；AWS 先用 Free 计划；切流量后删除旧项目；新增三条排错。 |
 | 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增 9.4：实例准备、`.env` 生成、部署与回滚、切流量顺序和四条排错；新增 `GET /api/system/health`、`INLINE_JOB_RUN_ENABLED`、worker `--drain-seconds`；CI 新增 `production-config` 与默认关闭的 `deploy-lightsail-production`，Vercel 部署任务可用 `VERCEL_DEPLOY_ENABLED=false` 关闭。 |
 | 2026-10-10 | 发布 0035–0037 | 先迁移后合并；运行角色复验清单补 `work_runtime_state`、`ai_tasks`、`ai_task_items`，守护测试改为识别常量写法的授权。 |

@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 
 
@@ -75,6 +76,10 @@ def problems(selected: dict) -> list[str]:
         else:
             if port != 6543:
                 found.append("DATABASE_URL 不是 Supabase 事务池（端口 6543）")
+            # Supabase 给 Prisma 的连接串带 ?pgbouncer=true；psycopg 不认这个参数，
+            # 应用会在第一次连库时报 invalid connection option "pgbouncer"。
+            if "pgbouncer" in parse_qs(urlsplit(url).query):
+                found.append("DATABASE_URL 带有 pgbouncer=true（Prisma 专用参数），去掉它")
     return found
 
 
