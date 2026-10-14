@@ -1,0 +1,96 @@
+# 生产（AWS Lightsail 单机）：caddy + app + worker。方案见 docs/部署平台迁移到AWS方案.md。
+#
+# 数据库与文件存储在 Supabase，这里没有数据库服务。镜像也不在这里构建：CI 构建后
+# 经 SSH 载入实例，deploy.sh 把要上线的版本打成 current 标签。
+#
+# 密钥在同目录的 .env（权限 0600，不进仓库）：每次部署由 CI 用 GitHub production 环境的
+# 密钥生成（scripts/production_env.py --from-environment）。
+# 下面 environment 里的是不含密钥的生产配置，随仓库评审；同名变量以这里为准。
+
+x-app-environment: &app-environment
+  STORAGE_PROVIDER: supabase
+  # L0 缓存（llm_cache.sqlite）放在卷里：发版换容器不丢，app 与 worker 共用。
+  STORAGE_ROOT: /app/storage
+  AUTH_ENABLED: "true"
+  # 评分由 worker 逐份领取；请求里同步跑整批会和 worker 抢条目。
+  INLINE_JOB_RUN_ENABLED: "false"
+  LLM_DEBUG_LOG_ENABLED: "false"
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 20m
+    max-file: "5"
+
+services:
+  app:
+    image: paper-grading-system:current
+    env_file: .env
+    environment: *app-environment
+    # 不用 Dockerfile 的 CMD：它先跑 alembic upgrade head，而生产运行角色 pgs_app
+    # 没有 DDL。迁移走手动审批的 production-migrate.yml。
+    # 端口不对外，只有 Caddy 连得到，所以可以信任转发头。
+    command:
+      - uvicorn
+      - backend.app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    volumes:
+      - app_storage:/app/storage
+    healthcheck:
+      # 用不查库的接口：数据库抖动时不该把 web 判成不健康。
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/auth/status', timeout=5).read()\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    # 让进行中的请求做完；新请求由 Caddy 在空档期间重试。
+    stop_grace_period: 60s
+    restart: unless-stopped
+    logging: *logging
+
+  worker:
+    image: paper-grading-system:current
+    env_file: .env
+    environment: *app-environment
+    # 收到停止信号后不再领取，最多等 100 秒让在执行的条目做完；宽限期比它多 10 秒。
+    command: ["python", "-m", "backend.app.scripts.run_batch_worker", "--drain-seconds", "100"]
+    volumes:
+      - app_storage:/app/storage
+    stop_grace_period: 110s
+    restart: unless-stopped
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    # 只给站点地址，拿不到应用密钥。
+    environment:
+      PGS_SITE_ADDRESS: ${PGS_SITE_ADDRESS:?Set PGS_SITE_ADDRESS in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # 挂目录而不是单个文件：部署时文件被替换成新的 inode，单文件挂载看不到新内容。
+      - ./caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  app_storage:
+  caddy_data:
+  caddy_config:

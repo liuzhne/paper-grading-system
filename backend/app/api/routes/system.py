@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from backend.app.api.deps import CurrentPrincipal
@@ -14,6 +15,7 @@ from backend.app.db.session import get_db
 from backend.app.schemas.system import CapabilitiesRead
 from backend.app.schemas.system import PlatformLLMConfigWrite
 from backend.app.services.auth import auth_active
+from backend.app.services.deployment.readiness import build_health
 from backend.app.services.deployment.readiness import build_ops_readiness
 from backend.app.services.deployment.readiness import build_organization_readiness
 from backend.app.services.llm.diagnostics import check_connectivity
@@ -29,6 +31,21 @@ from backend.app.services.offline import offline_ready
 from backend.app.services.llm_observability import observability_status
 
 router = APIRouter(prefix="/system", tags=["system"])
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)):
+    """外部可用性监测用：不需要登录，只返回检查项与状态，不带任何业务数据。
+
+    200 表示 web、数据库与 worker 都在正常工作；任一项失败返回 503，监测据此报警。
+    """
+
+    healthy, payload = build_health(db)
+    return JSONResponse(
+        payload,
+        status_code=200 if healthy else 503,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/ops-readiness")

@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     DIRECT_UPLOAD_MAX_SIZE_MB: int = 50
     DIRECT_UPLOAD_TUS_THRESHOLD_MB: int = 6
     PAPER_PARSE_LEASE_SECONDS: int = 600
+    # 是否允许 `POST /batch-scoring-jobs/{id}/run` 在请求里同步跑完整个批任务。
+    # 本地调试用；生产由 worker 逐份领取，必须设为 false——否则一个请求就会把整批
+    # 评分跑在 web 进程里，与 worker 抢同一批条目。
+    INLINE_JOB_RUN_ENABLED: bool = True
     # 默认入口是否切到 v2 工作台（前端 v2 计划 §8.3）。切换是显式动作：
     # 部署了新页不等于自动生效，出问题时改这一个开关即可退回旧页，不必重发版。
     OFFLINE_MODE: bool = False  # True=硬禁止一切外呼（网络型导出报错提示改用 Excel）；CLI 可经 --offline 开启

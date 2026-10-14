@@ -182,8 +182,9 @@ sequenceDiagram
 - 本地 CLI：`pgs` 直接调用服务层，默认独立使用 `~/.paper-grading/cli.db` 与 `~/.paper-grading/storage`，不需要 Web 服务。
 - 内网 Compose：Caddy HTTPS -> FastAPI app -> PostgreSQL 16，Postgres、应用 storage、备份和 Caddy CA 使用独立 volume；app 启动先 `alembic upgrade head`。
 - Vercel 生产：`public/` 由构建脚本生成指纹化静态资源；Python API 使用 Supabase/Postgres 连接。Vercel Git 直部署关闭，生产只能由 GitHub Actions 门禁后执行 prebuilt deploy。
+- Lightsail 生产（迁移中，`docs/部署平台迁移到AWS方案.md`）：一台新加坡实例跑 `deploy/production/compose.yml`——Caddy（Let's Encrypt、压缩、安全头与缓存头）→ app（uvicorn 单进程）；worker 循环领取与巡检，与内网相同，不用 Vercel 队列。数据库与文件存储是新建的 Supabase 项目（6543 事务池），由 `backend/app/scripts/init_database.py` 初始化（运行角色、现有迁移、全表授权与行级安全、私有桶）；旧项目数据不迁移。app 与 worker 共用卷 `/app/storage` 存 L0 缓存。生产 compose 覆盖 Dockerfile 的 CMD，启动时不迁移。镜像由 GitHub Actions 构建后经 SSH 载入，运行时密钥存 GitHub `production` 环境、部署时生成实例 `.env`，`deploy.sh` 切换 `current` 标签。
 
-FastAPI 中数据路由受 `enforce_auth` 保护；auth 和公开集成自检在登录前可达，`ops-readiness` 单独要求鉴权。开启 `AUTH_ENABLED` 后，弱密码、弱 `AUTH_SECRET` 或原文 LLM debug 会使应用 fail closed。
+FastAPI 中数据路由受 `enforce_auth` 保护；auth、公开集成自检和健康检查 `/api/system/health`（只返回检查项与状态）在登录前可达，`ops-readiness` 单独要求鉴权。开启 `AUTH_ENABLED` 后，弱密码、弱 `AUTH_SECRET` 或原文 LLM debug 会使应用 fail closed。
 
 ## 7. 架构不变量与变更检查
 
@@ -579,6 +580,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-13 | 部署迁移改为全新环境 | 生产库换成新建的 Supabase 项目，由初始化脚本建库；运行时密钥的来源改为 GitHub `production` 环境；执行模型与持久化边界不变，无迁移。 |
+| 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增生产拓扑（Caddy + app + worker 单机，数据库与存储不变）；执行模型不变，生产的叫醒层改为 worker 循环；新增公开健康检查；无迁移。 |
 | 2026-10-10 | 发布 0035–0037 | 无架构变化；生产迁移工作流的运行角色复验覆盖 0035/0036 新表。 |
 | 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 四类 AI 操作全部改为任务；三个同步接口 410，估算拆为独立接口；0037 让导入前的结构识别任务不挂评分标准；新增 `on_task_success` 钩子与 `ai_tasks/provider_errors`。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 完成原子编辑、完整来源复制、AI 追加、锁内内容摘要复核及结构阻断展示；本地 1911 项后端与 139 项浏览器回归通过，后续总分补充修复的 10 项专项测试通过。主线 95d189f 经完整 CI 部署；数据库与默认 legacy 不变，线上资源一致、健康 200、未登录审核接口 401，待登录后业务验收。 |
@@ -1290,3 +1293,18 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 - 后端不变。
 
 维护记录：2026-10-11 · 生产核对问题修复：启动提示、加载状态与空状态分开、无作业批次可从评分进度页重新开始评分；后端与数据不变。
+
+### 2026-10-13 PostgreSQL 运行角色完整权限校验
+
+- `scripts/verify_postgres_ops` → `services/deployment/postgres_verifier.verify_postgres`：若 `pgs_app` 存在，按 `RUNTIME_ACCESS_TABLES` 对每张表同时验证四项 DML、RLS 开关和 `pgs_app_dml` 策略存在；权限查询使用已定位的 `public` 表 OID，不依赖 `search_path`。PostgreSQL 的逗号分隔权限参数表示“任一项满足”，因此必须逐项调用并用 `AND` 合并。
+- 校验清单覆盖现有迁移中授予 `pgs_app` 的 15 张表，补齐 `review_command_receipts`、`export_events`、`platform_llm_config`、`rubric_import_sessions`；迁移授权扫描契约同时约束生产迁移工作流与 verifier 的清单。
+- `init_database.verify` 的全表 `bool_and` 逐项核对原已正确，保持不变。CI 在该脚本初始化的本地空库上，逐表逐项临时撤权，证明完整 verifier 拒绝；每次撤权都以保存点回滚。
+- 核对范围：初始化、生产迁移复验与 CI 门禁；业务调用链、评分语义、权限授予方式和表结构均不变。未新增迁移，head 仍为 `0038_assistant_conversations`；不授予默认 Core 发布权限。
+
+维护记录：2026-10-13 · PostgreSQL 运行角色完整权限校验：修复“任一 DML 即通过”，补齐四张遗漏表，增加迁移清单契约与真实 PostgreSQL 负向门禁；初始化与评分边界不变。
+
+### 2026-10-13 初始化连接串编码与凭据保护
+
+核对 `init_database → Alembic env.py → SQLAlchemy/psycopg` 的 owner 连接链路。Alembic 写入 ConfigParser 前将 `%` 转义为 `%%`，读取后仍使用原始 URL 编码，支持 owner 密码包含特殊字符。初始化入口的数据库异常只报告异常类别和 SQLSTATE；迁移子进程输出由入口捕获，失败只报告退出码，不向终端转发可能含连接串或角色密码的 traceback。连接来源仍为隐藏输入或环境变量，现有五步初始化、授权/RLS 策略、head `0038_assistant_conversations` 与评分边界不变。
+
+维护记录：2026-10-13 · 初始化连接串编码与凭据保护：核对连接串编码、失败输出与凭据边界；不新增迁移。

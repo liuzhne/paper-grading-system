@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+import logging
 from pathlib import Path
 import shutil
 
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app.core.config import deployment_security_issues
 from backend.app.core.config import settings
@@ -20,6 +22,9 @@ from backend.app.db.models import WorkRuntimeState
 from backend.app.db.models import utcnow
 from backend.app.services.work_queue.limits import SWEEP_INTERVAL_SECONDS
 from backend.app.services.work_queue.state import LAST_SWEEP
+
+
+logger = logging.getLogger("ops-readiness")
 
 
 def _thresholds():
@@ -108,6 +113,34 @@ def _sweep_signal(db, now, *, active):
         "last_swept_at": None if last is None else last.isoformat(),
         "stale_after_seconds": limit_seconds,
     }
+
+
+def build_health(db, *, now=None):
+    """公开的健康检查（外部可用性监测用）：只回答“能不能正常干活”，不带业务数据。
+
+    worker 不论有没有活，每个巡检周期都巡检一次并记下时间，所以超过两个周期没有
+    记录就说明 worker 没在跑——空闲时也判失败，免得等有人提交任务才发现。运维页的
+    ``_sweep_signal`` 没活时不判失败，因为它也服务没有 worker 的部署。
+    """
+
+    now = now or utcnow()
+    try:
+        db.execute(text("SELECT 1"))
+        last = db.scalar(
+            select(WorkRuntimeState.value_at).where(WorkRuntimeState.name == LAST_SWEEP)
+        )
+    except SQLAlchemyError:
+        logger.warning("health_check_failed database=fail")
+        try:
+            db.rollback()
+        except SQLAlchemyError:
+            pass
+        return False, {"status": "fail", "checks": {"database": "fail", "worker": "unknown"}}
+    fresh = last is not None and last >= now - timedelta(seconds=2 * SWEEP_INTERVAL_SECONDS)
+    if not fresh:
+        logger.warning("health_check_failed worker=fail last_swept_at=%s", last)
+    checks = {"database": "pass", "worker": "pass" if fresh else "fail"}
+    return fresh, {"status": "pass" if fresh else "fail", "checks": checks}
 
 
 def _batch_signal(db, organization_id=None):
@@ -232,4 +265,4 @@ def build_organization_readiness(db, organization_id):
     }
 
 
-__all__ = ["build_ops_readiness", "build_organization_readiness"]
+__all__ = ["build_health", "build_ops_readiness", "build_organization_readiness"]

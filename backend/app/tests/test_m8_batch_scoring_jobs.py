@@ -707,6 +707,31 @@ def test_serverless_run_endpoint_refuses_synchronous_execution(client, monkeypat
     assert "后台执行器" in response.json()["detail"]
 
 
+def test_worker_deployment_refuses_synchronous_execution_without_vercel(client, monkeypatch):
+    # Lightsail 生产没有 VERCEL 变量：靠显式配置拒绝，否则整批评分会跑在 web 进程里。
+    from backend.app.core.config import settings
+
+    with client.session_factory() as session:
+        batch_id, _rubric_id, _paper_ids = _seed_batch(
+            session, count=1, name="worker deployment guard"
+        )
+    created = client.post(
+        f"/api/batches/{batch_id}/score-jobs",
+        json={"max_workers": 1},
+    )
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.setattr(settings, "INLINE_JOB_RUN_ENABLED", False)
+
+    response = client.post(
+        f"/api/batch-scoring-jobs/{created.json()['id']}/run"
+    )
+
+    assert response.status_code == 409
+    assert "后台执行器" in response.json()["detail"]
+    job = client.get(f"/api/batch-scoring-jobs/{created.json()['id']}").json()
+    assert job["status"] == "queued"
+
+
 def test_observation_policy_fails_closed_without_complete_comparison_identity():
     jobs = _jobs_module()
     numeric_policy = _policy()

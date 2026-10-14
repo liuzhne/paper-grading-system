@@ -1,10 +1,12 @@
 # 部署平台迁移方案：从 Vercel 迁到 AWS
 
-状态：**已确认**（2026-10-13，第二版）。第 10 节的问题已全部答复或按建议执行。
+状态：**已确认**（2026-10-13，第三版：全新环境）。第 10 节的问题已全部答复或按建议执行。
 
 背景：2026-10-12 讨论过换平台，结论是用常驻进程、不用 Lambda / Cloud Functions，服务必须放在新加坡。2026-10-13 维护者确认：使用者面向全球，平台选 AWS，**可接受的预算是每季度 120 美元（约 40 美元/月）**。
 
 第一版方案是 ECS Fargate + CloudFront，约 120–140 美元/月，超出预算三倍以上。第二版改为**一台 Lightsail 实例跑 docker compose**，约 10–12 美元/月。第一版放弃的理由见第 9 节。
+
+第三版（同日）：维护者已联系用户，**生产数据不再保留**，改为全新环境——新建 Supabase 项目 `grading-system`（`mfkmbwkuiimhaytkazvk`，新加坡），用初始化脚本建库（4.13），所有密钥重新生成并存进 GitHub `production` 环境（4.8）；不迁移数据，也不再新旧并行。旧项目在切流量后由维护者删除。
 
 ---
 
@@ -19,7 +21,7 @@
 
 不动的：
 
-- 数据库与文件存储仍是 Supabase（`ap-southeast-1` 新加坡，Free 套餐），连接串不变。
+- 数据库与文件存储仍用 Supabase（新加坡，Free 套餐），但换成新建的项目，旧数据不迁移（第三版）。
 - 模型仍走 Bedrock，连接配置不变。
 - 生产迁移仍是手动触发、需要审批的 `production-migrate.yml`。
 - 镜像沿用现有 `Dockerfile`，前端沿用已提交的 `public/`。
@@ -44,7 +46,7 @@
 | `Dockerfile` 的 `CMD` | 启动先 `alembic upgrade head` | 生产运行角色 `pgs_app` 没有 DDL；生产 compose 覆盖启动命令，启动时不迁移（4.6） |
 | `ci.yml` 的 `deploy-vercel-production` | 推到 main 后部署 Vercel | 新增 `deploy-production`，通过 SSH 部署到实例（4.7）；切换后删掉 Vercel 任务 |
 | 公开入口 `paper-grading-system-kohl.vercel.app` | 用户访问地址 | 改为免费子域名；旧地址 308 跳转（4.10） |
-| Vercel Production 环境变量（Sensitive） | 运行配置与密钥 | 实例上一个权限 `0600` 的 `.env` 文件（4.8） |
+| Vercel Production 环境变量（Sensitive） | 运行配置与密钥 | 全部重新生成，存在 GitHub `production` 环境；部署任务据此生成实例上权限 `0600` 的 `.env`（4.8） |
 
 ## 3. 目标架构
 
@@ -67,7 +69,7 @@ Lightsail 实例（ap-southeast-1，静态 IP）
 |---|---|---|
 | 实例 | Lightsail Linux，2 GB 内存 / 2 vCPU / 60 GB SSD，Ubuntu 24.04 LTS，新加坡 | 套餐内含公网 IPv4 和流量额度；静态 IP 绑定实例时免费 |
 | 内存 | web 1 个进程、worker 1 个进程，另开 2 GB swap 兜底 | 本机实测（2026-10-13，macOS）：加载全部模块后单进程常驻约 160 MB。加上 Caddy、Docker、系统和解析大文件时的峰值，预计 1–1.2 GB |
-| 容器 | 新增 `deploy/production/compose.yml`：`caddy`、`app`、`worker` 三个服务，不含数据库 | 与内网 compose 结构相同，只是数据库与存储换成 Supabase |
+| 容器 | 新增 `deploy/production/compose.yml`：`caddy`、`app`、`worker` 三个服务，不含数据库 | 与内网 compose 结构相同，只是数据库与存储换成 Supabase。app 与 worker 共用卷 `/app/storage`，放 L0 缓存（`llm_cache.sqlite`），发版换容器不丢 |
 | 防火墙 | Lightsail 防火墙只开 22、80、443；SSH 只允许密钥登录 | |
 | 日志 | Docker 日志按大小轮转（单文件 20 MB，保留 5 个），通过 SSH 查看 | 不花钱；代价是没有集中检索 |
 | 告警 | 免费的外部可用性监测（如 UptimeRobot）每 5 分钟请求 `/api/system/health`，失败发邮件；Lightsail 实例告警（CPU、状态检查）；AWS Budgets 月度预算告警 | 见 4.9 |
@@ -78,11 +80,11 @@ Lightsail 实例（ap-southeast-1，静态 IP）
 
 执行模型不用改。统一执行模型（0035）之后，Vercel 与 worker 共用 `claim_next_item`，差别只在谁来叫醒。`wake_enabled()` 为假时，所有叫醒都是空操作；巡检由 `run_worker_loop` 的主线程每 120 秒做一次。
 
-切换期 Vercel 与实例两边同时领取是安全的：领取用 `SKIP LOCKED`，每个来源的名额、心跳租约、连续无进展计数都记在数据库里。唯一的影响是全局并发暂时相加（8 + 8）；每个连接自己的“同时请求数”仍然有效。所以可以先让实例上的 worker 上线干活，再切流量，不需要停机。
+第二版曾计划新旧两边共用一个库、同时领取，再切流量。第三版换了新库，两边不共用数据，也就不并行：新环境上线验证后直接切流量。（同一个库上多处同时领取仍然是安全的——领取用 `SKIP LOCKED`，名额、租约、无进展计数都在数据库里——这在单机上多开 worker 时仍然成立。）
 
 ### 4.2 发版时服务怎么停
 
-**worker。** 现在收到 SIGTERM 后主循环退出；领取线程是守护线程，进程直接结束。正在评的条目要等 120 秒租约过期，再由巡检重置续评。那次执行如果没写入新检查点，就记一次“无进展”，连续 3 次标为失败。每发一次版，正在评的条目就可能被记一次无进展。
+**worker。** 现在收到 SIGTERM 后主循环退出，每个领取线程最多再等一个轮询周期多一点（约 4 秒），进程就结束。正在评的条目要等 120 秒租约过期，再由巡检重置续评。那次执行如果没写入新检查点，就记一次“无进展”，连续 3 次标为失败。每发一次版，正在评的条目就可能被记一次无进展。
 
 改成：
 
@@ -100,7 +102,7 @@ Caddy 反向代理默认不限制响应时长，web 请求不再有 Vercel 的 3
 
 ### 4.4 安全头、缓存头、压缩
 
-新增生产用的 `deploy/production/Caddyfile`：
+新增生产用的 `deploy/production/caddy/Caddyfile`（compose 挂整个目录：部署时文件被替换成新的 inode，单文件挂载看不到新内容）：
 
 - 证书：Let's Encrypt 自动签发与续期（内网版用的是 `tls internal`）；
 - 安全头：照抄 `vercel.json` 的 5 个，HSTS 带 `includeSubDomains`；
@@ -112,7 +114,7 @@ Caddy 反向代理默认不限制响应时长，web 请求不再有 Vercel 的 3
 
 ### 4.5 数据库连接
 
-保持现在的连接串：Supabase 事务池（端口 6543）+ `NullPool`。实例与 Supabase 在同一区域，每次建连只要几毫秒。Supabase 直连地址只有 IPv6，所以不改用直连。
+新项目同样走 Supabase 事务池（端口 6543）+ `NullPool`，用户是 `pgs_app.<项目 ref>`。实例与 Supabase 在同一区域，每次建连只要几毫秒。Supabase 直连地址只有 IPv6，所以不用直连。部署时校验端口必须是 6543。
 
 ### 4.6 启动命令与迁移顺序
 
@@ -130,26 +132,29 @@ Caddy 反向代理默认不限制响应时长，web 请求不再有 Vercel 的 3
 1. `deploy-production` 任务等现有门禁（`docker-compose-smoke`、`frontend-workbench`）通过，并经 `production` 环境审批；
 2. 在 GitHub 上构建镜像，标签用提交 SHA；
 3. `docker save | gzip` 后经 SSH 传到实例，`docker load`；
-4. 同步 `deploy/production/` 下的 compose 文件与 Caddyfile；
+4. 同步 `deploy/production/` 下的 compose 文件、Caddyfile 与 `deploy.sh`，并用 GitHub 上的密钥生成实例的 `.env`（4.8）；
 5. 把这个镜像另打一个 `current` 标签，compose 只认 `current`；先重建 app，等它健康后再重建 worker（worker 要等在执行的条目做完），最后让 Caddy 热加载配置；镜像只保留最近 3 个；
 6. 冒烟：请求 `https://<域名>/api/system/health`，失败则任务失败。
 
 回滚：在实例上运行 `deploy/production/deploy.sh <上一个 SHA>`，把 `current` 指回旧镜像再重启，不需要重新构建。`deploy.sh --list` 列出实例上还留着的版本。
 
-GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例地址、实例的 SSH 主机指纹（防止中间人）。
+GitHub `production` 环境新增 3 个部署密钥：`PRODUCTION_SSH_KEY`（部署用的 SSH 私钥）、`PRODUCTION_SSH_HOST`（实例地址）、`PRODUCTION_SSH_KNOWN_HOSTS`（核对过的主机指纹，防止中间人）；运行时密钥见 4.8。仓库变量（必须是仓库级：任务的 `if` 读不到环境级变量）：`PRODUCTION_SITE_URL`（冒烟地址）、`LIGHTSAIL_DEPLOY_ENABLED`（设为 `true` 才部署）、`VERCEL_DEPLOY_ENABLED`（切流量前设为 `false`，否则下一次合并会把整个应用重新部署回 Vercel、盖掉跳转）。
 
 ### 4.8 密钥
 
-- 实例上的 `/opt/pgs/.env`，属主是部署用户，权限 `0600`。
-- 由维护者在本机运行一个脚本生成并上传：脚本读 `.env.local`，只取名单里的变量，不打印任何值。Claude 不读取、不经手任何密钥值。
-- 变量名与 Vercel 上一致，应用代码不用改。
+- 全新环境，所有密钥重新生成，不需要找回 Vercel 上的旧值（Vercel 的 Sensitive 变量本来也读不回来）。
+- **生产密钥只存 GitHub `production` 环境**：`RUNTIME_DATABASE_URL`、`BYOK_MASTER_KEY`、`AUTH_SECRET`、`AUTH_PASSWORD`、`SUPABASE_SECRET_KEY`；非密钥的 `SUPABASE_URL`、`AUTH_USERNAME`、`PRODUCTION_SITE_URL` 是仓库变量。
+- 部署任务每次用它们生成实例上的 `/opt/pgs/.env`（`scripts/production_env.py --from-environment`，只取名单里的变量，只打印变量名），经 SSH 标准输入写入，权限 `0600`。改密钥 = 改 GitHub 上的值再部署一次；不在实例上手改。
+- 值由维护者在 GitHub 网页或管道里填写（如 `openssl rand -hex 32 | gh secret set …`），Claude 不读取、不经手任何密钥值。
+- `AUTH_PASSWORD` 在新库上是**首个平台管理员的登录密码**：第一次用 `AUTH_USERNAME` 登录时用它建账号。
+- 手工部署时，同一个脚本也能从一份本机变量文件生成 `.env`（`--source`）。
 
 ### 4.9 健康检查与告警
 
 新增 `GET /api/system/health`，不需要登录，返回 200 或 503，响应里只有检查项名称与状态，没有任何业务数据：
 
 - 数据库能否连通；
-- worker 是否在巡检：有排队或执行中的任务、并且超过两个巡检周期（240 秒）没有巡检记录时，判为不健康。现有运维页的巡检信号用的就是这条规则，这里复用同一个判断。
+- worker 是否在巡检：超过两个巡检周期（240 秒）没有巡检记录，就判为不健康。worker 不论有没有活都每个周期巡检一次，所以**空闲时也判失败**，免得等有人提交任务才发现 worker 挂了。现有运维页的巡检信号没活时不判失败，因为它还服务没有 worker 的部署，所以两者不合并（实施时由“复用运维页的判断”改为此规则）。
 
 外部监测请求这个地址，所以“web 挂了”“数据库连不上”“worker 卡住了”三种情况都会发邮件。Lightsail 实例告警管机器层面（CPU 持续过高、状态检查失败）。费用告警见 4.12。
 
@@ -158,7 +163,7 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 - 用免费子域名（Q2，2026-10-13 维护者决定）：DuckDNS 的 `<名字>.duckdns.org`，A 记录指向静态 IP，Caddy 按这个名字向 Let's Encrypt 签证书。静态 IP 不变，所以只设一次，不需要动态更新。
 - 可以同时申请 eu.org 的免费域名（人工审批，可能要几周）。**S3 切流量之前**批下来就改用它：用户只认 S3 时公布的地址，此前换名字没有代价；S3 之后再换，就要把跳转、重新登录再来一遍。
 - 风险：地址归 DuckDNS 管，它的 DNS 出故障或改规则，网站就打不开；部分学校与企业网络会拦截动态域名。外部可用性监测（4.9）能发现前者；后者要靠用户反馈，遇到时再考虑换付费域名。
-- 切换后，旧地址 `paper-grading-system-kohl.vercel.app` 改成**只有跳转规则**的 Vercel 部署：所有路径 308 跳到新域名，保留路径和查询参数。已发出的邀请链接（7 天有效）与重置链接（1 小时有效）照样能用，满足 CLAUDE.md 里“这三条不能只剩 404”的要求。
+- 切换后，旧地址 `paper-grading-system-kohl.vercel.app` 改成**只有跳转规则**的 Vercel 部署：所有路径 308 跳到新域名，保留路径和查询参数，`/login`、`/register`、`/reset-password` 不会变成 404。旧库不迁移，所以旧邀请与重置链接里的令牌在新库里无效，跳转只为老书签还能打开。
 - 登录 Cookie 绑定域名，切换后每个用户要重新登录一次；切换时还开着旧页面的用户要刷新一次。
 
 ### 4.11 服务器维护
@@ -166,7 +171,7 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 单台机器要自己维护，这是省钱的代价。尽量做成脚本：
 
 - `deploy/production/bootstrap.sh`：装 Docker、建部署用户、开 2 GB swap、设置 Docker 日志轮转、开启 `unattended-upgrades`（只装安全更新，不自动重启）。新建或重建实例时运行一次。
-- 实例上没有需要备份的数据：数据库与文件都在 Supabase，密钥以本机 `.env.local` 为准，Caddy 证书可以重新签发。实例坏了就新建一台，跑 `bootstrap.sh` 再部署一次。
+- 实例上没有需要备份的数据：数据库与文件都在 Supabase，密钥在 GitHub `production` 环境里，Caddy 证书可以重新签发。实例坏了就新建一台，跑 `bootstrap.sh` 再部署一次。
 - 每月挑低峰手动重启一次，让内核更新生效。RUNBOOK 写步骤。
 
 ### 4.12 AWS 账号
@@ -177,11 +182,25 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 - 升级为付费计划后，没用完的额度在**开户 12 个月内**仍可用于符合条件的服务；额度用完或过期后按标准价付费。
 - 这条现在就影响生产：Bedrock 的模型费用也在扣这份额度。额度一旦用完，账号立即到期，**不论是否已经迁移，评分都会停**。
 
-所以：
+维护者决定（2026-10-13）：**先用 Free 计划，6 个月后再定**。对应的做法：
 
-1. S0 就升级为付费计划，不等到上线；
-2. 同时在 AWS Budgets 设两条告警：账号总额每月 40 美元，Bedrock 每月 28 美元（预算 40 减服务器约 12）；
+1. 在 Billing 控制台看清剩余额度与 Free 计划到期日，到期前两周决定是否升级；
+2. AWS Budgets 两条告警（维护者已设）：账号总额每月 40 美元，Bedrock 每月 28 美元（预算 40 减服务器约 12）。告警要按额度抵扣前的用量计算，否则额度用完前一直显示 0；
 3. Lightsail 对新账号有“部分套餐前 3 个月免费”的优惠（每个账号限一个套餐）。不同来源列出的套餐不一致，创建实例时以控制台标注为准；如果 2 GB 套餐在列，前 3 个月服务器不花钱。
+
+### 4.13 新库初始化（第三版）
+
+新项目用一次性脚本 `backend/app/scripts/init_database.py` 初始化，不新增迁移（维护者决定）：
+
+1. 运行角色 `pgs_app` 不存在时创建（LOGIN，不能建库、建角色、绕过行级安全）；已存在时不改密码。密码只能是 24 位以上字母数字：要原样放进连接串，Alembic 的配置解析又会把 `%` 当插值符号。
+2. 用 owner 连接串跑**现有**迁移到 head。
+3. 给 `public` 下所有表授权（`alembic_version` 只给 SELECT）、开启行级安全、建 `pgs_app_dml` 策略，与 0023 起各迁移的做法一致；序列给 USAGE 与 SELECT。
+4. 建私有存储桶 `paper-grading-private`；已存在但是公开的，直接报错。
+5. 逐表核对授权、行级安全与策略，以及迁移版本。
+
+为什么需要：0023 之后的迁移会在 `pgs_app` 存在时给新表授权；更早那批表（截至 0022 共 38 张）当初是在 SQL 编辑器里手工授权的，迁移里没有。新库只跑迁移，迁移成功、应用却 permission denied。脚本把那次手工操作固定下来。
+
+连接串与密码从环境变量读，没有就在终端提示输入（不回显）；脚本只打印步骤与计数。每一步先检查再做，可以重跑。CI 的 Postgres 任务在空库上跑两遍，再以 `pgs_app` 身份运行 `verify_postgres_ops --exercise-ci-fixture` 证明能读写——这是 CI 里第一次真的建 `pgs_app`。以后新增表仍然要在迁移里授权，脚本只管新环境。
 
 ## 5. 代码改动清单
 
@@ -191,8 +210,9 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 | worker 优雅退出：停止领取、等待在执行的条目、新增 `--drain-seconds` | `services/work_queue/runner.py`、`scripts/run_batch_worker.py` |
 | 健康检查接口 | `api/routes/system.py`（复用 `deployment/readiness.py` 的巡检判断） |
 | 生产 compose、Caddyfile、`bootstrap.sh`、`deploy.sh`（兼做回滚） | `deploy/production/`（新增） |
-| 生成并上传 `.env` 的脚本（只读名单、不回显） | `scripts/`（新增） |
-| `deploy-production` 任务；生产 compose 与 Caddyfile 的语法校验 | `.github/workflows/ci.yml` |
+| 生成 `.env` 的脚本：部署任务从 GitHub 密钥生成（`--from-environment`），也可从本机文件生成；只读名单、不回显 | `scripts/production_env.py`（新增） |
+| 新库初始化脚本（4.13） | `backend/app/scripts/init_database.py`（新增） |
+| `deploy-lightsail-production` 任务（含生成 `.env`）；`production-config` 校验 compose、Caddyfile 与脚本；Postgres 任务在空库上验证初始化脚本 | `.github/workflows/ci.yml` |
 | 三文档，以及 `PROJECT_MEMORY.md`、`CLAUDE.md`、`README.md`、`docs/上线清单.md` 中关于 Vercel 的描述 | 文档；`test_m8_documentation_contract.py` 按需更新 |
 
 没有数据库迁移，没有前端改动（冷启动提示留到收尾时删）。
@@ -200,6 +220,7 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 ## 6. 测试与验收（不调用真实模型）
 
 - 单元测试：健康检查的各种状态（数据库不可用、有活动任务且巡检过期、没有活动任务）；`run_job` 按配置拒绝；worker 收到停止信号后不再领取，并等在执行的条目做完。
+- 初始化脚本：建角色只建一次且不打印密码、拒绝会弄坏连接串的密码、授权语句与 0023 一致且重跑不重复建策略、存储桶必须私有；CI 在真实 PostgreSQL 16 空库上跑两遍，再以 `pgs_app` 读写。
 - CI：`docker compose -f deploy/production/compose.yml config` 与 `caddy validate` 校验生产配置；现有 `docker-compose-smoke` 不变（它跑的就是 worker 路径）。
 - 部署后冒烟：请求健康检查，并检查安全头。
 - 线上验收（S2）：登录、上传、解析、查看已有结果。真实评分要花钱，跑不跑、跑多少由维护者决定。
@@ -223,11 +244,11 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 
 | 步骤 | 谁做 | 内容 |
 |---|---|---|
-| S0 准备 | 维护者 | 账号升级为付费计划并设两条预算告警（4.12）；在 DuckDNS 注册子域名（可同时申请 eu.org）；在新加坡创建 Lightsail 实例并绑定静态 IP、配置防火墙；子域名 A 记录指向静态 IP；运行 `bootstrap.sh`；上传 `.env`；在 GitHub 配置 3 个部署密钥 |
-| S1 代码 | Claude | 第 5 节的改动，一个 PR；部署密钥配好之前，部署任务不执行 |
-| S2 并行运行 | 维护者批准部署 | 首次部署后，实例上的 worker 与 Vercel 一起干活（4.1）；在新域名上验收；确认能收到告警邮件 |
-| S3 切流量 | 维护者 | Vercel 改为只跳转的部署；通知用户新地址；观察 48 小时 |
-| S4 回滚（需要时） | 维护者 | 在 Vercel 控制台用 Instant Rollback 回到切换前的部署。数据是共用的，不需要回滚数据；实例可以留着，也可以 `docker compose stop` |
+| S0 准备 | 维护者 | Free 计划先用 6 个月、看清额度与到期日，两条预算告警（4.12，已设）；Lightsail 实例 `grading-sg` + 静态 IP + 防火墙（已建）；新 Supabase 项目 `grading-system`（已建）并运行 `init_database`；DuckDNS 子域名；`bootstrap.sh`；GitHub 密钥与仓库变量（RUNBOOK 9.4） |
+| S1 代码 | Claude | 第 5 节的改动，一个 PR；`LIGHTSAIL_DEPLOY_ENABLED` 打开之前，部署任务不执行 |
+| S2 上线验证 | 维护者批准部署 | 首次部署；用 `AUTH_USERNAME` / `AUTH_PASSWORD` 登录建平台管理员，填平台模型的 API Key；在新域名上验收；确认能收到告警邮件。Vercel 仍连旧库照常服务 |
+| S3 切流量 | 维护者 | 先设 `VERCEL_DEPLOY_ENABLED=false`，再把 Vercel 改为只跳转；通知用户新地址并重新邀请；观察 48 小时后，在 Supabase 后台删除旧项目（不可恢复，数据已确认不保留） |
+| S4 回滚（需要时） | 维护者 | 删除旧项目之前：在 Vercel 控制台用 Instant Rollback 回到切换前的部署，并把 `VERCEL_DEPLOY_ENABLED` 改回；删除之后就没有回退目标，所以删除放在最后 |
 | S5 收尾 | Claude | 切换稳定 2 周后一个 PR：删 `vercel_queue.py`、`vercel` 依赖、`api/index.py`、`VERCEL` 判断、Vercel 部署任务；删冷启动提示；更新文档 |
 
 ## 9. 放弃了什么（实施时写进 DECISIONS）
@@ -241,6 +262,10 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 - **Google Cloud Run**：数据库（Supabase 在 AWS 新加坡）和模型（Bedrock）都在 AWS。2026-10-13 已定。
 - **ECS Express Mode、App Runner、Lambda**：Express Mode 放不了 worker，负载均衡配置也改不了；App Runner 从 2026-04-30 起不再接受新客户；Lambda 与 Vercel 函数一样有冷启动和执行时限。
 - **启动时自动迁移**：生产运行角色没有 DDL；迁移保留手动审批。
+- **迁移旧数据、新旧并行（第二版做法）**：维护者已联系用户，数据不再保留；新库从空开始，所有旧凭据随旧项目一起作废，也不用找回 Vercel 上读不回来的 `BYOK_MASTER_KEY`。代价：用户要重新注册、重新配置模型连接。
+- **补一个迁移 `0039` 给旧表授权**：能让任何环境跑完迁移就完整；维护者选择用初始化脚本（4.13）。代价：新环境必须记得跑脚本，漏跑时的症状写在 RUNBOOK 排错里。
+- **新注册一个 Supabase 账号**：新项目已经带来全新的地址、密钥和数据库密码；新账号只会多一套登录要管，当前会话的 Supabase 连接也用不了。
+- **把运行时密钥放在实例上手工维护**：要从本机上传、容易与 GitHub 里的两条数据库连接串不一致；改为部署任务每次从 GitHub 生成。
 - **留在 Vercel**：Hobby 套餐不花钱，但第 1 节的四个限制都还在。迁移每季度约 30–36 美元，换掉这四个限制。
 - **付费域名**：Cloudflare Registrar 的 .com 每年约 10–11 美元，地址归自己、不易被拦截。维护者考虑经费，选了免费子域名（Q2）。
 
@@ -251,9 +276,13 @@ GitHub `production` 环境新增 3 个密钥：部署用的 SSH 私钥、实例�
 | Q1 | 每季度 120 美元是否也要付 Bedrock 的模型费用 | **已定（2026-10-13）**：包括模型费用；部署预算优先，模型费用不够时换到维护者的 Google Cloud 额度（第 7 节） | — |
 | Q2 | 域名 | **已定（2026-10-13）**：用免费子域名 DuckDNS，同时可申请 eu.org，S3 前批下来就改用 | — |
 | Q3 | 实例规格 | A. 2 GB（10–12 美元/月）；B. 4 GB（约 24 美元/月） | **按建议选 A**。实测单进程约 160 MB，2 GB 加 swap 够用；不够时按第 7 节升级 |
-| Q4 | AWS 账号是不是 Free 账户计划 | **已定（2026-10-13）**：是。S0 就升级为付费计划，并设两条预算告警（4.12） | — |
+| Q4 | AWS 账号是不是 Free 账户计划 | **已定（2026-10-13）**：是；**先用 Free 计划 6 个月，到时再定**，看清额度与到期日（4.12） | — |
 | Q5 | 旧 `vercel.app` 地址的跳转保留多久 | A. 长期保留（Hobby 免费，只剩跳转规则）；B. 30 天后删除 | **按建议选 A**。不花钱，旧书签和在途链接都不会失效 |
 | Q6 | 交付方式 | A. 本文档一个 PR → S1 一个 PR → S5 一个 PR；B. S1 拆成代码与部署脚本两个 PR | **按建议选 A**。S1 的代码改动小，和部署脚本放在一起更容易对照评审 |
+| Q7 | 生产数据是否保留 | **已定（2026-10-13）**：不保留（已联系用户），新建 Supabase 项目 `grading-system`，旧项目切流量后删除 | — |
+| Q8 | 新库先建后删旧，还是先删旧再建 | **先建后删**（维护者已先建好新项目） | — |
+| Q9 | 旧表的授权：补迁移 `0039`，还是初始化脚本 | **已定（2026-10-13）**：初始化脚本，不加迁移（4.13） | — |
+| Q10 | 运行时密钥放哪里 | **按建议**：GitHub `production` 环境，部署任务生成实例 `.env`（4.8） | — |
 
 ## 参考
 

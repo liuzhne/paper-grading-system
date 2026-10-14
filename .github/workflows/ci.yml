@@ -269,9 +269,29 @@ jobs:
             | tee pgs_ops_artifacts/restored-postgres-verification.json
           diff pgs_ops_storage/uploads/fixture.docx pgs_ops_restored/uploads/fixture.docx
           cp "$package/manifest.json" pgs_ops_artifacts/backup-manifest.json
+      # 全新环境（Lightsail 生产）的初始化脚本：空库上建运行角色、跑迁移、补齐 0023 之前那批表
+      # 的授权与行级安全，再以运行角色读写一遍。平时本地与 CI 都不建 pgs_app，这是唯一用真实
+      # PostgreSQL 验证这条路径的地方。放在最后：之后的步骤不会因为角色存在而改变行为。
+      - name: Initialize an empty database and use it as the runtime role
+        env:
+          MIGRATION_DATABASE_URL: postgresql+psycopg://paper:ci-only-postgres-password@127.0.0.1:5432/pgs_init_check
+          PGS_APP_PASSWORD: CiRuntimeRolePassword2026abcdef
+        run: |
+          set -euo pipefail
+          createdb -h 127.0.0.1 -U paper pgs_init_check
+          uv run python -m backend.app.scripts.init_database | tee pgs_ops_artifacts/init-database.log
+          # 重跑必须无副作用：角色与策略已存在时跳过，不报 already exists。
+          uv run python -m backend.app.scripts.init_database | tee -a pgs_ops_artifacts/init-database.log
+          DATABASE_URL="postgresql+psycopg://pgs_app:${PGS_APP_PASSWORD}@127.0.0.1:5432/pgs_init_check" \
+            uv run python -m backend.app.scripts.verify_postgres_ops --exercise-ci-fixture \
+            | tee pgs_ops_artifacts/init-runtime-verification.json
+          # 逐表、逐项撤掉 DML 权限，验证门禁拒绝；每次都回滚，不留下权限变化。
+          PGS_TEST_POSTGRES_VERIFIER_URL="$MIGRATION_DATABASE_URL" \
+            uv run pytest -q backend/app/tests/test_postgres_runtime_access.py \
+            | tee pgs_ops_artifacts/init-runtime-privilege-regressions.log
       - name: Reject secret leakage in persisted CI evidence
         run: |
-          if grep -R -E 'ci-only-postgres-password|PGPASSWORD|AUTH_SECRET|OPENAI(_COMPATIBLE)?_API_KEY' pgs_ops_artifacts
+          if grep -R -E 'ci-only-postgres-password|CiRuntimeRolePassword|PGPASSWORD|AUTH_SECRET|OPENAI(_COMPATIBLE)?_API_KEY' pgs_ops_artifacts
           then
             echo "secret-like material detected in OPS evidence"
             exit 1
@@ -418,7 +438,10 @@ jobs:
           retention-days: 30
 
   deploy-vercel-production:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # 迁到 Lightsail 后（S3），Vercel 项目只剩跳转规则；先把仓库变量
+    # VERCEL_DEPLOY_ENABLED 设为 false，否则下一次合并会把整个应用重新部署回去、
+    # 盖掉跳转。见 RUNBOOK「部署平台迁移：Vercel → Lightsail」。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VERCEL_DEPLOY_ENABLED != 'false'
     needs:
       - docker-compose-smoke
       # The deployed workbench comes from the committed public/ artifact, so a
@@ -491,3 +514,141 @@ jobs:
           echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
           echo "### Vercel production deployment" >> "$GITHUB_STEP_SUMMARY"
           echo "[$deployment_url]($deployment_url)" >> "$GITHUB_STEP_SUMMARY"
+
+  production-config:
+    # 生产（Lightsail）的 compose、Caddyfile 与部署脚本在合并前就要能用：
+    # 部署时才发现语法错误，线上已经切了一半。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Validate the production compose file
+        working-directory: deploy/production
+        run: |
+          printf 'PGS_SITE_ADDRESS=pgs-ci.duckdns.org\n' > .env
+          docker compose --project-name pgs --file compose.yml config --quiet
+      - name: Validate the production Caddyfile
+        run: |
+          docker run --rm -e PGS_SITE_ADDRESS=pgs-ci.duckdns.org \
+            -v "$PWD/deploy/production/caddy:/etc/caddy:ro" caddy:2-alpine \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Lint the deployment scripts
+        run: shellcheck deploy/production/bootstrap.sh deploy/production/deploy.sh
+
+  deploy-lightsail-production:
+    # 生产部署到 AWS Lightsail 单机（docs/部署平台迁移到AWS方案.md）。仓库变量
+    # LIGHTSAIL_DEPLOY_ENABLED=true 之前不执行：实例、.env 与部署密钥要先准备好。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.LIGHTSAIL_DEPLOY_ENABLED == 'true'
+    needs:
+      - docker-compose-smoke
+      - frontend-workbench
+      - production-config
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    concurrency:
+      group: lightsail-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      IMAGE: paper-grading-system:${{ github.sha }}
+      SITE_URL: ${{ vars.PRODUCTION_SITE_URL }}
+    steps:
+      - name: Validate deployment settings
+        env:
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+          RUNTIME_DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+          BYOK_MASTER_KEY: ${{ secrets.BYOK_MASTER_KEY }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in PRODUCTION_SSH_KEY PRODUCTION_SSH_HOST PRODUCTION_SSH_KNOWN_HOSTS SITE_URL \
+            RUNTIME_DATABASE_URL BYOK_MASTER_KEY AUTH_SECRET AUTH_PASSWORD SUPABASE_SECRET_KEY \
+            SUPABASE_URL AUTH_USERNAME
+          do
+            if [[ -z "${!name:-}" ]]
+            then
+              echo "::error::Required production setting ${name} is not configured."
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Configure SSH
+        env:
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$PRODUCTION_SSH_KEY" > ~/.ssh/pgs_deploy
+          chmod 0600 ~/.ssh/pgs_deploy
+          # 主机指纹由维护者核对后写进密钥；不用 ssh-keyscan 现取，防止中间人。
+          printf '%s\n' "$PRODUCTION_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<CONFIG
+          Host pgs
+            HostName ${PRODUCTION_SSH_HOST}
+            User deploy
+            IdentityFile ~/.ssh/pgs_deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          CONFIG
+      - name: Build the application image
+        run: docker build --pull --tag "$IMAGE" .
+      - name: Ship the image and deployment files
+        run: |
+          set -euo pipefail
+          docker save "$IMAGE" | gzip -1 | ssh pgs 'gunzip | docker load'
+          tar -C deploy/production -czf - compose.yml deploy.sh caddy \
+            | ssh pgs 'tar -xzf - -C /opt/pgs && chmod 0755 /opt/pgs/deploy.sh'
+      # 实例上的 .env 每次部署都由这里重新生成：生产密钥只存在 GitHub production 环境里，
+      # 改密钥就是改 GitHub 上的值再部署一次。经 SSH 的标准输入写入，不落在命令行里。
+      - name: Write the runtime environment
+        env:
+          DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+          BYOK_MASTER_KEY: ${{ secrets.BYOK_MASTER_KEY }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
+        run: |
+          set -euo pipefail
+          host="${SITE_URL#https://}"
+          host="${host%%/*}"
+          env_file="$RUNNER_TEMP/pgs.env"
+          trap 'rm -f "$env_file"' EXIT
+          python3 scripts/production_env.py --from-environment --site-address "$host" --output "$env_file"
+          ssh pgs 'umask 077 && cat > /opt/pgs/.env.new && mv /opt/pgs/.env.new /opt/pgs/.env' < "$env_file"
+      - name: Switch to this version
+        run: ssh pgs "/opt/pgs/deploy.sh ${GITHUB_SHA}"
+      - name: Smoke test through the public address
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors \
+            --dump-header headers.txt --output health.json "${SITE_URL%/}/api/system/health"
+          cat health.json
+          grep -qi '^strict-transport-security: max-age=31536000; includeSubDomains' headers.txt
+          grep -qi '^x-frame-options: SAMEORIGIN' headers.txt
+          echo "### Lightsail production deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "${GITHUB_SHA} → ${SITE_URL}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove the deploy key from the runner
+        if: always()
+        run: rm -f ~/.ssh/pgs_deploy
