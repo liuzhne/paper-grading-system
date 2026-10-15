@@ -340,6 +340,9 @@ def test_ai_drafter_reports_non_retryable_provider_rejection_without_body(status
     assert ("测试当前 AI 连接" in captured.value.user_action) is connection_hint
     if not connection_hint:
         assert "这一批原文" in captured.value.user_action
+        # 重试会原样重发冻结的输入：引导重新起草或手写规则，而不是改原文后重试。
+        assert "重新起草" in captured.value.user_action
+        assert "原样重发" in captured.value.user_action
     assert "groq" not in str(captured.value).lower()
 
 
@@ -367,7 +370,7 @@ def test_draft_task_fails_a_provider_rejection_without_retrying_or_exposing_the_
 
     assert task["status"] == "failed"
     assert task["error_code"] == "AI_DRAFT_PROVIDER_REJECTED"
-    assert "模型拒绝处理这一批起草请求（HTTP 400）" in task["error_message"]
+    assert "模型拒绝处理这一批起草请求（invalid_request，HTTP 400）" in task["error_message"]
     assert "测试当前 AI 连接" not in task["error_message"]
     assert "groq" not in task["error_message"].lower()
     # 请求被拒（400）立即判失败，不再执行第二次；剩下的批次不再发出。
@@ -617,7 +620,23 @@ def test_wrapped_context_overflow_points_at_the_batch_length():
         draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(), business_profile_key="thesis")
     assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
     assert "context_length_exceeded，HTTP 400" in caught.value.message
-    assert "精简这几段原文" in caught.value.user_action
+    assert "精简该评分项的规则来源" in caught.value.user_action
+    assert "重新起草" in caught.value.user_action
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "text"),
+    [(402, "AI_DRAFT_PROVIDER_ERROR", "额度已用完"), (413, "AI_DRAFT_PROVIDER_REJECTED", "超出了模型一次能处理的长度")],
+)
+def test_direct_http_errors_share_the_provider_classification(status, code, text):
+    # 没经过传输层、直接抛出的 HTTP 错误，也按同一套分类给提示。
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(
+            criterion=_criterion(), input_analysis={}, scorer=_RejectedDraftScorer(status),
+            business_profile_key="thesis",
+        )
+    assert caught.value.code == code
+    assert text in caught.value.message
 
 
 def test_wrapped_payment_required_uses_the_quota_hint():

@@ -24,6 +24,7 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.services.llm.errors import ProviderCallError
+from backend.app.services.llm.errors import project_provider_error
 from backend.app.services.llm.factory import scorer_concurrency
 from backend.app.services.llm.rate_limit import CircuitOpenError
 from backend.app.services.llm.anthropic_messages_adapter import AnthropicMessagesScorer
@@ -465,25 +466,43 @@ _PROVIDER_FAILURE_TEXT = {
 }
 
 
-# 请求本身被拒（参数、内容、长度），而不是连接、鉴权或模型不存在。
-_REQUEST_REJECTION_STATUSES = frozenset({400, 409, 413, 422})
+def _error_detail(error) -> str:
+    # 错误码与状态码都是受控枚举，不含厂商正文；写进提示，免得排查时还要翻服务日志。
+    return error.code + (f"，HTTP {error.http_status}" if error.http_status else "")
+
+
+def _provider_rejection(error) -> AIRuleDraftValidationError | None:
+    """HTTP 4xx（429 与额度用完除外）是不可重试的拒绝；其余返回 None，走通用提示。"""
+
+    status = error.http_status
+    if status is None or not 400 <= status < 500 or status == 429:
+        return None
+    if error.code == "quota_exhausted":
+        # 402 / Claude 消费上限的 400 是额度问题，走“额度已用完”的提示。
+        return None
+    return _rejection_error(
+        request_scope=error.scope == "request", detail=_error_detail(error), code=error.code,
+    )
 
 
 def _rejection_error(*, request_scope: bool, detail: str, code: str | None = None) -> AIRuleDraftValidationError:
     """4xx 拒绝分两种：连接被拒要去测连接；请求被拒时连接是好的，测了也会通过。"""
 
+    # 「重试失败的批次」原样重发任务冻结的输入：内容不变就还会被拒，所以引导重新起草。
     if code in {"context_length_exceeded", "request_too_large"}:
         return AIRuleDraftValidationError(
             "AI_DRAFT_PROVIDER_REJECTED",
             f"这一批起草请求超出了模型一次能处理的长度（{detail}）。",
-            "可以精简这几段原文，或换用上下文更长的模型后再重试失败的条目。原有条款未改变。",
+            "「重试失败的批次」会原样重发这一批。可以精简该评分项的规则来源，或换用上下文更长的"
+            "连接，再点「AI 根据规则来源起草」重新起草。原有条款未改变。",
         )
     if request_scope:
         return AIRuleDraftValidationError(
             "AI_DRAFT_PROVIDER_REJECTED",
             f"模型拒绝处理这一批起草请求（{detail}）。",
-            "如果这个连接的其他起草都正常，多半是这一批原文触发了模型的内容限制；"
-            "可以改写这几段原文，或手动编写对应的规则后再重试失败的条目。原有条款未改变。",
+            "如果这个连接的其他起草都正常，多半是这一批原文触发了模型的内容限制，"
+            "「重试失败的批次」会原样重发、多半仍被拒。可以手动编写这几段原文对应的规则，"
+            "或调整该评分项的规则来源后点「AI 根据规则来源起草」重新起草。原有条款未改变。",
         )
     return AIRuleDraftValidationError(
         "AI_DRAFT_PROVIDER_REJECTED",
@@ -645,35 +664,25 @@ def _draft_deduction_rules_once(
                 f"AI 模型在 {_draft_timeout_seconds(scorer):g} 秒内没有返回起草结果。",
                 "请稍后重试；如果该连接经常超时，可在「账户与连接」为它设置更长的超时（最多 300 秒）。原有条款未改变。",
             ) from exc
-        # 错误码与状态码都是受控枚举，不含厂商正文；写进提示，免得排查时还要翻服务日志。
-        detail = exc.error.code + (f"，HTTP {exc.error.http_status}" if exc.error.http_status else "")
-        rejected = (
-            exc.error.http_status is not None
-            and 400 <= exc.error.http_status < 500
-            and exc.error.http_status != 429
-            # 402 / Claude 消费上限的 400 是额度问题，走下面“额度已用完”的提示。
-            and exc.error.code != "quota_exhausted"
-        )
-        if rejected:
-            raise _rejection_error(
-                request_scope=exc.error.scope == "request", detail=detail, code=exc.error.code,
-            ) from exc
-        detail += f"，等待 {waited:.0f} 秒后失败"
+        rejection = _provider_rejection(exc.error)
+        if rejection is not None:
+            raise rejection from exc
+        detail = _error_detail(exc.error) + f"，等待 {waited:.0f} 秒后失败"
         message, action = _PROVIDER_FAILURE_TEXT.get(exc.error.code, (
             "AI 服务暂时不可用", "请稍后重试；原有条款未改变。"))
         raise AIRuleDraftValidationError(
             "AI_DRAFT_PROVIDER_ERROR", f"{message}（{detail}）。", action,
         ) from exc
     except httpx.HTTPStatusError as exc:
-        status_code = getattr(exc.response, "status_code", None)
-        if (
-            status_code is not None
-            and 400 <= status_code < 500
-            and status_code != 429
-        ):
-            raise _rejection_error(
-                request_scope=status_code in _REQUEST_REJECTION_STATUSES,
-                detail=f"HTTP {status_code}",
+        # 没经过传输层的 HTTP 错误按同一套分类处理（402 走额度、413 走超长）。
+        projected = project_provider_error(exc)
+        rejection = _provider_rejection(projected)
+        if rejection is not None:
+            raise rejection from exc
+        if projected.code in _PROVIDER_FAILURE_TEXT:
+            message, action = _PROVIDER_FAILURE_TEXT[projected.code]
+            raise AIRuleDraftValidationError(
+                "AI_DRAFT_PROVIDER_ERROR", f"{message}（{_error_detail(projected)}）。", action,
             ) from exc
         raise AIRuleDraftValidationError(
             "AI_DRAFT_PROVIDER_ERROR",

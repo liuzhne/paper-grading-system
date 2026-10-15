@@ -233,6 +233,20 @@ def test_google_array_error_body_is_parsed_and_a_rejection_logs_its_message(slee
     assert "AIzaSECRET" not in caplog.text
 
 
+def test_rejection_message_redacts_quoted_credentials_before_logging(sleeps, caplog):
+    body = [{"error": {
+        "code": 400, "status": "INVALID_ARGUMENT",
+        "message": 'bad field {"api_key": "AIzaQUOTED", "password": \'two words\'} key AIzaSyA1234567890abcdefghijklmnopqrstu',
+    }}]
+    scorer = _scorer([httpx.Response(400, json=body)], [], "https://aiplatform.example/v1/openapi")
+    with caplog.at_level(logging.INFO, logger="paper_grading.llm.calls"):
+        with pytest.raises(ProviderCallError):
+            scorer.complete_json("系统", {"units": []}, attempts_limit=1)
+    assert "provider_message=" in caplog.text
+    for secret in ("AIzaQUOTED", "two words", "AIzaSyA1234567890"):
+        assert secret not in caplog.text
+
+
 def test_only_request_rejections_log_the_provider_message(sleeps, caplog):
     limited = [{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Resource exhausted."}}]
     denied = {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Permission denied on project x."}}

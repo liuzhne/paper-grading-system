@@ -140,9 +140,13 @@ _RATE_LIMIT_HEADER_NAMES = {
     ),
 }
 _BEARER_RE = re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]+")
+# 键名和值都可能带引号：厂商说明里回显 JSON 时是 "api_key": "…" 的形状。
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(api[_-]?key|authorization|secret|password|token)\s*[:=]\s*[^\s,;]+"
+    r"(?i)(api[_-]?key|authorization|secret|password|token)[\"']?\s*[:=]\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"
 )
+# Google API Key（AIza 开头），出现在说明里时没有键名可依。
+_GOOGLE_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{30,}")
 
 
 def project_provider_error(exc: BaseException) -> ProviderError:
@@ -337,6 +341,7 @@ def _safe_text(value, limit):
     text = str(value).replace("\r", " ").replace("\n", " ")
     text = _BEARER_RE.sub("Bearer ***REDACTED***", text)
     text = _SECRET_ASSIGNMENT_RE.sub(lambda match: "%s=***REDACTED***" % match.group(1), text)
+    text = _GOOGLE_API_KEY_RE.sub("***REDACTED***", text)
     return _bounded(text, limit)
 
 
