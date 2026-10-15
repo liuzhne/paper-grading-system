@@ -434,6 +434,8 @@ LOG_LEVEL=DEBUG docker compose -p pgs -f compose.yml up -d --force-recreate app 
 - **新库上应用报 `permission denied for table …`，但迁移是成功的。** 报错像代码问题，真正原因是只跑了迁移、没跑 `init_database`：0023 之前那批表没有给 `pgs_app` 授权。在新库上运行 `init_database`（重跑无副作用），它最后会逐表核对。以后新增表仍然要在迁移里授权（0023 的做法），这个脚本只管新环境的初始化。
 - **运行角色复验或应用连库时报 `invalid connection option "pgbouncer"`。** 报错像驱动或连接池问题，真正原因是 `RUNTIME_DATABASE_URL` 是从 Supabase 复制的 Prisma 版连接串，末尾带 `?pgbouncer=true`，psycopg 不认这个参数。去掉它（连接串以 `:6543/postgres` 结尾）后重设密钥。2026-10-14 首次配置时遇到过；部署任务生成 `.env` 时现在会直接拦下。
 - **页面上测试连接只显示“连接测试失败”，看不出原因。** 报错指向连接配置，真正的原因要看 app 日志里的 `ai_connection_test_failed … status=… error_type=…`：Bedrock 的错误类型来自 `x-amzn-errortype` 头。`status=400 error_type=ValidationException` 多半是模型 ID 不对（要和 Bedrock 控制台一字不差，新加坡区域不少模型要用 `apac.` / `global.` 推理配置前缀）；`403 AccessDeniedException` 是 Key 无权限或模型没开通；`404` 是地址或协议不对；`status=- error_type=ConnectTimeout` 是网络或地址不通。2026-10-14 之前 web 进程没有配置日志，这一行根本不会出现。
+- **Google Vertex AI 的连接测试 `status=401`，但同一把 Key 用 curl 带 `x-goog-api-key` 头能调通。** 报错像 Key 无效，真正原因是认证头：Vertex 的 OpenAI 兼容端点在 `Authorization: Bearer` 位置只认 OAuth 访问令牌，API Key（`AQ.` 开头的 express 模式 Key）必须放在 `x-goog-api-key` 头里。2026-10-15 起，主机是 `aiplatform.googleapis.com` 或 `<区域>-aiplatform.googleapis.com` 时自动改用该头（`services/llm/auth_headers.py`）；仍是 401，就检查 Key 是否属于地址里那个项目。
+- **Gemini 返回 `403` 且 `error_type=-`。** Google 的错误原因写在 `error.status` 与 `error.details[].reason`（如 `SERVICE_DISABLED`、`API_KEY_SERVICE_BLOCKED`、`API_KEY_HTTP_REFERRER_BLOCKED`），日志只记了状态码。用同一把 Key 在 CloudShell 里 `curl -s -H "x-goog-api-key: $KEY" https://generativelanguage.googleapis.com/v1beta/models` 可以看到原因；`API_KEY_INVALID`（400）是 Key 本身无效或没复制全。
 - **部署任务在 “Write the runtime environment” 失败，提示缺少变量或不是 6543。** 报错指向脚本，真正原因是 GitHub `production` 环境里少配了密钥，或 `RUNTIME_DATABASE_URL` 用的是 Session pooler（5432）。输出里只有变量名，按名字补齐。
 - **app 反复重启，日志里是 `permission denied` 或 `must be owner`，出现在 `alembic upgrade head` 之后。** 报错像数据库权限问题，真正原因是生产 compose 的 `command` 被删掉了，容器回到了 Dockerfile 的 CMD，在启动时迁移；生产运行角色 `pgs_app` 没有 DDL。迁移只走 `production-migrate.yml`。
 
@@ -906,6 +908,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-15 | 接入 Google Vertex AI | OpenAI 协议请求按主机选择认证头：Vertex 用 `x-goog-api-key`，其余仍用 Bearer；新增 Vertex 接入步骤与两条排错（Vertex 401、Gemini 403 看 reason）。 |
 | 2026-10-14 | 日志级别与测试连接诊断 | 新增 `LOG_LEVEL`（默认 INFO）；app 在启动时、worker 在入口统一配置日志格式；测试连接失败记 `ai_connection_test_failed`（状态码与错误类型）；9.4 增加看日志、临时调高级别的命令与一条排错。 |
 | 2026-10-14 | 首次配置新库连接串 | 新增排错：`RUNTIME_DATABASE_URL` 带 Prisma 的 `?pgbouncer=true` 时 psycopg 拒绝连接；`production_env.py` 生成 `.env` 时直接拦下。 |
 | 2026-10-13 | 全新环境：新 Supabase 项目、初始化脚本、密钥放 GitHub | 9.4 改写：新项目 `grading-system` 用 `init_database` 初始化（运行角色、迁移、全表授权与行级安全、私有桶、逐表核对）；运行时密钥存 GitHub `production` 环境，部署任务生成实例 `.env`；AWS 先用 Free 计划；切流量后删除旧项目；新增三条排错。 |
@@ -1785,6 +1788,29 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 发布：只改后端，没有迁移。回滚时还原 `backend/app/services/llm/base.py` 并删掉对应测试；回滚后连接参数会在旧路径再次被忽略。
 
 维护记录：2026-10-09 · 旧路径信封冻结实例参数：新增“连接参数在旧路径不生效”和“升级后旧路径开始推理”的排查方法，以及缓存影响的判断方法。
+
+### 2026-10-15 接入 Google Vertex AI（OpenAI 兼容）
+
+平台模型或个人连接都可以接 Vertex AI 的 OpenAI 兼容端点：
+
+| 字段 | 填写 |
+|---|---|
+| 协议 | OpenAI 兼容（建议手动选，自动识别也能识别出来） |
+| 接口地址 | `https://aiplatform.googleapis.com/v1/projects/<项目 ID>/locations/global/endpoints/openapi`（区域端点把主机换成 `<区域>-aiplatform.googleapis.com`、`locations/<区域>`） |
+| 模型 | 带发布方前缀，如 `google/gemini-2.5-flash` |
+| API Key | Vertex AI express 模式的 API Key（`AQ.` 开头） |
+
+- Key 由系统放在 `x-goog-api-key` 头里发送，不用 Bearer；其它 OpenAI 兼容服务（包括 Gemini API 的 `generativelanguage.googleapis.com`）仍用 Bearer。
+- 学生论文会发给 Google：项目要绑定结算账号，按付费条款处理数据。
+- 换模型会改变评分结果，正式使用前按 §15 重新锚定 QWK（需要维护者授权真实调用与预算）。
+
+验证（不调用真实模型）：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_vertex_api_key_header.py
+```
+
+维护记录：2026-10-15 · Vertex AI：OpenAI 协议请求按主机选择认证头，Vertex 用 `x-goog-api-key`；补接入步骤与两条排错。
 
 ### 2026-10-09 接入 AWS Bedrock 与调高吞吐
 

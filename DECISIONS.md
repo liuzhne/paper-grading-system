@@ -589,6 +589,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-10-15 | 接入 Google Vertex AI | 新增“OpenAI 协议请求按主机选择认证头”。 |
 | 2026-10-14 | 日志级别与测试连接诊断 | 新增“应用日志统一配置，测试连接失败记状态码与错误类型”。 |
 | 2026-10-13 | 部署迁移改为全新环境 | 新增“部署迁移改为全新环境”：生产数据不保留，新建 Supabase 项目；初始化脚本代替补迁移；运行时密钥存 GitHub、部署时生成实例 `.env`；先用 AWS Free 计划。修订前一条的“连接串不变、新旧并行”。 |
 | 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增“部署平台：从 Vercel 迁到 AWS Lightsail 单机”：按每季度 120 美元的预算放弃 Fargate + CloudFront，改单机 docker compose；镜像经 SSH 载入、不用镜像仓库；免费子域名；健康检查在 worker 空闲时也判失败。 |
@@ -1731,3 +1732,20 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - **放开 `LLM_DEBUG_LOG_ENABLED`**：会记请求原文（含论文），受保护部署继续禁止。
 
 维护记录：2026-10-14 · 日志级别与测试连接诊断：新增 `core/log_config.py`、`LOG_LEVEL`、试连失败日志与测试；RUNBOOK 9.4 补看日志与临时调级别。
+
+### 2026-10-15 OpenAI 协议请求按主机选择认证头，Vertex 用 x-goog-api-key（Accepted）
+
+背景：Bedrock 上的 Claude Opus 5 在这个账号被 AWS 限制（`not available for this account`），维护者改用 Google Vertex AI 的 OpenAI 兼容端点。地址、模型、Key 都正确，测试连接却是 401。维护者在浏览器里用同一把 Key 实测：放在 `x-goog-api-key` 头里调 OpenAI 兼容接口与原生接口都返回 200，放在 `Authorization: Bearer` 里返回 401。Vertex 的 Bearer 位置只认 OAuth 访问令牌，而系统所有 OpenAI 协议请求都按惯例用 Bearer 发 Key。
+
+选择：
+- **新增 `services/llm/auth_headers.openai_auth_headers(base_url, key)`**：主机是 `aiplatform.googleapis.com` 或 `<区域>-aiplatform.googleapis.com` 时返回 `x-goog-api-key`，否则返回 Bearer。Chat Completions 与 Responses 两个适配器、连接试连、`diagnose_llm` 都改用它。
+- **只按主机判断**，不看 Key 的前缀：同一主机上 Key 的格式可能变，主机才决定认证方式；形似的主机（`aiplatform.googleapis.com.example.com`）不匹配。
+- Gemini API（`generativelanguage.googleapis.com`）的 OpenAI 兼容端点接受 Bearer，保持不变。
+
+放弃了什么：
+- **新增一个 “Vertex” 协议或连接字段让用户选认证方式**：多一个要理解的选项，用户选错照样 401；主机已经足够判断。代价：将来别的服务也要求非 Bearer 时，要在这里加一条主机规则。
+- **把 Key 放在查询参数 `?key=`**：会出现在代理、访问日志和报错里的 URL 中。
+- **用 Google 的 OAuth 访问令牌（服务账号）**：令牌一小时过期，要实现刷新和服务账号密钥的保管，远超这次的需要。
+- **同时发两种头**：Vertex 在 Bearer 位置拿到非 OAuth 令牌会直接拒绝。
+
+维护记录：2026-10-15 · 接入 Google Vertex AI：新增 `auth_headers`，四处 OpenAI 协议请求改用它；新增 `test_vertex_api_key_header.py`；RUNBOOK 补接入步骤与排错。
