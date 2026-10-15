@@ -19,6 +19,7 @@ from backend.app.db.models import AITaskItem
 from backend.app.db.models import utcnow
 from backend.app.services.ai_tasks.errors import AITaskItemError
 from backend.app.services.ai_tasks.handlers import get_handler
+from backend.app.services.ai_tasks.provider_errors import cause_chain
 from backend.app.services.ai_tasks.service import task_scorer
 from backend.app.services.ai_tasks.service import task_view
 from backend.app.services.ai_tasks.state import ACTIVE_TASK_STATUSES
@@ -26,6 +27,7 @@ from backend.app.services.ai_tasks.state import cancel_pending_items
 from backend.app.services.ai_tasks.state import lock_task
 from backend.app.services.ai_tasks.state import recount
 from backend.app.services.ai_tasks.state import shift_counts
+from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.work_queue.kinds import ClaimedItem
 from backend.app.services.work_queue.kinds import WorkKind
 from backend.app.services.work_queue.kinds import register
@@ -44,6 +46,19 @@ MAX_RETRIES = 1
 MAX_REPAIRS = 1
 # 根因码：熔断是此前失败的结果，不是原因（与批量评分取根因码相同）。
 _DERIVED_CODES = {"PROVIDER_CIRCUIT_OPEN"}
+
+
+def _provider_fields(error):
+    """模型调用失败时记下 HTTP 状态与厂商错误码/类型（受控短字段，不含厂商说明）。"""
+
+    for cause in cause_chain(error):
+        if isinstance(cause, ProviderCallError):
+            return {
+                "http_status": cause.error.http_status,
+                "provider_code": cause.error.provider_error_code,
+                "provider_type": cause.error.provider_error_type,
+            }
+    return {}
 
 
 def _retry_after(error):
@@ -206,6 +221,7 @@ def _finish(session_factory, claimed, *, output=None, error=None, latency_ms=0):
             shift_counts(session, task.id, running=-1, succeeded=1)
         else:
             entry["error_code"] = error.code
+            entry.update(_provider_fields(error))
             disposition = error.disposition
             target = "failed"
             if disposition == "defer" and item.deferral_count < MAX_DEFERRALS:

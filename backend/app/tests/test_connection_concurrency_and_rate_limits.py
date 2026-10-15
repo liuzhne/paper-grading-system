@@ -206,6 +206,70 @@ def test_error_envelope_inside_a_success_status_is_logged_with_its_code(sleeps, 
     assert "Provider returned error" not in caplog.text
 
 
+def test_google_array_error_body_is_parsed_and_a_rejection_logs_its_message(sleeps, caplog):
+    # Vertex AI / Gemini 的 OpenAI 兼容接口把错误包在数组里，类型在 error.status。
+    body = [{"error": {
+        "code": 400, "status": "INVALID_ARGUMENT",
+        "message": 'Request contains an invalid argument.\ninjected=1 "quoted" api_key=AIzaSECRET',
+    }}]
+    scorer = _scorer([httpx.Response(400, json=body)], [], "https://aiplatform.example/v1/openapi")
+    with caplog.at_level(logging.INFO, logger="paper_grading.llm.calls"):
+        with pytest.raises(ProviderCallError) as excinfo:
+            scorer.complete_json("系统", {"units": []}, attempts_limit=1)
+
+    error = excinfo.value.error
+    assert (error.code, error.scope, error.provider_error_code, error.provider_error_type) == (
+        "invalid_request", "request", "400", "INVALID_ARGUMENT",
+    )
+    [record] = [r for r in caplog.records if r.getMessage().startswith("llm_call_failed")]
+    line = record.getMessage()
+    assert "status=400 provider_code=400 provider_type=INVALID_ARGUMENT" in line
+    # 说明脱敏、去换行，引号被转义，伪造不出新字段。
+    assert line.endswith(
+        'retry=no provider_message="Request contains an invalid argument. injected=1 '
+        '\\"quoted\\" api_key=***REDACTED***"'
+    )
+    assert "\n" not in line
+    assert "AIzaSECRET" not in caplog.text
+
+
+def test_rejection_message_redacts_quoted_credentials_before_logging(sleeps, caplog):
+    body = [{"error": {
+        "code": 400, "status": "INVALID_ARGUMENT",
+        "message": 'bad field {"api_key": "AIzaQUOTED", "password": \'two words\'} key AIzaSyA1234567890abcdefghijklmnopqrstu',
+    }}]
+    scorer = _scorer([httpx.Response(400, json=body)], [], "https://aiplatform.example/v1/openapi")
+    with caplog.at_level(logging.INFO, logger="paper_grading.llm.calls"):
+        with pytest.raises(ProviderCallError):
+            scorer.complete_json("系统", {"units": []}, attempts_limit=1)
+    assert "provider_message=" in caplog.text
+    for secret in ("AIzaQUOTED", "two words", "AIzaSyA1234567890"):
+        assert secret not in caplog.text
+
+
+def test_quoted_secret_with_an_escaped_quote_is_redacted_to_its_closing_quote():
+    from backend.app.services.llm.errors import _safe_text
+
+    text = _safe_text('{"token": "ab\\"cdSECRET", \'secret\': \'it\\\'sSECRET\', "next": 1}', 300)
+    assert "SECRET" not in text
+    assert text.endswith('"next": 1}')
+
+
+def test_only_request_rejections_log_the_provider_message(sleeps, caplog):
+    limited = [{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Resource exhausted."}}]
+    denied = {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Permission denied on project x."}}
+    for status, body in ((429, limited), (403, denied)):
+        scorer = _scorer([httpx.Response(status, json=body)], [], "https://aiplatform.example/v1/openapi")
+        with caplog.at_level(logging.INFO, logger="paper_grading.llm.calls"):
+            with pytest.raises(ProviderCallError):
+                scorer.complete_json("系统", {"units": []}, attempts_limit=1, rate_limit_retries=0)
+    assert "provider_type=RESOURCE_EXHAUSTED" in caplog.text
+    assert "provider_type=PERMISSION_DENIED" in caplog.text
+    # 限流、鉴权类错误的说明可能带账号或项目信息，仍然不记。
+    assert "provider_message" not in caplog.text
+    assert "Permission denied" not in caplog.text
+
+
 # ---- 归类 -----------------------------------------------------------------
 
 

@@ -140,9 +140,14 @@ _RATE_LIMIT_HEADER_NAMES = {
     ),
 }
 _BEARER_RE = re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]+")
+# 键名和值都可能带引号：厂商说明里回显 JSON 时是 "api_key": "…" 的形状。
+# 引号内的转义字符一并吞掉，直到闭合引号；截断后没有闭合引号时吞到结尾。
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(api[_-]?key|authorization|secret|password|token)\s*[:=]\s*[^\s,;]+"
+    r"(?i)(api[_-]?key|authorization|secret|password|token)[\"']?\s*[:=]\s*"
+    r"(?:\"(?:\\.|[^\"\\])*\"?|'(?:\\.|[^'\\])*'?|[^\s,;\"']+)"
 )
+# Google API Key（AIza 开头），出现在说明里时没有键名可依。
+_GOOGLE_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{30,}")
 
 
 def project_provider_error(exc: BaseException) -> ProviderError:
@@ -288,6 +293,9 @@ def _response_error_fields(response):
         payload = response.json()
     except (json.JSONDecodeError, ValueError, TypeError):
         return None, None, None
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        # Google（Vertex AI、Gemini 的 OpenAI 兼容接口）把错误包在数组里：[{"error": {...}}]。
+        payload = payload[0]
     if not isinstance(payload, dict):
         return None, None, None
     error = payload.get("error")
@@ -303,7 +311,11 @@ def _response_error_fields(response):
     if code is None and isinstance(details, dict):
         # Claude 把细分错误码放在 error.details.error_code。
         code = scalar(details.get("error_code"))
-    return (scalar(fields.get("type")), code,
+    error_type = scalar(fields.get("type"))
+    if error_type is None and isinstance(error, dict) and isinstance(error.get("status"), str):
+        # Google 的错误类型是 error.status（INVALID_ARGUMENT、RESOURCE_EXHAUSTED……）。
+        error_type = error["status"]
+    return (error_type, code,
             fields.get("message") if isinstance(fields.get("message"), str) else None)
 
 
@@ -330,6 +342,7 @@ def _safe_text(value, limit):
     text = str(value).replace("\r", " ").replace("\n", " ")
     text = _BEARER_RE.sub("Bearer ***REDACTED***", text)
     text = _SECRET_ASSIGNMENT_RE.sub(lambda match: "%s=***REDACTED***" % match.group(1), text)
+    text = _GOOGLE_API_KEY_RE.sub("***REDACTED***", text)
     return _bounded(text, limit)
 
 
