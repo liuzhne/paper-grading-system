@@ -151,3 +151,23 @@ describe("assistant store", () => {
     expect(store.messages.map((item) => item.id)).toEqual(["m1"]);
   });
 });
+
+describe("助手模型设置", () => {
+  it("保存时发 PUT /assistant/settings，成功后关闭设置框", async () => {
+    // 2026-10-15：api 上没有 put，点“保存”只显示“保存失败”，请求根本没发出去。
+    const saved = { configured: true, model_source: "connection", ai_connection_id: "conn-1", connections: [] };
+    const calls = fakeServer({
+      "PUT /assistant/settings": () => [200, saved],
+    });
+    const store = useAssistantStore();
+    store.setupOpen = true;
+
+    await store.saveSettings({ model_source: "connection", ai_connection_id: "conn-1" });
+
+    expect(calls).toEqual([
+      { method: "PUT", path: "/assistant/settings", body: { model_source: "connection", ai_connection_id: "conn-1" } },
+    ]);
+    expect(store.settings).toEqual(saved);
+    expect(store.setupOpen).toBe(false);
+  });
+});

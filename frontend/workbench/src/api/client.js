@@ -218,6 +218,10 @@ export const api = {
   get: (path, options) => request(path, { ...options, method: "GET" }),
   post: (path, body, options) =>
     request(path, { ...options, method: "POST", body }),
+  // 评分助手的设置接口是 PUT（整体替换）。2026-10-15 之前这里没有 put，
+  // 前端调用直接抛 TypeError，对话框只显示“保存失败”，请求根本没发出去。
+  put: (path, body, options) =>
+    request(path, { ...options, method: "PUT", body }),
   patch: (path, body, options) =>
     request(path, { ...options, method: "PATCH", body }),
   del: (path, options) => request(path, { ...options, method: "DELETE" }),
