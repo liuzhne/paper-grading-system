@@ -141,9 +141,10 @@ _RATE_LIMIT_HEADER_NAMES = {
 }
 _BEARER_RE = re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]+")
 # 键名和值都可能带引号：厂商说明里回显 JSON 时是 "api_key": "…" 的形状。
+# 引号内的转义字符一并吞掉，直到闭合引号；截断后没有闭合引号时吞到结尾。
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(api[_-]?key|authorization|secret|password|token)[\"']?\s*[:=]\s*"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"
+    r"(?:\"(?:\\.|[^\"\\])*\"?|'(?:\\.|[^'\\])*'?|[^\s,;\"']+)"
 )
 # Google API Key（AIza 开头），出现在说明里时没有键名可依。
 _GOOGLE_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{30,}")

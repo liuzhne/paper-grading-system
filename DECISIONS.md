@@ -1758,7 +1758,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 选择：
 - **错误体解析兼容数组**：取第一个元素；Google 的错误类型在 `error.status`，记为 `provider_type`。只在 `error` 是对象、`status` 是字符串时才取，避免把顶层的数字状态当成类型。
-- **只对请求范围的 HTTP 错误**（`scope=request`：400、409、413、422 等），在 `llm_call_failed` 行尾附 `provider_message`：沿用 `_safe_text` 去换行、遮蔽密钥（这次补上带引号的 `"api_key": "…"` 形状与 `AIza…` 开头的 Google Key），截断到 300 字，以 JSON 字符串写出，转义引号与控制字符，说明里的内容伪造不出新字段；说明等于缺省文案时不附。
+- **只对请求范围的 HTTP 错误**（`scope=request`：400、409、413、422 等），在 `llm_call_failed` 行尾附 `provider_message`：沿用 `_safe_text` 去换行、遮蔽密钥（这次补上带引号的 `"api_key": "…"` 形状——引号内的转义字符一并遮蔽到闭合引号——与 `AIza…` 开头的 Google Key），截断到 300 字，以 JSON 字符串写出，转义引号与控制字符，说明里的内容伪造不出新字段；说明等于缺省文案时不附。
 - **AI 任务条目的 `attempt_history`** 增加 `http_status`、`provider_code`、`provider_type` 三个受控短字段，不写说明文字。
 - **起草的 4xx 拒绝分两种提示**：请求被拒提示“模型拒绝处理这一批起草请求（invalid_request，HTTP 400）”，建议手写这几段原文对应的规则，或调整规则来源后点「AI 根据规则来源起草」重新起草；上下文超长（`context_length_exceeded`、413）提示精简规则来源或换上下文更长的连接后重新起草；连接被拒（401、403、404）仍提示测试连接。402 和 Claude 消费上限的 400 改走“额度已用完”的提示——以前会被“拒绝”分支先截走。没经过传输层、直接抛出的 HTTP 错误也先经 `project_provider_error` 分类，得到同样的提示。
 

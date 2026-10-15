@@ -247,6 +247,14 @@ def test_rejection_message_redacts_quoted_credentials_before_logging(sleeps, cap
         assert secret not in caplog.text
 
 
+def test_quoted_secret_with_an_escaped_quote_is_redacted_to_its_closing_quote():
+    from backend.app.services.llm.errors import _safe_text
+
+    text = _safe_text('{"token": "ab\\"cdSECRET", \'secret\': \'it\\\'sSECRET\', "next": 1}', 300)
+    assert "SECRET" not in text
+    assert text.endswith('"next": 1}')
+
+
 def test_only_request_rejections_log_the_provider_message(sleeps, caplog):
     limited = [{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Resource exhausted."}}]
     denied = {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Permission denied on project x."}}
