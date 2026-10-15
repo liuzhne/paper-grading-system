@@ -31,6 +31,7 @@ from backend.app.services.ai_connection_protocol import ProtocolEndpointMissing
 from backend.app.services.ai_connection_protocol import normalize_base_url
 from backend.app.services.ai_connection_protocol import split_endpoint_suffix
 from backend.app.services.llm.call_log import _field as _log_field
+from backend.app.services.llm.auth_headers import openai_auth_headers
 
 
 logger = logging.getLogger("paper_grading.ai_connections")
@@ -513,7 +514,7 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
     headers = (
         {"x-api-key": runtime.api_key, "anthropic-version": _CLAUDE_API_VERSION}
         if runtime.provider_type == MESSAGES
-        else {"Authorization": "Bearer %s" % runtime.api_key}
+        else openai_auth_headers(base_url, runtime.api_key)
     )
     try:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:

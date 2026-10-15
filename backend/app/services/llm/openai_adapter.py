@@ -3,6 +3,7 @@ import json
 import httpx
 
 from backend.app.core.config import settings
+from backend.app.services.llm.auth_headers import openai_auth_headers
 from backend.app.services.llm.base import LLMScorer
 from backend.app.services.llm.base import validated_envelope_provider
 from backend.app.services.llm.core_adapter import validated_core_envelope_provider
@@ -242,7 +243,7 @@ class OpenAIResponsesScorer(LLMScorer):
             self,
             url="%s/responses" % self.base_url,
             headers={
-                "Authorization": "Bearer %s" % self.api_key,
+                **openai_auth_headers(self.base_url, self.api_key),
                 "Content-Type": "application/json",
             },
             payload=payload,

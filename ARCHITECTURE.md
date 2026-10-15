@@ -580,6 +580,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-15 | 接入 Google Vertex AI | 新增 `services/llm/auth_headers.py`：Chat 与 Responses 适配器、连接试连、`diagnose_llm` 共用，按主机选择认证头。调用链与持久化不变。 |
 | 2026-10-14 | 日志级别与测试连接诊断 | 新增 `core/log_config.py`：web 在 lifespan、worker 在入口配置根日志器（导入时不配置，pytest 与离线脚本不受影响）；试连失败经 `paper_grading.ai_connections` 记元数据。调用链与持久化不变。 |
 | 2026-10-13 | 部署迁移改为全新环境 | 生产库换成新建的 Supabase 项目，由初始化脚本建库；运行时密钥的来源改为 GitHub `production` 环境；执行模型与持久化边界不变，无迁移。 |
 | 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增生产拓扑（Caddy + app + worker 单机，数据库与存储不变）；执行模型不变，生产的叫醒层改为 worker 循环；新增公开健康检查；无迁移。 |

@@ -4,6 +4,7 @@ import sys
 import httpx
 
 from backend.app.core.config import settings
+from backend.app.services.llm.auth_headers import openai_auth_headers
 
 
 def main():
@@ -31,7 +32,7 @@ def main():
         response = httpx.post(
             url,
             headers={
-                "Authorization": "Bearer %s" % settings.OPENAI_COMPATIBLE_API_KEY,
+                **openai_auth_headers(url, settings.OPENAI_COMPATIBLE_API_KEY),
                 "Content-Type": "application/json",
             },
             json=payload,
