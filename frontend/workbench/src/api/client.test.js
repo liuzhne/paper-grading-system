@@ -171,3 +171,40 @@ it("刷新后仍不一致时不再反复刷新，照常发出请求", async () =
   await expect(api.post("/x", {})).resolves.toEqual({});
   expect(reload).toHaveBeenCalledTimes(1);
 });
+
+describe("api 方法齐全", () => {
+  // 源码里每一处 api.xxx( 调用都必须在 api 对象上有对应方法。2026-10-15 评分助手调用了
+  // 不存在的 api.put，保存直接失败，而它的调用方没有测试覆盖。
+  const sources = import.meta.glob(["../**/*.js", "../**/*.vue", "!../**/*.test.js"], {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  });
+
+  it("源码中用到的 api 方法都存在", () => {
+    const used = new Set();
+    for (const text of Object.values(sources)) {
+      for (const match of String(text).matchAll(/\bapi\.([A-Za-z_]+)\(/g)) used.add(match[1]);
+    }
+    expect(used.size).toBeGreaterThan(0);
+    const missing = [...used].filter((name) => typeof api[name] !== "function");
+    expect(missing).toEqual([]);
+  });
+
+  it("put 发 PUT 与 JSON 正文", async () => {
+    resetContractGuard();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.put("/assistant/settings", { model_source: "platform" });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/assistant/settings");
+    expect(init.method).toBe("PUT");
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(init.body)).toEqual({ model_source: "platform" });
+  });
+});

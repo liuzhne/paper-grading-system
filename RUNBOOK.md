@@ -908,6 +908,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
 | 2026-10-15 | 接入 Google Vertex AI | OpenAI 协议请求按主机选择认证头：Vertex 用 `x-goog-api-key`，其余仍用 Bearer；新增 Vertex 接入步骤与两条排错（Vertex 401、Gemini 403 看 reason）。 |
 | 2026-10-14 | 日志级别与测试连接诊断 | 新增 `LOG_LEVEL`（默认 INFO）；app 在启动时、worker 在入口统一配置日志格式；测试连接失败记 `ai_connection_test_failed`（状态码与错误类型）；9.4 增加看日志、临时调高级别的命令与一条排错。 |
 | 2026-10-14 | 首次配置新库连接串 | 新增排错：`RUNTIME_DATABASE_URL` 带 Prisma 的 `?pgbouncer=true` 时 psycopg 拒绝连接；`production_env.py` 生成 `.env` 时直接拦下。 |
@@ -2032,6 +2033,9 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   - 真正原因：测试库是共享一个连接的内存 SQLite，`max_workers=2` 的多线程评分会互相踩。测试里先把作业的 `max_workers` 改成 1 再跑（见 `test_assistant.py` 的 `_run_job`）。
 - **现象**：删除一份材料返回 409 `PAPER_DELETE_STATE_INVALID`。
   - 真正原因：只能删除上传未完成的记录，或解析失败且从未评分（无评分记录、无批任务条目、无分块）的材料。
+- **现象**：“选择助手使用的模型”对话框点“保存”只显示“保存失败”，后端日志里却没有任何 `PUT /api/assistant/settings` 请求。
+  - 报错指向：看起来像后端拒绝或模型连接有问题。
+  - 真正原因：前端 `api` 对象没有 `put` 方法，`api.put(...)` 在浏览器里直接抛 `TypeError`，请求根本没发出去；对话框把非接口错误一律显示成“保存失败”。2026-10-15 补上 `put`，并加了“源码里用到的 `api.xxx` 方法都必须存在”的测试。以后遇到“前端报失败、后端没请求”，先看浏览器控制台。
 
 发布：
 - 迁移 `0038_assistant_conversations` 新建五张表并在迁移内给 `pgs_app` 授权、建 RLS；生产按 D-025 审批工作流先迁移（`expected_head=0038_assistant_conversations`）再部署。`verify_postgres_ops` 与生产迁移工作流的运行角色检查覆盖这五张表。
