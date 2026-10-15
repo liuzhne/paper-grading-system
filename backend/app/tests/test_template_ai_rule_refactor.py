@@ -35,11 +35,14 @@ class _RejectedDraftScorer:
     model_name = "openai/gpt-oss-120b"
     model_version = "chat-completions"
 
+    def __init__(self, status=400):
+        self.status = status
+
     def complete_json(self, _instructions, _payload):
         request = httpx.Request(
             "POST", "https://api.groq.com/openai/v1/chat/completions"
         )
-        response = httpx.Response(400, request=request)
+        response = httpx.Response(self.status, request=request)
         raise httpx.HTTPStatusError(
             "provider rejected request", request=request, response=response
         )
@@ -317,18 +320,26 @@ def test_draft_task_returns_structured_suggestions_without_mutating_rubric(
     assert len(after["compilations"]) == 1
 
 
-def test_ai_drafter_reports_non_retryable_provider_rejection_without_body():
+@pytest.mark.parametrize(
+    ("status", "connection_hint"),
+    [(400, False), (422, False), (401, True), (403, True), (404, True)],
+)
+def test_ai_drafter_reports_non_retryable_provider_rejection_without_body(status, connection_hint):
     with pytest.raises(AIRuleDraftValidationError) as captured:
         draft_deduction_rules(
             criterion=_criterion(),
             input_analysis=analyze_rule_input([], criterion_code="T02"),
-            scorer=_RejectedDraftScorer(),
+            scorer=_RejectedDraftScorer(status),
             business_profile_key="thesis",
         )
 
     assert captured.value.code == "AI_DRAFT_PROVIDER_REJECTED"
     assert "拒绝" in captured.value.message
-    assert "测试当前 AI 连接" in captured.value.user_action
+    assert f"HTTP {status}" in captured.value.message
+    # 请求被拒时连接是好的，测连接也会通过；只有连接被拒才让用户去测连接。
+    assert ("测试当前 AI 连接" in captured.value.user_action) is connection_hint
+    if not connection_hint:
+        assert "这一批原文" in captured.value.user_action
     assert "groq" not in str(captured.value).lower()
 
 
@@ -356,7 +367,8 @@ def test_draft_task_fails_a_provider_rejection_without_retrying_or_exposing_the_
 
     assert task["status"] == "failed"
     assert task["error_code"] == "AI_DRAFT_PROVIDER_REJECTED"
-    assert "测试当前 AI 连接" in task["error_message"]
+    assert "模型拒绝处理这一批起草请求（HTTP 400）" in task["error_message"]
+    assert "测试当前 AI 连接" not in task["error_message"]
     assert "groq" not in task["error_message"].lower()
     # 请求被拒（400）立即判失败，不再执行第二次；剩下的批次不再发出。
     first, second = sorted(task["items"], key=lambda item: item["ordinal"])
@@ -574,7 +586,55 @@ def test_wrapped_provider_rejection_remains_rejection(caplog):
     with pytest.raises(AIRuleDraftValidationError) as caught:
         draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(), business_profile_key="thesis")
     assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "invalid_request，HTTP 400" in caught.value.message
+    assert "这一批原文" in caught.value.user_action
     assert "status=400" in caplog.text
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(401), business_profile_key="thesis")
+    assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "测试当前 AI 连接" in caught.value.user_action
+
+
+def test_wrapped_context_overflow_points_at_the_batch_length():
+    from backend.app.services.llm.errors import raise_provider_call_error
+
+    class Scorer:
+        provider = "openai_compatible"
+        model_name = "m"
+        model_version = "v"
+
+        def complete_json(self, _instructions, _payload):
+            request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+            response = httpx.Response(
+                400, json={"error": {"message": "maximum context length is 8192 tokens"}}, request=request,
+            )
+            raise_provider_call_error(
+                "openai_compatible", httpx.HTTPStatusError("x", request=request, response=response),
+            )
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(), business_profile_key="thesis")
+    assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "context_length_exceeded，HTTP 400" in caught.value.message
+    assert "精简这几段原文" in caught.value.user_action
+
+
+def test_wrapped_payment_required_uses_the_quota_hint():
+    from backend.app.services.llm.errors import raise_provider_call_error
+
+    class Scorer(_RejectedDraftScorer):
+        def complete_json(self, instructions, payload):
+            try:
+                super().complete_json(instructions, payload)
+            except httpx.HTTPStatusError as exc:
+                raise_provider_call_error("openai_compatible", exc)
+
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(402), business_profile_key="thesis")
+    # 402 是额度问题，不是“请求被拒”：提示充值或换连接，而不是去测连接。
+    assert caught.value.code == "AI_DRAFT_PROVIDER_ERROR"
+    assert "额度已用完" in caught.value.message
 
 
 def test_missing_mutex_is_repaired_once_without_relaxing_validation():

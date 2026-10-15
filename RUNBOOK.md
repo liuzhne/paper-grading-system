@@ -435,7 +435,8 @@ LOG_LEVEL=DEBUG docker compose -p pgs -f compose.yml up -d --force-recreate app 
 - **运行角色复验或应用连库时报 `invalid connection option "pgbouncer"`。** 报错像驱动或连接池问题，真正原因是 `RUNTIME_DATABASE_URL` 是从 Supabase 复制的 Prisma 版连接串，末尾带 `?pgbouncer=true`，psycopg 不认这个参数。去掉它（连接串以 `:6543/postgres` 结尾）后重设密钥。2026-10-14 首次配置时遇到过；部署任务生成 `.env` 时现在会直接拦下。
 - **页面上测试连接只显示“连接测试失败”，看不出原因。** 报错指向连接配置，真正的原因要看 app 日志里的 `ai_connection_test_failed … status=… error_type=…`：Bedrock 的错误类型来自 `x-amzn-errortype` 头。`status=400 error_type=ValidationException` 多半是模型 ID 不对（要和 Bedrock 控制台一字不差，新加坡区域不少模型要用 `apac.` / `global.` 推理配置前缀）；`403 AccessDeniedException` 是 Key 无权限或模型没开通；`404` 是地址或协议不对；`status=- error_type=ConnectTimeout` 是网络或地址不通。2026-10-14 之前 web 进程没有配置日志，这一行根本不会出现。
 - **Google Vertex AI 的连接测试 `status=401`，但同一把 Key 用 curl 带 `x-goog-api-key` 头能调通。** 报错像 Key 无效，真正原因是认证头：Vertex 的 OpenAI 兼容端点在 `Authorization: Bearer` 位置只认 OAuth 访问令牌，API Key（`AQ.` 开头的 express 模式 Key）必须放在 `x-goog-api-key` 头里。2026-10-15 起，主机是 `aiplatform.googleapis.com` 或 `<区域>-aiplatform.googleapis.com` 时自动改用该头（`services/llm/auth_headers.py`）；仍是 401，就检查 Key 是否属于地址里那个项目。
-- **Gemini 返回 `403` 且 `error_type=-`。** Google 的错误原因写在 `error.status` 与 `error.details[].reason`（如 `SERVICE_DISABLED`、`API_KEY_SERVICE_BLOCKED`、`API_KEY_HTTP_REFERRER_BLOCKED`），日志只记了状态码。用同一把 Key 在 CloudShell 里 `curl -s -H "x-goog-api-key: $KEY" https://generativelanguage.googleapis.com/v1beta/models` 可以看到原因；`API_KEY_INVALID`（400）是 Key 本身无效或没复制全。
+- **Gemini 返回 `403`，日志里 `provider_type=PERMISSION_DENIED`（2026-10-15 之前是 `-`）。** Google 的错误类型在 `error.status`，日志记它；更细的原因在 `error.details[].reason`（如 `SERVICE_DISABLED`、`API_KEY_SERVICE_BLOCKED`、`API_KEY_HTTP_REFERRER_BLOCKED`），日志不记（鉴权类说明常带项目信息）。用同一把 Key 在 CloudShell 里 `curl -s -H "x-goog-api-key: $KEY" https://generativelanguage.googleapis.com/v1beta/models` 可以看到原因；`API_KEY_INVALID`（400）是 Key 本身无效或没复制全。
+- **AI 起草某一批总是失败，提示“模型拒绝处理这一批起草请求（invalid_request，HTTP 400）”，同一连接的其他批次都成功。** 报错像连接或参数问题，真正原因是模型拒绝处理这一批的内容，确切说明在 worker 日志 `llm_call_failed` 行尾的 `provider_message="…"` 里：`sudo docker compose -p pgs -f /opt/pgs/compose.yml logs worker | grep 'llm_call_failed.*status=400'`。2026-10-15 之前这行只有 `provider_code=- provider_type=-`：Vertex AI 把错误体包在数组里（`[{"error": {...}}]`），解析器整段丢弃，说明也按约定不进日志；当时页面还提示去测试连接，测了也会通过。看到说明之前，可以先改写这一批的几段原文，或手动编写对应规则，再点“重试失败的条目”；条目的 `attempt_history` 里有每次的 `http_status`、`provider_code`、`provider_type`。
 - **部署任务在 “Write the runtime environment” 失败，提示缺少变量或不是 6543。** 报错指向脚本，真正原因是 GitHub `production` 环境里少配了密钥，或 `RUNTIME_DATABASE_URL` 用的是 Session pooler（5432）。输出里只有变量名，按名字补齐。
 - **app 反复重启，日志里是 `permission denied` 或 `must be owner`，出现在 `alembic upgrade head` 之后。** 报错像数据库权限问题，真正原因是生产 compose 的 `command` 被删掉了，容器回到了 Dockerfile 的 CMD，在启动时迁移；生产运行角色 `pgs_app` 没有 DDL。迁移只走 `production-migrate.yml`。
 
@@ -909,6 +910,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
 | 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
+| 2026-10-15 | 厂商错误说明与起草被拒提示 | 请求被拒时 `llm_call_failed` 行尾附 `provider_message`（脱敏、截断 300 字）；Google 数组错误体可解析，`provider_type` 取 `error.status`；起草的 HTTP 4xx 分“请求被拒”“连接被拒”两种提示，402 走额度提示；新增一条排错（某一批起草总被 400 拒绝），更新两条（Gemini 403、看厂商原文的方法）。 |
 | 2026-10-15 | 接入 Google Vertex AI | OpenAI 协议请求按主机选择认证头：Vertex 用 `x-goog-api-key`，其余仍用 Bearer；新增 Vertex 接入步骤与两条排错（Vertex 401、Gemini 403 看 reason）。 |
 | 2026-10-14 | 日志级别与测试连接诊断 | 新增 `LOG_LEVEL`（默认 INFO）；app 在启动时、worker 在入口统一配置日志格式；测试连接失败记 `ai_connection_test_failed`（状态码与错误类型）；9.4 增加看日志、临时调高级别的命令与一条排错。 |
 | 2026-10-14 | 首次配置新库连接串 | 新增排错：`RUNTIME_DATABASE_URL` 带 Prisma 的 `?pgbouncer=true` 时 psycopg 拒绝连接；`production_env.py` 生成 `.env` 时直接拦下。 |
@@ -1493,7 +1495,7 @@ npm --prefix frontend/workbench run api:generate
     from rule_scoring_tasks where scoring_run_id = '<run_id>' group by 1;
     ```
 
-    这次的根因是 `PROVIDER_INVALID_REQUEST`：百炼 kimi-k3 拒绝 `top_p=1.0`。修复后，批次页会优先显示根因码。错误码不含厂商原文；要看原文，就用该连接发一个最小请求复现，只看状态码和错误体，不要写进日志或数据库。
+    这次的根因是 `PROVIDER_INVALID_REQUEST`：百炼 kimi-k3 拒绝 `top_p=1.0`。修复后，批次页会优先显示根因码。错误码不含厂商原文。2026-10-15 起，请求被拒（400/413/422 这类）的厂商说明会脱敏后附在 `llm_call_failed` 行尾（`provider_message`），先看日志；其他类型的错误仍不记说明，需要时用该连接发一个最小请求复现，只看状态码和错误体，不要写进日志或数据库。
 - **现象**：`RULE_EXECUTION_FAILED (exception_type=ValueError)`，或日志里出现 `did not contain text output`。新版本会显示 `PROVIDER_OUTPUT_TRUNCATED`。
   - 真正原因：推理模型把 `max_output_tokens` 全部用在了推理上。可以关闭思考（Chat 协议，连接选项设 `thinking_type=disabled`），也可以调大 `max_output_tokens` 和 `timeout_seconds`。保留推理时，kimi-k3 单条规则约 30 秒。
 - **现象**：改完连接配置后重试，材料立刻失败。旧版本显示 `scoring_failure (exception_type=ValueError)`，新版本显示 `AI_CONNECTION_CONFIG_CHANGED`。

@@ -5,12 +5,19 @@
 - 上游服务商（聚合平台返回的 ``provider``）；
 - HTTP 状态、错误类别和厂商错误码（如智谱的 1302/1305），用来区分并发超额、
   频率超额和服务繁忙。
+
+唯一的例外是请求被拒（400/413/422 这类请求范围的错误）：错误码往往只有笼统的
+INVALID_ARGUMENT，真正原因只在厂商的错误说明里，于是把它脱敏、截断后附在行尾。
+限流、鉴权、5xx 等其他失败仍然不记。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+
+from backend.app.services.llm.errors import _default_message
 
 
 logger = logging.getLogger("paper_grading.llm.calls")
@@ -53,11 +60,28 @@ def log_call_succeeded(provider, model, data, *, elapsed_ms, attempt):
     )
 
 
+_PROVIDER_MESSAGE_LIMIT = 300
+
+
+def _rejection_message(projected) -> str | None:
+    """请求被拒时厂商给的说明（已去换行、遮蔽密钥）；其他失败或没有说明时为 None。"""
+
+    if projected.scope != "request" or projected.http_status is None:
+        return None
+    message = projected.message
+    if not message or message == _default_message(projected.code):
+        return None
+    return message[:_PROVIDER_MESSAGE_LIMIT]
+
+
 def log_call_failed(provider, model, projected, *, attempt, attempts, will_retry):
+    message = _rejection_message(projected)
     logger.warning(
         "llm_call_failed provider=%s model=%s code=%s status=%s provider_code=%s provider_type=%s "
-        "attempt=%d/%d retry=%s",
+        "attempt=%d/%d retry=%s%s",
         _field(provider), _field(model), _field(projected.code), _field(projected.http_status),
         _field(projected.provider_error_code), _field(projected.provider_error_type),
         attempt + 1, attempts, "yes" if will_retry else "no",
+        # JSON 字符串转义引号与控制字符，说明里的内容伪造不出新的日志字段。
+        "" if message is None else " provider_message=" + json.dumps(message, ensure_ascii=False),
     )

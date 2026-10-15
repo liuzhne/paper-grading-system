@@ -59,19 +59,20 @@ def _group(code="T02-R1"):
     }
 
 
-def _provider_error(code, *, status=429, retry_after=None):
+def _provider_error(code, *, status=429, retry_after=None, scope="provider",
+                    provider_type=None, provider_code=None, message=None):
     return ProviderCallError(
         "fake",
         ProviderError(
             schema_version="provider-error@1",
             code=code,
-            scope="provider",
+            scope=scope,
             retryable=code == "rate_limited",
             reducible=False,
             http_status=status,
-            provider_error_type=None,
-            provider_error_code=None,
-            message=code,
+            provider_error_type=provider_type,
+            provider_error_code=provider_code,
+            message=message or code,
             provider_request_id=None,
             retry_after=retry_after,
             rate_limit_headers={},
@@ -275,6 +276,29 @@ def test_a_permanent_failure_keeps_successful_batches_and_retries_only_the_faile
     _drain(client)
     assert len(drafter.calls) == calls_before + 1  # 只重跑失败的那批
     assert _task(client, task["id"])["status"] == "succeeded"
+
+
+def test_a_rejected_batch_records_the_status_but_not_the_provider_message(client, drafter):
+    drafter.script = [_provider_error(
+        "invalid_request", status=400, scope="request", provider_type="INVALID_ARGUMENT",
+        provider_code="400", message="Request contains an invalid argument.",
+    )]
+    rubric_id = _rubric(client)
+    task = _create(client, rubric_id).json()
+    _drain(client)
+    failed = _task(client, task["id"])
+    assert failed["error_code"] == "AI_DRAFT_PROVIDER_REJECTED"
+    # 请求被拒时连接是好的：不再让用户去测连接。
+    assert "模型拒绝处理这一批起草请求（invalid_request，HTTP 400）" in failed["error_message"]
+    assert "测试当前 AI 连接" not in failed["error_message"]
+    with client.session_factory() as session:
+        item = session.query(models.AITaskItem).filter_by(task_id=task["id"], status="failed").one()
+        entry = item.attempt_history[-1]
+    assert entry["error_code"] == "AI_DRAFT_PROVIDER_REJECTED"
+    assert (entry["http_status"], entry["provider_code"], entry["provider_type"]) == (
+        400, "400", "INVALID_ARGUMENT",
+    )
+    assert "invalid argument" not in str(item.attempt_history)  # 厂商说明只进日志
 
 
 def test_timeouts_retry_once_then_fail(client, drafter):

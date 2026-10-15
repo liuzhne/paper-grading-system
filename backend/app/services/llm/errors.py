@@ -288,6 +288,9 @@ def _response_error_fields(response):
         payload = response.json()
     except (json.JSONDecodeError, ValueError, TypeError):
         return None, None, None
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        # Google（Vertex AI、Gemini 的 OpenAI 兼容接口）把错误包在数组里：[{"error": {...}}]。
+        payload = payload[0]
     if not isinstance(payload, dict):
         return None, None, None
     error = payload.get("error")
@@ -303,7 +306,11 @@ def _response_error_fields(response):
     if code is None and isinstance(details, dict):
         # Claude 把细分错误码放在 error.details.error_code。
         code = scalar(details.get("error_code"))
-    return (scalar(fields.get("type")), code,
+    error_type = scalar(fields.get("type"))
+    if error_type is None and isinstance(error, dict) and isinstance(error.get("status"), str):
+        # Google 的错误类型是 error.status（INVALID_ARGUMENT、RESOURCE_EXHAUSTED……）。
+        error_type = error["status"]
+    return (error_type, code,
             fields.get("message") if isinstance(fields.get("message"), str) else None)
 
 
