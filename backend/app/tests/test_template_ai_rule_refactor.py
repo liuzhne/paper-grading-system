@@ -1021,6 +1021,29 @@ def test_lean_schema_output_is_still_validated_by_code():
     assert len(calls) == 4  # 每次执行：完整 Schema 被拒 → 精简 Schema；修正那次同样
 
 
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        # 精简 Schema 没有来源枚举：编造的位置由代码拦下。
+        ({"source_refs": ["/input_analysis/not-real"]}, "AI_DRAFT_SOURCE_INVALID"),
+        # 精简 Schema 没有 minimum：小于 0.01 的扣分由代码拦下。
+        ({"points": 0.001}, "DEDUCTION_POINTS_INVALID"),
+    ],
+)
+def test_lean_schema_keeps_the_strict_bounds_in_code(change, code):
+    group = _VALID_GROUPS["rule_groups"][0]
+    bad = {"rule_groups": [{**group, "cap_points": 2, "rules": [{**group["rules"][0], **change}]}]}
+    calls = []
+    scorer = _schema_fallback_scorer(
+        [(400, _TOO_MANY_STATES), (200, bad), (400, _TOO_MANY_STATES), (200, bad)], calls,
+    )
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                              business_profile_key="thesis")
+    assert caught.value.code == code
+    assert len(calls) == 4  # 修正一次后仍不合格：失败，不采纳
+
+
 def test_lean_schema_rejected_too_reports_the_format_constraint_not_content(caplog):
     calls = []
     scorer = _schema_fallback_scorer([(400, _TOO_MANY_STATES), (400, _TOO_MANY_STATES)], calls)

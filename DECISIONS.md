@@ -1779,6 +1779,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 选择：
 - **只在厂商明确说约束太复杂时降级**：400 且说明含 “too many states”（`llm/errors.schema_too_complex`）时，同一批、同一提示词立即用精简 Schema 再发一次。精简版保留结构、必填字段、三个短枚举，以及组数和条数上限；去掉字符串长度、数值范围、来源枚举与去重，这些在返回后由 `validate_ai_rule_draft` 按同一套上限检查。
+- **代码校验补齐到与完整版等价**（CodeRabbit 复审指出）：扣分至少 0.01（原来只拦 ≤0）；来源由前缀放行改为在输入里逐级查找，`/input_analysis/…`、`/criterion/evidence_hints/<下标>` 等必须真实存在。代价：以前被前缀放行的不存在位置，现在会被拒并进入一次格式修正；不带 Schema 的适配器（如 Bedrock 上默认关闭结构化输出的 Claude）同样受益。
 - **只降级一次**：精简版也被拒时，提示“模型处理不了这一批起草所需的输出格式约束”，并说明与原文和连接无关，建议换模型或手写规则；不继续降到 `json_object` 或无 Schema。
 - **可追溯**：单批元数据记 `output_schema`，合并后记 `lean_schema_batches`；日志记 `rubric_ai_draft_schema_fallback`。起草版本升为 `rubric-rule-draft@9`。
 - **请求被拒的通用提示不再猜原因**：改为“连接本身可用，被拒的是这一批请求（参数、输出格式或内容），具体原因管理员可在服务日志里查看”。

@@ -6,7 +6,8 @@ from backend.app.services.rubric_import.ai_rule_drafter import AIRuleDraftValida
 from backend.app.services.rubric_import.ai_rule_drafter import validate_ai_rule_draft
 from backend.app.services.rubric_import.compiler import analyze_rule_input
 
-CRITERION = {"code": "T02", "name": "需求分析", "max_score": 10, "description": "需求完整"}
+CRITERION = {"code": "T02", "name": "需求分析", "max_score": 10, "description": "需求完整",
+             "evidence_hints": ["需求规格说明"]}
 
 
 def _draft(source_refs):
@@ -40,6 +41,11 @@ def test_refs_pointing_at_real_inputs_are_accepted(refs):
     ["/criterion/secret_field"],
     ["第 3 页"],
     ["/criteria/T02/deduction_rules/0", "/made/up"],
+    # 前缀对、位置不存在：以前按前缀放行，现在要在输入里真实找到。
+    ["/input_analysis/not-real"],
+    ["/input_analysis/unresolved_segments/9"],
+    ["/criterion/evidence_hints/9"],
+    ["/criterion/description/0"],
 ])
 def test_fabricated_refs_are_rejected(refs):
     with pytest.raises(AIRuleDraftValidationError) as exc:

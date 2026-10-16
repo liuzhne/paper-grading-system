@@ -44,6 +44,8 @@ AI_RULE_DRAFT_MAX_GROUPS_PER_BATCH = 2
 AI_RULE_DRAFT_MAX_RULES_PER_GROUP = 3
 AI_RULE_DRAFT_MAX_GROUPS = AI_RULE_DRAFT_MAX_BATCHES * AI_RULE_DRAFT_MAX_GROUPS_PER_BATCH
 AI_RULE_DRAFT_MAX_TEXT_CHARS = 320
+# 严格 Schema 的 minimum；精简 Schema 不限分值，最小扣分由 _positive_points 把关。
+AI_RULE_DRAFT_MIN_POINTS = 0.01
 AI_RULE_DRAFT_MAX_SOURCE_REFS = 6
 # 起草一批的缺省等待：与原文归类（CLASSIFIER_TIMEOUT_SECONDS）同样依据百炼实测，
 # 60 秒不足以返回严格 Schema 的规则 JSON。连接显式配置的超时始终优先。
@@ -89,7 +91,8 @@ def _draft_output_schema(*, maximum: float, allowed_source_refs: list[str]):
     text = {"type": "string", "minLength": 1, "maxLength": AI_RULE_DRAFT_MAX_TEXT_CHARS}
     rule = _closed_object({
         "severity": {"type": "string", "enum": ["minor", "moderate", "severe"]},
-        "trigger": text, "points": {"type": "number", "minimum": 0.01, "maximum": maximum}, "reason": text,
+        "trigger": text, "points": {"type": "number", "minimum": AI_RULE_DRAFT_MIN_POINTS, "maximum": maximum},
+        "reason": text,
         "repeat_policy": {"type": "string", "enum": ["once"]},
         "source": {"type": "string", "enum": ["ai_interpreted_user_text", "ai_inferred"]},
         "source_refs": {"type": "array", "minItems": 1, "maxItems": AI_RULE_DRAFT_MAX_SOURCE_REFS,
@@ -98,7 +101,7 @@ def _draft_output_schema(*, maximum: float, allowed_source_refs: list[str]):
     group = _closed_object({
         "group_code": {"type": "string", "minLength": 1, "maxLength": 80},
         "issue": text, "mutex_group": {"type": "string", "minLength": 1, "maxLength": 80},
-        "cap_points": {"type": "number", "minimum": 0.01, "maximum": maximum},
+        "cap_points": {"type": "number", "minimum": AI_RULE_DRAFT_MIN_POINTS, "maximum": maximum},
         "rules": {"type": "array", "minItems": 1, "maxItems": AI_RULE_DRAFT_MAX_RULES_PER_GROUP,
                   "items": rule},
     })
@@ -110,9 +113,10 @@ def _draft_output_schema(*, maximum: float, allowed_source_refs: list[str]):
 def _lean_draft_output_schema():
     """Gemini 报“约束状态太多”时的退路：只留结构、必填字段、短枚举和组数/条数上限。
 
-    去掉的字符串长度、数值范围、来源枚举与去重，``validate_ai_rule_draft`` 在返回后按
-    同一套上限检查（来源先经 ``_normalize_source_refs`` 规整）；业务规则没有放宽，只是
-    把检查从模型侧挪到了代码里。组数、条数上限保留，输出长度仍然有界。
+    去掉的字符串长度、数值范围、来源枚举，``validate_ai_rule_draft`` 在返回后按同一套
+    上限检查：长度上限、0.01～满分、来源必须在输入里真实存在（先经 ``_normalize_source_refs``
+    规整，去重也在那里做）。业务规则没有放宽，只是把检查从模型侧挪到了代码里。组数、条数
+    上限保留，输出长度仍然有界。
     """
 
     text = {"type": "string"}
@@ -168,6 +172,12 @@ def _positive_points(value, *, maximum, label):
             f"{label}的扣分值必须大于 0。",
             "请把扣分值调整为大于 0 的固定数字。",
         )
+    if number < AI_RULE_DRAFT_MIN_POINTS:
+        raise AIRuleDraftValidationError(
+            "DEDUCTION_POINTS_INVALID",
+            f"{label}的扣分值小于 {AI_RULE_DRAFT_MIN_POINTS:g}。",
+            f"请把扣分值调整为不小于 {AI_RULE_DRAFT_MIN_POINTS:g} 的固定数字。",
+        )
     if number > maximum:
         raise AIRuleDraftValidationError(
             "DEDUCTION_POINTS_EXCEED_MAX",
@@ -180,18 +190,50 @@ def _positive_points(value, *, maximum, label):
 _SOURCE_FIELDS = ("code", "name", "max_score", "description", "evidence_hints", "scoring_mode")
 
 
-def _allowed_source_prefixes(criterion_code: str, input_assessment) -> tuple[str, ...]:
-    prefixes = ["/input_analysis"]
-    for field_name in _SOURCE_FIELDS:
-        prefixes.extend((f"/criterion/{field_name}", f"/criteria/{criterion_code}/{field_name}"))
-    for ref in (input_assessment or {}).get("source_refs") or []:
-        prefixes.append(str(ref))
-        prefixes.append(str(ref).replace(f"/criteria/{criterion_code}/", "/criterion/", 1))
-    return tuple(prefixes)
+_MISSING = object()
 
 
-def _is_known_source(ref: str, prefixes: tuple[str, ...]) -> bool:
-    return any(ref == prefix or ref.startswith(prefix + "/") for prefix in prefixes)
+def _pointer_target(value, segments):
+    """按 JSON 指针的各段逐级取值；任何一段不存在都返回 ``_MISSING``。"""
+
+    for segment in segments:
+        if isinstance(value, Mapping) and segment in value:
+            value = value[segment]
+        elif isinstance(value, list) and segment.isdigit() and int(segment) < len(value):
+            value = value[int(segment)]
+        else:
+            return _MISSING
+    return value
+
+
+def _source_ref_exists(ref: str, *, criterion_code: str, criterion, input_assessment) -> bool:
+    """来源必须指向输入里真实存在的位置：
+
+    - 输入列出的原文单元（``docx:p[12]``、``/criteria/T02/deduction_rules/0``）及其子路径；
+    - ``/input_analysis`` 本身，或它下面真实存在的路径；
+    - 评分项字段本身（``/criterion/description``），或字段下真实存在的下标。
+
+    以前按前缀放行，``/input_analysis/…`` 下随便写、``evidence_hints`` 写个不存在的下标都算数。
+    严格 Schema 的枚举挡得住这些值，精简 Schema 和不带 Schema 的适配器挡不住。
+    """
+
+    input_assessment = input_assessment or {}
+    for listed in input_assessment.get("source_refs") or []:
+        listed = str(listed)
+        for candidate in (listed, listed.replace(f"/criteria/{criterion_code}/", "/criterion/", 1)):
+            if ref == candidate or ref.startswith(candidate + "/"):
+                return True
+    if ref == "/input_analysis":
+        return True
+    if ref.startswith("/input_analysis/"):
+        return _pointer_target(input_assessment, ref.split("/")[2:]) is not _MISSING
+    for prefix in ("/criterion/", f"/criteria/{criterion_code}/"):
+        if ref.startswith(prefix):
+            field, _, rest = ref[len(prefix):].partition("/")
+            if field not in _SOURCE_FIELDS:
+                return False
+            return not rest or _pointer_target(criterion.get(field), rest.split("/")) is not _MISSING
+    return False
 
 
 def _schema_source_refs(criterion_code: str, input_assessment) -> list[str]:
@@ -445,8 +487,13 @@ def validate_ai_rule_draft(value, *, criterion):
                     f"规则组 {group_code} 存在无法追溯来源的规则。",
                     "请重新生成并保留用户输入或评分说明的来源位置。",
                 )
-            prefixes = _allowed_source_prefixes(criterion_code, draft.get("input_assessment"))
-            unknown = [str(item).strip() for item in source_refs if not _is_known_source(str(item).strip(), prefixes)]
+            unknown = [
+                str(item).strip() for item in source_refs
+                if not _source_ref_exists(
+                    str(item).strip(), criterion_code=criterion_code, criterion=criterion_value,
+                    input_assessment=draft.get("input_assessment"),
+                )
+            ]
             if unknown:
                 # 只回显模型写的来源标识（截断），便于判断是模型编造还是格式不符；不含原文正文。
                 shown = "、".join(ref[:40] for ref in unknown[:3])
