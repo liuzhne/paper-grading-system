@@ -25,6 +25,7 @@ import httpx
 from backend.app.core.config import settings
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.llm.errors import project_provider_error
+from backend.app.services.llm.errors import schema_too_complex
 from backend.app.services.llm.factory import scorer_concurrency
 from backend.app.services.llm.rate_limit import CircuitOpenError
 from backend.app.services.llm.anthropic_messages_adapter import AnthropicMessagesScorer
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 AI_RULE_DRAFT_SCHEMA_VERSION = "ai-deduction-draft@1"
-AI_RULE_DRAFT_PROMPT_VERSION = "rubric-rule-draft@8"
+AI_RULE_DRAFT_PROMPT_VERSION = "rubric-rule-draft@9"
 AI_RULE_DRAFT_MAX_OUTPUT_TOKENS = 6144
 AI_RULE_DRAFT_MAX_BATCHES = 6
 AI_RULE_DRAFT_MAX_GROUPS_PER_BATCH = 2
@@ -79,12 +80,14 @@ source_refs 只能从 payload.batch.allowed_source_refs 中原样选取：原文
 """.strip()
 
 
+def _closed_object(properties):
+    return {"type": "object", "properties": properties,
+            "required": list(properties), "additionalProperties": False}
+
+
 def _draft_output_schema(*, maximum: float, allowed_source_refs: list[str]):
-    def closed_object(properties):
-        return {"type": "object", "properties": properties,
-                "required": list(properties), "additionalProperties": False}
     text = {"type": "string", "minLength": 1, "maxLength": AI_RULE_DRAFT_MAX_TEXT_CHARS}
-    rule = closed_object({
+    rule = _closed_object({
         "severity": {"type": "string", "enum": ["minor", "moderate", "severe"]},
         "trigger": text, "points": {"type": "number", "minimum": 0.01, "maximum": maximum}, "reason": text,
         "repeat_policy": {"type": "string", "enum": ["once"]},
@@ -92,16 +95,42 @@ def _draft_output_schema(*, maximum: float, allowed_source_refs: list[str]):
         "source_refs": {"type": "array", "minItems": 1, "maxItems": AI_RULE_DRAFT_MAX_SOURCE_REFS,
                         "uniqueItems": True, "items": {"type": "string", "enum": allowed_source_refs}},
     })
-    group = closed_object({
+    group = _closed_object({
         "group_code": {"type": "string", "minLength": 1, "maxLength": 80},
         "issue": text, "mutex_group": {"type": "string", "minLength": 1, "maxLength": 80},
         "cap_points": {"type": "number", "minimum": 0.01, "maximum": maximum},
         "rules": {"type": "array", "minItems": 1, "maxItems": AI_RULE_DRAFT_MAX_RULES_PER_GROUP,
                   "items": rule},
     })
-    return closed_object({"rule_groups": {"type": "array", "minItems": 1,
-                                          "maxItems": AI_RULE_DRAFT_MAX_GROUPS_PER_BATCH,
-                                          "items": group}})
+    return _closed_object({"rule_groups": {"type": "array", "minItems": 1,
+                                           "maxItems": AI_RULE_DRAFT_MAX_GROUPS_PER_BATCH,
+                                           "items": group}})
+
+
+def _lean_draft_output_schema():
+    """Gemini 报“约束状态太多”时的退路：只留结构、必填字段、短枚举和组数/条数上限。
+
+    去掉的字符串长度、数值范围、来源枚举与去重，``validate_ai_rule_draft`` 在返回后按
+    同一套上限检查（来源先经 ``_normalize_source_refs`` 规整）；业务规则没有放宽，只是
+    把检查从模型侧挪到了代码里。组数、条数上限保留，输出长度仍然有界。
+    """
+
+    text = {"type": "string"}
+    rule = _closed_object({
+        "severity": {"type": "string", "enum": ["minor", "moderate", "severe"]},
+        "trigger": text, "points": {"type": "number"}, "reason": text,
+        "repeat_policy": {"type": "string", "enum": ["once"]},
+        "source": {"type": "string", "enum": ["ai_interpreted_user_text", "ai_inferred"]},
+        "source_refs": {"type": "array", "items": text},
+    })
+    group = _closed_object({
+        "group_code": text, "issue": text, "mutex_group": text, "cap_points": {"type": "number"},
+        "rules": {"type": "array", "minItems": 1, "maxItems": AI_RULE_DRAFT_MAX_RULES_PER_GROUP,
+                  "items": rule},
+    })
+    return _closed_object({"rule_groups": {"type": "array", "minItems": 1,
+                                           "maxItems": AI_RULE_DRAFT_MAX_GROUPS_PER_BATCH,
+                                           "items": group}})
 
 
 class AIRuleDraftValidationError(ValueError):
@@ -482,13 +511,24 @@ def _provider_rejection(error) -> AIRuleDraftValidationError | None:
         return None
     return _rejection_error(
         request_scope=error.scope == "request", detail=_error_detail(error), code=error.code,
+        schema_rejected=schema_too_complex(error),
     )
 
 
-def _rejection_error(*, request_scope: bool, detail: str, code: str | None = None) -> AIRuleDraftValidationError:
+def _rejection_error(
+    *, request_scope: bool, detail: str, code: str | None = None, schema_rejected: bool = False,
+) -> AIRuleDraftValidationError:
     """4xx 拒绝分两种：连接被拒要去测连接；请求被拒时连接是好的，测了也会通过。"""
 
     # 「重试失败的批次」原样重发任务冻结的输入：内容不变就还会被拒，所以引导重新起草。
+    if schema_rejected:
+        # 走到这里时精简 Schema 也已被拒（见 _draft_deduction_rules_once 的退路）。
+        return AIRuleDraftValidationError(
+            "AI_DRAFT_PROVIDER_REJECTED",
+            f"模型处理不了这一批起草所需的输出格式约束，精简格式也没有通过（{detail}）。",
+            "这与原文内容和连接无关，「重试失败的批次」会得到同样的结果。可以换用其他模型的连接后"
+            "点「AI 根据规则来源起草」重新起草，或手动编写这几段原文对应的规则。原有条款未改变。",
+        )
     if code in {"context_length_exceeded", "request_too_large"}:
         return AIRuleDraftValidationError(
             "AI_DRAFT_PROVIDER_REJECTED",
@@ -500,8 +540,9 @@ def _rejection_error(*, request_scope: bool, detail: str, code: str | None = Non
         return AIRuleDraftValidationError(
             "AI_DRAFT_PROVIDER_REJECTED",
             f"模型拒绝处理这一批起草请求（{detail}）。",
-            "如果这个连接的其他起草都正常，多半是这一批原文触发了模型的内容限制，"
-            "「重试失败的批次」会原样重发、多半仍被拒。可以手动编写这几段原文对应的规则，"
+            # 不猜原因：400 可能是参数、输出格式或内容，厂商的说明只记在服务日志 llm_call_failed 里。
+            "连接本身可用，被拒的是这一批请求（参数、输出格式或内容），具体原因管理员可在服务日志里查看。"
+            "「重试失败的批次」会原样重发、仍会被拒：可以手动编写这几段原文对应的规则，"
             "或调整该评分项的规则来源后点「AI 根据规则来源起草」重新起草。原有条款未改变。",
         )
     return AIRuleDraftValidationError(
@@ -575,6 +616,7 @@ def _draft_deduction_rules_once(
         },
     }
     request_budget = None
+    output_schema = None
     started = time.monotonic()
     try:
         instructions = AI_RULE_DRAFT_INSTRUCTIONS
@@ -598,16 +640,32 @@ def _draft_deduction_rules_once(
             )
             # 每批只发一次：本层已有一次格式修正，传输层再重试会把一次超时放大成
             # 三次等待，并连续计入同一连接的熔断计数（Responses 适配器默认会重试）。
-            raw = scorer.complete_json(
-                instructions,
-                payload,
-                response_schema=schema,
-                default_max_tokens=AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
-                attempts_limit=1,
-                default_timeout_seconds=AI_RULE_DRAFT_TIMEOUT_SECONDS,
-                rate_limit_retries=rate_limit_retries,
-                deadline=deadline,
-            )
+            def complete(response_schema):
+                return scorer.complete_json(
+                    instructions,
+                    payload,
+                    response_schema=response_schema,
+                    default_max_tokens=AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
+                    attempts_limit=1,
+                    default_timeout_seconds=AI_RULE_DRAFT_TIMEOUT_SECONDS,
+                    rate_limit_retries=rate_limit_retries,
+                    deadline=deadline,
+                )
+
+            output_schema = "strict"
+            try:
+                raw = complete(schema)
+            except ProviderCallError as exc:
+                if not schema_too_complex(exc.error):
+                    raise
+                # 厂商编译不了这份 Schema（与内容无关，原样重发必然再失败）：同一批立即改用
+                # 精简 Schema 再发一次。这一次仍失败就按请求被拒处理，不再继续降级。
+                logger.warning(
+                    "rubric_ai_draft_schema_fallback batch=%s/%s reason=schema_too_complex",
+                    analysis.get("batch_index", 1), analysis.get("batch_count", 1),
+                )
+                output_schema = "lean"
+                raw = complete(_lean_draft_output_schema())
         else:
             raw = scorer.complete_json(instructions, payload)
     except json.JSONDecodeError as exc:
@@ -715,6 +773,8 @@ def _draft_deduction_rules_once(
             "model_version": str(getattr(scorer, "model_version", "unknown")),
             "prompt_version": AI_RULE_DRAFT_PROMPT_VERSION,
             "output_token_budget": request_budget,
+            # strict：完整有界 Schema；lean：厂商报约束太复杂后改用的精简 Schema；None：未带 Schema。
+            "output_schema": output_schema,
         },
     }
     try:
@@ -893,8 +953,11 @@ def merge_draft_batches(criterion_value, analysis, drafts):
     criterion_code = str(criterion_value.get("code") or "")
     merged_groups = []
     metadata = None
+    lean_batches = []
     for batch_index, batch_draft in enumerate(drafts, start=1):
         metadata = metadata or deepcopy(batch_draft.get("generation_metadata") or {})
+        if (batch_draft.get("generation_metadata") or {}).get("output_schema") == "lean":
+            lean_batches.append(batch_index)
         for group_index, raw_group in enumerate(batch_draft.get("rule_groups") or [], start=1):
             group = deepcopy(raw_group)
             stable = f"{criterion_code}-B{batch_index:02d}-G{group_index:02d}"
@@ -909,9 +972,11 @@ def merge_draft_batches(criterion_value, analysis, drafts):
         "rule_groups": merged_groups,
         "requires_confirmation": True,
         "generation_metadata": {
-            **(metadata or {}),
+            # 各批的 output_schema 不同，合并后改记哪些批次用了精简 Schema。
+            **{key: value for key, value in (metadata or {}).items() if key != "output_schema"},
             "prompt_version": AI_RULE_DRAFT_PROMPT_VERSION,
             "batch_count": len(drafts),
+            "lean_schema_batches": lean_batches,
             "default_max_output_tokens": AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
         },
     }
