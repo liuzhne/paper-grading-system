@@ -50,6 +50,7 @@ def main():
                 "url": url,
                 "model": settings.OPENAI_COMPATIBLE_MODEL,
                 "thinking": payload.get("thinking"),
+                "reasoning_effort": payload.get("reasoning_effort"),
                 "response_format": payload.get("response_format"),
                 "error_type": exc.__class__.__name__,
                 "error": str(exc),
@@ -65,6 +66,8 @@ def main():
         "url": url,
         "model": settings.OPENAI_COMPATIBLE_MODEL,
         "thinking": payload.get("thinking"),
+        # Google 主机关闭思考发的是 reasoning_effort（thinking 为 null），两者都报出来便于核对。
+        "reasoning_effort": payload.get("reasoning_effort"),
         "response_format": payload.get("response_format"),
         "status_code": response.status_code,
         "content_type": response.headers.get("content-type"),

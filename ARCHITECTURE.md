@@ -934,7 +934,7 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 | 同上 | 关闭，但模型关不掉思考（2.5 Pro、Gemini 3）；或没配置 | 不发 | `provider-default`（开启） |
 | 其他主机 | 原样 | `thinking: {"type": …}` | 原样 |
 
-`OpenAICompatibleChatScorer` 在初始化时把 `thinking_type` 换算成身份值；`score_criterion`、`score_envelope`、`_post_core_request`、`complete_json` 与 `scripts/diagnose_llm.py` 都经 `thinking_request_fields` 拼请求体。身份变了，决策账本与 Core 缓存就不会把开着思考时的旧判定当作同一请求复用；旧路径的 L0 缓存键不含思考与输出上限，所以 `llm_cache.PROMPT_VERSION` 升为 `2026-10-16-1`。
+`OpenAICompatibleChatScorer` 在初始化时把 `thinking_type` 换算成身份值；`score_criterion`、`score_envelope`、`_post_core_request`、`complete_json` 与 `scripts/diagnose_llm.py` 都经 `thinking_request_fields` 拼请求体；`diagnose_llm` 的输出同时报告 `thinking` 与 `reasoning_effort`。身份变了，决策账本与 Core 缓存就不会把开着思考时的旧判定当作同一请求复用；旧路径的 L0 缓存键不含思考与输出上限，所以 `llm_cache.PROMPT_VERSION` 升为 `2026-10-16-1`。
 
 默认输出上限 `OPENAI_COMPATIBLE_MAX_TOKENS` 1200→2048，给关不掉思考的模型留余量。评分的输入预算是 `SCORING_CONTEXT_WINDOW_TOKENS − 输出上限 − SCORING_CONTEXT_SAFETY_MARGIN_TOKENS`，所以窗口同步 8192→9040，OpenAI 兼容连接的输入预算保持 5968、证据选择与请求体大小不变；OpenAI Responses（1200）与 Claude（4096）的输入预算各多 848。
 

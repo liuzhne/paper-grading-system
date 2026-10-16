@@ -126,3 +126,28 @@ def test_raising_the_default_output_cap_keeps_the_evidence_budget():
     margin = fields["SCORING_CONTEXT_SAFETY_MARGIN_TOKENS"].default
     assert output == 2048
     assert window - output - margin == 5968
+
+
+def test_diagnose_llm_reports_the_reasoning_effort_it_sent(monkeypatch, capsys):
+    # 只构造请求、用假响应，不发真实调用。
+    from backend.app.core.config import settings
+    from backend.app.scripts import diagnose_llm
+
+    sent = {}
+
+    def fake_post(url, headers, json, timeout):
+        sent.update(json)
+        return httpx.Response(200, request=httpx.Request("POST", url),
+                              json={"choices": [{"message": {"content": '{"ok": true}'}, "finish_reason": "stop"}]})
+
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_BASE_URL", VERTEX)
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_MODEL", "google/gemini-2.5-flash")
+    monkeypatch.setattr(settings, "OPENAI_COMPATIBLE_THINKING_TYPE", "disabled")
+    monkeypatch.setattr(diagnose_llm.httpx, "post", fake_post)
+
+    diagnose_llm.main()
+    report = json.loads(capsys.readouterr().out)
+    assert sent["reasoning_effort"] == "none" and "thinking" not in sent
+    assert report["reasoning_effort"] == "none"
+    assert report["thinking"] is None
