@@ -589,6 +589,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-10-16 | Gemini 关闭思考与评分输出上限 | 新增“Google 主机关闭思考改发 reasoning_effort，评分默认输出上限与上下文窗口同步调大”。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | 新增“厂商编译不了起草 Schema 时，同一批改用精简 Schema 重发一次”；给 2026-09-21“严格有界输出”加一条只在厂商拒绝时启用的退路，并更正 2026-10-15 请求被拒提示里“内容限制”的猜测。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | 新增“请求被拒时日志记录厂商错误说明，起草被拒提示按原因区分”；部分收回 2026-10-14 “厂商错误正文不进日志”的决定（只对请求被拒，且只进日志）。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 纯缺陷修复（前端少了 `api.put`，后端接口本来就是 `PUT /api/assistant/settings`），没有新的取舍，不新增决策。 |
@@ -1792,3 +1793,25 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - **降级时去掉组数和条数上限**：输出会失去长度上界，回到 2026-09-21 要避免的截断风险。
 
 维护记录：2026-10-16 · 起草 Schema 太复杂时改用精简 Schema：新增 `schema_too_complex` 与 `_lean_draft_output_schema`；更正 2026-10-15 请求被拒提示的“内容限制”猜测；起草版本 `rubric-rule-draft@9`。
+
+### 2026-10-16 Google 主机关闭思考改发 reasoning_effort，评分默认输出上限与上下文窗口同步调大（Accepted）
+
+背景：生产上用 Vertex AI 的 Gemini 2.5 Flash 评一份论文，48 次规则调用里 12 次 `PROVIDER_OUTPUT_TRUNCATED`，按设计整份判失败。用量账本里输入 58,330、可见输出 3,304，合计却是 98,552：约 3.7 万 token 是模型的思考，平均每次约 770，而可见输出平均只有约 70。全局配置 `OPENAI_COMPATIBLE_THINKING_TYPE=disabled`，但适配器发的是智谱写法 `thinking: {"type": "disabled"}`，Vertex 不认、静默忽略；思考 token 计入 1200 的输出上限，思考一长 JSON 就写不完。运行身份却记着“思考已关闭”，与实际不符。
+
+选择：
+- **按主机换算思考参数**（`services/llm/thinking_params.py`）：Google 主机（Vertex 与 Gemini API）上配置为关闭时，发 Google 文档给出的 `reasoning_effort: "none"`；只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，就不发参数，运行身份记为 `provider-default`（思考开启）。其他主机照旧发 `thinking` 字段。
+- **运行身份记换算后的值**：决策账本与 Core 缓存按身份区分，开着思考时的旧判定不会被当作同一请求复用；旧路径的 L0 缓存键不含思考与输出上限，`llm_cache.PROMPT_VERSION` 升为 `2026-10-16-1`。
+- **默认输出上限 1200→2048，上下文窗口 8192→9040**（维护者选定）：给关不掉思考的模型和偶尔较长的输出留余量。窗口同步调大，OpenAI 兼容连接的输入预算保持 5968，证据选择和请求体大小不变（当初窗口收紧到 8k 正是为了请求体不触发 413）。
+
+放弃了什么：
+- **只调大输出上限、不关思考**：思考照样发生、照样按输出计费（这份论文约 37% 的 token 花在思考上），思考长度也不可控，只是把截断概率压低。
+- **用 `extra_body.google.thinking_config.thinking_budget=0`**：Google 文档说它和 `reasoning_effort` 重叠，不要混用；`reasoning_effort` 是 OpenAI 写法，LiteLLM 等也这么映射。代价：只能按档位控制。
+- **对关不掉思考的模型改发 `reasoning_effort: "low"`**：会把用户配置的“关闭”悄悄变成“低”。改为不发参数、如实记为开启，靠 2048 上限兜底。
+- **新增连接选项，让用户直接填 `reasoning_effort`**：要改前端、校验和身份字段；沿用已有的 `thinking_type` 语义就够了。
+- **只对 Google 主机调大输出上限**：这个连接的输入预算会从 5968 降到 5120，每条规则能带的证据少约 15%。
+- **只调输出上限、不动窗口**：所有 OpenAI 兼容连接的输入预算都会缩到 5120，评分输入随之改变。
+- **升级 `CORE_PROVIDER_PROMPT_VERSION`**：没必要，Google 连接的思考身份、所有连接的输出上限都已变化，账本与 Core 缓存本来就会失效。
+
+代价：关闭思考会改变 Gemini 的判定，正式使用前要按 §15 用 QWK 留出集重新锚定（需要维护者授权真实调用与预算）。所有 OpenAI 兼容连接的运行身份变一次，决策账本与缓存各失效一次。OpenAI Responses（1200）与 Claude（4096）连接的输入预算各多 848，证据可能多选几条。
+
+维护记录：2026-10-16 · Gemini 关闭思考与评分输出上限：新增 `thinking_params`；`OPENAI_COMPATIBLE_MAX_TOKENS=2048`、`SCORING_CONTEXT_WINDOW_TOKENS=9040`、`llm_cache.PROMPT_VERSION=2026-10-16-1`。

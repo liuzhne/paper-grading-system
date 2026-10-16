@@ -911,6 +911,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
 | 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
+| 2026-10-16 | Gemini 关闭思考与评分输出上限 | Google 主机关闭思考改发 `reasoning_effort: "none"`；默认输出上限 1200→2048、上下文窗口 8192→9040（输入预算不变），`llm_cache.PROMPT_VERSION=2026-10-16-1`；截断排错补上 Vertex/Gemini 的情况与用量账本的判断方法，Vertex 接入说明补思考一条。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | 厂商报“约束状态太多”时同一批自动改用精简 Schema 重发一次（日志 `rubric_ai_draft_schema_fallback`）；精简版去掉的约束在代码里补齐（扣分至少 0.01、来源必须在输入里真实存在）；请求被拒的提示不再猜“内容限制”；排错补上 T02 的真实原因，新增一条（精简格式也被拒）。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | 请求被拒时 `llm_call_failed` 行尾附 `provider_message`（脱敏、截断 300 字）；Google 数组错误体可解析，`provider_type` 取 `error.status`；说明里的密钥（含带引号的 `"api_key": "…"` 与 `AIza…` 形状）先遮蔽；起草的 HTTP 4xx 分“请求被拒”“连接被拒”两种提示，402 走额度提示，请求被拒引导重新起草而不是重试（重试原样重发冻结输入）；新增一条排错（某一批起草总被 400 拒绝），更新两条（Gemini 403、看厂商原文的方法）。 |
 | 2026-10-15 | 接入 Google Vertex AI | OpenAI 协议请求按主机选择认证头：Vertex 用 `x-goog-api-key`，其余仍用 Bearer；新增 Vertex 接入步骤与两条排错（Vertex 401、Gemini 403 看 reason）。 |
@@ -1500,6 +1501,7 @@ npm --prefix frontend/workbench run api:generate
     这次的根因是 `PROVIDER_INVALID_REQUEST`：百炼 kimi-k3 拒绝 `top_p=1.0`。修复后，批次页会优先显示根因码。错误码不含厂商原文。2026-10-15 起，请求被拒（400/413/422 这类）的厂商说明会脱敏后附在 `llm_call_failed` 行尾（`provider_message`），先看日志；其他类型的错误仍不记说明，需要时用该连接发一个最小请求复现，只看状态码和错误体，不要写进日志或数据库。
 - **现象**：`RULE_EXECUTION_FAILED (exception_type=ValueError)`，或日志里出现 `did not contain text output`。新版本会显示 `PROVIDER_OUTPUT_TRUNCATED`。
   - 真正原因：推理模型把 `max_output_tokens` 全部用在了推理上。可以关闭思考（Chat 协议，连接选项设 `thinking_type=disabled`），也可以调大 `max_output_tokens` 和 `timeout_seconds`。保留推理时，kimi-k3 单条规则约 30 秒。
+  - **Vertex / Gemini 上，2026-10-16 之前 `thinking_type=disabled` 不生效。** 报错像输出上限太小，真正原因是 Google 的 OpenAI 兼容端点不认 `thinking` 字段，Gemini 2.5 Flash 一直在思考，思考 token 计入输出上限。判断方法：看用量账本 `ai_usage_ledger`，`total_tokens` 明显大于 `prompt_tokens + completion_tokens`，差值就是思考 token（10-16 那份论文：58,330 + 3,304，合计却是 98,552）。2026-10-16 起，Google 主机关闭思考改发 `reasoning_effort: "none"`；只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，只能靠输出上限（默认 2048）兜底，或给连接设更大的 `max_tokens`。调大连接的 `max_tokens` 会挤掉证据预算（输入预算 = `SCORING_CONTEXT_WINDOW_TOKENS` − 输出上限 − 安全余量），而且改了连接配置的旧评分任务会报 `AI_CONNECTION_CONFIG_CHANGED`，要新建任务。
 - **现象**：改完连接配置后重试，材料立刻失败。旧版本显示 `scoring_failure (exception_type=ValueError)`，新版本显示 `AI_CONNECTION_CONFIG_CHANGED`。
   - 报错指向：评分执行。
   - 真正原因：批次创建时冻结了连接快照，连接配置变了，评分就拒绝执行；这是有意的保护。正规做法是新建评分任务并重新上传材料。只有确认是同一连接、同一密钥，且变更是有意为之时，才在库里更新该批次的 `ai_connection_snapshot`，并写一条审计。
@@ -1806,6 +1808,7 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 | API Key | Vertex AI express 模式的 API Key（`AQ.` 开头） |
 
 - Key 由系统放在 `x-goog-api-key` 头里发送，不用 Bearer；其它 OpenAI 兼容服务（包括 Gemini API 的 `generativelanguage.googleapis.com`）仍用 Bearer。
+- 思考：连接的 `thinking_type=disabled`（全局默认）在 Vertex 与 Gemini API 上改发 `reasoning_effort: "none"`（只有 2.5 Flash 系列能关；2026-10-16 起）。
 - 学生论文会发给 Google：项目要绑定结算账号，按付费条款处理数据。
 - 换模型会改变评分结果，正式使用前按 §15 重新锚定 QWK（需要维护者授权真实调用与预算）。
 

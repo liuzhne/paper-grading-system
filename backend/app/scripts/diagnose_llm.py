@@ -5,6 +5,8 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.services.llm.auth_headers import openai_auth_headers
+from backend.app.services.llm.thinking_params import effective_thinking_type
+from backend.app.services.llm.thinking_params import thinking_request_fields
 
 
 def main():
@@ -22,9 +24,11 @@ def main():
         "temperature": 0.2,
         "max_tokens": 200,
     }
-    thinking_type = (settings.OPENAI_COMPATIBLE_THINKING_TYPE or "").strip()
-    if thinking_type:
-        payload["thinking"] = {"type": thinking_type}
+    # 与评分适配器同一套换算：Google 主机关闭思考发 reasoning_effort，其余发 thinking 字段。
+    thinking_type = effective_thinking_type(
+        url, settings.OPENAI_COMPATIBLE_MODEL, settings.OPENAI_COMPATIBLE_THINKING_TYPE,
+    )
+    payload.update(thinking_request_fields(url, settings.OPENAI_COMPATIBLE_MODEL, thinking_type))
     if settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON:
         payload["response_format"] = {"type": "json_object"}
 
