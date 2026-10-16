@@ -1,3 +1,4 @@
+import logging
 import time
 
 import httpx
@@ -339,7 +340,8 @@ def test_ai_drafter_reports_non_retryable_provider_rejection_without_body(status
     # 请求被拒时连接是好的，测连接也会通过；只有连接被拒才让用户去测连接。
     assert ("测试当前 AI 连接" in captured.value.user_action) is connection_hint
     if not connection_hint:
-        assert "这一批原文" in captured.value.user_action
+        assert "被拒的是这一批请求" in captured.value.user_action
+        assert "内容限制" not in captured.value.user_action  # 400 的原因不止内容，不替用户猜
         # 重试会原样重发冻结的输入：引导重新起草或手写规则，而不是改原文后重试。
         assert "重新起草" in captured.value.user_action
         assert "原样重发" in captured.value.user_action
@@ -590,7 +592,7 @@ def test_wrapped_provider_rejection_remains_rejection(caplog):
         draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=Scorer(), business_profile_key="thesis")
     assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
     assert "invalid_request，HTTP 400" in caught.value.message
-    assert "这一批原文" in caught.value.user_action
+    assert "被拒的是这一批请求" in caught.value.user_action
     assert "status=400" in caplog.text
 
     with pytest.raises(AIRuleDraftValidationError) as caught:
@@ -934,6 +936,137 @@ def test_open_circuit_is_reported_as_a_pause_not_a_generic_failure():
     assert caught.value.code == "AI_DRAFT_PROVIDER_ERROR"
     assert "暂停调用" in caught.value.message
     assert "账户与连接" in caught.value.user_action
+
+
+_TOO_MANY_STATES = [{"error": {
+    "code": 400, "status": "INVALID_ARGUMENT",
+    "message": "The specified schema produces a constraint that has too many states for serving.",
+}}]
+
+
+def _schema_fallback_scorer(responses, calls):
+    """Chat 适配器：按顺序返回 ``responses``；元素是 (状态码, 正文)。"""
+
+    import json
+    from backend.app.services.llm.errors import raise_provider_call_error
+    from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
+
+    class Scorer(OpenAICompatibleChatScorer):
+        def _post_with_retry(self, body, **kwargs):
+            calls.append(body)
+            status, value = responses.pop(0)
+            request = httpx.Request("POST", self.base_url)
+            if status != 200:
+                response = httpx.Response(status, json=value, request=request)
+                raise_provider_call_error(
+                    "openai_compatible", httpx.HTTPStatusError("x", request=request, response=response),
+                )
+            return httpx.Response(200, request=request,
+                                  json={"choices": [{"message": {"content": json.dumps(value)}}]})
+
+    return Scorer(api_key="test-key", base_url="https://aiplatform.googleapis.com/v1/openapi",
+                  model_name="google/gemini-2.5-flash", response_format_json=False)
+
+
+_VALID_GROUPS = {"rule_groups": [{"group_code": "G1", "issue": "缺失", "mutex_group": "G1", "cap_points": 2,
+                  "rules": [{"severity": "minor", "trigger": "需求缺失", "points": 2, "reason": "不完整",
+                             "repeat_policy": "once", "source": "ai_inferred",
+                             "source_refs": ["/criterion/description"]}]}]}
+
+
+def test_schema_too_complex_is_resent_once_with_the_lean_schema(caplog):
+    import json
+
+    calls = []
+    scorer = _schema_fallback_scorer([(400, _TOO_MANY_STATES), (200, _VALID_GROUPS)], calls)
+    with caplog.at_level(logging.WARNING):
+        draft = draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                                      business_profile_key="thesis")
+
+    assert len(calls) == 2
+    strict = calls[0]["response_format"]["json_schema"]["schema"]
+    lean = calls[1]["response_format"]["json_schema"]
+    assert lean["strict"]
+    lean_text = json.dumps(lean["schema"])
+    # 精简 Schema 去掉长度、数值范围、来源枚举与去重；结构、必填字段和组数/条数上限保留。
+    for keyword in ("maxLength", "minLength", "minimum", "maximum", "uniqueItems"):
+        assert keyword in json.dumps(strict) and keyword not in lean_text
+    groups = lean["schema"]["properties"]["rule_groups"]
+    assert (groups["maxItems"], groups["items"]["properties"]["rules"]["maxItems"]) == (2, 3)
+    assert "mutex_group" in groups["items"]["required"]
+    rule = groups["items"]["properties"]["rules"]["items"]
+    assert rule["properties"]["source_refs"]["items"] == {"type": "string"}
+    assert rule["properties"]["severity"]["enum"] == ["minor", "moderate", "severe"]
+    # 其余请求内容不变：同一批、同一预算。
+    assert calls[0]["messages"] == calls[1]["messages"]
+    assert calls[0]["max_tokens"] == calls[1]["max_tokens"]
+    # 合并后的草稿记下哪些批次用了精简 Schema，便于事后追查。
+    assert draft["generation_metadata"]["lean_schema_batches"] == [1]
+    assert "output_schema" not in draft["generation_metadata"]
+    assert "rubric_ai_draft_schema_fallback batch=1/1 reason=schema_too_complex" in caplog.text
+
+
+def test_lean_schema_output_is_still_validated_by_code():
+    # 精简 Schema 不限分值：超过满分的输出仍由代码拦下，修正一次后照样失败，不会被采纳。
+    group = _VALID_GROUPS["rule_groups"][0]
+    too_many = {"rule_groups": [{**group, "cap_points": 99, "rules": [{**group["rules"][0], "points": 99}]}]}
+    calls = []
+    scorer = _schema_fallback_scorer(
+        [(400, _TOO_MANY_STATES), (200, too_many), (400, _TOO_MANY_STATES), (200, too_many)], calls,
+    )
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                              business_profile_key="thesis")
+    assert caught.value.code == "DEDUCTION_POINTS_EXCEED_MAX"
+    assert len(calls) == 4  # 每次执行：完整 Schema 被拒 → 精简 Schema；修正那次同样
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        # 精简 Schema 没有来源枚举：编造的位置由代码拦下。
+        ({"source_refs": ["/input_analysis/not-real"]}, "AI_DRAFT_SOURCE_INVALID"),
+        # 精简 Schema 没有 minimum：小于 0.01 的扣分由代码拦下。
+        ({"points": 0.001}, "DEDUCTION_POINTS_INVALID"),
+    ],
+)
+def test_lean_schema_keeps_the_strict_bounds_in_code(change, code):
+    group = _VALID_GROUPS["rule_groups"][0]
+    bad = {"rule_groups": [{**group, "cap_points": 2, "rules": [{**group["rules"][0], **change}]}]}
+    calls = []
+    scorer = _schema_fallback_scorer(
+        [(400, _TOO_MANY_STATES), (200, bad), (400, _TOO_MANY_STATES), (200, bad)], calls,
+    )
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                              business_profile_key="thesis")
+    assert caught.value.code == code
+    assert len(calls) == 4  # 修正一次后仍不合格：失败，不采纳
+
+
+def test_lean_schema_rejected_too_reports_the_format_constraint_not_content(caplog):
+    calls = []
+    scorer = _schema_fallback_scorer([(400, _TOO_MANY_STATES), (400, _TOO_MANY_STATES)], calls)
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                              business_profile_key="thesis")
+    assert len(calls) == 2  # 只降级一次，不继续重发
+    assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "输出格式约束" in caught.value.message
+    assert "与原文内容和连接无关" in caught.value.user_action
+    assert "测试当前 AI 连接" not in caught.value.user_action
+
+
+def test_other_invalid_requests_are_not_resent():
+    calls = []
+    other = [{"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Invalid value at 'temperature'"}}]
+    scorer = _schema_fallback_scorer([(400, other)], calls)
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                              business_profile_key="thesis")
+    assert len(calls) == 1
+    assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "输出格式约束" not in caught.value.message
 
 
 def _batch_group(payload):
