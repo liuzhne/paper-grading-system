@@ -217,6 +217,18 @@ def project_provider_error(exc: BaseException) -> ProviderError:
     )
 
 
+# Gemini 结构化输出的 400 INVALID_ARGUMENT：Schema 编译出的约束状态太多（长度、数值范围、
+# 嵌套数组上限、长枚举都会增加状态），与请求内容和连接无关。
+_SCHEMA_TOO_COMPLEX_MARKERS = ("too many states",)
+
+
+def schema_too_complex(error: ProviderError) -> bool:
+    """厂商拒绝的是输出 Schema 太复杂，换一份更简单的 Schema 就能处理。"""
+
+    message = str(error.message or "").casefold()
+    return error.http_status == 400 and any(marker in message for marker in _SCHEMA_TOO_COMPLEX_MARKERS)
+
+
 def raise_provider_call_error(provider: str, exc: BaseException):
     if isinstance(exc, ProviderCallError):
         raise exc

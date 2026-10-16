@@ -581,6 +581,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-10-15 | 评分助手保存模型设置失败 | 无架构变化：前端 `api/client.js` 补齐 `put`，与后端 `PUT /api/assistant/settings` 对齐。 |
+| 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | `ai_rule_drafter._draft_deduction_rules_once` 在厂商报“约束状态太多”（`llm/errors.schema_too_complex`）时，同一批立即用 `_lean_draft_output_schema` 再发一次；精简版去掉的约束由 `validate_ai_rule_draft` 在返回后检查。单批元数据记 `output_schema`，合并后记 `lean_schema_batches`；起草版本升为 `rubric-rule-draft@9`。调用链与表结构不变，无迁移。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | `llm/errors` 兼容 Google 的数组错误体，类型取 `error.status`；`llm/call_log` 对请求范围的 HTTP 错误在 `llm_call_failed` 附脱敏后的厂商说明；`ai_tasks/execution` 在 `attempt_history` 记 `http_status`、`provider_code`、`provider_type`；起草 4xx 按错误范围分两种提示（直接抛出的 HTTP 错误也先经 `project_provider_error` 分类）；补记“重试复用冻结输入”的边界。调用链与表结构不变，无迁移。 |
 | 2026-10-15 | 接入 Google Vertex AI | 新增 `services/llm/auth_headers.py`：Chat 与 Responses 适配器、连接试连、`diagnose_llm` 共用，按主机选择认证头。调用链与持久化不变。 |
 | 2026-10-14 | 日志级别与测试连接诊断 | 新增 `core/log_config.py`：web 在 lifespan、worker 在入口配置根日志器（导入时不配置，pytest 与离线脚本不受影响）；试连失败经 `paper_grading.ai_connections` 记元数据。调用链与持久化不变。 |
@@ -921,6 +922,18 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 合并后的规则只引用真实原文编号或评分项字段，不再残留只在单批内部有意义的位置指针。
 
 维护记录：2026-09-30 · AI 起草来源引用归一化：起草 prompt 升为 `rubric-rule-draft@8`，全局缓存版本升为 `2026-09-30-1`；接口和数据库不变，head `0032_single_active_ai_connection` 不变。
+
+### 2026-10-16 起草 Schema 太复杂时改用精简 Schema
+
+`_draft_deduction_rules_once` 的模型调用改为最多两步：
+1. 照常带完整的有界 Schema（`_draft_output_schema`：字符串长度、分值范围、来源枚举与去重、组数和条数上限）。
+2. 只有厂商以 400 拒绝、说明里有 “too many states”（`llm/errors.schema_too_complex`，目前只见于 Gemini 的结构化输出）时，同一批、同一提示词立即改用 `_lean_draft_output_schema` 再发一次。精简版只保留结构、必填字段、`severity`/`repeat_policy`/`source` 三个短枚举，以及组数（≤2）、条数（≤3）上限。
+
+去掉的约束由 `validate_ai_rule_draft` 在返回后按同一套上限检查，业务规则不放宽：文字长度上限、扣分 0.01～满分（`AI_RULE_DRAFT_MIN_POINTS`），来源先经 `_normalize_source_refs` 规整、去重，再由 `_source_ref_exists` 在输入里逐级查找——`/input_analysis/…` 与评分项字段下的子路径必须真实存在，不再按前缀放行。精简版仍被拒时只失败一次，不再继续降级。格式修正（repair）的那次执行同样先发完整版。
+
+单批草稿的 `generation_metadata.output_schema` 记 `strict`、`lean` 或 `None`（未带 Schema 的适配器）；`merge_draft_batches` 合并后改记 `lean_schema_batches`（用了精简版的批次序号）。起草版本 `rubric-rule-draft@9`；起草不走 L0 缓存，全局缓存版本不变。
+
+维护记录：2026-10-16 · 起草 Schema 太复杂时改用精简 Schema：接口、数据库不变，head `0038_assistant_conversations` 不变。
 
 ### 2026-10-01 AI 起草厂商错误的提示细化
 
