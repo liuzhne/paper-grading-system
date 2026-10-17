@@ -157,3 +157,19 @@ def test_only_the_vercel_job_pins_the_reduced_motion_landing_page():
     assert pin in vercel
     assert vercel.index(pin) < vercel.index("vercel build --prod")
     assert "--landing-motion" not in lightsail
+
+
+def test_every_entry_page_links_the_favicon():
+    """入口页都声明图标：没有声明时浏览器会去取 `/favicon.ico`，两个宿主都是 404。"""
+    for path in (
+        "index.html",
+        "about/index.html",
+        "login/index.html",
+        "register/index.html",
+        "reset-password/index.html",
+        "workbench/index.html",
+    ):
+        html = (ROOT / "public" / path).read_text(encoding="utf-8")
+
+        assert '<link rel="icon" type="image/svg+xml" href="/workbench/favicon.svg"' in html, path
+    assert (ROOT / "public" / "workbench" / "favicon.svg").is_file()
