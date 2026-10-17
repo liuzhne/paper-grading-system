@@ -1,10 +1,10 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 
 import SiteFooter from "./SiteFooter.vue";
 import SiteHeader from "./SiteHeader.vue";
 import SiteMark from "./SiteMark.vue";
-import { measureSection, overlayState, productState } from "./landing-motion.js";
+import { measureSection, overlayState, productState, stillProductStates } from "./landing-motion.js";
 import { APP_URL, aboutUrl } from "./links.js";
 
 /**
@@ -14,6 +14,9 @@ import { APP_URL, aboutUrl } from "./links.js";
  * - 首屏「输入院系邮箱，获取试用名额」表单不上线。原型只改前端状态、提交后显示
  *   「已登记」而什么也没保存；落库另做。
  * - 原型里点了没反应的「申请试用」大按钮指向子页的预约区，「使用条款」去掉。
+ *
+ * 访客开了「减少动态效果」时（prefers-reduced-motion），滚动不再驱动任何动画：波浪
+ * 停在首屏底部随页面滚走，四步演示平铺成四行静态画面，不留 580vh 的滚动舞台。
  */
 defineProps({
   /** 首屏右侧的产品卡片（原型的 showProductCard 属性）。 */
@@ -21,6 +24,12 @@ defineProps({
 });
 
 const section = ref(/** @type {HTMLElement|null} */ (null));
+
+const motionQuery = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
+const reduceMotion = ref(Boolean(motionQuery?.matches));
+const onMotionChange = (/** @type {MediaQueryListEvent} */ event) => {
+  reduceMotion.value = event.matches;
+};
 const view = reactive({ p: 0, y: 0, vw: 1280, vh: 800, B: 0 });
 
 let frame = 0;
@@ -43,21 +52,44 @@ function schedule() {
 onMounted(() => {
   window.addEventListener("scroll", schedule, { passive: true });
   window.addEventListener("resize", schedule);
+  motionQuery?.addEventListener?.("change", onMotionChange);
   sample();
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("scroll", schedule);
   window.removeEventListener("resize", schedule);
+  motionQuery?.removeEventListener?.("change", onMotionChange);
   if (frame) cancelAnimationFrame(frame);
 });
 
-const product = computed(() => productState(view));
-const overlay = computed(() => overlayState({ y: view.y, vh: view.vh, B: view.B || view.vh }));
+// 切换后演示区的高度变了，产品区块的位置要重新量。
+watch(reduceMotion, () => nextTick(sample));
+
+/** 平时是一张随滚动变化的舞台；减少动态效果时是四张静态画面。 */
+const slides = computed(() => (reduceMotion.value ? stillProductStates(view) : [productState(view)]));
+
+const overlay = computed(() =>
+  // 静止姿态取页面顶部那一刻：波浪停在首屏底部，标志不出现。
+  overlayState({ y: reduceMotion.value ? 0 : view.y, vh: view.vh, B: view.B || view.vh }),
+);
+
+/** 减少动态效果时波浪层不再固定在视口上，而是贴在首屏底部随页面滚走。 */
+const overlayStyle = computed(() =>
+  reduceMotion.value
+    ? { position: "absolute", top: `${overlay.value.shift.toFixed(1)}px` }
+    : {
+        transform: `translateY(${overlay.value.shift.toFixed(1)}px)`,
+        display: overlay.value.hidden ? "none" : "block",
+      },
+);
 
 function explore() {
-  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-  window.scrollTo({ top: overlay.value.target, behavior: reduce ? "auto" : "smooth" });
+  if (reduceMotion.value) {
+    window.scrollTo({ top: view.B, behavior: "auto" });
+    return;
+  }
+  window.scrollTo({ top: overlay.value.target, behavior: "smooth" });
 }
 
 const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
@@ -115,21 +147,30 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
       <div class="wave-spacer" />
     </div>
 
-    <section ref="section" class="product" aria-label="产品演示">
+    <section ref="section" class="product" :class="{ still: reduceMotion }" aria-label="产品演示">
       <div class="product-stage">
         <div
+          v-for="(state, i) in slides"
+          :key="i"
           class="product-grid"
-          :style="{ gridTemplateColumns: product.frame.wide ? 'minmax(0, 0.85fr) minmax(0, 1.35fr)' : 'minmax(0, 1fr)' }"
+          :style="{ gridTemplateColumns: state.frame.wide ? 'minmax(0, 0.85fr) minmax(0, 1.35fr)' : 'minmax(0, 1fr)' }"
         >
-          <div class="captions" :style="{ minHeight: `${product.frame.captionHeight}px` }">
+          <div v-if="reduceMotion" class="captions">
+            <div class="caption still">
+              <div class="caption-index">{{ state.captions[i].index }}</div>
+              <h2>{{ state.captions[i].title }}</h2>
+              <p>{{ state.captions[i].body }}</p>
+            </div>
+          </div>
+          <div v-else class="captions" :style="{ minHeight: `${state.frame.captionHeight}px` }">
             <div class="rail">
-              <div v-for="step in product.rail" :key="step.label" class="rail-step">
+              <div v-for="step in state.rail" :key="step.label" class="rail-step">
                 <div class="rail-track"><div class="rail-fill" :style="{ width: percent(step.fill) }" /></div>
                 <div class="rail-label" :class="{ current: step.current }">{{ step.label }}</div>
               </div>
             </div>
             <div
-              v-for="caption in product.captions"
+              v-for="caption in state.captions"
               :key="caption.index"
               class="caption"
               :style="{ opacity: caption.opacity, transform: `translateY(${caption.shift.toFixed(1)}px)` }"
@@ -144,20 +185,20 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
             class="window"
             aria-hidden="true"
             :style="{
-              transform: `scale(${product.frame.scale.toFixed(4)})`,
-              opacity: product.frame.opacity,
-              marginBottom: `${product.frame.marginBottom.toFixed(1)}px`,
+              transform: `scale(${state.frame.scale.toFixed(4)})`,
+              opacity: state.frame.opacity,
+              marginBottom: `${state.frame.marginBottom.toFixed(1)}px`,
             }"
           >
             <div class="window-bar">
               <span class="window-mark"><SiteMark :size="13" :stroke-width="2.6" /></span>
-              <span class="window-crumb">{{ product.frame.crumb }}</span>
+              <span class="window-crumb">{{ state.frame.crumb }}</span>
             </div>
-            <div class="window-body" :style="{ height: `${product.frame.bodyHeight}px` }">
-              <div class="panel" :style="{ opacity: product.criteria.opacity }">
+            <div class="window-body" :style="{ height: `${state.frame.bodyHeight}px` }">
+              <div class="panel" :style="{ opacity: state.criteria.opacity }">
                 <div class="panel-head"><span class="panel-title">评分项</span><span class="panel-sub">打分规则.xlsx › 指导教师评分项</span></div>
                 <div
-                  v-for="row in product.criteria.rows"
+                  v-for="row in state.criteria.rows"
                   :key="row.code"
                   class="crit-row"
                   :style="{ opacity: row.opacity, transform: `translateX(${row.shift.toFixed(1)}px)` }"
@@ -169,7 +210,7 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
                 </div>
               </div>
 
-              <div class="panel panel-evidence" :style="{ opacity: product.evidence.opacity }">
+              <div class="panel panel-evidence" :style="{ opacity: state.evidence.opacity }">
                 <div class="doc">
                   <div class="doc-page">
                     <div class="doc-meta">论文正文 · 第 12 页</div>
@@ -179,7 +220,7 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
                     </div>
                     <div class="paper-heading">3.2 研究方法</div>
                     <div class="doc-quote">
-                      <div class="doc-mark" :style="{ width: percent(product.evidence.highlight) }" />
+                      <div class="doc-mark" :style="{ width: percent(state.evidence.highlight) }" />
                       <span>本文采用对比实验，在三组公开数据集上评估模型的召回率与精确率……</span>
                     </div>
                     <div class="lines lines-top">
@@ -198,12 +239,12 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
                       stroke="#c9953f"
                       stroke-width="1.8"
                       stroke-dasharray="1"
-                      :style="{ strokeDashoffset: product.evidence.dash }"
+                      :style="{ strokeDashoffset: state.evidence.dash }"
                     />
                   </svg>
                   <div
                     class="evidence-card"
-                    :style="{ opacity: product.evidence.cardOpacity, transform: `translateY(${product.evidence.cardShift.toFixed(1)}px)` }"
+                    :style="{ opacity: state.evidence.cardOpacity, transform: `translateY(${state.evidence.cardShift.toFixed(1)}px)` }"
                   >
                     <div class="score-head">
                       <span class="score-name">研究方法与技术方案</span>
@@ -214,10 +255,10 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
                 </div>
               </div>
 
-              <div class="panel" :style="{ opacity: product.review.opacity }">
+              <div class="panel" :style="{ opacity: state.review.opacity }">
                 <div class="panel-head"><span class="panel-title">评分表</span><span class="panel-sub">SE-2026-014 · 置信度</span></div>
                 <div
-                  v-for="row in product.review.rows"
+                  v-for="row in state.review.rows"
                   :key="row.name"
                   class="conf-row"
                   :style="{ background: `rgba(201,149,63,${(row.tag * 0.1).toFixed(3)})` }"
@@ -231,21 +272,21 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
                 </div>
               </div>
 
-              <div class="panel panel-transcript" :style="{ opacity: product.transcript.opacity }">
+              <div class="panel panel-transcript" :style="{ opacity: state.transcript.opacity }">
                 <div class="panel-head tight"><span class="panel-title">成绩单</span><span class="panel-sub">2026 届毕业论文 · 批次 1</span></div>
                 <div class="stats">
                   <div>
                     <div class="stat-label">已复核</div>
-                    <div class="stat-value">{{ product.transcript.count }}<span class="stat-of"> / 24</span></div>
+                    <div class="stat-value">{{ state.transcript.count }}<span class="stat-of"> / 24</span></div>
                   </div>
                   <div>
                     <div class="stat-label">均分</div>
-                    <div class="stat-value">{{ product.transcript.average }}</div>
+                    <div class="stat-value">{{ state.transcript.average }}</div>
                   </div>
                 </div>
                 <div class="bars">
                   <div
-                    v-for="(bar, i) in product.transcript.bars"
+                    v-for="(bar, i) in state.transcript.bars"
                     :key="i"
                     class="bar"
                     :class="{ highlight: bar.highlight }"
@@ -253,7 +294,7 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
                   />
                 </div>
                 <div class="bar-labels"><span>&lt;60</span><span>60–69</span><span>70–79</span><span>80–89</span><span>90+</span></div>
-                <div class="exports" :style="{ opacity: product.transcript.exportOpacity }">
+                <div class="exports" :style="{ opacity: state.transcript.exportOpacity }">
                   <span class="export primary">HTML 评审报告</span>
                   <span class="export">Excel 成绩单</span>
                   <span class="export">结构化 JSON</span>
@@ -276,10 +317,7 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
 
     <SiteFooter />
 
-    <div
-      class="overlay"
-      :style="{ transform: `translateY(${overlay.shift.toFixed(1)}px)`, display: overlay.hidden ? 'none' : 'block' }"
-    >
+    <div class="overlay" :style="overlayStyle">
       <svg class="waves" viewBox="0 0 1440 1000" preserveAspectRatio="none" aria-hidden="true">
         <path :d="overlay.paths[0]" fill="#c9953f" />
         <path :d="overlay.paths[1]" fill="#2f7d5c" />
@@ -309,6 +347,7 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
 
 <style scoped>
 .landing {
+  position: relative;
   background: #f6f5f2;
 }
 
@@ -1051,6 +1090,27 @@ h1 {
   border-color: #175c50;
   background: #175c50;
   color: #fff;
+}
+
+/* 减少动态效果：四行静态画面依次排下，不吸顶、不占滚动距离。 */
+.product.still {
+  height: auto;
+  padding: 88px 0 24px;
+}
+
+.product.still .product-stage {
+  position: static;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.product.still .product-grid + .product-grid {
+  margin-top: 72px;
+}
+
+.caption.still {
+  position: static;
 }
 
 /* ---------- 收尾与页脚 ---------- */

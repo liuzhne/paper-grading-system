@@ -39,6 +39,28 @@ describe("宣传页", () => {
     expect(wrapper.text()).not.toContain("已登记");
   });
 
+  it("开了「减少动态效果」：四步平铺成静态画面，波浪不固定在视口上", () => {
+    window.matchMedia = vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    try {
+      const wrapper = mount(LandingPage);
+
+      expect(wrapper.get(".product").classes()).toContain("still");
+      expect(wrapper.findAll(".window")).toHaveLength(4);
+      expect(wrapper.findAll(".rail")).toHaveLength(0);
+      expect(wrapper.get(".overlay").attributes("style")).toContain("position: absolute");
+    } finally {
+      delete window.matchMedia;
+    }
+  });
+
+  it("平时是一张随滚动变化的舞台", () => {
+    const wrapper = mount(LandingPage);
+
+    expect(wrapper.get(".product").classes()).not.toContain("still");
+    expect(wrapper.findAll(".window")).toHaveLength(1);
+    expect(wrapper.get(".overlay").attributes("style")).toContain("translateY");
+  });
+
   it("没有点了没反应的链接", () => {
     const wrapper = mount(LandingPage);
 

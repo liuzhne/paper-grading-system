@@ -64,6 +64,24 @@ test.describe("从宣传页进入工作台", () => {
   });
 });
 
+test.describe("减少动态效果", () => {
+  test("四步演示平铺成静态画面，不留长滚动舞台", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/");
+
+    const product = page.getByRole("region", { name: "产品演示" });
+    await expect(product.locator(".window")).toHaveCount(4);
+    // 580vh 的吸顶舞台不再存在：四行画面的总高度远小于它。
+    const height = await product.evaluate((el) => el.getBoundingClientRect().height);
+    expect(height).toBeLessThan(900 * 5.8);
+    for (const title of ["上传评分表，评分项自动成形", "每一项给分，都能回到原文", "拿不准的，交给老师", "复核完，成绩单一次导出"]) {
+      await product.getByRole("heading", { name: title }).scrollIntoViewIfNeeded();
+      await expect(product.getByRole("heading", { name: title })).toBeInViewport();
+    }
+  });
+});
+
 test.describe("官网子页", () => {
   test("按地址里的 # 打开对应分页，导航切换分页", async ({ page }) => {
     await page.goto("/about#security");

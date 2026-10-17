@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { STEPS, measureSection, overlayState, productState } from "./landing-motion.js";
+import { STEPS, measureSection, overlayState, productState, stillProductStates } from "./landing-motion.js";
 
 /**
  * 宣传页滚动动画。动画算错不会报错，只会让某一屏停在半透明、两步叠在一起或
@@ -98,5 +98,34 @@ describe("overlayState", () => {
     const { target } = overlayState({ y: 0, vh, B });
     expect(target).toBe(B + vh);
     expect(overlayState({ y: target, vh, B }).hidden).toBe(true);
+  });
+});
+
+describe("stillProductStates（减少动态效果）", () => {
+  const stills = stillProductStates({ vw: 1440, vh: 900 });
+
+  it("四步各一张，每张只露出自己那一步", () => {
+    expect(stills).toHaveLength(4);
+    stills.forEach((state, i) => {
+      const panels = [state.criteria, state.evidence, state.review, state.transcript].map((x) => x.opacity);
+      panels.forEach((opacity, j) => {
+        if (j === i) expect(opacity, `第 ${i + 1} 张的面板 ${j + 1}`).toBeCloseTo(1, 3);
+        else expect(opacity, `第 ${i + 1} 张的面板 ${j + 1}`).toBe(0);
+      });
+      expect(state.frame.crumb).toBe(STEPS[i].crumb);
+    });
+  });
+
+  it("每一步都停在演示完成的样子，窗口不缩放不淡入", () => {
+    const [criteria, evidence, review, transcript] = stills;
+    expect(criteria.criteria.rows.every((r) => r.checked && r.opacity === 1)).toBe(true);
+    expect(evidence.evidence.highlight).toBe(1);
+    expect(evidence.evidence.cardOpacity).toBe(1);
+    expect(review.review.rows.filter((r) => r.flagged).map((r) => r.name)).toEqual(["研究方法与技术方案", "结论与创新性"]);
+    expect(transcript.transcript.count).toBe(24);
+    expect(transcript.transcript.exportOpacity).toBe(1);
+    for (const state of stills) {
+      expect(state.frame).toMatchObject({ scale: 1, opacity: 1, marginBottom: 0 });
+    }
   });
 });

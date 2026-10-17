@@ -233,6 +233,7 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth、公开集成自检和�
   组装：`public/workbench/site/**` → `public/index.html`、`public/about/index.html`；FastAPI 从同一来源
   提供 `/` `/about` `/about/` 并注入 `API_PREFIX`，产物里没有宣传页时 `/` 回落工作台。宣传页挂载后请求
   `/api/auth/me`，`auth_required` 为真且有用户时跳 `/workbench/`。官网不调用其他接口、不收集任何数据。
+  滚动动画是 `landing-motion.js` 的纯函数；`prefers-reduced-motion` 时改用 `stillProductStates` 的四张静态画面。
 - **状态机**：`0024` 落七态 CHECK 与 `state_version`；所有转移经 `services/batches/state`。
   归档/重开是显式端点，目标阶段由服务端从当前结果推导。**旧写入口（`PATCH /score-items`、
   `POST /scoring-runs/{id}/review`）与新端点共用归档守卫，改分同样 bump `review_revision`**——

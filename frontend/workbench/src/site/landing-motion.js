@@ -170,6 +170,24 @@ export function productState({ p, vw, vh }) {
 }
 
 /**
+ * 「减少动态效果」时的四步静态画面（访客在系统里开了 prefers-reduced-motion）。
+ *
+ * 每一步取它自己演示完、还没开始淡出的那一刻：评分项全部核对、证据卡片落定、低置信
+ * 度项已标出、成绩单数字到位。窗口不缩放、不淡入，也不随视口高度收缩——不再是一屏
+ * 吸顶的舞台，而是四行依次排下来。
+ *
+ * @param {{ vw: number, vh: number }} view
+ */
+export function stillProductStates({ vw, vh }) {
+  return STEPS.map((_, i) => {
+    const settled = i === STEPS.length - 1 ? 1 : 0.88;
+    const p = 0.06 + (0.9 * (i + settled)) / STEPS.length;
+    const state = productState({ p, vw, vh });
+    return { ...state, frame: { ...state.frame, scale: 1, opacity: 1, marginBottom: 0 } };
+  });
+}
+
+/**
  * 一条起伏的波浪边：两组正弦叠加，避免看起来像机械的正弦曲线。
  *
  * @returns {Array<[number, number]>}
