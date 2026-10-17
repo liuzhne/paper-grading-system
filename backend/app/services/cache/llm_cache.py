@@ -28,7 +28,7 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-10-05-1"  # Core semantic rules send provider-view@1 (core-semantic-provider@3)
+PROMPT_VERSION = "2026-10-16-1"  # Google 主机关闭思考改发 reasoning_effort（旧路径缓存键不含思考与输出上限）
 
 
 @dataclass(frozen=True)

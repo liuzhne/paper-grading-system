@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | `main.py` 的浏览器页面（`/`、`/about`、三条邮件链接、`/workbench/*`）经 `page_route` 同时登记 GET 与 HEAD，`/api/*` 不变；图标 `favicon.svg` 随 Vite 产物发布在 `/workbench/favicon.svg`，入口页声明。无接口、表结构与迁移变化。 |
 | 2026-10-17 | 宣传页成为首页 | §7.2 新增“官网”：`/` 宣传页、`/about` 官网子页由同一次 Vite 构建产出（多入口），`build_web_static.py` 与 FastAPI 从 `public/workbench/site/` 取页；工作台规范地址 `/workbench/`，三条已发出链接的路由不变。后端只改静态入口路由，无接口、表结构与迁移变化。Vercel 部署任务在构建前把宣传页固定为少动效版，Lightsail 正常动效。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 无架构变化：前端 `api/client.js` 补齐 `put`，与后端 `PUT /api/assistant/settings` 对齐。 |
+| 2026-10-16 | Gemini 关闭思考与评分输出上限 | 新增 `services/llm/thinking_params.py`：OpenAI 兼容适配器的四处请求与 `diagnose_llm` 共用，Google 主机（Vertex、Gemini API）关闭思考改发 `reasoning_effort: "none"`（仅 2.5 Flash 系列），其余主机照发 `thinking` 字段；`OpenAICompatibleChatScorer.thinking_type` 记换算后的值，运行身份如实。默认输出上限 1200→2048、上下文窗口 8192→9040（输入预算不变）；`llm_cache.PROMPT_VERSION=2026-10-16-1`。调用链与表结构不变，无迁移。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | `ai_rule_drafter._draft_deduction_rules_once` 在厂商报“约束状态太多”（`llm/errors.schema_too_complex`）时，同一批立即用 `_lean_draft_output_schema` 再发一次；精简版去掉的约束由 `validate_ai_rule_draft` 在返回后检查。单批元数据记 `output_schema`，合并后记 `lean_schema_batches`；起草版本升为 `rubric-rule-draft@9`。调用链与表结构不变，无迁移。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | `llm/errors` 兼容 Google 的数组错误体，类型取 `error.status`；`llm/call_log` 对请求范围的 HTTP 错误在 `llm_call_failed` 附脱敏后的厂商说明；`ai_tasks/execution` 在 `attempt_history` 记 `http_status`、`provider_code`、`provider_type`；起草 4xx 按错误范围分两种提示（直接抛出的 HTTP 错误也先经 `project_provider_error` 分类）；补记“重试复用冻结输入”的边界。调用链与表结构不变，无迁移。 |
 | 2026-10-15 | 接入 Google Vertex AI | 新增 `services/llm/auth_headers.py`：Chat 与 Responses 适配器、连接试连、`diagnose_llm` 共用，按主机选择认证头。调用链与持久化不变。 |
@@ -933,6 +934,22 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 合并后的规则只引用真实原文编号或评分项字段，不再残留只在单批内部有意义的位置指针。
 
 维护记录：2026-09-30 · AI 起草来源引用归一化：起草 prompt 升为 `rubric-rule-draft@8`，全局缓存版本升为 `2026-09-30-1`；接口和数据库不变，head `0032_single_active_ai_connection` 不变。
+
+### 2026-10-16 Gemini 关闭思考与评分输出上限
+
+连接的 `thinking_type` 沿用智谱写法 `thinking: {"type": …}`。Google 的 OpenAI 兼容端点不认这个字段，会静默忽略，Gemini 2.5 Flash 于是一直按默认开着思考。`services/llm/thinking_params.py` 按主机换算：
+
+| 主机 | 连接配置 | 发出的字段 | 运行身份 `thinking.type` |
+|---|---|---|---|
+| Vertex（`aiplatform.googleapis.com` 与区域端点）、Gemini API（`generativelanguage.googleapis.com`） | 关闭（`disabled` 等），模型是 2.5 Flash 系列 | `reasoning_effort: "none"` | `none`（关闭） |
+| 同上 | 关闭，但模型关不掉思考（2.5 Pro、Gemini 3）；或没配置 | 不发 | `provider-default`（开启） |
+| 其他主机 | 原样 | `thinking: {"type": …}` | 原样 |
+
+`OpenAICompatibleChatScorer` 在初始化时把 `thinking_type` 换算成身份值；`score_criterion`、`score_envelope`、`_post_core_request`、`complete_json` 与 `scripts/diagnose_llm.py` 都经 `thinking_request_fields` 拼请求体；`diagnose_llm` 的输出同时报告 `thinking` 与 `reasoning_effort`。身份变了，决策账本与 Core 缓存就不会把开着思考时的旧判定当作同一请求复用；旧路径的 L0 缓存键不含思考与输出上限，所以 `llm_cache.PROMPT_VERSION` 升为 `2026-10-16-1`。
+
+默认输出上限 `OPENAI_COMPATIBLE_MAX_TOKENS` 1200→2048，给关不掉思考的模型留余量。评分的输入预算是 `SCORING_CONTEXT_WINDOW_TOKENS − 输出上限 − SCORING_CONTEXT_SAFETY_MARGIN_TOKENS`，所以窗口同步 8192→9040，OpenAI 兼容连接的输入预算保持 5968、证据选择与请求体大小不变；OpenAI Responses（1200）与 Claude（4096）的输入预算各多 848。
+
+维护记录：2026-10-16 · Gemini 关闭思考与评分输出上限：接口、数据库不变，head `0038_assistant_conversations` 不变。
 
 ### 2026-10-16 起草 Schema 太复杂时改用精简 Schema
 

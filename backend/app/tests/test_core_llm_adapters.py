@@ -239,6 +239,33 @@ def test_openai_compatible_scores_prompt_envelope_v3_with_connection_controls(
     )
 
 
+def test_vertex_gemini_core_scoring_disables_thinking_with_reasoning_effort():
+    # 2026-10-16：Vertex 不认 thinking 字段，Gemini 2.5 Flash 照常思考，撑满 1200 的输出上限被截断。
+    class VertexClient(_CompatibleCoreClient):
+        def post(self, url, headers, json):
+            assert headers["x-goog-api-key"] == "test-key"  # Vertex 不用 Bearer
+            return super().post(url, {**headers, "Authorization": "Bearer test-key"}, json)
+
+    client = VertexClient()
+    scorer = OpenAICompatibleChatScorer(
+        api_key="test-key",
+        base_url="https://aiplatform.googleapis.com/v1/projects/demo/locations/global/endpoints/openapi",
+        model_name="google/gemini-2.5-flash",
+        client=client,
+        thinking_type="disabled",
+    )
+    envelope = _core_envelope(scorer)
+    client.output = _provider_response(envelope)
+
+    ThesisLLMRuntime(scorer).score(envelope=envelope)
+
+    assert client.payload["reasoning_effort"] == "none"
+    assert "thinking" not in client.payload
+    assert envelope.to_mapping()["runtime_identity"]["provider"]["thinking"] == {
+        "enabled": False, "type": "none",
+    }
+
+
 @pytest.mark.parametrize("profile", [ThesisProfile(), TechnicalProposalProfile()])
 def test_production_profile_freezes_real_connection_controls(profile):
     scorer = OpenAICompatibleChatScorer(
