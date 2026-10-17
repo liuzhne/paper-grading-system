@@ -117,6 +117,19 @@ def test_vercel_entrypoint_and_bundle_contract():
     ignore_rules = (ROOT / ".vercelignore").read_text(encoding="utf-8").splitlines()
     assert "/storage" in ignore_rules
     assert "storage" not in ignore_rules
+    # 按扩展名排除文档图（*.svg、*.png …）的规则不能吃掉 public/ 里的静态产物：
+    # 2026-10-17 favicon.svg 没上传，Vercel 把请求回退成了工作台首页的 HTML。
+    # 忽略规则按顺序生效，重新包含 public/ 的那一条必须排在所有扩展名规则之后。
+    rules = [line.strip() for line in ignore_rules if line.strip() and not line.startswith("#")]
+    assert "!/public/**" in rules
+    extension_rules = [i for i, rule in enumerate(rules) if rule.startswith("*.")]
+    assert extension_rules and rules.index("!/public/**") > max(extension_rules)
+    for path in (ROOT / "public").rglob("*"):
+        if path.is_file():
+            assert not any(
+                part in {"docs", "test", "deploy", ".github"}
+                for part in path.relative_to(ROOT / "public").parts
+            ), path
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )

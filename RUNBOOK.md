@@ -592,6 +592,15 @@ FastAPI 注入 `API_PREFIX` 的标记（测试会拦）。
 
   拨测本身改用 GET 也能绕开，但别只改拨测：Vercel 与 Lightsail 对同一页面的 HEAD 应一致。
   发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`，无迁移、无数据回退。
+- Vercel 上某个静态文件（如 `/workbench/favicon.svg`）返回的是工作台首页的 HTML，Lightsail 上却正常：
+  报错像是 `vercel.json` 里 `/workbench/*` 的 SPA 回退抢了路由，真正的原因是 `.vercelignore` 按扩展名
+  排除了 `*.svg` `*.png` `*.md`，文件根本没上传，请求才落到回退上。`public/` 已在文件末尾用
+  `!/public/**` 整体重新包含；新增排除规则要写在它前面。核对：
+
+  ```bash
+  curl -s -o /dev/null -w '%{content_type}\n' https://paper-grading-system-kohl.vercel.app/workbench/favicon.svg
+  ```
+
 - 本地 `public/index.html` 里找不到 `landingMotion`、Lightsail 上宣传页是正常动效：这是预期，
   不是没生效——只有 Vercel 的部署工作区里才有这个值。核对 Vercel 时看线上页面源码里有没有
   `"landingMotion": "reduced"`。
@@ -953,6 +962,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增一条排错（静态文件返回工作台 HTML，真实原因是 `.vercelignore` 按扩展名排除了 `*.svg`）；`.vercelignore` 末尾 `!/public/**` 重新包含静态产物。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增一条排错（拨测报首页 405，真实原因是页面路由不接 HEAD）；新增页面路由要用 `page_route`。`public/` 已重建（含 `favicon.svg` 与入口页的图标声明）。 |
 | 2026-10-17 | 宣传页成为首页 | “默认入口”改为宣传页 + `/about` + `/workbench/`；补本地预览方式（`cd frontend/workbench && npm run dev`）、宣传页动效按部署区分（Vercel 少动效、Lightsail 正常）与三条排错（普通构建报宣传页缺失、e2e 点不到「探索更多」、本地与 Lightsail 看不到 `landingMotion`）。生产 Caddy 的入口缓存规则加 `/about`。新增 `.coderabbit.yaml` 排除 `public/**`（构建产物把 PR 撑过 CodeRabbit 100 个文件的上限，整次评审被跳过）。`public/` 已重建。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |

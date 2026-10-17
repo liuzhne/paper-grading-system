@@ -22,3 +22,7 @@ test
 *.svg
 *.mmd
 *.md
+# public/ 是 Vercel 直接托管的静态产物。上面按扩展名排除的规则（*.svg、*.png、*.md …）
+# 本意是排除仓库里的文档与图，不能把产物里的图标一起排掉：2026-10-17 的 favicon.svg
+# 就是这样没上传，请求落到 /workbench/* 的回退上，拿到的是工作台首页的 HTML。
+!/public/**
