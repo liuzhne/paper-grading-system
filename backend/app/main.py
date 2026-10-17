@@ -147,6 +147,15 @@ def create_app():
 
     repo_root = Path(__file__).resolve().parents[2]
 
+    def page_route(path: str):
+        """登记一个浏览器页面：GET 之外也接 HEAD。
+
+        FastAPI 的 `app.get` 只登记 GET（Starlette 的 Route 会自动补 HEAD，FastAPI 的
+        APIRoute 不会），`HEAD /` 于是得到 405。默认用 HEAD 的拨测会把正常的首页判成
+        故障，而 Vercel 静态托管同一批页面时 HEAD 一直是 200——两个宿主不一致。
+        """
+        return app.api_route(path, methods=["GET", "HEAD"], include_in_schema=False)
+
     # v2 评审工作台（计划 §8.3）：新页统一挂在 /workbench/ 下，与旧 SPA 并存。
     # 托管的是 scripts/build_web_static.py 的统一组装产物，而非 Vite 源码目录。
     # 资源 mount 必须先于 SPA 回退注册：缺失的 JS 要 404，不能回 HTML。
@@ -159,8 +168,8 @@ def create_app():
             name="workbench-assets",
         )
 
-        @app.get("/workbench", include_in_schema=False)
-        @app.get("/workbench/{path:path}", include_in_schema=False)
+        @page_route("/workbench")
+        @page_route("/workbench/{path:path}")
         def workbench_app(path: str = ""):
             # 产物根目录下的真实文件先按文件返回（字体许可证就在这里）。SIL OFL
             # 1.1 要求许可证随字体分发；把它交给 SPA 回退，取到的会是一份 HTML，
@@ -199,10 +208,10 @@ def create_app():
 
             return serve
 
-        app.get("/", include_in_schema=False)(_site_page(site_pages["/"]))
+        page_route("/")(_site_page(site_pages["/"]))
         about = _site_page(site_pages["/about"])
-        app.get("/about", include_in_schema=False)(about)
-        app.get("/about/", include_in_schema=False)(about)
+        page_route("/about")(about)
+        page_route("/about/")(about)
 
     # 旧 SPA 已下线（用户决定，2026-09-08），不再保留 `/legacy/` 与
     # WORKBENCH_DEFAULT_ENTRY 开关。
@@ -223,7 +232,7 @@ def create_app():
         if not has_site:
             entry_paths.insert(0, "/")
         for entry_path in entry_paths:
-            app.get(entry_path, include_in_schema=False)(workbench_entry)
+            page_route(entry_path)(workbench_entry)
 
     return app
 

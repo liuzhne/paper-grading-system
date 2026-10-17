@@ -589,6 +589,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增“浏览器页面同时接受 GET 与 HEAD，图标用 SVG 并在入口页声明”。 |
 | 2026-10-17 | 宣传页成为首页 | 新增“根路径改为宣传页、`/about` 官网子页，工作台规范地址 `/workbench/`”；补充 D-024（`/` 不再是工作台，三条已发出链接的路由不变）；补充决定 Vercel 固定少动效、Lightsail 正常动效。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | 新增“厂商编译不了起草 Schema 时，同一批改用精简 Schema 重发一次”；给 2026-09-21“严格有界输出”加一条只在厂商拒绝时启用的退路，并更正 2026-10-15 请求被拒提示里“内容限制”的猜测。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | 新增“请求被拒时日志记录厂商错误说明，起草被拒提示按原因区分”；部分收回 2026-10-14 “厂商错误正文不进日志”的决定（只对请求被拒，且只进日志）。 |
@@ -1834,3 +1835,20 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - 代价：Vercel 访客一律看不到滚动动效；改档位要改 CI 这一步（删掉即恢复正常动效）。`pin_landing_motion` 遇到已写过的入口页直接报错，不静默叠加。
 
 维护记录：2026-10-17 · 宣传页成为首页：新增官网两页与路由调整；补充 D-024；Vercel 固定少动效、Lightsail 正常动效。
+
+### 2026-10-17 浏览器页面同时接受 GET 与 HEAD，图标用 SVG 并在入口页声明（Accepted）
+
+背景：宣传页上线后的线上核验发现两个旧问题。Lightsail 上 `HEAD /`、`/about`、`/login` 等页面返回 405（GET 正常），而 Vercel 静态托管同一批页面时 HEAD 是 200；默认用 HEAD 的拨测会把正常的首页判成故障。另外全站没有声明图标，浏览器自动请求 `/favicon.ico`，两个宿主都是 404。
+
+选择：
+- `main.py` 新增 `page_route`：宣传页、子页、工作台入口与 `/workbench/*` 都用 `api_route(methods=["GET", "HEAD"])` 登记。FastAPI 的 `app.get` 只登记 GET（Starlette 的 Route 会自动补 HEAD，FastAPI 的 APIRoute 不会）。HEAD 的正文由 uvicorn 丢弃。
+- 图标是 `frontend/workbench/public/favicon.svg`（标志的 SVG，深绿底白描边），构建后在 `/workbench/favicon.svg`；工作台与官网三个入口页都用 `<link rel="icon">` 声明。
+
+放弃了什么：
+- **全局中间件把所有 HEAD 当 GET 处理**：会连同 `/api/*` 一起放宽，接口的方法表不该因为拨测而改变；接口仍是 405。
+- **另做 `/favicon.ico`**（生成 ICO 或重定向到 SVG）：入口页声明了图标后浏览器不再去取它；ICO 要多一个二进制产物和生成步骤，重定向要在 FastAPI 与 `vercel.json` 各配一次。直接访问 `/favicon.ico` 仍是 404。
+
+代价：极老的浏览器不认 SVG 图标，显示默认图标。
+
+维护记录：2026-10-17 · 页面路由接 HEAD、补网站图标：新增 `page_route` 与 `favicon.svg`；接口方法不变。
+

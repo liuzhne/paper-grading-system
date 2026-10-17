@@ -121,3 +121,41 @@ def test_the_file_shortcut_cannot_escape_the_artifact(client):
         assert response.status_code in (200, 404)
         if response.status_code == 200:
             assert "[project]" not in response.text
+
+
+def test_pages_answer_head_like_get(client):
+    """页面路由也接 HEAD（2026-10-17 生产核验发现 Lightsail 上 `HEAD /` 是 405）。
+
+    默认用 HEAD 的拨测会把正常的首页判成故障；Vercel 静态托管同一批页面时 HEAD
+    一直是 200，两个宿主要一致。
+    """
+    for path in (
+        "/",
+        "/about",
+        "/about/",
+        "/login",
+        "/register",
+        "/reset-password",
+        "/workbench",
+        "/workbench/",
+        "/workbench/review",
+        "/workbench/favicon.svg",
+    ):
+        head = client.head(path)
+        get = client.get(path)
+
+        assert head.status_code == get.status_code == 200, path
+        assert head.headers["content-type"] == get.headers["content-type"], path
+
+
+def test_api_routes_are_not_widened_to_head(client):
+    """只放宽浏览器页面；接口的方法表不跟着变。"""
+    assert client.head("/api/system/integrations").status_code == 405
+
+
+def test_favicon_is_served_as_svg(client):
+    response = client.get("/workbench/favicon.svg")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert "<svg" in response.text

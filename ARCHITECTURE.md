@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-17 | 页面路由接 HEAD、补网站图标 | `main.py` 的浏览器页面（`/`、`/about`、三条邮件链接、`/workbench/*`）经 `page_route` 同时登记 GET 与 HEAD，`/api/*` 不变；图标 `favicon.svg` 随 Vite 产物发布在 `/workbench/favicon.svg`，入口页声明。无接口、表结构与迁移变化。 |
 | 2026-10-17 | 宣传页成为首页 | §7.2 新增“官网”：`/` 宣传页、`/about` 官网子页由同一次 Vite 构建产出（多入口），`build_web_static.py` 与 FastAPI 从 `public/workbench/site/` 取页；工作台规范地址 `/workbench/`，三条已发出链接的路由不变。后端只改静态入口路由，无接口、表结构与迁移变化。Vercel 部署任务在构建前把宣传页固定为少动效版，Lightsail 正常动效。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 无架构变化：前端 `api/client.js` 补齐 `put`，与后端 `PUT /api/assistant/settings` 对齐。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | `ai_rule_drafter._draft_deduction_rules_once` 在厂商报“约束状态太多”（`llm/errors.schema_too_complex`）时，同一批立即用 `_lean_draft_output_schema` 再发一次；精简版去掉的约束由 `validate_ai_rule_draft` 在返回后检查。单批元数据记 `output_schema`，合并后记 `lean_schema_batches`；起草版本升为 `rubric-rule-draft@9`。调用链与表结构不变，无迁移。 |
