@@ -8,7 +8,7 @@ import { RouterLink } from "vue-router";
     <h1>页面不存在</h1>
     <p class="hint">
       该地址不属于评审工作台。返回<RouterLink :to="{ name: 'dashboard' }">工作台</RouterLink>，
-      或前往<a href="/">旧版工作台</a>。
+      或回到<a href="/">有据智评首页</a>。
     </p>
   </div>
 </template>

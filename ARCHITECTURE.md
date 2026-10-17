@@ -223,10 +223,19 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth、公开集成自检和�
 - **前端产物**：`frontend/workbench/`（Vite + Vue 3 + JS）经 `scripts/build_web_static.py --with-workbench`
   组装进 `public/`。FastAPI、Vercel、Docker 托管同一份产物；Docker 镜像 COPY `public/`（此前没有，
   容器里 `/workbench/*` 全是 404）。自托管 IBM Plex Mono 的 SIL OFL 许可证随产物发布并可经 HTTP 取到。
-- **入口（2026-09-08 起）**：`/` 直接是工作台，**旧 SPA 已下线**，`/legacy/` 返回 404，
+- **入口（2026-09-08 起）**：**旧 SPA 已下线**，`/legacy/` 返回 404，
   `WORKBENCH_DEFAULT_ENTRY` 开关取消。`/login` `/register` `/reset-password` 由工作台承接——
   邮件里已发出的邀请与重置链接指向后两条。**入口在两处生效**：FastAPI 的路由，以及
   `build_web_static.py` 写出的 `public/index.html`；Vercel 直接静态托管后者，只改前者在生产上无效。
+- **官网（2026-10-17 起）**：`/` 是宣传页、`/about#deploy|security|docs` 是官网子页，工作台的
+  规范地址是 `/workbench/`。源码在 `frontend/workbench/src/site/`，与工作台同一次 Vite 构建（多入口
+  `site/index.html`、`site/about/index.html`），资源同在 `/workbench/assets/`，宣传页不加载工作台主包。
+  组装：`public/workbench/site/**` → `public/index.html`、`public/about/index.html`；FastAPI 从同一来源
+  提供 `/` `/about` `/about/` 并注入 `API_PREFIX`，产物里没有宣传页时 `/` 回落工作台。宣传页挂载后请求
+  `/api/auth/me`，`auth_required` 为真且有用户时跳 `/workbench/`。官网不调用其他接口、不收集任何数据。
+  滚动动画是 `landing-motion.js` 的纯函数；`prefers-reduced-motion` 时改用 `stillProductStates` 的四张静态画面。
+  入口页全局配置 `landingMotion: "reduced"` 把宣传页固定为少动效版：只有 CI 的 Vercel 部署任务在构建前写入
+  （`build_web_static.py --landing-motion reduced`），仓库产物与 Lightsail 不带，即正常动效。
 - **状态机**：`0024` 落七态 CHECK 与 `state_version`；所有转移经 `services/batches/state`。
   归档/重开是显式端点，目标阶段由服务端从当前结果推导。**旧写入口（`PATCH /score-items`、
   `POST /scoring-runs/{id}/review`）与新端点共用归档守卫，改分同样 bump `review_revision`**——
@@ -580,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-17 | 宣传页成为首页 | §7.2 新增“官网”：`/` 宣传页、`/about` 官网子页由同一次 Vite 构建产出（多入口），`build_web_static.py` 与 FastAPI 从 `public/workbench/site/` 取页；工作台规范地址 `/workbench/`，三条已发出链接的路由不变。后端只改静态入口路由，无接口、表结构与迁移变化。Vercel 部署任务在构建前把宣传页固定为少动效版，Lightsail 正常动效。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 无架构变化：前端 `api/client.js` 补齐 `put`，与后端 `PUT /api/assistant/settings` 对齐。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | `ai_rule_drafter._draft_deduction_rules_once` 在厂商报“约束状态太多”（`llm/errors.schema_too_complex`）时，同一批立即用 `_lean_draft_output_schema` 再发一次；精简版去掉的约束由 `validate_ai_rule_draft` 在返回后检查。单批元数据记 `output_schema`，合并后记 `lean_schema_batches`；起草版本升为 `rubric-rule-draft@9`。调用链与表结构不变，无迁移。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | `llm/errors` 兼容 Google 的数组错误体，类型取 `error.status`；`llm/call_log` 对请求范围的 HTTP 错误在 `llm_call_failed` 附脱敏后的厂商说明；`ai_tasks/execution` 在 `attempt_history` 记 `http_status`、`provider_code`、`provider_type`；起草 4xx 按错误范围分两种提示（直接抛出的 HTTP 错误也先经 `project_provider_error` 分类）；补记“重试复用冻结输入”的边界。调用链与表结构不变，无迁移。 |

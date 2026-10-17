@@ -495,6 +495,11 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - name: Pin the reduced-motion landing page for Vercel
+        # 用户决定（2026-10-17）：Vercel 上的宣传页固定为少动效版，Lightsail 保持正常
+        # 动效（仍照顾访客自己开的「减少动态效果」）。只改本次部署的工作区，
+        # 仓库里的 public/ 不带这个设置。必须在 vercel build 之前：它把 public/ 拷进产物。
+        run: python3 scripts/build_web_static.py --landing-motion reduced
       - name: Build the production deployment
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
