@@ -19,6 +19,8 @@ from backend.app.services.llm.legacy_prompts import chat_envelope_instructions a
 from backend.app.services.llm.legacy_prompts import chat_input_payload as _input_payload
 from backend.app.services.llm.legacy_prompts import chat_instructions as _instructions
 from backend.app.services.llm.legacy_prompts import strip_json_fence as _strip_json_fence
+from backend.app.services.llm.thinking_params import effective_thinking_type
+from backend.app.services.llm.thinking_params import thinking_request_fields
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
 
@@ -47,7 +49,9 @@ class OpenAICompatibleChatScorer(LLMScorer):
         # (Bailian kimi-k3 rejects 1.0 but accepts 0.95).
         self.top_p = float(top_p if top_p is not None else 1)
         self.response_format_json = settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON if response_format_json is None else bool(response_format_json)
-        self.thinking_type = settings.OPENAI_COMPATIBLE_THINKING_TYPE if thinking_type is None else thinking_type
+        configured_thinking = settings.OPENAI_COMPATIBLE_THINKING_TYPE if thinking_type is None else thinking_type
+        # Google 主机认 reasoning_effort 而不是 thinking 字段：记下实际发出的写法，运行身份才如实。
+        self.thinking_type = effective_thinking_type(self.base_url, self.model_name, configured_thinking)
         self.service_tier = (
             settings.OPENAI_COMPATIBLE_SERVICE_TIER
             if service_tier is None
@@ -79,9 +83,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
-        thinking_type = (self.thinking_type or "").strip()
-        if thinking_type:
-            payload["thinking"] = {"type": thinking_type}
+        payload.update(thinking_request_fields(self.base_url, self.model_name, self.thinking_type))
         if self.response_format_json:
             payload["response_format"] = {"type": "json_object"}
         if self.service_tier:
@@ -128,9 +130,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
         }
         if sampling["seed"] is not None:
             payload["seed"] = sampling["seed"]
-        thinking_type = provider["thinking"]["type"]
-        if thinking_type:
-            payload["thinking"] = {"type": thinking_type}
+        payload.update(thinking_request_fields(self.base_url, self.model_name, provider["thinking"]["type"]))
         if provider["response_format"] == "json_object":
             payload["response_format"] = {"type": "json_object"}
         if self.service_tier:
@@ -175,9 +175,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
         }
         if sampling["seed"] is not None:
             payload["seed"] = sampling["seed"]
-        thinking_type = provider["thinking"]["type"]
-        if thinking_type:
-            payload["thinking"] = {"type": thinking_type}
+        payload.update(thinking_request_fields(self.base_url, self.model_name, provider["thinking"]["type"]))
         if provider["response_format"] == "json_object":
             payload["response_format"] = {"type": "json_object"}
         if self.service_tier:
@@ -225,8 +223,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
             "max_tokens": self.max_tokens if self.max_tokens_explicit or default_max_tokens is None else max(self.max_tokens, default_max_tokens),
         }
         thinking_type = (self.thinking_type or "").strip()
-        if thinking_type:
-            body["thinking"] = {"type": thinking_type}
+        body.update(thinking_request_fields(self.base_url, self.model_name, thinking_type))
         if self.response_format_json:
             body["response_format"] = {"type": "json_object"}
         if response_schema is not None:
