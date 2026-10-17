@@ -28,7 +28,7 @@
 	}
 
 	@entry {
-		path / /login /register /reset-password /workbench /workbench/*
+		path / /about /about/ /login /register /reset-password /workbench /workbench/*
 		not path /workbench/assets/*
 	}
 	header @entry {

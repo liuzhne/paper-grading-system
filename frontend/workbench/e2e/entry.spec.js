@@ -9,11 +9,15 @@ import { expect, test } from "@playwright/test";
  * 而收件人只会看到一个 404，不知道该找谁。
  */
 test.describe("默认入口", () => {
-  test("根路径直接是工作台，不再回落旧页", async ({ page }) => {
+  test("根路径是宣传页（用户决定，2026-10-17）", async ({ page }) => {
     const response = await page.goto("/");
 
     expect(response.status()).toBe(200);
-    await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("每一个分数");
+    await expect(page.getByRole("navigation", { name: "官网导航" })).toBeVisible();
+    // 默认 e2e 后端关闭鉴权：/auth/me 对谁都是 200，但那不是「已登录」，不能跳走。
+    await page.waitForLoadState("networkidle");
+    await expect(page).toHaveURL(/\/$/);
   });
 
   test("旧壳路径不再提供页面", async ({ request }) => {
@@ -23,13 +27,12 @@ test.describe("默认入口", () => {
   });
 });
 
-test.describe("根路径进入后的应用内导航", () => {
-  test("从 / 点导航会落到工作台的规范地址", async ({ page }) => {
+test.describe("从宣传页进入工作台", () => {
+  test("「直接进入工作台」落到工作台的规范地址，应用内导航走得动", async ({ page }) => {
     await page.goto("/");
+    await page.getByRole("link", { name: "直接进入工作台 →" }).click();
 
-    // 路由的 history base 是 /workbench/，而入口页同时挂在 /。两个地址空间
-    // 并存时最容易出问题的是「进得去、走不动」：首屏渲染正常，一点导航就
-    // 匹配不上路由。
+    await expect(page).toHaveURL(/\/workbench\/$/);
     // 限定在侧栏导航里：页头的「新建评分任务」也含「评分任务」四个字。
     await page
       .getByRole("navigation", { name: "主导航" })
@@ -42,11 +45,43 @@ test.describe("根路径进入后的应用内导航", () => {
     ).toBeVisible();
   });
 
-  test("从 / 直接刷新仍在工作台", async ({ page }) => {
-    await page.goto("/");
+  test("工作台首页直接刷新仍在工作台", async ({ page }) => {
+    await page.goto("/workbench/");
     await page.reload();
 
     await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+  });
+
+  test("「探索更多」滚过转场，露出产品演示", async ({ page }) => {
+    // 箭头按原型压在首屏底部的波浪上，而不是视口底部。1280 宽时产品卡片换行到文案
+    // 下方（原型如此），首屏比一屏高，箭头在折叠线下；固定定位的元素也没法被自动
+    // 滚进视口。用卡片与文案并排、首屏正好一屏的宽屏。
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "探索更多" }).click();
+
+    await expect(page.getByRole("heading", { name: "上传评分表，评分项自动成形" })).toBeInViewport();
+  });
+});
+
+test.describe("官网子页", () => {
+  test("按地址里的 # 打开对应分页，导航切换分页", async ({ page }) => {
+    await page.goto("/about#security");
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("学生材料只用于评分");
+    await expect(page).toHaveTitle("数据安全 · 有据智评");
+
+    await page.getByRole("navigation", { name: "官网导航" }).getByRole("link", { name: "帮助文档" }).click();
+    await expect(page).toHaveURL(/\/about#docs$/);
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("快速开始");
+  });
+
+  test("宣传页的「申请试用」落到院系部署页的预约区", async ({ page }) => {
+    await page.goto("/");
+    await page.locator('[data-test="hero-trial"]').click();
+
+    await expect(page).toHaveURL(/\/about#contact$/);
+    await expect(page.getByRole("heading", { name: "预约部署评估", level: 2 })).toBeInViewport();
+    await expect(page.locator("#contact a[href^='mailto:']")).toBeVisible();
   });
 });
 

@@ -1,0 +1,42 @@
+/* 官网（宣传页与子页）的全局样式。
+ *
+ * 不引入工作台的 tokens/components：官网是独立入口，只需要字体栈与几条重置，
+ * 带上工作台整套样式只会让首屏多下载一份用不到的 CSS。
+ * 字体同工作台：IBM Plex Mono 自托管（离线部署禁止 Google Fonts CDN），
+ * 中文走系统字体栈。
+ */
+
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* 数字用等宽、中文回落系统字体：原型里的说明行与链接是这种混排。 */
+  --font-mono-cjk: "IBM Plex Mono", "PingFang SC", ui-monospace, monospace;
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  text-decoration: none;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid #c9953f;
+  outline-offset: 2px;
+}

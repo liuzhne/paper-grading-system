@@ -30,12 +30,17 @@ test.describe("V12 托管与路由", () => {
     expect(response.headers()["content-type"]).toContain("application/json");
   });
 
-  test("根路径直接是工作台", async ({ page }) => {
+  test("根路径是宣传页，/about 是官网子页", async ({ page }) => {
+    // 旧 SPA 已下线（2026-09-08）；根路径 2026-10-17 起是宣传页（用户决定）。
     const response = await page.goto("/");
-
-    // 旧 SPA 已下线（用户决定，2026-09-08）。
     expect(response.status()).toBe(200);
-    await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "官网导航" })).toBeVisible();
+
+    for (const path of ["/about", "/about/"]) {
+      const about = await page.goto(path);
+      expect(about.status(), path).toBe(200);
+      await expect(page.getByRole("heading", { level: 1 })).toContainText("部署在学校自己的服务器上");
+    }
   });
 
   test("未知路径显示 404 页而不是空白", async ({ page }) => {
