@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-17 | Vercel 上图标被当成工作台首页 | 无架构变化：`.vercelignore` 末尾重新包含 `public/`，Vercel 部署包与 Lightsail 镜像里的静态产物一致。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | `main.py` 的浏览器页面（`/`、`/about`、三条邮件链接、`/workbench/*`）经 `page_route` 同时登记 GET 与 HEAD，`/api/*` 不变；图标 `favicon.svg` 随 Vite 产物发布在 `/workbench/favicon.svg`，入口页声明。无接口、表结构与迁移变化。 |
 | 2026-10-17 | 宣传页成为首页 | §7.2 新增“官网”：`/` 宣传页、`/about` 官网子页由同一次 Vite 构建产出（多入口），`build_web_static.py` 与 FastAPI 从 `public/workbench/site/` 取页；工作台规范地址 `/workbench/`，三条已发出链接的路由不变。后端只改静态入口路由，无接口、表结构与迁移变化。Vercel 部署任务在构建前把宣传页固定为少动效版，Lightsail 正常动效。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 无架构变化：前端 `api/client.js` 补齐 `put`，与后端 `PUT /api/assistant/settings` 对齐。 |

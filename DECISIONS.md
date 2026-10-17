@@ -589,6 +589,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增“`.vercelignore` 末尾整体重新包含 `public/`”。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增“浏览器页面同时接受 GET 与 HEAD，图标用 SVG 并在入口页声明”。 |
 | 2026-10-17 | 宣传页成为首页 | 新增“根路径改为宣传页、`/about` 官网子页，工作台规范地址 `/workbench/`”；补充 D-024（`/` 不再是工作台，三条已发出链接的路由不变）；补充决定 Vercel 固定少动效、Lightsail 正常动效。 |
 | 2026-10-16 | Gemini 关闭思考与评分输出上限 | 新增“Google 主机关闭思考改发 reasoning_effort，评分默认输出上限与上下文窗口同步调大”。 |
@@ -1874,4 +1875,18 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 代价：极老的浏览器不认 SVG 图标，显示默认图标。
 
 维护记录：2026-10-17 · 页面路由接 HEAD、补网站图标：新增 `page_route` 与 `favicon.svg`；接口方法不变。
+
+### 2026-10-17 `.vercelignore` 末尾整体重新包含 `public/`（Accepted）
+
+背景：#36 上线后核验，Lightsail 上 `/workbench/favicon.svg` 正常，Vercel 上却返回工作台首页的 HTML。`.vercelignore` 按扩展名排除了 `*.svg` `*.png` `*.md`（本意是排掉仓库里的 `architecture.svg` 与文档），产物里的图标一起没上传，请求落到 `vercel.json` 的 `/workbench/*` 回退上。同目录的许可证文件是 `.txt`，不受影响，所以之前没暴露。
+
+选择：在文件末尾加 `!/public/**`，`public/` 里的静态产物一律上传；测试要求它排在所有扩展名规则之后。
+
+放弃了什么：
+- **删掉 `*.svg` 规则**：根目录的 `architecture.svg` 等文档图会进部署包，那正是这条规则要挡的。
+- **只放行 `favicon.svg` 一个文件**：下一张进产物的图片会再踩一次，而且症状同样是「拿到一页 HTML」，很难联想到忽略规则。
+
+代价：以后往 `public/` 放东西都会上传到 Vercel；`public/` 本来就只放构建产物，不放文档。
+
+维护记录：2026-10-17 · Vercel 上图标被当成工作台首页：`.vercelignore` 末尾 `!/public/**`；新增回归测试与一条排错。
 
