@@ -53,6 +53,18 @@ describe("宣传页", () => {
     }
   });
 
+  it("部署把宣传页固定为少动效版时，不看访客的系统设置（Vercel，2026-10-17）", () => {
+    globalThis.__PGS_CONFIG__ = { landingMotion: "reduced" };
+    try {
+      const wrapper = mount(LandingPage);
+
+      expect(wrapper.get(".product").classes()).toContain("still");
+      expect(wrapper.findAll(".window")).toHaveLength(4);
+    } finally {
+      delete globalThis.__PGS_CONFIG__;
+    }
+  });
+
   it("平时是一张随滚动变化的舞台", () => {
     const wrapper = mount(LandingPage);
 

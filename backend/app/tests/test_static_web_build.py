@@ -109,3 +109,51 @@ def test_sent_link_paths_are_assembled_as_the_workbench_too():
 
         assert path.is_file(), page
         assert _entry_script(path.read_text(encoding="utf-8")) == "workbench", page
+
+
+def _build_script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_web_static", ROOT / "scripts" / "build_web_static.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_landing_motion_pin_writes_the_client_config_once():
+    """Vercel 上的宣传页固定为少动效版（用户决定，2026-10-17）。"""
+    import pytest
+
+    build = _build_script()
+    html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+
+    pinned = build.pin_landing_motion(html, "reduced")
+
+    assert 'window.__PGS_CONFIG__ = {"landingMotion": "reduced"};' in pinned
+    assert build.CLIENT_CONFIG_MARKER not in pinned
+    # 写过一次就没有标记了：再写说明流程错了，不能静默叠加。
+    with pytest.raises(SystemExit):
+        build.pin_landing_motion(pinned, "reduced")
+    with pytest.raises(SystemExit):
+        build.pin_landing_motion(html, "wild")
+
+
+def test_committed_landing_page_keeps_the_injection_marker():
+    """仓库里的宣传页不带动效档位：Lightsail 经 FastAPI 在同一个标记处注入 API_PREFIX。"""
+    index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+
+    assert "landingMotion" not in index
+
+
+def test_only_the_vercel_job_pins_the_reduced_motion_landing_page():
+    """Vercel 固定少动效、Lightsail 正常动效；固定这一步必须在 vercel build 之前。"""
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    vercel = ci[ci.index("  deploy-vercel-production:"):ci.index("  production-config:")]
+    lightsail = ci[ci.index("  deploy-lightsail-production:"):]
+    pin = "scripts/build_web_static.py --landing-motion reduced"
+
+    assert pin in vercel
+    assert vercel.index(pin) < vercel.index("vercel build --prod")
+    assert "--landing-motion" not in lightsail

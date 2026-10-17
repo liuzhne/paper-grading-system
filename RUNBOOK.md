@@ -566,6 +566,21 @@ DATABASE_URL='<目标库>' .venv/bin/python -m backend.app.scripts.backfill_expo
 `cd frontend/workbench && npm run dev` 后打开 `http://localhost:5173/workbench/site/`（子页是 `…/site/about/#docs`），
 或照常 `python scripts/build_web_static.py --with-workbench` 后经 FastAPI 打开 `/`。
 
+**宣传页动效按部署区分**（用户决定，2026-10-17）：Vercel 固定少动效版（四步平铺成静态画面、
+波浪不随滚动），Lightsail 正常动效（访客自己开了「减少动态效果」时同样显示少动效版）。开关是入口页
+的 `window.__PGS_CONFIG__.landingMotion`，只由 CI 的 Vercel 部署任务在 `vercel build` 之前写入：
+
+```bash
+python3 scripts/build_web_static.py --landing-motion reduced
+```
+
+想让 Vercel 恢复正常动效，删掉 `ci.yml` 里这一步即可。**不要在本地跑完把结果提交**：它占掉了
+FastAPI 注入 `API_PREFIX` 的标记（测试会拦）。
+
+- 本地 `public/index.html` 里找不到 `landingMotion`、Lightsail 上宣传页是正常动效：这是预期，
+  不是没生效——只有 Vercel 的部署工作区里才有这个值。核对 Vercel 时看线上页面源码里有没有
+  `"landingMotion": "reduced"`。
+
 - 普通构建（不带 `--with-workbench`）报 `public/workbench/site/index.html 缺失`：报错指向组装
   脚本，真正的原因是 `public/workbench/` 还是旧产物（宣传页之前构建的）。带 `--with-workbench`
   重建一次；`public/workbench/site/` 是入口页的来源，不能当成多余目录删掉。
@@ -923,7 +938,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-10-17 | 宣传页成为首页 | “默认入口”改为宣传页 + `/about` + `/workbench/`；补本地预览方式（`cd frontend/workbench && npm run dev`）与两条排错（普通构建报宣传页缺失、e2e 点不到「探索更多」）。生产 Caddy 的入口缓存规则加 `/about`。新增 `.coderabbit.yaml` 排除 `public/**`（构建产物把 PR 撑过 CodeRabbit 100 个文件的上限，整次评审被跳过）。`public/` 已重建。 |
+| 2026-10-17 | 宣传页成为首页 | “默认入口”改为宣传页 + `/about` + `/workbench/`；补本地预览方式（`cd frontend/workbench && npm run dev`）、宣传页动效按部署区分（Vercel 少动效、Lightsail 正常）与三条排错（普通构建报宣传页缺失、e2e 点不到「探索更多」、本地与 Lightsail 看不到 `landingMotion`）。生产 Caddy 的入口缓存规则加 `/about`。新增 `.coderabbit.yaml` 排除 `public/**`（构建产物把 PR 撑过 CodeRabbit 100 个文件的上限，整次评审被跳过）。`public/` 已重建。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | 厂商报“约束状态太多”时同一批自动改用精简 Schema 重发一次（日志 `rubric_ai_draft_schema_fallback`）；精简版去掉的约束在代码里补齐（扣分至少 0.01、来源必须在输入里真实存在）；请求被拒的提示不再猜“内容限制”；排错补上 T02 的真实原因，新增一条（精简格式也被拒）。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | 请求被拒时 `llm_call_failed` 行尾附 `provider_message`（脱敏、截断 300 字）；Google 数组错误体可解析，`provider_type` 取 `error.status`；说明里的密钥（含带引号的 `"api_key": "…"` 与 `AIza…` 形状）先遮蔽；起草的 HTTP 4xx 分“请求被拒”“连接被拒”两种提示，402 走额度提示，请求被拒引导重新起草而不是重试（重试原样重发冻结输入）；新增一条排错（某一批起草总被 400 拒绝），更新两条（Gemini 403、看厂商原文的方法）。 |

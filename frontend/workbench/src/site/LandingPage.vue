@@ -6,6 +6,7 @@ import SiteHeader from "./SiteHeader.vue";
 import SiteMark from "./SiteMark.vue";
 import { measureSection, overlayState, productState, stillProductStates } from "./landing-motion.js";
 import { APP_URL, aboutUrl } from "./links.js";
+import { landingMotionPinnedReduced } from "./site-config.js";
 
 /**
  * 宣传页（`/`），还原 Claude Design 原型「有据智评 宣传页.dc.html」。
@@ -16,7 +17,8 @@ import { APP_URL, aboutUrl } from "./links.js";
  * - 原型里点了没反应的「申请试用」大按钮指向子页的预约区，「使用条款」去掉。
  *
  * 访客开了「减少动态效果」时（prefers-reduced-motion），滚动不再驱动任何动画：波浪
- * 停在首屏底部随页面滚走，四步演示平铺成四行静态画面，不留 580vh 的滚动舞台。
+ * 停在首屏底部随页面滚走，四步演示平铺成四行静态画面，不留 580vh 的滚动舞台。部署
+ * 也可以把宣传页固定为这个少动效版（`site-config.js`，Vercel 如此）。
  */
 defineProps({
   /** 首屏右侧的产品卡片（原型的 showProductCard 属性）。 */
@@ -25,10 +27,11 @@ defineProps({
 
 const section = ref(/** @type {HTMLElement|null} */ (null));
 
+const pinnedReduced = landingMotionPinnedReduced();
 const motionQuery = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
-const reduceMotion = ref(Boolean(motionQuery?.matches));
+const reduceMotion = ref(pinnedReduced || Boolean(motionQuery?.matches));
 const onMotionChange = (/** @type {MediaQueryListEvent} */ event) => {
-  reduceMotion.value = event.matches;
+  reduceMotion.value = pinnedReduced || event.matches;
 };
 const view = reactive({ p: 0, y: 0, vw: 1280, vh: 800, B: 0 });
 

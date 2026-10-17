@@ -22,6 +22,7 @@ rather than a silent skip, so a release can never ship a stale workbench.
 
 import argparse
 from hashlib import sha256
+import json
 from pathlib import Path
 import re
 from shutil import copytree, rmtree
@@ -122,6 +123,35 @@ def _copy_font_licence(target: Path) -> None:
     )
 
 
+#: 宣传页的动效档位。`reduced`：固定为少动效版（不论访客的系统设置）；不指定即正常
+#: 动效，访客自己开了「减少动态效果」时仍会照顾。
+LANDING_MOTIONS = ("reduced",)
+CLIENT_CONFIG_MARKER = "<!-- PGS_CLIENT_CONFIG -->"
+
+
+def pin_landing_motion(html: str, motion: str) -> str:
+    """把宣传页的动效档位写进入口页的全局配置。
+
+    只给不经过 Python 的静态宿主用（Vercel 部署任务，用户决定 2026-10-17）：本地
+    FastAPI 与 Lightsail 在请求时替换同一个标记注入 `API_PREFIX`，标记被这里占掉后
+    就注入不了——所以这一步只跑在部署任务的工作区里，不进仓库的 `public/`。
+    """
+
+    if motion not in LANDING_MOTIONS:
+        raise SystemExit("未知的宣传页动效档位：%s" % motion)
+    if CLIENT_CONFIG_MARKER not in html:
+        raise SystemExit(
+            "宣传页入口里没有 %s 标记：已经写过动效档位，或产物不是本脚本组装的。"
+            % CLIENT_CONFIG_MARKER
+        )
+    config = json.dumps({"landingMotion": motion}, ensure_ascii=False)
+    return html.replace(
+        CLIENT_CONFIG_MARKER,
+        "<script>window.__PGS_CONFIG__ = %s;</script>" % config,
+        1,
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -130,6 +160,15 @@ def main(argv: list[str] | None = None) -> None:
         help=(
             "also build and assemble the v2 workbench at /workbench/. "
             "Requires frontend/workbench/node_modules (npm ci)."
+        ),
+    )
+    parser.add_argument(
+        "--landing-motion",
+        choices=LANDING_MOTIONS,
+        help=(
+            "pin the landing page's motion level in the assembled entry page. "
+            "Only for static hosts that never run FastAPI (the Vercel deploy "
+            "job); never commit the result."
         ),
     )
     args = parser.parse_args(argv)
@@ -177,6 +216,14 @@ def main(argv: list[str] | None = None) -> None:
 
     # 官网页的来源留在 public/workbench/site/ 里：普通构建只保留工作台产物，
     # 要能从那里重新写出入口页，而不是要求每次都带 --with-workbench。
+    if args.landing_motion:
+        landing = workbench_output / SITE_PAGES["index.html"]
+        if landing.is_file():
+            landing.write_text(
+                pin_landing_motion(landing.read_text(encoding="utf-8"), args.landing_motion),
+                encoding="utf-8",
+            )
+
     for target, source in SITE_PAGES.items():
         source_path = workbench_output / source
         if not source_path.is_file():
