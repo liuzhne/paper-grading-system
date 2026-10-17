@@ -54,7 +54,7 @@
 ## 前端（v2 评审工作台 · 有据智评）
 - 源码 `frontend/workbench/`（Vite + Vue 3 + JS，JSDoc 引类型）；旧 SPA 在 `frontend/web/`。
 - 统一组装：`python scripts/build_web_static.py --with-workbench` → `public/`。FastAPI、Vercel、Docker 托管**同一份产物**；`public/` 已提交，CI 有漂移门禁。
-- 入口：`/` 直接是 v2 工作台，**旧 SPA 已下线**（`/legacy/` 返回 404）。`/login` `/register` `/reset-password` 由工作台承接——邮件里已发出的邀请与重置链接指向后两条，收件人不会重新拿到新链接，这三条不能只剩 404。
+- 入口：`/` 是宣传页、`/about#deploy|security|docs` 是官网子页（源码 `src/site/`，同一次 Vite 构建的多入口），工作台规范地址 `/workbench/`，**旧 SPA 已下线**（`/legacy/` 返回 404）。`/login` `/register` `/reset-password` 由工作台承接——邮件里已发出的邀请与重置链接指向后两条，收件人不会重新拿到新链接，这三条不能只剩 404。
 - 静态入口页由 `build_web_static.py` 写出，**改后端路由不够**：Vercel 直接静态托管 `public/`，`/` 命中的是 `public/index.html`，不经过 Python。
 - 门禁：`npm run test:unit`（组件/状态）、`typecheck`、`api:dump && api:check`（OpenAPI 合同差异）、`playwright test`（浏览器验收，含一个 `AUTH_ENABLED=true` 的多组织后端）。
 - 旧写入口与新端点**共用守卫**：归档批次拒绝改分/复核，改分同样 bump `review_revision`。不能只有新端点防冲突。

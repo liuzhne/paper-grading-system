@@ -178,24 +178,52 @@ def create_app():
                 )
             )
 
-    # 旧 SPA 已下线（用户决定，2026-09-08）：根路径直接给工作台，不再保留
-    # `/legacy/` 与 WORKBENCH_DEFAULT_ENTRY 开关。
+    # 根路径是宣传页、`/about` 是官网子页（用户决定，2026-10-17）；两张页与
+    # 工作台出自同一次构建，来源在 public/workbench/site/。产物里没有宣传页时
+    # （只组装过旧版本的工作台），根路径回落工作台，不让首页变成 404。
+    #
+    # 已登录的人由宣传页自己查会话后跳工作台；这里不读 Cookie，Vercel 静态托管
+    # 的 `/` 同样不经过 Python，两个宿主行为一致。
+    site_pages = {
+        "/": workbench_dir / "site" / "index.html",
+        "/about": workbench_dir / "site" / "about" / "index.html",
+    }
+    has_site = all(page.is_file() for page in site_pages.values())
+    if has_site:
+
+        def _site_page(page: Path):
+            def serve():
+                return HTMLResponse(
+                    _inject_client_config(page.read_text(encoding="utf-8"))
+                )
+
+            return serve
+
+        app.get("/", include_in_schema=False)(_site_page(site_pages["/"]))
+        about = _site_page(site_pages["/about"])
+        app.get("/about", include_in_schema=False)(about)
+        app.get("/about/", include_in_schema=False)(about)
+
+    # 旧 SPA 已下线（用户决定，2026-09-08），不再保留 `/legacy/` 与
+    # WORKBENCH_DEFAULT_ENTRY 开关。
     #
     # `/login` `/register` `/reset-password` 交给工作台的同一份 index.html：
     # 邮件里已经发出去的邀请与重置链接指向这两条路由，收件人不会重新拿到新
     # 链接，不接就等于把所有在途邀请作废，而他们只会看到 404。
     if (workbench_dir / "index.html").is_file():
 
-        @app.get("/", include_in_schema=False)
-        @app.get("/login", include_in_schema=False)
-        @app.get("/register", include_in_schema=False)
-        @app.get("/reset-password", include_in_schema=False)
         def workbench_entry():
             return HTMLResponse(
                 _inject_client_config(
                     (workbench_dir / "index.html").read_text(encoding="utf-8")
                 )
             )
+
+        entry_paths = ["/login", "/register", "/reset-password"]
+        if not has_site:
+            entry_paths.insert(0, "/")
+        for entry_path in entry_paths:
+            app.get(entry_path, include_in_schema=False)(workbench_entry)
 
     return app
 

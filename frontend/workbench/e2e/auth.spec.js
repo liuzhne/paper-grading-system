@@ -23,6 +23,22 @@ async function login(page, username) {
 }
 
 test.describe("V01 登录与会话", () => {
+  test("未登录打开根路径停在宣传页", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForLoadState("networkidle");
+
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("每一个分数");
+  });
+
+  test("已登录打开根路径直接进工作台（用户决定，2026-10-17）", async ({ page }) => {
+    await login(page, "teacher");
+    await page.goto("/");
+
+    await expect(page).toHaveURL(/\/workbench\/$/);
+    await expect(page.getByRole("heading", { name: "工作台" })).toBeVisible();
+  });
+
   test("未登录访问工作台会被引导去登录", async ({ page }) => {
     await page.goto("/workbench/");
 

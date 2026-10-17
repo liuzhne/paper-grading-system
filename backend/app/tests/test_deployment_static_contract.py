@@ -78,12 +78,23 @@ def test_vercel_config_has_no_route_for_the_retired_legacy_assets():
     assert "/workbench/assets/(.*)" in sources
 
 
-def test_vercel_serves_the_workbench_at_the_public_entry_paths():
-    """`/` 与三条鉴权路由都是静态文件，不依赖 rewrite。
+def test_vercel_serves_the_public_entry_paths_as_static_files():
+    """`/` 宣传页、`/about` 官网子页与三条鉴权路由都是静态文件，不依赖 rewrite。
 
     产物里必须真有这些文件，否则 Vercel 会 404——而这条路径不经过 FastAPI，
     后端的路由改动救不了它。
     """
-    for path in ("index.html", "login/index.html", "register/index.html",
-                 "reset-password/index.html"):
+    for path in ("index.html", "about/index.html", "login/index.html",
+                 "register/index.html", "reset-password/index.html"):
         assert (REPO_ROOT / "public" / path).is_file(), path
+
+
+def test_caddy_revalidates_every_public_entry_page():
+    """生产 Caddy 给入口页 must-revalidate；漏掉 `/about`，发版后子页可能还是旧版本。"""
+    caddyfile = (REPO_ROOT / "deploy" / "production" / "caddy" / "Caddyfile").read_text(
+        encoding="utf-8"
+    )
+    entry = next(line for line in caddyfile.splitlines() if line.strip().startswith("path / "))
+
+    for path in ("/", "/about", "/about/", "/login", "/register", "/reset-password"):
+        assert path in entry.split(), path

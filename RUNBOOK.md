@@ -558,8 +558,36 @@ DATABASE_URL='<目标库>' .venv/bin/python -m backend.app.scripts.backfill_expo
 确认该通道应映射到哪个展示通道，补进 `services/batches/exports.LEGACY_CHANNELS`
 后重新执行。
 
-**默认入口**：根路径直接是 v2 工作台，旧 SPA 已下线（用户决定，2026-09-08）。
-`WORKBENCH_DEFAULT_ENTRY` 开关与常驻 `/legacy/` 一并取消。
+**默认入口**：根路径是宣传页、`/about` 是官网子页，工作台在 `/workbench/`（用户决定，
+2026-10-17）。旧 SPA 已下线（2026-09-08），`WORKBENCH_DEFAULT_ENTRY` 开关与常驻 `/legacy/`
+一并取消。已登录的人打开 `/` 会自动跳到工作台；关闭鉴权的本地环境不跳，直接看得到宣传页。
+
+官网两页的源码在 `frontend/workbench/src/site/`，与工作台同一次构建：本地看效果用
+`cd frontend/workbench && npm run dev` 后打开 `http://localhost:5173/workbench/site/`（子页是 `…/site/about/#docs`），
+或照常 `python scripts/build_web_static.py --with-workbench` 后经 FastAPI 打开 `/`。
+
+**宣传页动效按部署区分**（用户决定，2026-10-17）：Vercel 固定少动效版（四步平铺成静态画面、
+波浪不随滚动），Lightsail 正常动效（访客自己开了「减少动态效果」时同样显示少动效版）。开关是入口页
+的 `window.__PGS_CONFIG__.landingMotion`，只由 CI 的 Vercel 部署任务在 `vercel build` 之前写入：
+
+```bash
+python3 scripts/build_web_static.py --landing-motion reduced
+```
+
+想让 Vercel 恢复正常动效，删掉 `ci.yml` 里这一步即可。**不要在本地跑完把结果提交**：它占掉了
+FastAPI 注入 `API_PREFIX` 的标记（测试会拦）。
+
+- 本地 `public/index.html` 里找不到 `landingMotion`、Lightsail 上宣传页是正常动效：这是预期，
+  不是没生效——只有 Vercel 的部署工作区里才有这个值。核对 Vercel 时看线上页面源码里有没有
+  `"landingMotion": "reduced"`。
+
+- 普通构建（不带 `--with-workbench`）报 `public/workbench/site/index.html 缺失`：报错指向组装
+  脚本，真正的原因是 `public/workbench/` 还是旧产物（宣传页之前构建的）。带 `--with-workbench`
+  重建一次；`public/workbench/site/` 是入口页的来源，不能当成多余目录删掉。
+- e2e 里点「探索更多」一直报 `element is outside of the viewport`：报错像是元素被遮住，
+  真正的原因是视口——箭头按原型压在首屏底部而不是视口底部，1280 宽时产品卡片换行到文案下方，
+  首屏比一屏高，箭头在折叠线下；它是固定定位，Playwright 也滚不动它。用 1440×900 这类首屏正好
+  一屏的视口。
 
 `/login`、`/register`、`/reset-password` 由工作台承接。**这三条不能只剩 404**：
 邮件里已经发出去的邀请与重置链接指向后两条，收件人不会重新拿到新链接。
@@ -910,6 +938,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-17 | 宣传页成为首页 | “默认入口”改为宣传页 + `/about` + `/workbench/`；补本地预览方式（`cd frontend/workbench && npm run dev`）、宣传页动效按部署区分（Vercel 少动效、Lightsail 正常）与三条排错（普通构建报宣传页缺失、e2e 点不到「探索更多」、本地与 Lightsail 看不到 `landingMotion`）。生产 Caddy 的入口缓存规则加 `/about`。新增 `.coderabbit.yaml` 排除 `public/**`（构建产物把 PR 撑过 CodeRabbit 100 个文件的上限，整次评审被跳过）。`public/` 已重建。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
 | 2026-10-16 | Gemini 关闭思考与评分输出上限 | Google 主机关闭思考改发 `reasoning_effort: "none"`；默认输出上限 1200→2048、上下文窗口 8192→9040（输入预算不变），`llm_cache.PROMPT_VERSION=2026-10-16-1`；截断排错补上 Vertex/Gemini 的情况与用量账本的判断方法，Vertex 接入说明补思考一条；`diagnose_llm` 输出补 `reasoning_effort`。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | 厂商报“约束状态太多”时同一批自动改用精简 Schema 重发一次（日志 `rubric_ai_draft_schema_fallback`）；精简版去掉的约束在代码里补齐（扣分至少 0.01、来源必须在输入里真实存在）；请求被拒的提示不再猜“内容限制”；排错补上 T02 的真实原因，新增一条（精简格式也被拒）。 |

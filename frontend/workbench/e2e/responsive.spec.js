@@ -17,6 +17,19 @@ async function openSeedRubric(page) {
  * 滚动出一个够不着的评分表。
  */
 test.describe("V12 窄屏", () => {
+  test("宣传页与官网子页在手机宽度下不产生横向滚动", async ({ page }) => {
+    // 原型只按桌面排版：页头四个导航、两个按钮和角标在手机宽度上会挤出横向滚动。
+    for (const path of ["/", "/about#deploy", "/about#security", "/about#docs"]) {
+      await page.goto(path);
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      );
+      expect(overflow, path).toBeLessThanOrEqual(1);
+    }
+  });
+
   test("工作台在窄屏下不产生横向滚动", async ({ page }) => {
     await page.goto("/workbench/");
     await expect(page.getByRole("heading", { name: "工作台" })).toBeVisible();

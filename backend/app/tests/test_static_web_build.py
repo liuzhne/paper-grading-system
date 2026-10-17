@@ -21,25 +21,28 @@ def test_vercel_static_web_build_is_self_contained(tmp_path):
     public = ROOT / "public"
     for path in (
         "index.html",
+        "about/index.html",
         "login/index.html",
         "register/index.html",
         "reset-password/index.html",
     ):
         assert (public / path).is_file()
-    index = (public / "index.html").read_text(encoding="utf-8")
-    # CDN 产物不带注入的全局配置：前端回落同源 /api，不必经 Python 渲染页面。
-    assert "__PGS_CONFIG__" not in index
+    for path in ("index.html", "about/index.html", "workbench/index.html"):
+        page = (public / path).read_text(encoding="utf-8")
+        # CDN 产物不带注入的全局配置：前端回落同源 /api，不必经 Python 渲染页面。
+        assert "__PGS_CONFIG__" not in page, path
 
-    # 入口引用的是工作台的指纹资源，且这些文件真的在产物里——引用存在而文件
-    # 缺失，浏览器拿到的是 404 被当成 JS 执行的语法错误。
-    referenced = set(re.findall(r"/workbench/assets/[A-Za-z0-9_.-]+", index))
-    assert referenced
-    for href in referenced:
-        assert (public / href.lstrip("/")).is_file(), href
+        # 入口引用的是指纹资源，且这些文件真的在产物里——引用存在而文件缺失，
+        # 浏览器拿到的是 404 被当成 JS 执行的语法错误。
+        referenced = set(re.findall(r"/workbench/assets/[A-Za-z0-9_.-]+", page))
+        assert referenced, path
+        for href in referenced:
+            assert (public / href.lstrip("/")).is_file(), href
 
-    # 四条公开路由必须是同一份外壳，否则邀请链接打开的会是另一个版本。
+    # 三条公开路由必须是工作台的同一份外壳，否则邀请链接打开的会是另一个版本。
+    workbench = (public / "workbench" / "index.html").read_text(encoding="utf-8")
     for page in ("login", "register", "reset-password"):
-        assert (public / page / "index.html").read_text(encoding="utf-8") == index
+        assert (public / page / "index.html").read_text(encoding="utf-8") == workbench
 
 
 def test_plain_build_preserves_assembled_workbench(tmp_path):
@@ -73,17 +76,27 @@ def test_plain_build_preserves_assembled_workbench(tmp_path):
             sentinel.unlink(missing_ok=True)
 
 
-def test_assembled_index_is_the_workbench_not_the_legacy_shell():
-    """静态产物的入口必须是工作台（用户决定，2026-09-08）。
+def _entry_script(html: str) -> str:
+    match = re.search(r'<script type="module"[^>]*src="/workbench/assets/([a-z]+)-', html)
+    assert match, html[:300]
+    return match.group(1)
+
+
+def test_assembled_index_is_the_landing_page():
+    """静态产物的 `/` 必须是宣传页（用户决定，2026-10-17；此前是工作台）。
 
     Vercel 直接静态托管 `public/`，`/` 命中的是 `public/index.html`——它不经过
-    FastAPI 的路由。后端把根路径改成工作台、而这份文件还是旧壳，本地与 Docker
+    FastAPI 的路由。后端把根路径改成宣传页、而这份文件还是工作台，本地与 Docker
     都对，**唯独生产还是旧页面**。
     """
     index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
 
-    assert "/workbench/assets/" in index
+    assert _entry_script(index) == "site"
     assert "衡鉴" not in index
+    # 本地宿主要往宣传页里注入 API_PREFIX（它要查会话）。
+    assert "<!-- PGS_CLIENT_CONFIG -->" in index
+    about = (ROOT / "public" / "about" / "index.html").read_text(encoding="utf-8")
+    assert _entry_script(about) == "about"
 
 
 def test_sent_link_paths_are_assembled_as_the_workbench_too():
@@ -95,4 +108,52 @@ def test_sent_link_paths_are_assembled_as_the_workbench_too():
         path = ROOT / "public" / page / "index.html"
 
         assert path.is_file(), page
-        assert "/workbench/assets/" in path.read_text(encoding="utf-8"), page
+        assert _entry_script(path.read_text(encoding="utf-8")) == "workbench", page
+
+
+def _build_script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_web_static", ROOT / "scripts" / "build_web_static.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_landing_motion_pin_writes_the_client_config_once():
+    """Vercel 上的宣传页固定为少动效版（用户决定，2026-10-17）。"""
+    import pytest
+
+    build = _build_script()
+    html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+
+    pinned = build.pin_landing_motion(html, "reduced")
+
+    assert 'window.__PGS_CONFIG__ = {"landingMotion": "reduced"};' in pinned
+    assert build.CLIENT_CONFIG_MARKER not in pinned
+    # 写过一次就没有标记了：再写说明流程错了，不能静默叠加。
+    with pytest.raises(SystemExit):
+        build.pin_landing_motion(pinned, "reduced")
+    with pytest.raises(SystemExit):
+        build.pin_landing_motion(html, "wild")
+
+
+def test_committed_landing_page_keeps_the_injection_marker():
+    """仓库里的宣传页不带动效档位：Lightsail 经 FastAPI 在同一个标记处注入 API_PREFIX。"""
+    index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+
+    assert "landingMotion" not in index
+
+
+def test_only_the_vercel_job_pins_the_reduced_motion_landing_page():
+    """Vercel 固定少动效、Lightsail 正常动效；固定这一步必须在 vercel build 之前。"""
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    vercel = ci[ci.index("  deploy-vercel-production:"):ci.index("  production-config:")]
+    lightsail = ci[ci.index("  deploy-lightsail-production:"):]
+    pin = "scripts/build_web_static.py --landing-motion reduced"
+
+    assert pin in vercel
+    assert vercel.index(pin) < vercel.index("vercel build --prod")
+    assert "--landing-motion" not in lightsail
