@@ -580,6 +580,18 @@ FastAPI 注入 `API_PREFIX` 的标记（测试会拦）。
 - 拨测（如 UptimeRobot）报首页故障、状态 405，浏览器里打开却正常：报错指向首页挂了，真正的原因
   是拨测发的是 `HEAD`，而 FastAPI 的 `app.get` 只登记 GET。浏览器页面已改用 `page_route`（GET 与
   HEAD）；以后新增页面路由也用它，别直接写 `app.get`。`/api/*` 仍只接各自声明的方法。
+  复现与核验（修复后页面应为 200，接口仍为 405）：
+
+  ```bash
+  curl -sI https://grading-sg.duckdns.org/ | head -1
+  ```
+
+  ```bash
+  curl -sI https://grading-sg.duckdns.org/api/system/integrations | head -1
+  ```
+
+  拨测本身改用 GET 也能绕开，但别只改拨测：Vercel 与 Lightsail 对同一页面的 HEAD 应一致。
+  发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`，无迁移、无数据回退。
 - 本地 `public/index.html` 里找不到 `landingMotion`、Lightsail 上宣传页是正常动效：这是预期，
   不是没生效——只有 Vercel 的部署工作区里才有这个值。核对 Vercel 时看线上页面源码里有没有
   `"landingMotion": "reduced"`。
