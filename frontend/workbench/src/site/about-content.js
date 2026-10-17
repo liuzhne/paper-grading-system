@@ -34,7 +34,8 @@ export function resolveHash(hash) {
   if (ABOUT_PAGES.includes(key)) {
     return { page: /** @type {"deploy"|"security"|"docs"} */ (key), anchor: null, known: true };
   }
-  if (key in ANCHOR_PAGES) {
+  // 用 hasOwn 而不是 in：`#constructor`、`#toString` 会顺着原型链命中。
+  if (Object.hasOwn(ANCHOR_PAGES, key)) {
     return { page: ANCHOR_PAGES[key], anchor: key, known: true };
   }
   return { page: "deploy", anchor: null, known: false };

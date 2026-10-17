@@ -56,7 +56,7 @@ const product = computed(() => productState(view));
 const overlay = computed(() => overlayState({ y: view.y, vh: view.vh, B: view.B || view.vh }));
 
 function explore() {
-  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
   window.scrollTo({ top: overlay.value.target, behavior: reduce ? "auto" : "smooth" });
 }
 

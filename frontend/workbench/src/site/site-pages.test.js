@@ -57,6 +57,9 @@ describe("官网子页", () => {
     expect(resolveHash("#status").page).toBe("docs");
     expect(resolveHash("")).toEqual({ page: "deploy", anchor: null, known: false });
     expect(resolveHash("#whatever").page).toBe("deploy");
+    // 原型链上的名字不是锚点。
+    expect(resolveHash("#constructor")).toEqual({ page: "deploy", anchor: null, known: false });
+    expect(resolveHash("#toString").known).toBe(false);
   });
 
   it("按 hash 切换分页并更新标题", async () => {
