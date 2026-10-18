@@ -619,6 +619,10 @@ curl -s https://grading-sg.duckdns.org/ | grep -o '"siteLeads": true'
 本地试：`SITE_LEADS_ENABLED=true` 起服务，打开 `/`。限流与保留期可用 `SITE_LEADS_PER_IP_HOURLY`
 `SITE_LEADS_PER_IP_DAILY` `SITE_LEADS_DAILY_LIMIT` `SITE_LEADS_RETENTION_DAYS` 调。
 
+- CI 的 `docker-compose-smoke` 偶尔在「Verify the workbench ships inside the image」以退出码 23 失败，
+  重跑又过了：报错指向 curl（写入失败），真正的原因是脚本里的 `curl … | grep -q`——`pipefail` 下
+  grep 一匹配就退出，curl 还在写就收到断开的管道。这一步已改成先 `--output` 存文件再 `grep`；
+  以后在 CI 脚本里匹配命令输出，别把 `grep -q` 接在管道末尾（2026-10-18，PR #40）。
 - 宣传页上没有申请表单，接口却能提交成功：报错像是前端没部署新版本，真正的原因是开关只在 FastAPI
   渲染入口页时下发。依次查：页面源码里有没有 `"siteLeads": true`；实例 `.env` 里有没有
   `SITE_LEADS_ENABLED='true'`（设完变量是否重新部署过）；访问的是不是 Vercel 地址（那里永远没有）。
@@ -990,7 +994,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 切流量（S3）第一步已完成：`VERCEL_DEPLOY_ENABLED=false`，记下剩余步骤；宣传页动效区分随 Vercel 任务一起停用。首屏改动不涉及运维命令。`public/` 已重建。 |
+| 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 新增一条排错（CI 冒烟偶发退出码 23，真实原因是 `curl | grep -q`，已改为先存文件再匹配）。切流量（S3）第一步已完成：`VERCEL_DEPLOY_ENABLED=false`，记下剩余步骤；宣传页动效区分随 Vercel 任务一起停用。首屏改动不涉及运维命令。`public/` 已重建。 |
 | 2026-10-18 | 官网申请落库 | 新增「官网申请」：开关、上线顺序（先迁移 0039 再合并，设变量后重新部署）、核验与关闭；三条排错（页面没表单、子页缺注入标记、提交太频繁）。 |
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增一条排错（静态文件返回工作台 HTML，真实原因是 `.vercelignore` 按扩展名排除了 `*.svg`）；`.vercelignore` 末尾 `!/public/**` 重新包含静态产物。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增一条排错（拨测报首页 405，真实原因是页面路由不接 HEAD）；新增页面路由要用 `page_route`。`public/` 已重建（含 `favicon.svg` 与入口页的图标声明）。 |

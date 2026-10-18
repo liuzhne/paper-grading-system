@@ -180,6 +180,20 @@ describe("官网申请表单（docs/官网申请落库改造方案.md）", () =>
     wrapper.unmount();
   });
 
+  it("页头「申请试用」带修饰键点击时保留浏览器行为（新标签页打开子页）", () => {
+    respond(202);
+    const wrapper = mount(LandingPage, { attachTo: document.body });
+    const link = wrapper.get('[data-test="header-trial"]').element;
+
+    for (const init of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true, ...init });
+      link.dispatchEvent(event);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(false);
+    }
+    expect(document.activeElement?.id).not.toBe("trial-email");
+    wrapper.unmount();
+  });
+
   it("蜜罐对人隐藏且不可聚焦", () => {
     respond(202);
     const wrapper = mount(LandingPage);

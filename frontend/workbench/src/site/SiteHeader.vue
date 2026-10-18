@@ -26,6 +26,9 @@ const emit = defineEmits(["trial"]);
 
 function onTrialClick(/** @type {MouseEvent} */ event) {
   if (!props.interceptTrial) return;
+  // 只接管不带修饰键的左键点击：⌘ / Ctrl / Shift / Alt 点击与中键要保留浏览器本来的
+  // 行为（新标签页、新窗口、下载），否则用户没法把子页另开。
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   event.preventDefault();
   emit("trial");
 }
