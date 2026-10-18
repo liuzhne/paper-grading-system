@@ -5,16 +5,19 @@ import SiteFooter from "./SiteFooter.vue";
 import SiteHeader from "./SiteHeader.vue";
 import SiteMark from "./SiteMark.vue";
 import { measureSection, overlayState, productState, stillProductStates } from "./landing-motion.js";
-import { APP_URL, aboutUrl } from "./links.js";
-import { landingMotionPinnedReduced } from "./site-config.js";
+import { APP_URL, CONTACT_EMAIL, aboutUrl, mailto } from "./links.js";
+import { landingMotionPinnedReduced, siteLeadsEnabled, siteLeadsRetentionDays } from "./site-config.js";
+import { failureMessage, submitLead } from "./site-leads.js";
 
 /**
  * 宣传页（`/`），还原 Claude Design 原型「有据智评 宣传页.dc.html」。
  *
  * 与原型的差异（用户决定，2026-10-17）：
- * - 首屏「输入院系邮箱，获取试用名额」表单不上线。原型只改前端状态、提交后显示
- *   「已登记」而什么也没保存；落库另做。
- * - 原型里点了没反应的「申请试用」大按钮指向子页的预约区，「使用条款」去掉。
+ * - 首屏「输入院系邮箱，获取试用名额」表单只在部署打开申请开关时出现（2026-10-18
+ *   落库上线，docs/官网申请落库改造方案.md）；没开时（Vercel）不显示。成功文案不再
+ *   承诺「试用开放时会第一时间通知你」，只说会用这个邮箱联系。
+ * - 原型里点了没反应的「申请试用」大按钮：表单在时把焦点送到邮箱框，否则指向子页的
+ *   预约区。「使用条款」去掉。
  *
  * 访客开了「减少动态效果」时（prefers-reduced-motion），滚动不再驱动任何动画：波浪
  * 停在首屏底部随页面滚走，四步演示平铺成四行静态画面，不留 580vh 的滚动舞台。部署
@@ -96,11 +99,50 @@ function explore() {
 }
 
 const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
+
+// ---------- 首屏申请表单 ----------
+
+const leadsEnabled = siteLeadsEnabled();
+const retentionDays = siteLeadsRetentionDays();
+const trial = reactive({ email: "", website: "", sending: false, sent: false, sentEmail: "", error: "", fieldError: "" });
+const trialInput = ref(/** @type {HTMLInputElement|null} */ (null));
+
+async function submitTrial() {
+  if (trial.sending) return;
+  trial.error = "";
+  trial.fieldError = "";
+  const email = trial.email.trim();
+  if (!email) {
+    trial.fieldError = "请填写院系邮箱";
+    trialInput.value?.focus();
+    return;
+  }
+  trial.sending = true;
+  const result = await submitLead({ kind: "trial", email, website: trial.website });
+  trial.sending = false;
+  if (result.ok) {
+    trial.sent = true;
+    trial.sentEmail = email;
+    return;
+  }
+  if (result.reason === "invalid") {
+    trial.fieldError = result.fields.email || "请检查填写的内容";
+    trialInput.value?.focus();
+    return;
+  }
+  trial.error = failureMessage(result.reason);
+}
+
+function focusTrial(/** @type {MouseEvent} */ event) {
+  if (!leadsEnabled || trial.sent) return;
+  event.preventDefault();
+  trialInput.value?.focus();
+}
 </script>
 
 <template>
   <div class="landing">
-    <div class="hero">
+    <div class="hero" :class="{ 'with-form': leadsEnabled }">
       <div class="ring ring-gold" aria-hidden="true" />
       <div class="ring ring-teal" aria-hidden="true" />
       <div class="ring ring-faint" aria-hidden="true" />
@@ -110,10 +152,37 @@ const percent = (/** @type {number} */ x) => `${(x * 100).toFixed(1)}%`;
       <section class="hero-main">
         <div class="hero-copy">
           <h1>每一个分数，<br />都有出处</h1>
-          <p class="tagline">作业与学位论文评审系统 | 评分标准入库 · 逐项给出证据 · 人工复核留痕</p>
+          <p class="tagline" :class="{ 'with-form': leadsEnabled }">作业与学位论文评审系统 | 评分标准入库 · 逐项给出证据 · 人工复核留痕</p>
+          <template v-if="leadsEnabled">
+            <form v-if="!trial.sent" class="trial-form" novalidate data-test="trial-form" @submit.prevent="submitTrial">
+              <label class="sr-only" for="trial-email">院系邮箱</label>
+              <input
+                id="trial-email"
+                ref="trialInput"
+                v-model="trial.email"
+                type="email"
+                autocomplete="email"
+                maxlength="254"
+                placeholder="输入院系邮箱，获取试用名额"
+                :aria-invalid="trial.fieldError ? 'true' : undefined"
+                :aria-describedby="trial.fieldError ? 'trial-email-error' : undefined"
+              />
+              <input v-model="trial.website" class="honeypot" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" />
+              <button type="submit" class="trial-submit" :disabled="trial.sending" aria-label="提交试用申请">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14" /><path d="M13 6l6 6-6 6" /></svg>
+              </button>
+            </form>
+            <div v-else class="trial-done" role="status" data-test="trial-done">
+              <span class="trial-check" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.6 5.2l2.4 2.4L8.4 3" /></svg></span>
+              <span>已收到 {{ trial.sentEmail }}，我们会通过这个邮箱联系你。</span>
+            </div>
+            <p v-if="trial.fieldError" id="trial-email-error" class="form-error" role="alert">{{ trial.fieldError }}</p>
+            <p v-if="trial.error" class="form-error" role="alert">{{ trial.error }}<a :href="mailto(CONTACT_EMAIL, '有据智评 · 申请试用')">{{ CONTACT_EMAIL }}</a></p>
+            <p v-if="!trial.sent" class="consent">提交即表示同意我们用这个邮箱联系你。申请记录保存 {{ retentionDays }} 天，到期自动删除。<a :href="aboutUrl('leads')">怎么处理</a></p>
+          </template>
           <a class="deploy-link" :href="aboutUrl('deploy')">院系批量部署？联系我们</a>
           <div class="cta-row">
-            <a class="cta-primary" :href="aboutUrl('contact')" data-test="hero-trial">申请试用</a>
+            <a class="cta-primary" :href="aboutUrl('contact')" data-test="hero-trial" @click="focusTrial">申请试用</a>
             <span class="signin">已有账户？<a :href="APP_URL" data-test="enter-app">直接进入工作台 →</a></span>
           </div>
         </div>
@@ -431,6 +500,143 @@ h1 {
   text-wrap: pretty;
 }
 
+.tagline.with-form {
+  margin-bottom: 34px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 蜜罐：对人不可见、不可聚焦；脚本往往会把它也填上。 */
+.honeypot {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.trial-form {
+  position: relative;
+  display: flex;
+  align-items: center;
+  max-width: 560px;
+  height: 62px;
+  padding: 6px 6px 6px 26px;
+  border-radius: 40px;
+  border: 1.5px solid #c9953f;
+  background: linear-gradient(90deg, rgba(23, 92, 80, 0.55), rgba(201, 149, 63, 0.35));
+  box-shadow: 0 0 0 4px rgba(201, 149, 63, 0.12);
+}
+
+.trial-form input[type="email"] {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font-family: var(--font-mono-cjk);
+  font-size: 15px;
+}
+
+.trial-form input[type="email"]::placeholder {
+  color: #8fa39b;
+}
+
+.trial-form input[type="email"]:focus {
+  outline: none;
+}
+
+.trial-form:focus-within {
+  box-shadow: 0 0 0 4px rgba(201, 149, 63, 0.32);
+}
+
+.trial-submit {
+  flex: none;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 0;
+  background: #c9953f;
+  color: #1c211e;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.trial-submit:hover {
+  background: #d8a650;
+}
+
+.trial-submit:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.trial-done {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 560px;
+  min-height: 62px;
+  padding: 12px 24px;
+  border-radius: 40px;
+  border: 1.5px solid #6fa196;
+  background: rgba(23, 92, 80, 0.45);
+  font-size: 15px;
+  color: #e7eae8;
+  overflow-wrap: anywhere;
+}
+
+.trial-check {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #6fa196;
+  color: #1c211e;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.form-error {
+  max-width: 560px;
+  margin: 10px 0 0;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: #f0c27a;
+}
+
+.form-error a {
+  margin-left: 4px;
+  color: #f6dfb4;
+  border-bottom: 1px solid rgba(246, 223, 180, 0.5);
+}
+
+.consent {
+  max-width: 560px;
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: #8f9a95;
+}
+
+.consent a {
+  margin-left: 4px;
+  color: #cdd3d0;
+  border-bottom: 1px solid rgba(205, 211, 208, 0.4);
+}
+
 .deploy-link {
   display: inline-block;
   margin: 18px 0 28px;
@@ -662,6 +868,17 @@ h1 {
   z-index: 1;
   height: clamp(220px, 32vh, 360px);
   margin-top: -40px;
+}
+
+/*
+ * 原型的预留比波浪实际占的高度少：最上层波浪静止时顶在首屏底部往上 clamp(…) 处，
+ * 浪尖还要再高出约 5% 屏高，再加上 -40px 的负外边距。没有表单时文案刚好够得着，
+ * 加了表单内容高出约 110px，「申请试用」大按钮就被波浪盖住。表单出现时把整段
+ * 波浪带都让出来（首屏随之变高，波浪层按首屏底部定位，跟着下移）。
+ */
+.hero.with-form .wave-spacer {
+  height: calc(clamp(220px, 32vh, 360px) + 5vh + 16px);
+  margin-top: 0;
 }
 
 /* ---------- 产品演示 ---------- */

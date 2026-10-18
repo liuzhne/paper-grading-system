@@ -10,3 +10,19 @@
 export function landingMotionPinnedReduced() {
   return globalThis.__PGS_CONFIG__?.landingMotion === "reduced";
 }
+
+/**
+ * 官网申请表单开没开（docs/官网申请落库改造方案.md）。
+ *
+ * 只有 FastAPI 在 `SITE_LEADS_ENABLED` 打开时往入口页里写 `siteLeads: true`。Vercel 的
+ * 首页是静态文件，拿不到这个值，表单不出现——它连的是切流量后要删除的旧库。
+ */
+export function siteLeadsEnabled() {
+  return globalThis.__PGS_CONFIG__?.siteLeads === true;
+}
+
+/** 申请记录的保留天数，随开关一起下发；缺省与后端默认一致。 */
+export function siteLeadsRetentionDays() {
+  const days = Number(globalThis.__PGS_CONFIG__?.siteLeadsRetentionDays);
+  return Number.isInteger(days) && days > 0 ? days : 180;
+}

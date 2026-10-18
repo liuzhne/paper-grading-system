@@ -188,7 +188,8 @@ jobs:
             0035_unified_work_queue \
             0036_ai_tasks \
             0037_ai_task_upload_scope \
-            0038_assistant_conversations
+            0038_assistant_conversations \
+            0039_site_leads
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
@@ -634,6 +635,8 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
+          # 官网申请表单的开关（docs/官网申请落库改造方案.md）；没设即关闭。
+          SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

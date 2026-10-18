@@ -160,3 +160,45 @@ test.describe("V10 角色边界", () => {
     expect([403, 404]).toContain(response.status());
   });
 });
+
+test.describe("官网申请（docs/官网申请落库改造方案.md）", () => {
+  test("访客提交两种申请，平台管理员在运维页看到并标记已联系", async ({ browser, page }) => {
+    // 访客：不登录、独立的浏览器上下文。
+    const visitor = await browser.newContext();
+    const guest = await visitor.newPage();
+    await guest.goto("/");
+    await guest.getByLabel("院系邮箱").fill("e2e-trial@example.edu.cn");
+    await guest.getByRole("button", { name: "提交试用申请" }).click();
+    await expect(guest.getByRole("status")).toContainText("已收到 e2e-trial@example.edu.cn，我们会通过这个邮箱联系你。");
+
+    await guest.goto("/about#contact");
+    await guest.getByLabel("学校与院系").fill("验收大学 计算机学院");
+    await guest.getByLabel("联系邮箱").fill("e2e-dean@example.edu.cn");
+    await guest.getByLabel("备注 / 课程范围（选填）").fill("三门课");
+    await guest.getByRole("button", { name: "提交" }).click();
+    await expect(guest.getByRole("status")).toHaveText("已收到，我们会通过邮件联系你。");
+    await visitor.close();
+
+    // 平台管理员：运维页的「官网申请」卡片。
+    await login(page, "platform");
+    await page.goto("/workbench/ops");
+    const card = page.locator('[data-test="site-leads"]');
+    await expect(card.getByRole("heading", { name: "官网申请" })).toBeVisible();
+    const deanRow = card.locator("tbody tr", { hasText: "e2e-dean@example.edu.cn" });
+    await expect(deanRow).toContainText("验收大学 计算机学院");
+    await expect(deanRow).toContainText("三门课");
+    await expect(card.locator("tbody tr", { hasText: "e2e-trial@example.edu.cn" })).toBeVisible();
+
+    await deanRow.getByLabel("状态").selectOption("contacted");
+    // 默认只看新申请：标记后这一行离开列表。
+    await expect(card.locator("tbody tr", { hasText: "e2e-dean@example.edu.cn" })).toHaveCount(0);
+  });
+
+  test("教师看不到申请", async ({ page }) => {
+    await login(page, "teacher");
+
+    const response = await page.request.get("/api/site/leads");
+
+    expect(response.status()).toBe(403);
+  });
+});

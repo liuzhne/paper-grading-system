@@ -17,6 +17,7 @@ export const PAGE_TITLES = {
 /** 分页内锚点 → 所在分页。 */
 const ANCHOR_PAGES = {
   contact: "deploy",
+  leads: "security",
   "docs-before": "docs",
   "docs-steps": "docs",
   keys: "docs",

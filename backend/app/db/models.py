@@ -3340,3 +3340,39 @@ class AssistantCheckpointWrite(Base):
     value_type: Mapped[str] = mapped_column(String(50), nullable=False)
     value_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     task_path: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+
+
+class SiteLead(Base):
+    """官网提交的试用与部署评估申请（docs/官网申请落库改造方案.md）。
+
+    平台级数据：申请发生在开通账户之前，不挂组织。只存联系所需的最少信息；
+    原始 IP 不存，`ip_hash` 是 HMAC 摘要，只用于限流，随记录一起到期删除。
+    """
+
+    __tablename__ = "site_leads"
+    __table_args__ = (
+        CheckConstraint("kind IN ('trial', 'deploy_assessment')", name="ck_site_leads_kind"),
+        CheckConstraint(
+            "status IN ('new', 'contacted', 'closed', 'spam')", name="ck_site_leads_status"
+        ),
+        CheckConstraint("submit_count >= 1", name="ck_site_leads_submit_count"),
+        Index("ix_site_leads_kind_email", "kind", "email"),
+        Index("ix_site_leads_ip_hash_submitted", "ip_hash", "last_submitted_at"),
+        Index("ix_site_leads_status_submitted", "status", "last_submitted_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    organization_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_path: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="new")
+    submit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    last_submitted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    handled_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

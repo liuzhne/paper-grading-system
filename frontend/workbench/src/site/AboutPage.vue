@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 
 import SiteFooter from "./SiteFooter.vue";
 import SiteHeader from "./SiteHeader.vue";
@@ -19,13 +19,15 @@ import {
   resolveHash,
 } from "./about-content.js";
 import { CONTACT_EMAIL, SECURITY_EMAIL, aboutUrl, mailto } from "./links.js";
+import { siteLeadsEnabled, siteLeadsRetentionDays } from "./site-config.js";
+import { failureMessage, submitLead } from "./site-leads.js";
 
 /**
  * 官网子页（`/about`），还原 Claude Design 原型「有据智评 官网子页.dc.html」。
  *
  * 与原型的差异（用户决定，2026-10-17）：
- * - 「预约部署评估」表单不上线（原型提交后显示「已收到」而什么也没保存；落库另做），
- *   改为发邮件到联系邮箱。
+ * - 「预约部署评估」表单只在部署打开申请开关时出现（2026-10-18 落库上线，加了可选的
+ *   备注 / 课程范围）；没开时（Vercel）保留「发邮件预约」。
  * - 帮助文档去掉不工作的搜索框、「下一篇」与「有帮助吗」；空链接改为锚点、工作台
  *   页面或「即将上线」。
  */
@@ -49,6 +51,50 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => window.removeEventListener("hashchange", sync));
+
+// ---------- 预约部署评估 ----------
+
+const leadsEnabled = siteLeadsEnabled();
+const retentionDays = siteLeadsRetentionDays();
+const NOTE_MAX = 500;
+const deploy = reactive({
+  organization: "",
+  email: "",
+  note: "",
+  website: "",
+  sending: false,
+  sent: false,
+  error: "",
+  fields: /** @type {Record<string, string>} */ ({}),
+});
+
+async function submitDeploy() {
+  if (deploy.sending) return;
+  deploy.error = "";
+  const fields = /** @type {Record<string, string>} */ ({});
+  if (!deploy.organization.trim()) fields.organization_name = "请填写学校与院系";
+  if (!deploy.email.trim()) fields.email = "请填写联系邮箱";
+  deploy.fields = fields;
+  if (Object.keys(fields).length) return;
+  deploy.sending = true;
+  const result = await submitLead({
+    kind: "deploy_assessment",
+    email: deploy.email.trim(),
+    organization_name: deploy.organization.trim(),
+    note: deploy.note.trim(),
+    website: deploy.website,
+  });
+  deploy.sending = false;
+  if (result.ok) {
+    deploy.sent = true;
+    return;
+  }
+  if (result.reason === "invalid") {
+    deploy.fields = result.fields;
+    return;
+  }
+  deploy.error = failureMessage(result.reason);
+}
 </script>
 
 <template>
@@ -119,9 +165,53 @@ onBeforeUnmount(() => window.removeEventListener("hashchange", sync));
         <div class="contact">
           <div class="contact-copy">
             <h2>预约部署评估</h2>
-            <p>发邮件告诉我们学校、院系和联系方式，我们会确认课程范围、数据存放要求和现有系统，再给出部署方案。</p>
+            <p v-if="leadsEnabled">留下院系和联系方式，我们会确认课程范围、数据存放要求和现有系统，再给出部署方案。</p>
+            <p v-else>发邮件告诉我们学校、院系和联系方式，我们会确认课程范围、数据存放要求和现有系统，再给出部署方案。</p>
           </div>
-          <div class="contact-action">
+          <template v-if="leadsEnabled">
+            <form v-if="!deploy.sent" class="contact-form" novalidate data-test="deploy-form" @submit.prevent="submitDeploy">
+              <label class="sr-only" for="deploy-org">学校与院系</label>
+              <input
+                id="deploy-org"
+                v-model="deploy.organization"
+                type="text"
+                maxlength="120"
+                autocomplete="organization"
+                placeholder="学校与院系"
+                :aria-invalid="deploy.fields.organization_name ? 'true' : undefined"
+                :aria-describedby="deploy.fields.organization_name ? 'deploy-org-error' : undefined"
+              />
+              <p v-if="deploy.fields.organization_name" id="deploy-org-error" class="field-error" role="alert">{{ deploy.fields.organization_name }}</p>
+              <label class="sr-only" for="deploy-email">联系邮箱</label>
+              <input
+                id="deploy-email"
+                v-model="deploy.email"
+                type="email"
+                maxlength="254"
+                autocomplete="email"
+                placeholder="联系邮箱"
+                :aria-invalid="deploy.fields.email ? 'true' : undefined"
+                :aria-describedby="deploy.fields.email ? 'deploy-email-error' : undefined"
+              />
+              <p v-if="deploy.fields.email" id="deploy-email-error" class="field-error" role="alert">{{ deploy.fields.email }}</p>
+              <label class="sr-only" for="deploy-note">备注 / 课程范围（选填）</label>
+              <textarea
+                id="deploy-note"
+                v-model="deploy.note"
+                rows="3"
+                :maxlength="NOTE_MAX"
+                placeholder="备注 / 课程范围（选填）"
+                :aria-invalid="deploy.fields.note ? 'true' : undefined"
+              />
+              <p v-if="deploy.fields.note" class="field-error" role="alert">{{ deploy.fields.note }}</p>
+              <input v-model="deploy.website" class="honeypot" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" />
+              <button type="submit" :disabled="deploy.sending">{{ deploy.sending ? "提交中…" : "提交" }}</button>
+              <p v-if="deploy.error" class="field-error" role="alert">{{ deploy.error }}<a :href="mailto(CONTACT_EMAIL, '有据智评 · 预约部署评估')">{{ CONTACT_EMAIL }}</a></p>
+              <p class="contact-consent">提交即表示同意我们用这个邮箱联系你。申请记录保存 {{ retentionDays }} 天，到期自动删除。<a :href="aboutUrl('leads')">怎么处理</a></p>
+            </form>
+            <div v-else class="contact-done" role="status" data-test="deploy-done">已收到，我们会通过邮件联系你。</div>
+          </template>
+          <div v-else class="contact-action">
             <a class="contact-mail" :href="mailto(CONTACT_EMAIL, '有据智评 · 预约部署评估')">发邮件预约</a>
             <div class="contact-addr">{{ CONTACT_EMAIL }}</div>
           </div>
@@ -193,6 +283,13 @@ onBeforeUnmount(() => window.removeEventListener("hashchange", sync));
             <span class="anon-id">SE-2026-014</span>
           </div>
           <p class="panel-note">编号与姓名的对应关系只有教务管理员可见，导出成绩单时再还原。</p>
+        </div>
+      </section>
+
+      <section id="leads" class="block">
+        <div class="panel-card">
+          <h3 class="tight">官网申请信息</h3>
+          <p class="panel-p flush">在官网提交的试用与部署评估申请，只保存邮箱、学校与院系和你写的备注，用于联系你；不保存 IP 地址。记录保存 {{ retentionDays }} 天后自动删除，也可以发邮件到 <a :href="mailto(CONTACT_EMAIL, '有据智评 · 删除申请记录')">{{ CONTACT_EMAIL }}</a> 要求提前删除。</p>
         </div>
       </section>
 
@@ -730,6 +827,126 @@ h1 {
 .contact-mail:hover {
   background: #d8a650;
   color: #1c211e;
+}
+
+.contact-form {
+  flex: 1 1 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.contact-form input,
+.contact-form textarea {
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.15);
+  color: #fff;
+  font-size: 15px;
+}
+
+.contact-form input {
+  height: 46px;
+}
+
+.contact-form textarea {
+  padding: 12px 16px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.contact-form input::placeholder,
+.contact-form textarea::placeholder {
+  color: #a9c4bc;
+}
+
+.contact-form input:focus,
+.contact-form textarea:focus {
+  outline: none;
+  border-color: #c9953f;
+}
+
+.contact-form input[aria-invalid="true"] {
+  border-color: #f0c27a;
+}
+
+.contact-form button {
+  height: 46px;
+  border: 0;
+  border-radius: 10px;
+  background: #c9953f;
+  color: #1c211e;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.contact-form button:hover {
+  background: #d8a650;
+}
+
+.contact-form button:disabled {
+  cursor: progress;
+  opacity: 0.75;
+}
+
+.field-error {
+  margin: -2px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #f6dfb4;
+}
+
+.field-error a,
+.contact-consent a {
+  margin-left: 4px;
+  color: #fff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.contact-consent {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: #b9d2ca;
+}
+
+.contact-done {
+  flex: 1 1 380px;
+  font-size: 15px;
+  line-height: 1.8;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.honeypot {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.panel-p.flush {
+  margin-bottom: 0;
+}
+
+#leads {
+  scroll-margin-top: 16px;
 }
 
 .contact-addr {

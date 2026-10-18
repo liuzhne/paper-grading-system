@@ -16,13 +16,13 @@
 - CI：`.github/workflows/ci.yml` 包含锁文件全量测试与 Postgres 16 的逐版本迁移、约束/排序、拒绝 lossy downgrade、备份恢复演练；本机 SQLite 通过不能替代真实 CI artifact。
 
 ## 当前发布边界
-- Alembic head：`0038_assistant_conversations`（0023 规则检查点与人工复核任务；0024 批次七态约束 + `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0029 为 0026/0027 的新表补 `pgs_app` 授权与 RLS；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本 `rule_decision_ledger` 与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议 CHECK 加入 `anthropic_messages`；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与两条部分索引，新增 `work_runtime_state`；0036 AI 任务 `ai_tasks` / `ai_task_items` 与规则来源 `atomic_rules.ai_origin` / `ai_model`；0037 `ai_tasks.rubric_id` 对导入前的结构识别可空；0038 评分助手的偏好、会话、消息与两张流程状态表，给 `pgs_app` 授权并建 RLS）。**0024–0028、0031 有数据时一律拒绝降级**；0033 的账本是缓存，降级可删，但有 `decision_reused=true` 或 `group_call_id` 的任务时拒绝降级；0034 有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级；0035 有排队、评分中或取消中的批量评分任务时拒绝降级；0036 有 AI 任务或已记录生成模型的规则时拒绝降级；0037 有不挂评分标准的结构识别任务时拒绝降级；0038 任一助手表有数据时拒绝降级。
+- Alembic head：`0039_site_leads`（0023 规则检查点与人工复核任务；0024 批次七态约束 + `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0029 为 0026/0027 的新表补 `pgs_app` 授权与 RLS；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本 `rule_decision_ledger` 与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议 CHECK 加入 `anthropic_messages`；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与两条部分索引，新增 `work_runtime_state`；0036 AI 任务 `ai_tasks` / `ai_task_items` 与规则来源 `atomic_rules.ai_origin` / `ai_model`；0037 `ai_tasks.rubric_id` 对导入前的结构识别可空；0038 评分助手的偏好、会话、消息与两张流程状态表，给 `pgs_app` 授权并建 RLS；0039 官网申请表 `site_leads`，给 `pgs_app` 授权并建 RLS）。**0024–0028、0031 有数据时一律拒绝降级**；0033 的账本是缓存，降级可删，但有 `decision_reused=true` 或 `group_call_id` 的任务时拒绝降级；0034 有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级；0035 有排队、评分中或取消中的批量评分任务时拒绝降级；0036 有 AI 任务或已记录生成模型的规则时拒绝降级；0037 有不挂评分标准的结构识别任务时拒绝降级；0038 任一助手表有数据时拒绝降级；0039 官网申请表有数据时拒绝降级。
 - **新建表必须在迁移里给 `pgs_app` 授权并建 RLS**（照 0023 的做法）。生产运行角色没有 DDL，也不会自动获得新表权限；漏了不会让迁移失败，而是让迁移成功之后应用 permission denied——本地与 CI 不建这个角色，两边都测不出来。
 - v1 `score_paper()` 与 v2 `score_generic_submission()` 并存；正式 RubricVersion 走 AtomicRule Core，未版本化标准只能走显式 compatibility。
 - `SCORING_ENGINE_MODE` 当前默认 `legacy`；它只控制未版本化兼容路径。真实 `GATE-03` 达到 `gating_eligible=true` 且取得维护者发布批准前，禁止改为默认 Core。
 
 ## 架构（backend/app/）
-- `api/routes/`：rubrics / batches / papers / submissions_v2 / scoring / exports / release_gates / system / calibration / assistant。
+- `api/routes/`：rubrics / batches / papers / submissions_v2 / scoring / exports / release_gates / system / calibration / assistant / site（官网申请：公开提交不登录，管理接口只给平台管理员）。
 - `api/guards.py` 共享可见性守卫、`api/actions.py` 共享写动作（建批次、预检、删论文、开评、重试、取消）：页面接口与评分助手的图调用同一组函数，路由里的 `_visible_*` 是它们的别名。
 - `services/`：
   - `rubric_import/`：三层解析（见 `docs/评分规则解析模块重构方案.md`）——`sources/` 格式适配器（Excel/Word → 原文单元台账 `SourceLedger`，不用 LLM）、`extraction/` 抽取器（确定性表格/Word 抽取、E1–E8 触发、用户确认的结构覆盖、LLM 结构识别兜底）、`classification/` 兜底分类器；`coverage` 覆盖率、`parse_state` 单元处理与发布门禁、`structure_state` 结构建议合入/撤销、`review`/`review_state` 规则审查；`pipeline` 只做组装与持久化；`compiler` 结构化扣分规则（`compile_criterion_rules` 旧 LLM 编译仅供 CLI）。
@@ -39,6 +39,7 @@
   - `calibration/`：L2 锚点库(`library`) + 漂移/排名(`analytics`)。
   - `llm/`：base + mock + openai（Responses）+ openai_compatible（Chat，默认 zhipu）+ anthropic_messages（Claude：Bedrock / api.anthropic.com）；三者共用 `transport`（重试/截止时间/熔断/计量）与 `legacy_prompts`；`cache/llm_cache` 是 L0 缓存。
   - `report/generator`：HTML 报告（含扣分明细/篇章一致性/格式问题）；`spreadsheet/` 导出。
+  - `site_leads`：官网试用与部署评估申请（见 `docs/官网申请落库改造方案.md`）——校验、按来源 IP 摘要限流、全站日上限、30 天去重；`SITE_LEADS_ENABLED` 默认关闭，只在 FastAPI 渲染官网入口页时下发给页面（Vercel 静态首页拿不到，表单不出现）；到期由 worker 巡检每天清理一次。
 - `eval/`：QWK 评估（`metrics`/`runner`/`labeled_dataset`/`scores_template`）；`scripts/run_qwk_eval.py` 入口。
 - `db/models`、`schemas/`、`scripts/`（seed_dev、diagnose_llm、run_qwk_eval）。
 
@@ -85,7 +86,7 @@
 （迁移 head、命令、边界事实）；机器检不出来的部分靠这条约定。
 
 ## 约定
-- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0038_assistant_conversations`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
+- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0039_site_leads`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
 - 改 prompt/输入构造要 bump `cache/llm_cache.PROMPT_VERSION`。
 - 改评分逻辑后用 §15 QWK 留出集重新锚定基线。
 - 生产变更需完成 `docs/上线清单.md`；备份恢复必须先 verify，restore 只允许显式确认的数据库与空 storage 目标。

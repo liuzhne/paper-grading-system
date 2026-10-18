@@ -48,8 +48,10 @@ REQUIRED = (
     "SUPABASE_URL",
     "SUPABASE_SECRET_KEY",
 )
+#: 可选开关：GitHub 仓库变量没设时不写进 .env，应用取默认值（关闭）。
+OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED",)
 # --from-environment 只取这些：部署任务的环境里还有 GITHUB_*、RUNNER_* 等无关变量。
-ENVIRONMENT_NAMES = REQUIRED + ("AUTH_USERNAME", "SUPABASE_STORAGE_BUCKET")
+ENVIRONMENT_NAMES = REQUIRED + ("AUTH_USERNAME", "SUPABASE_STORAGE_BUCKET") + OPTIONAL_SWITCHES
 _SITE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -67,6 +69,11 @@ def select_variables(values: dict) -> dict:
 
 def problems(selected: dict) -> list[str]:
     found = [f"缺少必需变量 {name}" for name in REQUIRED if not selected.get(name)]
+    for name in OPTIONAL_SWITCHES:
+        # 写成 yes/on 应用也认，但仓库变量一眼看不出开没开；只收 true / false。
+        value = selected.get(name)
+        if value is not None and value not in ("true", "false"):
+            found.append(f"{name} 只能是 true 或 false")
     url = selected.get("DATABASE_URL")
     if url:
         try:

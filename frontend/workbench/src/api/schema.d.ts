@@ -2467,6 +2467,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/site/leads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Site Leads */
+        get: operations["list_site_leads_api_site_leads_get"];
+        put?: never;
+        /** Submit Site Lead */
+        post: operations["submit_site_lead_api_site_leads_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/site/leads/{lead_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Site Lead */
+        delete: operations["delete_site_lead_api_site_leads__lead_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Site Lead */
+        patch: operations["update_site_lead_api_site_leads__lead_id__patch"];
+        trace?: never;
+    };
     "/api/system/capabilities": {
         parameters: {
             query?: never;
@@ -5678,6 +5714,88 @@ export interface components {
             submission_id?: string | null;
             /** Total Tokens */
             total_tokens?: number | null;
+        };
+        /** SiteLeadPage */
+        SiteLeadPage: {
+            /** Items */
+            items: components["schemas"]["SiteLeadRead"][];
+            /** New Count */
+            new_count: number;
+            /** Total */
+            total: number;
+        };
+        /** SiteLeadRead */
+        SiteLeadRead: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Email */
+            email: string;
+            /** Handled At */
+            handled_at: string | null;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "trial" | "deploy_assessment";
+            /**
+             * Last Submitted At
+             * Format: date-time
+             */
+            last_submitted_at: string;
+            /** Note */
+            note: string | null;
+            /** Organization Name */
+            organization_name: string | null;
+            /** Source Path */
+            source_path: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "new" | "contacted" | "closed" | "spam";
+            /** Submit Count */
+            submit_count: number;
+        };
+        /** SiteLeadReceived */
+        SiteLeadReceived: {
+            /**
+             * Status
+             * @default received
+             * @constant
+             */
+            status: "received";
+        };
+        /** SiteLeadStatusUpdate */
+        SiteLeadStatusUpdate: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "new" | "contacted" | "closed" | "spam";
+        };
+        /**
+         * SiteLeadSubmit
+         * @description 公开提交。上限比落库长度宽松：清洗与逐字段中文提示在路由里做，这里只防超大请求体。
+         */
+        SiteLeadSubmit: {
+            /** Email */
+            email: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "trial" | "deploy_assessment";
+            /** Note */
+            note?: string | null;
+            /** Organization Name */
+            organization_name?: string | null;
+            /** Website */
+            website?: string | null;
         };
         /** SourceUnitBatchResolveRequest */
         SourceUnitBatchResolveRequest: {
@@ -11375,6 +11493,149 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExportLogRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_site_leads_api_site_leads_get: {
+        parameters: {
+            query?: {
+                status?: ("new" | "contacted" | "closed" | "spam") | null;
+                kind?: ("trial" | "deploy_assessment") | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiteLeadPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_site_lead_api_site_leads_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SiteLeadSubmit"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiteLeadReceived"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_site_lead_api_site_leads__lead_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                lead_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_site_lead_api_site_leads__lead_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                lead_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SiteLeadStatusUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SiteLeadRead"];
                 };
             };
             /** @description Validation Error */
