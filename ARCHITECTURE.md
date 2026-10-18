@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-18 | 官网申请落库 | 新增 `api/routes/site` 与 `services/site_leads`、表 `site_leads`（迁移 0039，`pgs_app` 授权与 RLS）；官网入口页由 FastAPI 渲染时下发 `siteLeads` 开关；worker 巡检每天清理一次过期申请；运维页新增「官网申请」卡片。 |
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 无架构变化：`.vercelignore` 末尾重新包含 `public/`，Vercel 部署包与 Lightsail 镜像里的静态产物一致。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | `main.py` 的浏览器页面（`/`、`/about`、三条邮件链接、`/workbench/*`）经 `page_route` 同时登记 GET 与 HEAD，`/api/*` 不变；图标 `favicon.svg` 随 Vite 产物发布在 `/workbench/favicon.svg`，入口页声明。无接口、表结构与迁移变化。 |
 | 2026-10-17 | 宣传页成为首页 | §7.2 新增“官网”：`/` 宣传页、`/about` 官网子页由同一次 Vite 构建产出（多入口），`build_web_static.py` 与 FastAPI 从 `public/workbench/site/` 取页；工作台规范地址 `/workbench/`，三条已发出链接的路由不变。后端只改静态入口路由，无接口、表结构与迁移变化。Vercel 部署任务在构建前把宣传页固定为少动效版，Lightsail 正常动效。 |
@@ -1354,3 +1355,27 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 核对 `init_database → Alembic env.py → SQLAlchemy/psycopg` 的 owner 连接链路。Alembic 写入 ConfigParser 前将 `%` 转义为 `%%`，读取后仍使用原始 URL 编码，支持 owner 密码包含特殊字符。初始化入口的数据库异常只报告异常类别和 SQLSTATE；迁移子进程输出由入口捕获，失败只报告退出码，不向终端转发可能含连接串或角色密码的 traceback。连接来源仍为隐藏输入或环境变量，现有五步初始化、授权/RLS 策略、head `0038_assistant_conversations` 与评分边界不变。
 
 维护记录：2026-10-13 · 初始化连接串编码与凭据保护：核对连接串编码、失败输出与凭据边界；不新增迁移。
+
+### 2026-10-18 官网试用与部署评估申请
+
+方案：`docs/官网申请落库改造方案.md`（Q1–Q8 已确认）。
+
+调用链：
+
+```
+宣传页首屏 / 子页预约区（src/site，fetch）──POST /api/site/leads──▶ api/routes/site.submit_site_lead
+   ├─ SITE_LEADS_ENABLED 为假 → 404 site_leads_disabled
+   ├─ 蜜罐字段非空 → 202，静默丢弃
+   ├─ 字段校验（逐字段中文提示，422）
+   └─ services/site_leads.submit_lead：按 ip_hash 每小时 / 每天限流 → 30 天内同类型同邮箱合并 → 全站日上限 → 写 site_leads → 202
+运维页 SiteLeadsCard（平台管理员）──GET / PATCH / DELETE /api/site/leads…──▶ 列表、改状态（handled_by / handled_at）、删除；改状态与删除写 audit_logs（不含邮箱）
+worker run_global_sweep ──▶ site_leads.purge_expired_if_due（work_runtime_state 的 site_leads_purge，每天最多一次）
+```
+
+- 路由挂在 `guarded` 之外（公开提交不登录、不带组织上下文）；三个管理接口逐个 `current_principal` + `require_platform_admin`。
+- 页面怎么知道开没开：FastAPI 渲染 `/`、`/about` 时，若开关为真，往 `window.__PGS_CONFIG__` 加 `siteLeads` 与 `siteLeadsRetentionDays`。Vercel 的入口页是静态文件，拿不到，表单不出现（它连旧库）。两张官网入口 HTML 都带 `PGS_CLIENT_CONFIG` 标记，`build_web_static.py` 构建时检查。
+- 持久化：`site_leads` 是平台级表（不挂组织）；原始 IP 不落库，`ip_hash = HMAC-SHA256(AUTH_SECRET, IP)`；保留期 `SITE_LEADS_RETENTION_DAYS`（默认 180）按 `last_submitted_at` 计。日志与审计不记邮箱。
+- 生产开关：GitHub 仓库变量 `SITE_LEADS_ENABLED` → 部署任务 → `production_env.py` 写进实例 `.env`；没设即关闭。
+
+维护记录：2026-10-18 · 官网申请落库：新增模块、表与调用链；head 升为 `0039_site_leads`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
+

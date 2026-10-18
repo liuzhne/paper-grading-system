@@ -1658,3 +1658,47 @@ def test_0038_refuses_to_downgrade_with_assistant_data(monkeypatch, tmp_path, ta
 
     with pytest.raises(RuntimeError, match=table):
         command.downgrade(config, "0037_ai_task_upload_scope")
+
+
+def test_0039_creates_site_leads_and_downgrades_when_empty(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "site-leads-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0039_site_leads")
+    engine = create_engine(url)
+    try:
+        assert "site_leads" in set(inspect(engine).get_table_names())
+        indexes = {index["name"] for index in inspect(engine).get_indexes("site_leads")}
+        assert {
+            "ix_site_leads_kind_email",
+            "ix_site_leads_ip_hash_submitted",
+            "ix_site_leads_status_submitted",
+        } <= indexes
+        command.downgrade(config, "0038_assistant_conversations")
+        assert "site_leads" not in set(inspect(engine).get_table_names())
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
+
+
+def test_0039_refuses_to_downgrade_with_site_leads(monkeypatch, tmp_path):
+    """访客的申请可能还没回复，不是缓存：有数据时拒绝降级。"""
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "site-leads-data.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0039_site_leads")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as db:
+            db.execute(text(
+                "INSERT INTO site_leads (id, kind, email, source_path, status, submit_count,"
+                " created_at, last_submitted_at)"
+                " VALUES ('l1', 'trial', 'a@b.cn', '/', 'new', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="site_leads"):
+        command.downgrade(config, "0038_assistant_conversations")

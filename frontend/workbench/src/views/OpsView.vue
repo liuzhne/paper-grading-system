@@ -9,6 +9,7 @@ import {
   STRUCTURED_OUTPUT_CHOICES,
   withClaudeOptions,
 } from "@/lib/claude-options.js";
+import SiteLeadsCard from "@/components/SiteLeadsCard.vue";
 import { useSessionStore } from "@/stores/session.js";
 
 /**
@@ -372,6 +373,9 @@ onMounted(async () => {
         Core 默认切换权限。
       </div>
     </section>
+
+    <!-- 官网申请：官网提交的试用与部署评估申请，仅平台管理员 -->
+    <SiteLeadsCard v-if="canPlatform" />
 
     <!-- 集成状态：登录后可见的最小投影 -->
     <section class="card">

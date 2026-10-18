@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     BYOK_MASTER_KEY: Optional[str] = None
     BYOK_KEY_VERSION: int = 1
     AI_CONNECTION_RATE_LIMIT_PER_MINUTE: int = 20
+    # 官网试用与部署评估申请（docs/官网申请落库改造方案.md）。默认关闭：本地、CI 与
+    # 内网部署不收申请；生产（Lightsail）经 GitHub 仓库变量打开。Vercel 的首页是静态
+    # 文件，拿不到这个开关，表单自然不出现——它连的是切流量后要删除的旧库。
+    SITE_LEADS_ENABLED: bool = False
+    SITE_LEADS_RETENTION_DAYS: int = 180
+    SITE_LEADS_PER_IP_HOURLY: int = 5
+    SITE_LEADS_PER_IP_DAILY: int = 20
+    SITE_LEADS_DAILY_LIMIT: int = 300
     LLM_PROVIDER: str = "mock"
     # A protected multi-user deployment must not accidentally bill/expose work
     # through the deployment-wide key.  Set this only for a reviewed migration,

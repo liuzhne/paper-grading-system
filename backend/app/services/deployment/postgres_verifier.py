@@ -41,6 +41,7 @@ MIGRATION_SEQUENCE = (
     "0036_ai_tasks",
     "0037_ai_task_upload_scope",
     "0038_assistant_conversations",
+    "0039_site_leads",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -71,6 +72,7 @@ RUNTIME_ACCESS_TABLES = (
     "assistant_messages",
     "assistant_checkpoints",
     "assistant_checkpoint_writes",
+    "site_leads",
 )
 
 

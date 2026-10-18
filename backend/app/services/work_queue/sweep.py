@@ -146,6 +146,7 @@ def run_global_sweep(session_factory, *, now=None):
     now = now or utcnow()
     report = sweep_stale_items(session_factory, now=now)
     record_state(session_factory, LAST_SWEEP, now)
+    _purge_site_leads(session_factory, now)
     logger.info(
         "work_sweep_ran recovered=%s failed=%s converged=%s rung=%s",
         report.recovered,
@@ -154,6 +155,17 @@ def run_global_sweep(session_factory, *, now=None):
         report.rung,
     )
     return report
+
+
+def _purge_site_leads(session_factory, now) -> None:
+    """官网申请到期删除（每天最多一次）。失败只记日志，不能拖垮评分队列的巡检。"""
+
+    from backend.app.services.site_leads import purge_expired_if_due
+
+    try:
+        purge_expired_if_due(session_factory, now)
+    except Exception:
+        logger.exception("site_leads_purge_failed")
 
 
 def ensure_sweep_chain(session_factory, *, now=None) -> bool:

@@ -601,6 +601,34 @@ FastAPI 注入 `API_PREFIX` 的标记（测试会拦）。
   curl -s -o /dev/null -w '%{content_type}\n' https://paper-grading-system-kohl.vercel.app/workbench/favicon.svg
   ```
 
+**官网申请**（2026-10-18，`docs/官网申请落库改造方案.md`）：宣传页首屏「申请试用」与子页「预约部署评估」
+两个表单把申请写进 `site_leads`，平台管理员在工作台「运维」页的「官网申请」卡片里看、改状态、删除。
+开关 `SITE_LEADS_ENABLED` 默认关闭；生产在 GitHub 仓库变量里设为 `true`（只收 `true` / `false`），
+**再重新部署一次**才生效——实例的 `.env` 只在部署时生成。Vercel 上永远不出现表单。
+
+上线顺序：先在 Actions 里跑 `production-migrate.yml`（分支选本次的 PR 分支，`expected_head=0039_site_leads`，
+先 `dry_run` 再正式），再合并；合并部署后设变量、重新部署，核验：
+
+```bash
+curl -s https://grading-sg.duckdns.org/ | grep -o '"siteLeads": true'
+```
+
+然后在页面上各提交一次两种申请，到运维页确认能看到、能改状态、能删除。关掉：变量设回 `false` 再部署，
+表单消失、数据保留；有数据时不做数据库降级（0039 会拒绝）。
+
+本地试：`SITE_LEADS_ENABLED=true` 起服务，打开 `/`。限流与保留期可用 `SITE_LEADS_PER_IP_HOURLY`
+`SITE_LEADS_PER_IP_DAILY` `SITE_LEADS_DAILY_LIMIT` `SITE_LEADS_RETENTION_DAYS` 调。
+
+- 宣传页上没有申请表单，接口却能提交成功：报错像是前端没部署新版本，真正的原因是开关只在 FastAPI
+  渲染入口页时下发。依次查：页面源码里有没有 `"siteLeads": true`；实例 `.env` 里有没有
+  `SITE_LEADS_ENABLED='true'`（设完变量是否重新部署过）；访问的是不是 Vercel 地址（那里永远没有）。
+- 子页预约区一直是「发邮件预约」，宣传页却有表单：报错指向子页组件，真正的原因是入口 HTML 缺了
+  `<!-- PGS_CLIENT_CONFIG -->` 标记，FastAPI 无处注入。`build_web_static.py` 现在会拦下缺标记的产物；
+  手改 `frontend/workbench/site/**/index.html` 时别删它。
+- 访客说提交提示「太频繁」：同一来源每小时 5 次、每天 20 次（同一办公网出口算一个来源）。日志查
+  `site_lead_rejected reason=per_ip_hourly`；全站当天超过 300 条会有 WARNING `site_lead_daily_limit_reached`。
+  日志里只有申请 ID 与类型，没有邮箱。
+
 - 本地 `public/index.html` 里找不到 `landingMotion`、Lightsail 上宣传页是正常动效：这是预期，
   不是没生效——只有 Vercel 的部署工作区里才有这个值。核对 Vercel 时看线上页面源码里有没有
   `"landingMotion": "reduced"`。
@@ -962,6 +990,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-18 | 官网申请落库 | 新增「官网申请」：开关、上线顺序（先迁移 0039 再合并，设变量后重新部署）、核验与关闭；三条排错（页面没表单、子页缺注入标记、提交太频繁）。 |
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增一条排错（静态文件返回工作台 HTML，真实原因是 `.vercelignore` 按扩展名排除了 `*.svg`）；`.vercelignore` 末尾 `!/public/**` 重新包含静态产物。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增一条排错（拨测报首页 405，真实原因是页面路由不接 HEAD）；新增页面路由要用 `page_route`。`public/` 已重建（含 `favicon.svg` 与入口页的图标声明）。 |
 | 2026-10-17 | 宣传页成为首页 | “默认入口”改为宣传页 + `/about` + `/workbench/`；补本地预览方式（`cd frontend/workbench && npm run dev`）、宣传页动效按部署区分（Vercel 少动效、Lightsail 正常）与三条排错（普通构建报宣传页缺失、e2e 点不到「探索更多」、本地与 Lightsail 看不到 `landingMotion`）。生产 Caddy 的入口缓存规则加 `/about`。新增 `.coderabbit.yaml` 排除 `public/**`（构建产物把 PR 撑过 CodeRabbit 100 个文件的上限，整次评审被跳过）。`public/` 已重建。 |

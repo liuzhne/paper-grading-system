@@ -26,6 +26,7 @@ from backend.app.api.routes import papers
 from backend.app.api.routes import release_gates
 from backend.app.api.routes import rubrics
 from backend.app.api.routes import scoring
+from backend.app.api.routes import site
 from backend.app.api.routes import system
 from backend.app.api.routes import submissions_v2
 from backend.app.core.config import settings
@@ -48,17 +49,18 @@ async def lifespan(app):
     yield
 
 
-def _inject_client_config(html: str) -> str:
+def _inject_client_config(html: str, extra: dict | None = None) -> str:
     """Inject the served API prefix into a browser entrypoint.
 
     The path comes from the running service configuration; the frontend offers
     no editable entry for it. JSON encoding keeps special characters in the
     configuration from breaking out of the page's script context. Both the
     legacy SPA and the v2 workbench read the same ``window.__PGS_CONFIG__``.
+    ``extra`` carries page-specific switches (the product site's lead forms).
     """
 
     client_config = json.dumps(
-        {"apiBase": settings.API_PREFIX.rstrip("/")}, ensure_ascii=False
+        {"apiBase": settings.API_PREFIX.rstrip("/"), **(extra or {})}, ensure_ascii=False
     ).replace("</", "<\\/")
     return html.replace(
         "<!-- PGS_CLIENT_CONFIG -->",
@@ -142,6 +144,8 @@ def create_app():
     )
     app.include_router(exports.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(system.router, prefix=settings.API_PREFIX)
+    # 官网申请：公开提交不登录，管理接口在路由里逐个校验平台管理员。
+    app.include_router(site.router, prefix=settings.API_PREFIX)
     app.include_router(calibration.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(assistant.router, prefix=settings.API_PREFIX, dependencies=guarded)
 
@@ -202,8 +206,17 @@ def create_app():
 
         def _site_page(page: Path):
             def serve():
+                # 申请表单只在开关打开的宿主上出现；每次请求读开关，改环境变量重启即生效。
+                extra = (
+                    {
+                        "siteLeads": True,
+                        "siteLeadsRetentionDays": settings.SITE_LEADS_RETENTION_DAYS,
+                    }
+                    if settings.SITE_LEADS_ENABLED
+                    else None
+                )
                 return HTMLResponse(
-                    _inject_client_config(page.read_text(encoding="utf-8"))
+                    _inject_client_config(page.read_text(encoding="utf-8"), extra)
                 )
 
             return serve

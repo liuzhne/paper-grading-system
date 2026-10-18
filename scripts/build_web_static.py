@@ -86,19 +86,17 @@ def _build_workbench() -> None:
             "local hosts could not inject a non-default API_PREFIX."
         )
 
-    # 官网两张入口页（宣传页与子页）由同一次构建产出。宣传页要查会话再决定是否
-    # 跳工作台，同样依赖本地宿主注入的 API_PREFIX。
+    # 官网两张入口页（宣传页与子页）由同一次构建产出。两张页都要本地宿主注入
+    # 配置：宣传页查会话要用 API_PREFIX，申请表单要看 siteLeads 开关。
     for page in SITE_PAGES.values():
         html = dist / page
         if not html.is_file():
             raise SystemExit("workbench build produced no dist/%s" % page)
-    if "<!-- PGS_CLIENT_CONFIG -->" not in (dist / SITE_PAGES["index.html"]).read_text(
-        encoding="utf-8"
-    ):
-        raise SystemExit(
-            "dist/site/index.html lost the PGS_CLIENT_CONFIG marker; the landing "
-            "page could not find a non-default API_PREFIX."
-        )
+        if CLIENT_CONFIG_MARKER not in html.read_text(encoding="utf-8"):
+            raise SystemExit(
+                "dist/%s lost the PGS_CLIENT_CONFIG marker; local hosts could not "
+                "inject API_PREFIX or the lead-form switch." % page
+            )
 
     copytree(dist, OUTPUT / "workbench")
     _copy_font_licence(OUTPUT / "workbench")

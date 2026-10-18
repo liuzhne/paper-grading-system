@@ -480,3 +480,41 @@ def test_production_env_rejects_the_prisma_pgbouncer_flag(tmp_path, capsys):
     errors = capsys.readouterr().err
     assert "pgbouncer=true" in errors and _SECRET not in errors
     assert not output.exists()
+
+
+def test_production_env_passes_the_site_leads_switch_through(tmp_path, monkeypatch, capsys):
+    """官网申请开关来自 GitHub 仓库变量；没设就不写，应用按默认（关闭）。"""
+    script = _env_script()
+    for name, value in {
+        "DATABASE_URL": "postgresql://pgs_app.ref:%s@pooler.supabase.com:6543/postgres" % _SECRET,
+        "AUTH_SECRET": _SECRET,
+        "AUTH_PASSWORD": _SECRET,
+        "BYOK_MASTER_KEY": _SECRET,
+        "SUPABASE_URL": "https://new.supabase.co",
+        "SUPABASE_SECRET_KEY": _SECRET,
+    }.items():
+        monkeypatch.setenv(name, value)
+    output = tmp_path / "pgs.env"
+    args = ["--from-environment", "--site-address", "pgs.duckdns.org", "--output", str(output)]
+
+    assert script.main(args) == 0
+    assert "SITE_LEADS_ENABLED" not in output.read_text(encoding="utf-8")
+
+    output.unlink()
+    monkeypatch.setenv("SITE_LEADS_ENABLED", "true")
+    assert script.main(args) == 0
+    assert "SITE_LEADS_ENABLED='true'" in output.read_text(encoding="utf-8")
+
+    # yes / on 应用也认，但仓库变量一眼看不出开没开：只收 true / false。
+    output.unlink()
+    monkeypatch.setenv("SITE_LEADS_ENABLED", "yes")
+    assert script.main(args) == 1
+    assert "SITE_LEADS_ENABLED 只能是 true 或 false" in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_lightsail_deploy_job_renders_the_site_leads_switch():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
+
+    assert "SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}" in lightsail

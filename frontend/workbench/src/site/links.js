@@ -20,7 +20,7 @@ export const CONTACT_EMAIL = "amir185715231@gmail.com";
 export const SECURITY_EMAIL = CONTACT_EMAIL;
 
 /**
- * @param {"deploy"|"security"|"docs"|"contact"} anchor
+ * @param {"deploy"|"security"|"docs"|"contact"|"leads"} anchor
  */
 export function aboutUrl(anchor) {
   return `${ABOUT_URL}#${anchor}`;

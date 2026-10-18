@@ -15,6 +15,8 @@ test.describe("默认入口", () => {
     expect(response.status()).toBe(200);
     await expect(page.getByRole("heading", { level: 1 })).toContainText("每一个分数");
     await expect(page.getByRole("navigation", { name: "官网导航" })).toBeVisible();
+    // 默认后端没开申请开关（与 Vercel 一样）：首屏不出现试用表单。
+    await expect(page.locator('[data-test="trial-form"]')).toHaveCount(0);
     // 默认 e2e 后端关闭鉴权：/auth/me 对谁都是 200，但那不是「已登录」，不能跳走。
     await page.waitForLoadState("networkidle");
     await expect(page).toHaveURL(/\/$/);
