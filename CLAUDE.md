@@ -6,7 +6,7 @@
 
 生产部署、Supabase、鉴权、发布核验与安全待办见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md)；该文件不得记录任何密钥值。
 
-生产正从 Vercel 迁到一台新加坡 AWS Lightsail 实例（`deploy/production/`：Caddy + app + worker），数据库与存储换成新建的 Supabase 项目，用 `backend/app/scripts/init_database.py` 初始化，运行时密钥存 GitHub `production` 环境。方案见 `docs/部署平台迁移到AWS方案.md`，准备、发布、回滚与切流量顺序见 RUNBOOK 9.4；切流量完成前 Vercel 仍是正式入口。
+生产正从 Vercel 迁到一台新加坡 AWS Lightsail 实例（`deploy/production/`：Caddy + app + worker），数据库与存储换成新建的 Supabase 项目，用 `backend/app/scripts/init_database.py` 初始化，运行时密钥存 GitHub `production` 环境。方案见 `docs/部署平台迁移到AWS方案.md`，准备、发布、回滚与切流量顺序见 RUNBOOK 9.4。**2026-10-18 起流水线不再部署 Vercel**（仓库变量 `VERCEL_DEPLOY_ENABLED=false`，用户已通知迁移到 Lightsail），Lightsail 是正式入口；Vercel 停在最后一次部署上，改为只跳转、删除旧 Supabase 项目尚待维护者操作。
 
 ## 命令
 - 测试：`.venv/bin/python -m pytest -q`（或 `uv run pytest`）。**全套自包含**：内存 SQLite + Mock LLM，无需 Postgres/API Key/联网。

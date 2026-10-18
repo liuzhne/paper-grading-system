@@ -424,7 +424,7 @@ LOG_LEVEL=DEBUG docker compose -p pgs -f compose.yml up -d --force-recreate app 
 
 每月挑低峰手动重启一次让内核更新生效（`sudo reboot`，服务约 1 分钟后自动恢复）；系统安全更新由 `unattended-upgrades` 自动安装、不自动重启。
 
-切流量（S3）：先把仓库变量 `VERCEL_DEPLOY_ENABLED` 设为 `false`，再把 Vercel 项目改为只有 308 跳转规则的部署，跳到新域名并保留路径与查询参数。顺序不能反：变量没关时，下一次合并会把整个应用重新部署回 Vercel，盖掉跳转。新地址稳定后，由维护者在 Supabase 后台删除旧项目 `euizniwqisnhfhxwiqsg`（不可恢复；数据已确认不保留），旧项目的数据库密码与 API 密钥随之失效。
+切流量（S3）：**2026-10-18 已完成第一步**——`VERCEL_DEPLOY_ENABLED=false`（用户已通知迁移），合并到 main 不再部署 Vercel，Vercel 停在最后一次部署（`fd4226a`）上。剩下：Vercel 改为只跳转、观察 48 小时、删除旧项目。原文顺序：先把仓库变量 `VERCEL_DEPLOY_ENABLED` 设为 `false`，再把 Vercel 项目改为只有 308 跳转规则的部署，跳到新域名并保留路径与查询参数。顺序不能反：变量没关时，下一次合并会把整个应用重新部署回 Vercel，盖掉跳转。新地址稳定后，由维护者在 Supabase 后台删除旧项目 `euizniwqisnhfhxwiqsg`（不可恢复；数据已确认不保留），旧项目的数据库密码与 API 密钥随之失效。
 
 排错：
 
@@ -566,7 +566,7 @@ DATABASE_URL='<目标库>' .venv/bin/python -m backend.app.scripts.backfill_expo
 `cd frontend/workbench && npm run dev` 后打开 `http://localhost:5173/workbench/site/`（子页是 `…/site/about/#docs`），
 或照常 `python scripts/build_web_static.py --with-workbench` 后经 FastAPI 打开 `/`。
 
-**宣传页动效按部署区分**（用户决定，2026-10-17）：Vercel 固定少动效版（四步平铺成静态画面、
+**宣传页动效按部署区分**（用户决定，2026-10-17；2026-10-18 起 Vercel 不再部署，这一步随 Vercel 任务一起停用，Vercel 上停留的仍是少动效版）：Vercel 固定少动效版（四步平铺成静态画面、
 波浪不随滚动），Lightsail 正常动效（访客自己开了「减少动态效果」时同样显示少动效版）。开关是入口页
 的 `window.__PGS_CONFIG__.landingMotion`，只由 CI 的 Vercel 部署任务在 `vercel build` 之前写入：
 
@@ -990,6 +990,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 切流量（S3）第一步已完成：`VERCEL_DEPLOY_ENABLED=false`，记下剩余步骤；宣传页动效区分随 Vercel 任务一起停用。首屏改动不涉及运维命令。`public/` 已重建。 |
 | 2026-10-18 | 官网申请落库 | 新增「官网申请」：开关、上线顺序（先迁移 0039 再合并，设变量后重新部署）、核验与关闭；三条排错（页面没表单、子页缺注入标记、提交太频繁）。 |
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增一条排错（静态文件返回工作台 HTML，真实原因是 `.vercelignore` 按扩展名排除了 `*.svg`）；`.vercelignore` 末尾 `!/public/**` 重新包含静态产物。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增一条排错（拨测报首页 405，真实原因是页面路由不接 HEAD）；新增页面路由要用 `page_route`。`public/` 已重建（含 `favicon.svg` 与入口页的图标声明）。 |

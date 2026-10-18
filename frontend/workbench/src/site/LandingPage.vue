@@ -16,8 +16,10 @@ import { failureMessage, submitLead } from "./site-leads.js";
  * - 首屏「输入院系邮箱，获取试用名额」表单只在部署打开申请开关时出现（2026-10-18
  *   落库上线，docs/官网申请落库改造方案.md）；没开时（Vercel）不显示。成功文案不再
  *   承诺「试用开放时会第一时间通知你」，只说会用这个邮箱联系。
- * - 原型里点了没反应的「申请试用」大按钮：表单在时把焦点送到邮箱框，否则指向子页的
- *   预约区。「使用条款」去掉。
+ * - 表单在时它就是首屏唯一的主操作：原型里那颗点了没反应的「申请试用」大按钮不再
+ *   出现（2026-10-18，否则同一屏有三个「申请试用」），「院系批量部署」与「直接进入
+ *   工作台」并成表单下的一行次要链接，页头「申请试用」改为把光标送到邮箱框。表单
+ *   不在时（Vercel）保留大按钮，指向子页的预约区。「使用条款」去掉。
  *
  * 访客开了「减少动态效果」时（prefers-reduced-motion），滚动不再驱动任何动画：波浪
  * 停在首屏底部随页面滚走，四步演示平铺成四行静态画面，不留 580vh 的滚动舞台。部署
@@ -133,9 +135,8 @@ async function submitTrial() {
   trial.error = failureMessage(result.reason);
 }
 
-function focusTrial(/** @type {MouseEvent} */ event) {
-  if (!leadsEnabled || trial.sent) return;
-  event.preventDefault();
+/** 页头「申请试用」：表单就在首屏，把光标送过去，而不是跳去子页。 */
+function focusTrial() {
   trialInput.value?.focus();
 }
 </script>
@@ -147,7 +148,7 @@ function focusTrial(/** @type {MouseEvent} */ event) {
       <div class="ring ring-teal" aria-hidden="true" />
       <div class="ring ring-faint" aria-hidden="true" />
 
-      <SiteHeader active="product" />
+      <SiteHeader active="product" :intercept-trial="leadsEnabled && !trial.sent" @trial="focusTrial" />
 
       <section class="hero-main">
         <div class="hero-copy">
@@ -179,12 +180,18 @@ function focusTrial(/** @type {MouseEvent} */ event) {
             <p v-if="trial.fieldError" id="trial-email-error" class="form-error" role="alert">{{ trial.fieldError }}</p>
             <p v-if="trial.error" class="form-error" role="alert">{{ trial.error }}<a :href="mailto(CONTACT_EMAIL, '有据智评 · 申请试用')">{{ CONTACT_EMAIL }}</a></p>
             <p v-if="!trial.sent" class="consent">提交即表示同意我们用这个邮箱联系你。申请记录保存 {{ retentionDays }} 天，到期自动删除。<a :href="aboutUrl('leads')">怎么处理</a></p>
+            <div class="secondary-links" data-test="hero-links">
+              <a class="deploy-link" :href="aboutUrl('deploy')">院系批量部署？联系我们</a>
+              <span class="signin">已有账户？<a :href="APP_URL" data-test="enter-app">直接进入工作台 →</a></span>
+            </div>
           </template>
-          <a class="deploy-link" :href="aboutUrl('deploy')">院系批量部署？联系我们</a>
-          <div class="cta-row">
-            <a class="cta-primary" :href="aboutUrl('contact')" data-test="hero-trial" @click="focusTrial">申请试用</a>
-            <span class="signin">已有账户？<a :href="APP_URL" data-test="enter-app">直接进入工作台 →</a></span>
-          </div>
+          <template v-else>
+            <a class="deploy-link" :href="aboutUrl('deploy')">院系批量部署？联系我们</a>
+            <div class="cta-row">
+              <a class="cta-primary" :href="aboutUrl('contact')" data-test="hero-trial">申请试用</a>
+              <span class="signin">已有账户？<a :href="APP_URL" data-test="enter-app">直接进入工作台 →</a></span>
+            </div>
+          </template>
         </div>
 
         <div v-if="showProductCard" class="hero-card" aria-hidden="true">
@@ -652,6 +659,18 @@ h1 {
   border-bottom-color: #fff;
 }
 
+.secondary-links {
+  display: flex;
+  align-items: center;
+  gap: 12px 28px;
+  flex-wrap: wrap;
+  margin-top: 22px;
+}
+
+.secondary-links .deploy-link {
+  margin: 0;
+}
+
 .cta-row {
   display: flex;
   align-items: center;
@@ -871,15 +890,15 @@ h1 {
 }
 
 /*
- * 原型的预留比波浪实际占的高度少：最上层波浪静止时顶在首屏底部往上 clamp(…) 处，
- * 浪尖还要再高出约 5% 屏高，再加上 -40px 的负外边距。没有表单时文案刚好够得着，
- * 加了表单内容高出约 110px，「申请试用」大按钮就被波浪盖住。表单出现时把整段
- * 波浪带都让出来（首屏随之变高，波浪层按首屏底部定位，跟着下移）。
+ * 原型的预留比波浪实际占的高度少：浪尖会再高出约 5% 屏高，加上 -40px 的负外边距。
+ * 没有表单时文案刚好够得着；有表单时首屏多了输入框和一行说明，最下面那行链接会
+ * 被浪尖压住 30–45px（1440×900、1536×864、1366×768 实测）。表单出现时多让出 64px。
  */
 .hero.with-form .wave-spacer {
-  height: calc(clamp(220px, 32vh, 360px) + 5vh + 16px);
+  height: calc(clamp(220px, 32vh, 360px) + 24px);
   margin-top: 0;
 }
+
 
 /* ---------- 产品演示 ---------- */
 

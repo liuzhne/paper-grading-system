@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 无模块与数据流变化：宣传页在有申请表单时不渲染「申请试用」大按钮，`SiteHeader` 新增 `interceptTrial` / `trial` 事件；生产部署只剩 Lightsail（`deploy-vercel-production` 由仓库变量关闭，任务保留以便 S4 回滚）。 |
 | 2026-10-18 | 官网申请落库 | 新增 `api/routes/site` 与 `services/site_leads`、表 `site_leads`（迁移 0039，`pgs_app` 授权与 RLS）；官网入口页由 FastAPI 渲染时下发 `siteLeads` 开关；worker 巡检每天清理一次过期申请；运维页新增「官网申请」卡片。 |
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 无架构变化：`.vercelignore` 末尾重新包含 `public/`，Vercel 部署包与 Lightsail 镜像里的静态产物一致。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | `main.py` 的浏览器页面（`/`、`/about`、三条邮件链接、`/workbench/*`）经 `page_route` 同时登记 GET 与 HEAD，`/api/*` 不变；图标 `favicon.svg` 随 Vite 产物发布在 `/workbench/favicon.svg`，入口页声明。无接口、表结构与迁移变化。 |
