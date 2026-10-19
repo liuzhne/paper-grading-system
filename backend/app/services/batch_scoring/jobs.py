@@ -117,6 +117,30 @@ class IncompleteScoringResultError(ValueError):
         super().__init__(message)
         self.code = code
         self.failure_kind = failure_kind
+        # 失败的这次评分实际花了多少、模型有没有思考、截断了几次（条目 telemetry 用）。
+        self.provider_usage = None
+
+
+THINKING_NOT_DISABLED_CODE = "PROVIDER_THINKING_NOT_DISABLED"
+THINKING_NOT_DISABLED_MESSAGE = (
+    "模型没有按运行设置关闭思考：运行身份记的是「不思考」，应答里却观测到推理 token，"
+    "评分结果不能如实复现，本篇已停止，同一任务里尚未开始的材料也已停止、不再花费。"
+    "请换一个能关闭思考的模型，或把连接的思考设置改为开启并调大输出上限，然后新建评分任务。"
+)
+THINKING_STOPPED_ITEM_MESSAGE = (
+    "同一任务里另一份材料发现模型没有按设置关闭思考，本份尚未开始，已随任务停止，未产生费用。"
+)
+
+
+def _run_provider_usage(run):
+    """一次评分运行的模型用量与行为观测（只有计数）。"""
+
+    return {
+        "prompt_tokens": int(run.prompt_tokens or 0),
+        "completion_tokens": int(run.completion_tokens or 0),
+        "reasoning_tokens": int(getattr(run, "reasoning_tokens", 0) or 0),
+        "truncated_count": int(getattr(run, "truncated_count", 0) or 0),
+    }
 
 
 def default_observation_policy(*, sample_size=1):
@@ -686,8 +710,7 @@ def _telemetry_for_run(session, run, *, latency_ms):
             for task in semantic_tasks
             if not task.decision_reused and task.status != "skipped"
         ),
-        "prompt_tokens": int(run.prompt_tokens or 0),
-        "completion_tokens": int(run.completion_tokens or 0),
+        **_run_provider_usage(run),
         "checker_failures": 0,
         "llm_failures": 0,
         "latency_ms": int(latency_ms),
@@ -727,6 +750,11 @@ def _incomplete_scoring_error(rule_tasks):
         if isinstance(task.provider_error, dict)
     ]
     provider_codes = [code for code in provider_codes if code]
+    if THINKING_NOT_DISABLED_CODE in provider_codes:
+        # 不比多少：身份与行为不一致是根因，其余规则的失败（截断、没发出）都是它的后果。
+        return IncompleteScoringResultError(
+            THINKING_NOT_DISABLED_CODE, THINKING_NOT_DISABLED_MESSAGE, failure_kind="llm"
+        )
     if "TOKEN_BUDGET_UNSATISFIABLE" in provider_codes:
         return IncompleteScoringResultError(
             "TOKEN_BUDGET_UNSATISFIABLE",
@@ -754,7 +782,8 @@ def _incomplete_scoring_error(rule_tasks):
             message = (
                 "模型输出达到输出 token 上限被截断（推理模型的思考过程可能耗尽了额度）；"
                 "请调大该 AI 连接的输出 token 上限（max_output_tokens / max_tokens），"
-                "或关闭思考、降低思考强度后重试。"
+                "或关闭思考、降低思考强度后重试。注意：调大上限会改变判定身份，"
+                "已成功的规则也要重新判定、重新计费。"
             )
         elif code == "PROVIDER_OUTPUT_REFUSED":
             message = (
@@ -831,7 +860,9 @@ def _default_score_item(session, *, paper_id, job_id):
         rule_tasks = session.scalars(
             select(RuleScoringTask).where(RuleScoringTask.scoring_run_id == run.id)
         ).all()
-        raise _incomplete_scoring_error(rule_tasks)
+        error = _incomplete_scoring_error(rule_tasks)
+        error.provider_usage = _run_provider_usage(run)
+        raise error
     latency_ms = max(0, int((monotonic() - started) * 1000))
     return {
         "status": "succeeded",
@@ -1213,7 +1244,10 @@ def _finish_item(session_factory, claimed, *, result=None, error=None):
             item.status = status
             item.error_code = code
             item.error_message = _safe_failure_message(error, code)
-            item.telemetry = _failure_telemetry(failure_kind)
+            item.telemetry = {
+                **_failure_telemetry(failure_kind),
+                **(getattr(error, "provider_usage", None) or {}),
+            }
             history_entry = {
                 "attempt": item.attempt_count,
                 "status": "failed",
@@ -1227,9 +1261,22 @@ def _finish_item(session_factory, claimed, *, result=None, error=None):
         item.attempt_history = history
         error_code = item.error_code
         session.flush()
+        stopped = 0
+        if error_code == THINKING_NOT_DISABLED_CODE:
+            # 先改其余条目、再动任务行：与领取（条目 → 任务）同一加锁顺序。
+            stopped = _stop_pending_items(session, item.job_id, now)
         _shift_counts(session, item.job_id, running=-1, **{status: 1})
+        if stopped:
+            _request_cancel(session, item.job_id, now)
         _finalize_if_settled(session, item.job_id, now)
         session.commit()
+    if stopped:
+        logger.warning(
+            "batch_scoring_job_stopped job_id=%s reason=%s pending_canceled=%d",
+            claimed.parent_id,
+            THINKING_NOT_DISABLED_CODE,
+            stopped,
+        )
     if error is None:
         logger.info(
             "work_item_finished kind=%s item_id=%s status=%s", KIND, claimed.item_id, status
@@ -1239,6 +1286,35 @@ def _finish_item(session_factory, claimed, *, result=None, error=None):
             "work_item_failed kind=%s item_id=%s code=%s", KIND, claimed.item_id, error_code
         )
     return True
+
+
+def _stop_pending_items(session, job_id, now):
+    """模型身份与行为不符：同一任务里还没开始的条目直接取消，返回取消了几条。
+
+    已完成的条目保留，正在评的那几篇各自会撞上同一道守卫。
+    """
+
+    result = session.execute(
+        update(BatchScoringItem)
+        .where(BatchScoringItem.job_id == job_id, BatchScoringItem.status == "pending")
+        .values(
+            status="canceled",
+            finished_at=now,
+            error_code=THINKING_NOT_DISABLED_CODE,
+            error_message=THINKING_STOPPED_ITEM_MESSAGE,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)
+
+
+def _request_cancel(session, job_id, now):
+    job = _lock_job(session, job_id)
+    if job is not None and job.status not in TERMINAL_JOB_STATUSES:
+        job.cancel_requested_at = now
+        job.status = "cancel_requested"
+        session.flush()
+        _recount(session, job_id)
 
 
 def _execute_item(session_factory, claimed, *, score_item=None, **_options):

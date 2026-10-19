@@ -23,6 +23,7 @@ from backend.app.services.llm.thinking_params import effective_thinking_type
 from backend.app.services.llm.thinking_params import thinking_request_fields
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
+from backend.app.services.llm.usage import observed_usage
 
 
 class OpenAICompatibleChatScorer(LLMScorer):
@@ -265,7 +266,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
                 "max_tokens": payload.get("max_tokens"),
             },
             configured_retries=settings.OPENAI_COMPATIBLE_MAX_RETRIES,
-            usage_of=_usage_from_chat,
+            usage_of=_observed_usage_from_chat,
             success_output=lambda data: {"service_tier": data.get("service_tier")},
             attempts_limit=attempts_limit,
             timeout_seconds=timeout_seconds,
@@ -281,6 +282,34 @@ def _usage_from_chat(data):
         "completion_tokens": usage.get("completion_tokens"),
         "total_tokens": usage.get("total_tokens"),
     }
+
+
+def _observed_usage_from_chat(data):
+    """计量用：计费用量之外，再记推理 token 与结束原因（不含任何内容）。
+
+    推理 token 的位置各家不同：OpenAI、DeepSeek、OpenRouter 报在
+    ``usage.completion_tokens_details.reasoning_tokens``；Vertex 不单独报，只能从合计推算；
+    智谱、DeepSeek 还会在 ``message.reasoning_content`` 里给出思考文本。
+    """
+
+    data = data if isinstance(data, dict) else {}
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    details = usage.get("completion_tokens_details")
+    choices = data.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    finish_reason = choice.get("finish_reason")
+    return observed_usage(
+        prompt=usage.get("prompt_tokens"),
+        completion=usage.get("completion_tokens"),
+        total=usage.get("total_tokens"),
+        reported_reasoning=details.get("reasoning_tokens") if isinstance(details, dict) else None,
+        thinking_seen=bool(
+            str(message.get("reasoning_content") or message.get("reasoning") or "").strip()
+        ),
+        finish_reason=finish_reason,
+        truncated=finish_reason == "length",
+    )
 
 
 class ChatJSONOutputError(ProviderJSONOutputError):

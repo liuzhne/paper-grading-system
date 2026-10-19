@@ -43,6 +43,7 @@ from backend.app.services.llm.legacy_prompts import score_schema
 from backend.app.services.llm.legacy_prompts import strip_json_fence
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
+from backend.app.services.llm.usage import observed_usage
 
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -145,6 +146,30 @@ def usage_from_messages(data):
     completion = count("output_tokens")
     total = prompt + completion if prompt is not None and completion is not None else None
     return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+
+
+def observed_usage_from_messages(data):
+    """计量用：计费用量之外，再记有没有思考与结束原因（不含任何内容）。
+
+    Claude 的思考 token 计入 ``output_tokens``，不单独报告；有没有思考看应答里有没有
+    ``thinking`` / ``redacted_thinking`` 块。
+    """
+
+    usage = usage_from_messages(data)
+    data = data if isinstance(data, dict) else {}
+    content = data.get("content") if isinstance(data.get("content"), list) else []
+    stop_reason = data.get("stop_reason")
+    return observed_usage(
+        prompt=usage["prompt_tokens"],
+        completion=usage["completion_tokens"],
+        total=usage["total_tokens"],
+        thinking_seen=any(
+            isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+            for block in content
+        ),
+        finish_reason=stop_reason,
+        truncated=stop_reason == "max_tokens",
+    )
 
 
 def parse_messages_json(data):
@@ -314,7 +339,7 @@ class AnthropicMessagesScorer(LLMScorer):
                 "effort": (payload.get("output_config") or {}).get("effort"),
             },
             configured_retries=settings.ANTHROPIC_MAX_RETRIES,
-            usage_of=usage_from_messages,
+            usage_of=observed_usage_from_messages,
             success_output=lambda data: {"stop_reason": data.get("stop_reason")},
             attempts_limit=attempts_limit,
             timeout_seconds=timeout_seconds,
@@ -448,6 +473,7 @@ __all__ = [
     "MessagesJSONOutputError",
     "STRUCTURED_OUTPUT_MODES",
     "THINKING_TYPES",
+    "observed_usage_from_messages",
     "parse_messages_json",
     "request_controls",
     "resolve_structured_output",

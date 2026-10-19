@@ -527,7 +527,12 @@ def _evidence_for_sections(envelope, markers):
 
 class TechnicalProposalLLMRuntime:
     def __init__(self, scorer):
+        from backend.app.services.llm.usage import ThinkingConsistencyGuard
+
         self.scorer = scorer
+        self.last_call_usage = None
+        # 与论文 Profile 相同：身份声明不思考、模型却在思考时，本篇其余调用不再发出。
+        self.thinking_guard = ThinkingConsistencyGuard()
 
     def score(self, *, envelope):
         from backend.app.services.llm_observability import observation
@@ -558,7 +563,15 @@ class TechnicalProposalLLMRuntime:
     def _score(self, *, envelope, value, rule):
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
-            return explicit(envelope=envelope)
+            from backend.app.services.llm.usage import metered_call
+
+            return metered_call(
+                self.scorer,
+                lambda: explicit(envelope=envelope),
+                guard=self.thinking_guard,
+                thinking=value["runtime_identity"]["provider"]["thinking"],
+                on_usage=lambda delta: setattr(self, "last_call_usage", delta),
+            )
         if getattr(self.scorer, "provider", None) != "mock":
             raise LLMScoringError(
                 "selected provider does not implement PromptEnvelopeV3 Core scoring"

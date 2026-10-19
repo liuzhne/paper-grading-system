@@ -36,6 +36,7 @@ def langfuse_usage(usage):
             "input_tokens": usage.get("prompt_tokens"),
             "output_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
+            "reasoning_tokens": usage.get("reasoning_tokens") or None,
         }.items()
         if value is not None
     }
@@ -124,11 +125,11 @@ def post_with_retry(
                 log_llm_response(provider_label, response, elapsed_ms, attempt, attempts)
                 response.raise_for_status()
                 data = response.json()
+                usage = usage_of(data)
                 log_call_succeeded(
                     provider_label, scorer.model_name, data,
-                    elapsed_ms=elapsed_ms, attempt=attempt,
+                    elapsed_ms=elapsed_ms, attempt=attempt, usage=usage,
                 )
-                usage = usage_of(data)
                 scorer.usage_meter.record_success(usage)
                 generation.update(
                     output={

@@ -619,6 +619,34 @@ curl -s https://grading-sg.duckdns.org/ | grep -o '"siteLeads": true'
 本地试：`SITE_LEADS_ENABLED=true` 起服务，打开 `/`。限流与保留期可用 `SITE_LEADS_PER_IP_HOURLY`
 `SITE_LEADS_PER_IP_DAILY` `SITE_LEADS_DAILY_LIMIT` `SITE_LEADS_RETENTION_DAYS` 调。
 
+**评分输出观测**（2026-10-19，`docs/评分输出预算与截断恢复改造方案.md` P1）：每次模型应答记结束原因与推理
+token，运行身份写着「不思考」而模型在思考时，本篇失败（`PROVIDER_THINKING_NOT_DISABLED`），同一任务里还没开始的
+材料一并取消。没有新开关，上线即生效。
+
+上线顺序：先在 Actions 里跑 `production-migrate.yml`（分支选本次的 PR 分支，
+`expected_head=0040_provider_output_observations`，先 `dry_run` 再正式），再合并。0040 只给 `scoring_runs`
+与 `ai_usage_ledger` 加两列（默认 0），表级授权已覆盖，不需要另外授权。下一次真实评分后核验：
+
+```bash
+ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 1h worker | grep " llm_call " | tail -5'
+```
+
+每行末尾应有 `finish_reason=… prompt_tokens=… completion_tokens=… reasoning_tokens=… reasoning=none|reported|inferred`。
+运维页「平台运行状况 → batch_jobs」与组织视图「模型输出（近 24 小时）」按模型显示思考、截断与停下的份数，只观察，
+不影响「就绪」。回滚：回退代码即可，两列保留；有非零观测时 0040 拒绝降级，不要降级数据库。
+
+- 评分任务显示「已取消」，但没人点过取消；失败的那份写着「模型没有按运行设置关闭思考」，其余写着「已随任务停止，
+  未产生费用」：报错像是有人取消了任务，真正的原因是模型在身份声明「不思考」时仍在思考（2026-10-19 起的守卫，
+  见上一段）。确认：
+
+  ```bash
+  ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h worker | grep -E "batch_scoring_job_stopped| llm_call .*reasoning=(reported|inferred)" | tail -20'
+  ```
+
+  `reasoning=reported` 是厂商报告了推理 token 或返回了思考块；`inferred` 是由「合计 − 输入 − 可见输出」推算的
+  （Vertex 就是这样，连续两次才判定）。处理：换一个能关闭思考的模型（Vertex / Gemini API 上只有 2.5 Flash 系列
+  能关；OpenAI Responses 协议没有思考设置，推理模型只能换掉），或者把连接的思考设置改为开启并调大输出上限，然后
+  **新建**评分任务——改了连接配置，原任务的重试会被 `AI_CONNECTION_CONFIG_CHANGED` 拒绝。
 - CI 的 `docker-compose-smoke` 偶尔在「Verify the workbench ships inside the image」以退出码 23 失败，
   重跑又过了：报错指向 curl（写入失败），真正的原因是脚本里的 `curl … | grep -q`——`pipefail` 下
   grep 一匹配就退出，curl 还在写就收到断开的管道。这一步已改成先 `--output` 存文件再 `grep`；
@@ -1018,6 +1046,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-19 | 评分输出观测与思考一致性守卫（P1） | 新增「评分输出观测」：上线顺序（先迁移 0040 再合并）、日志字段、运维页观测与回滚；新增一条排错（任务显示「已取消」，真实原因是模型没按设置关闭思考）；截断排错改为直接看日志与 `scoring_runs` 两列，不再手算。`public/` 已重建。 |
 | 2026-10-19 | 无效评分项不给改分入口 | 新增一条排错（改分保存没反应，真实原因是该项 AI 评分无效、普通改分被拒）；处理方式为重试失败项。`public/` 已重建。 |
 | 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 新增一条排错（CI 冒烟偶发退出码 23，真实原因是 `curl | grep -q`，已改为先存文件再匹配）。切流量（S3）第一步已完成：`VERCEL_DEPLOY_ENABLED=false`，记下剩余步骤；宣传页动效区分随 Vercel 任务一起停用。首屏改动不涉及运维命令。`public/` 已重建。 |
 | 2026-10-18 | 官网申请落库 | 新增「官网申请」：开关、上线顺序（先迁移 0039 再合并，设变量后重新部署）、核验与关闭；三条排错（页面没表单、子页缺注入标记、提交太频繁）。 |
@@ -1615,7 +1644,7 @@ npm --prefix frontend/workbench run api:generate
     这次的根因是 `PROVIDER_INVALID_REQUEST`：百炼 kimi-k3 拒绝 `top_p=1.0`。修复后，批次页会优先显示根因码。错误码不含厂商原文。2026-10-15 起，请求被拒（400/413/422 这类）的厂商说明会脱敏后附在 `llm_call_failed` 行尾（`provider_message`），先看日志；其他类型的错误仍不记说明，需要时用该连接发一个最小请求复现，只看状态码和错误体，不要写进日志或数据库。
 - **现象**：`RULE_EXECUTION_FAILED (exception_type=ValueError)`，或日志里出现 `did not contain text output`。新版本会显示 `PROVIDER_OUTPUT_TRUNCATED`。
   - 真正原因：推理模型把 `max_output_tokens` 全部用在了推理上。可以关闭思考（Chat 协议，连接选项设 `thinking_type=disabled`），也可以调大 `max_output_tokens` 和 `timeout_seconds`。保留推理时，kimi-k3 单条规则约 30 秒。
-  - **Vertex / Gemini 上，2026-10-16 之前 `thinking_type=disabled` 不生效。** 报错像输出上限太小，真正原因是 Google 的 OpenAI 兼容端点不认 `thinking` 字段，Gemini 2.5 Flash 一直在思考，思考 token 计入输出上限。判断方法：看用量账本 `ai_usage_ledger`，`total_tokens` 明显大于 `prompt_tokens + completion_tokens`，差值就是思考 token（10-16 那份论文：58,330 + 3,304，合计却是 98,552）。2026-10-16 起，Google 主机关闭思考改发 `reasoning_effort: "none"`；只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，只能靠输出上限（默认 2048）兜底，或给连接设更大的 `max_tokens`。调大连接的 `max_tokens` 会挤掉证据预算（输入预算 = `SCORING_CONTEXT_WINDOW_TOKENS` − 输出上限 − 安全余量），而且改了连接配置的旧评分任务会报 `AI_CONNECTION_CONFIG_CHANGED`，要新建任务。
+  - **Vertex / Gemini 上，2026-10-16 之前 `thinking_type=disabled` 不生效。** 报错像输出上限太小，真正原因是 Google 的 OpenAI 兼容端点不认 `thinking` 字段，Gemini 2.5 Flash 一直在思考，思考 token 计入输出上限。判断方法：看用量账本 `ai_usage_ledger`，`total_tokens` 明显大于 `prompt_tokens + completion_tokens`，差值就是思考 token（10-16 那份论文：58,330 + 3,304，合计却是 98,552）。2026-10-19 起不用手算：`llm_call` 日志行带 `finish_reason` 与 `reasoning_tokens`，`scoring_runs` / `ai_usage_ledger` 有 `reasoning_tokens` 与 `truncated_count` 两列，任务页每篇用量后面直接显示「思考 / 截断」；身份声明不思考时，这种情况会报 `PROVIDER_THINKING_NOT_DISABLED` 而不是截断。2026-10-16 起，Google 主机关闭思考改发 `reasoning_effort: "none"`；只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，只能靠输出上限（默认 2048）兜底，或给连接设更大的 `max_tokens`。调大连接的 `max_tokens` 会挤掉证据预算（输入预算 = `SCORING_CONTEXT_WINDOW_TOKENS` − 输出上限 − 安全余量），而且改了连接配置的旧评分任务会报 `AI_CONNECTION_CONFIG_CHANGED`，要新建任务。
 - **现象**：改完连接配置后重试，材料立刻失败。旧版本显示 `scoring_failure (exception_type=ValueError)`，新版本显示 `AI_CONNECTION_CONFIG_CHANGED`。
   - 报错指向：评分执行。
   - 真正原因：批次创建时冻结了连接快照，连接配置变了，评分就拒绝执行；这是有意的保护。正规做法是新建评分任务并重新上传材料。只有确认是同一连接、同一密钥，且变更是有意为之时，才在库里更新该批次的 `ai_connection_snapshot`，并写一条审计。

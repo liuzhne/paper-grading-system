@@ -61,10 +61,30 @@ export function compactTokens(value) {
 
 // 一份材料本次实际付费的用量，以及复用了多少条已有判定。旧任务没有这些字段时返回「—」，
 // 不能显示成 0——0 表示「确实没花」，和「没有记录」不是一回事。
+// 推理 token 与截断次数是模型行为的观测：有才显示，失败的材料同样显示（为什么失败往往就在这里）。
 export function itemUsageText(item) {
   const telemetry = item?.telemetry || {};
   if (telemetry.prompt_tokens == null) return "—";
   const parts = [`输入 ${compactTokens(telemetry.prompt_tokens)} / 输出 ${compactTokens(telemetry.completion_tokens || 0)}`];
+  if (telemetry.reasoning_tokens) parts.push(`思考 ${compactTokens(telemetry.reasoning_tokens)}`);
+  if (telemetry.truncated_count) parts.push(`截断 ${telemetry.truncated_count} 次`);
   if (telemetry.decision_ledger_reused) parts.push(`复用 ${telemetry.decision_ledger_reused} 条`);
+  return parts.join(" · ");
+}
+
+// 运维页：近一段时间各模型的思考与截断（只观察，不计入就绪）。
+export function modelOutputText(signal) {
+  if (!signal || signal.status === "unavailable") return "近 24 小时无评分";
+  const parts = [`评分 ${signal.runs} 次`];
+  const visible = signal.completion_tokens || 0;
+  const reasoning = signal.reasoning_tokens || 0;
+  if (reasoning) {
+    const share = Math.round((reasoning / (reasoning + visible)) * 100);
+    parts.push(`思考 ${compactTokens(reasoning)}（占输出 ${share}%）`);
+  } else {
+    parts.push("无思考");
+  }
+  parts.push(`截断 ${signal.truncated_count || 0} 次`);
+  if (signal.thinking_mismatch_items) parts.push(`思考未关闭停下 ${signal.thinking_mismatch_items} 份`);
   return parts.join(" · ");
 }

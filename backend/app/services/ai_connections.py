@@ -657,6 +657,8 @@ def record_usage_ledger(db: Session, scoring_run, usage=None) -> None:
             prompt_tokens=int(scoring_run.prompt_tokens or 0),
             completion_tokens=int(scoring_run.completion_tokens or 0),
             total_tokens=int(scoring_run.total_tokens or 0),
+            reasoning_tokens=int(getattr(scoring_run, "reasoning_tokens", 0) or 0),
+            truncated_count=int(getattr(scoring_run, "truncated_count", 0) or 0),
             request_count=(
                 1 if usage is None else int(usage.get("request_count") or 0)
             ),

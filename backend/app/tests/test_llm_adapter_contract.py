@@ -164,9 +164,13 @@ def test_complete_json_returns_the_object_and_meters_usage(protocol):
     scorer = recorder.scorer()
 
     assert scorer.complete_json("系统", {"units": []}) == {"items": [1, 2]}
+    # Claude 的夹具带一个思考块：只看得到「思考过」，看不到思考了多少 token。
+    thought = protocol.name == "anthropic_messages"
     assert scorer.usage_meter.snapshot() == {
         "prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
         "request_count": 1, "failure_count": 0,
+        "reasoning_tokens": 0, "reasoning_requests": 1 if thought else 0,
+        "inferred_reasoning_requests": 0, "truncated_count": 0,
     }
 
 

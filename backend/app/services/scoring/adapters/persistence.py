@@ -420,9 +420,11 @@ def _persist_rule_task_checkpoints(
     criterion_id_by_code,
     reused_rule_codes=(),
     group_call_ids=None,
+    provider_attempts=None,
 ):
     if not settings.SCORING_RULE_TASKS_ENABLED:
         return
+    provider_attempts = dict(provider_attempts or {})
     organization_id = run.organization_id
     if not organization_id:
         # Auth-disabled local/test runs predate tenant selection.  Bind new
@@ -494,6 +496,16 @@ def _persist_rule_task_checkpoints(
             ),
             None,
         )
+        decision_reused = (
+            node["rule_code"] in reused_rule_codes and status != "failed_exhausted"
+        )
+        if rule["judge_type"] != "semantic":
+            attempt_count = 1
+        elif node["rule_code"] in provider_attempts:
+            attempt_count = provider_attempts[node["rule_code"]]
+        else:
+            # 没有计量（Mock）时：复用的判定、跳过的规则都没有发请求，其余按发过一次记。
+            attempt_count = 0 if decision_reused or status == "skipped" else 1
         task = RuleScoringTask(
             organization_id=organization_id,
             scoring_run_id=run.id,
@@ -504,12 +516,12 @@ def _persist_rule_task_checkpoints(
             dependency_rule_codes=deepcopy(rule["depends_on_rule_codes"]),
             status=status,
             blocking_final_total=blocking,
-            decision_reused=(
-                node["rule_code"] in reused_rule_codes and status != "failed_exhausted"
-            ),
+            decision_reused=decision_reused,
             group_call_id=(group_call_ids or {}).get(node["rule_code"]),
-            attempt_count=1,
-            max_attempts=3 if rule["judge_type"] == "semantic" else 1,
+            # 规则级的真实尝试：0 = 复用或请求没发出，1 = 发出过一次。规则级还没有
+            # 自动重试（截断恢复属于方案 P2），上限如实记 1；HTTP 层的重试另见调用日志。
+            attempt_count=attempt_count,
+            max_attempts=1,
             provider_error=(
                 None
                 if provider_issue is None
@@ -571,6 +583,7 @@ class CoreRunPersistence:
         usage=None,
         reused_rule_codes=(),
         group_call_ids=None,
+        provider_attempts=None,
     ) -> ScoringRun:
         request_mapping = _request_mapping(request)
         outcome_mapping = _outcome_mapping(outcome)
@@ -742,6 +755,8 @@ class CoreRunPersistence:
             prompt_tokens=int((usage or {}).get("prompt_tokens") or 0),
             completion_tokens=int((usage or {}).get("completion_tokens") or 0),
             total_tokens=int((usage or {}).get("total_tokens") or 0),
+            reasoning_tokens=int((usage or {}).get("reasoning_tokens") or 0),
+            truncated_count=int((usage or {}).get("truncated_count") or 0),
             coherence_findings=stored_coherence_findings,
             format_findings=stored_format_findings,
             ai_total_score=(
@@ -802,6 +817,7 @@ class CoreRunPersistence:
             criterion_id_by_code=criterion_id_by_code,
             reused_rule_codes=frozenset(reused_rule_codes or ()),
             group_call_ids=dict(group_call_ids or {}),
+            provider_attempts=provider_attempts,
         )
         record_usage_ledger(self.db, run, usage=usage)
         target = paper if paper is not None else stored_submission
