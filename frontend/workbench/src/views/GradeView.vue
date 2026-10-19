@@ -103,27 +103,70 @@ const draftScore = ref(null);
 const draftReason = ref("");
 const writeBusy = ref(false);
 const writeError = ref(null);
+// 改分的失败提示放在「保存」旁边：放在评分表底部时，用户在按钮附近看不到任何
+// 反应，以为点了没用（2026-10-19 生产反馈）。
+const editError = ref(null);
 const runNote = ref("");
+
+/**
+ * AI 没有评出有效结果的项（`invalid` / `blocked`）：普通改分会被后端拒绝
+ * （thesis_artifacts.assert_ordinary_item_override_allowed），这份评分也确认不了
+ * （总分为空）。不摆「改分」「确认」这种必然失败的入口，当场说明并指向「重试失败项」。
+ */
+const UNRESOLVED_AUTO_STATUSES = new Set(["invalid", "blocked"]);
+function unresolved(item) {
+  return UNRESOLVED_AUTO_STATUSES.has(item.auto_score_status);
+}
+const unresolvedCount = computed(() => store.items.filter(unresolved).length);
+
+/**
+ * 后端的拒绝原因是给开发看的英文；这里译成老师能照着做的中文。
+ * 没对上的按 HTTP 状态给一句通用说明，不把英文原文直接摆给用户。
+ */
+const WRITE_ERRORS = [
+  [/invalid or blocked auto score/i, () => "AI 没有评出这一项的有效结果，不能直接改分；请到评分进度页「重试失败项」重新评分。"],
+  [/invalid or blocked score items remain/i, () => "还有 AI 没评出有效结果的项，暂时不能确认这份评分；请先到评分进度页「重试失败项」。"],
+  [/final_score out of range/i, (item) => `分数要在 0 到 ${item?.max_score ?? "满分"} 之间。`],
+  [/no frozen policy snapshot/i, () => "这份评分来自旧版本，不能重算；请重新评分后再改。"],
+  [/score item not found|scoring run not found/i, () => "这一项已不存在，可能材料被重新评分了；请刷新页面。"],
+];
+
+function describeWriteError(err, fallback, item = null) {
+  const message = err instanceof Error ? err.message : "";
+  for (const [pattern, text] of WRITE_ERRORS) {
+    if (pattern.test(message)) return text(item);
+  }
+  // 已经是中文的（归档批次、理由必填、权限）原样给出。
+  if (/[\u4e00-\u9fff]/.test(message)) return message;
+  // 并发冲突：别人刚改过。不能叫用户「稍后重试」——重试会覆盖别人的改动，
+  // 要先刷新看清当前分数再决定。
+  if (err?.status === 409) return "这份评分刚被别人改过，请刷新页面、看清当前分数后再操作。";
+  const status = err?.status ? `（HTTP ${err.status}）` : "";
+  return `${fallback}${status}，请稍后重试；问题持续请联系管理员。`;
+}
 
 function startEdit(item) {
   editing.value = item.id;
   draftScore.value = item.final_score ?? item.ai_score ?? 0;
   draftReason.value = "";
-  writeError.value = null;
+  editError.value = null;
 }
 
 async function saveEdit(item) {
+  const raw = draftScore.value;
+  const score = Number(raw);
+  if (raw == null || raw === "" || !Number.isFinite(score) || score < 0 || score > Number(item.max_score)) {
+    editError.value = `分数要在 0 到 ${item.max_score} 之间。`;
+    return;
+  }
   writeBusy.value = true;
-  writeError.value = null;
+  editError.value = null;
   try {
-    await store.overrideScore(item.id, {
-      score: Number(draftScore.value),
-      reason: draftReason.value,
-    });
+    await store.overrideScore(item.id, { score, reason: draftReason.value });
     editing.value = null;
   } catch (err) {
     // 并发冲突要让用户看到并重新决定，不静默覆盖别人的改动。
-    writeError.value = err instanceof Error ? err.message : "改分失败";
+    editError.value = describeWriteError(err, "改分没有保存", item);
   } finally {
     writeBusy.value = false;
   }
@@ -137,7 +180,7 @@ async function confirmRun({ advance }) {
     runNote.value = "";
     if (advance) await goNeighbour("next");
   } catch (err) {
-    writeError.value = err instanceof Error ? err.message : "提交复核失败";
+    writeError.value = describeWriteError(err, "提交复核失败");
   } finally {
     writeBusy.value = false;
   }
@@ -340,7 +383,11 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
           <p v-if="item.review_reason" class="faint item-reason">{{ item.review_reason }}</p>
 
-          <div v-if="editing === item.id" class="edit-box">
+          <p v-if="unresolved(item)" class="notice notice-warn item-unresolved" data-test="item-unresolved">
+            AI 没有评出这一项的有效结果，不能直接改分。
+            <RouterLink :to="{ name: 'task-run', params: { batchId: route.params.batchId } }">到评分进度页「重试失败项」</RouterLink>
+          </p>
+          <div v-else-if="editing === item.id" class="edit-box">
             <label class="field">
               <span class="field-label">改为</span>
               <input
@@ -367,6 +414,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               </button>
               <button class="btn btn-sm" type="button" @click="editing = null">取消</button>
             </div>
+            <p v-if="editError" class="notice notice-danger edit-error" role="alert" data-test="edit-error">{{ editError }}</p>
           </div>
           <button v-else class="btn btn-sm edit-trigger" type="button" @click="startEdit(item)">
             改分
@@ -397,11 +445,15 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <textarea v-model="runNote" class="input" rows="2"></textarea>
           </label>
 
+          <p v-if="unresolvedCount" class="notice notice-warn" data-test="run-unresolved">
+            有 {{ unresolvedCount }} 项 AI 没评出有效结果，这份评分暂时不能确认。
+            <RouterLink :to="{ name: 'task-run', params: { batchId: route.params.batchId } }">到评分进度页「重试失败项」</RouterLink>
+          </p>
           <div class="form-actions">
             <button
               class="btn btn-primary"
               type="button"
-              :disabled="writeBusy || !store.currentRunId"
+              :disabled="writeBusy || !store.currentRunId || unresolvedCount > 0"
               @click="confirmRun({ advance: true })"
             >
               确认并进入下一份
@@ -409,7 +461,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <button
               class="btn"
               type="button"
-              :disabled="writeBusy || !store.currentRunId"
+              :disabled="writeBusy || !store.currentRunId || unresolvedCount > 0"
               @click="confirmRun({ advance: false })"
             >
               确认此份评分
@@ -691,6 +743,13 @@ mark {
   justify-content: space-between;
   font-size: 11.5px;
   margin-bottom: 8px;
+}
+
+.item-unresolved,
+.edit-error {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .item-reason {

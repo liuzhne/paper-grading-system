@@ -623,6 +623,30 @@ curl -s https://grading-sg.duckdns.org/ | grep -o '"siteLeads": true'
   重跑又过了：报错指向 curl（写入失败），真正的原因是脚本里的 `curl … | grep -q`——`pipefail` 下
   grep 一匹配就退出，curl 还在写就收到断开的管道。这一步已改成先 `--output` 存文件再 `grep`；
   以后在 CI 脚本里匹配命令输出，别把 `grep -q` 接在管道末尾（2026-10-18，PR #40）。
+- 评分工作区里改分点「保存」没反应（2026-10-19 之前的版本）：报错像是按钮坏了，真正的原因是这一项
+  `auto_score_status` 为 `invalid` / `blocked`（AI 没评出有效结果，例如模型输出被截断），普通改分按规则
+  被拒，提示却显示在评分表最底部。现在这种项不再显示「改分」，直接提示去评分进度页「重试失败项」。
+
+  复现 / 症状：app 日志里有 `PATCH /api/score-items/<评分项 ID> … 400`：
+
+  ```bash
+  ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h app | grep "PATCH /api/score-items"'
+  ```
+
+  诊断（只读，查完回滚，不打印学生信息；ID 取自上面那行或浏览器开发者工具）：
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_score_item <评分项 ID>'
+  ```
+
+  输出里 `checks` 说明改分会被哪道检查拒绝（`ordinary_override` 是 AI 结果无效、`batch_writable` 是批次
+  已归档、`frozen_policy` 是旧版本评分），`batch_jobs` 给出这份材料的评分任务与失败码，`next_step` 是
+  该怎么做。AI 结果无效时到评分进度页「重试失败项」（会真实调用模型）；连接配置改过、重试被拒时为这份
+  材料新建评分任务。
+
+  修复后的核验：打开这份材料的评分工作区，无效项显示「AI 没有评出这一项的有效结果，不能直接改分」与
+  「重试失败项」链接、没有「改分」按钮，两个确认按钮禁用；正常项改分时故意填超出满分的分数，「保存」
+  旁边出现中文提示。发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`，无迁移。
 - 宣传页上没有申请表单，接口却能提交成功：报错像是前端没部署新版本，真正的原因是开关只在 FastAPI
   渲染入口页时下发。依次查：页面源码里有没有 `"siteLeads": true`；实例 `.env` 里有没有
   `SITE_LEADS_ENABLED='true'`（设完变量是否重新部署过）；访问的是不是 Vercel 地址（那里永远没有）。
@@ -994,6 +1018,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-19 | 无效评分项不给改分入口 | 新增一条排错（改分保存没反应，真实原因是该项 AI 评分无效、普通改分被拒）；处理方式为重试失败项。`public/` 已重建。 |
 | 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 新增一条排错（CI 冒烟偶发退出码 23，真实原因是 `curl | grep -q`，已改为先存文件再匹配）。切流量（S3）第一步已完成：`VERCEL_DEPLOY_ENABLED=false`，记下剩余步骤；宣传页动效区分随 Vercel 任务一起停用。首屏改动不涉及运维命令。`public/` 已重建。 |
 | 2026-10-18 | 官网申请落库 | 新增「官网申请」：开关、上线顺序（先迁移 0039 再合并，设变量后重新部署）、核验与关闭；三条排错（页面没表单、子页缺注入标记、提交太频繁）。 |
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增一条排错（静态文件返回工作台 HTML，真实原因是 `.vercelignore` 按扩展名排除了 `*.svg`）；`.vercelignore` 末尾 `!/public/**` 重新包含静态产物。 |
