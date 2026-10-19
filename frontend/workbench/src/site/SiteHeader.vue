@@ -15,7 +15,23 @@ const props = defineProps({
   solid: { type: Boolean, default: false },
   /** 页头「申请试用」的去处：宣传页去院系部署，子页直接到预约表单区。 */
   trialHref: { type: String, default: () => aboutUrl("deploy") },
+  /**
+   * 页面自己接管「申请试用」：宣传页首屏有申请表单时，点了把光标送到邮箱框，
+   * 不跳走（触发 `trial` 事件）。没有表单时照常跳转。
+   */
+  interceptTrial: { type: Boolean, default: false },
 });
+
+const emit = defineEmits(["trial"]);
+
+function onTrialClick(/** @type {MouseEvent} */ event) {
+  if (!props.interceptTrial) return;
+  // 只接管不带修饰键的左键点击：⌘ / Ctrl / Shift / Alt 点击与中键要保留浏览器本来的
+  // 行为（新标签页、新窗口、下载），否则用户没法把子页另开。
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  emit("trial");
+}
 
 const nav = [
   { key: "product", label: "产品", href: "/" },
@@ -43,7 +59,7 @@ const nav = [
     </nav>
     <div class="actions">
       <a class="btn-login" :href="APP_URL">登录</a>
-      <a class="btn-trial" :href="props.trialHref">申请试用</a>
+      <a class="btn-trial" :href="props.trialHref" data-test="header-trial" @click="onTrialClick">申请试用</a>
     </div>
     <div class="ribbon" aria-hidden="true">
       <span class="ribbon-tag">PUBLIC BETA</span>

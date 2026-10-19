@@ -31,6 +31,16 @@ describe("宣传页", () => {
     expect(wrapper.get('[data-test="enter-app"]').attributes("href")).toBe("/workbench/");
   });
 
+  it("没开申请开关时（Vercel）保留大按钮，页头「申请试用」照常跳转", () => {
+    const wrapper = mount(LandingPage);
+
+    expect(wrapper.get('[data-test="hero-trial"]').attributes("href")).toBe("/about#contact");
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    wrapper.get('[data-test="header-trial"]').element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(wrapper.find('[data-test="hero-links"]').exists()).toBe(false);
+  });
+
   it("部署没开申请开关时（Vercel）不出现试用表单", () => {
     const wrapper = mount(LandingPage);
 
@@ -145,13 +155,42 @@ describe("官网申请表单（docs/官网申请落库改造方案.md）", () =>
     wrapper.unmount();
   });
 
-  it("首屏：「申请试用」大按钮把焦点送到邮箱框", async () => {
+  it("首屏只有一个主操作：没有「申请试用」大按钮，两条次要链接并成一行", () => {
+    respond(202);
+    const wrapper = mount(LandingPage);
+
+    // 同一屏不能再有第三个「申请试用」（2026-10-18）。
+    expect(wrapper.find('[data-test="hero-trial"]').exists()).toBe(false);
+    const links = wrapper.get('[data-test="hero-links"]');
+    expect(links.text()).toContain("院系批量部署？联系我们");
+    expect(links.text()).toContain("直接进入工作台");
+    expect(links.get('[data-test="enter-app"]').attributes("href")).toBe("/workbench/");
+  });
+
+  it("页头「申请试用」把光标送到邮箱框，不跳去子页", async () => {
     respond(202);
     const wrapper = mount(LandingPage, { attachTo: document.body });
 
-    await wrapper.get('[data-test="hero-trial"]').trigger("click");
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    wrapper.get('[data-test="header-trial"]').element.dispatchEvent(event);
+    await flushPromises();
 
+    expect(event.defaultPrevented).toBe(true);
     expect(document.activeElement?.id).toBe("trial-email");
+    wrapper.unmount();
+  });
+
+  it("页头「申请试用」带修饰键点击时保留浏览器行为（新标签页打开子页）", () => {
+    respond(202);
+    const wrapper = mount(LandingPage, { attachTo: document.body });
+    const link = wrapper.get('[data-test="header-trial"]').element;
+
+    for (const init of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true, ...init });
+      link.dispatchEvent(event);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(false);
+    }
+    expect(document.activeElement?.id).not.toBe("trial-email");
     wrapper.unmount();
   });
 

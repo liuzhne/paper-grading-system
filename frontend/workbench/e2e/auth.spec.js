@@ -194,6 +194,16 @@ test.describe("官网申请（docs/官网申请落库改造方案.md）", () => 
     await expect(card.locator("tbody tr", { hasText: "e2e-dean@example.edu.cn" })).toHaveCount(0);
   });
 
+  test("有表单时首屏只有一个主操作，页头「申请试用」聚焦邮箱框", async ({ page }) => {
+    await page.goto("/");
+
+    await expect(page.locator('[data-test="hero-trial"]')).toHaveCount(0);
+    await expect(page.locator('[data-test="hero-links"]')).toContainText("院系批量部署？联系我们");
+    await page.locator('[data-test="header-trial"]').click();
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByLabel("院系邮箱")).toBeFocused();
+  });
+
   test("教师看不到申请", async ({ page }) => {
     await login(page, "teacher");
 
