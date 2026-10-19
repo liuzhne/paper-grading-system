@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-19 | 评分输出观测与思考一致性守卫（输出预算方案 P1） | 新增迁移 0040（`scoring_runs`、`ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`）；三个适配器的计量回调多记推理 token 与结束原因，`llm/usage` 新增 `ThinkingConsistencyGuard` 与 `metered_call`，论文与技术方案的 LLM 运行时经它发出每次 Core 调用；规则任务的尝试次数改由执行日志如实记录；批量任务遇到 `PROVIDER_THINKING_NOT_DISABLED` 取消同任务未开始的条目；运维就绪的 `batch_jobs` 下新增只观察的 `model_output`。 |
 | 2026-10-19 | 无效评分项不给改分入口 | 无架构变化：GradeView 按 `ScoreItemRead.auto_score_status` 隐藏 `invalid` / `blocked` 项的改分入口并禁用确认，改分错误就近显示；后端接口与规则不变。新增只读运维脚本 `scripts/inspect_score_item`（复用改分接口的三道检查）。 |
 | 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 无模块与数据流变化：宣传页在有申请表单时不渲染「申请试用」大按钮，`SiteHeader` 新增 `interceptTrial` / `trial` 事件；生产部署只剩 Lightsail（`deploy-vercel-production` 由仓库变量关闭，任务保留以便 S4 回滚）。 |
 | 2026-10-18 | 官网申请落库 | 新增 `api/routes/site` 与 `services/site_leads`、表 `site_leads`（迁移 0039，`pgs_app` 授权与 RLS）；官网入口页由 FastAPI 渲染时下发 `siteLeads` 开关；worker 巡检每天清理一次过期申请；运维页新增「官网申请」卡片。 |
@@ -1381,3 +1382,41 @@ worker run_global_sweep ──▶ site_leads.purge_expired_if_due（work_runtime
 
 维护记录：2026-10-18 · 官网申请落库：新增模块、表与调用链；head 升为 `0039_site_leads`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
 
+### 2026-10-19 评分输出观测与思考一致性守卫（输出预算方案 P1）
+
+方案：`docs/评分输出预算与截断恢复改造方案.md`（Q1–Q8 已确认，本节是 P1）。运行身份里的 `thinking.enabled=false` 是声明；这里补上观测，并在两者不一致时停下。
+
+观测（每次应答，只有计数与结束原因）：
+
+```
+适配器 _post_with_retry ──usage_of=_observed_usage_from_chat / _observed_usage_from_responses / observed_usage_from_messages──▶
+  llm/usage.observed_usage：输入、可见输出、合计、推理 token（厂商报告优先，否则 合计 − 输入 − 可见输出 并标 inferred）、
+                           有无思考块 / reasoning_content、finish_reason、是否截断
+transport.post_with_retry ──▶ call_log「llm_call … finish_reason= prompt_tokens= completion_tokens= reasoning_tokens= reasoning=」
+                          ──▶ UsageMeter：reasoning_tokens、reasoning_requests、inferred_reasoning_requests、truncated_count
+```
+
+适配器写进评分输出的 `output["usage"]` 不变（旧路径的缓存与原始输出不受影响），只有计量回调多带这些字段。
+
+守卫与停止（Core 规则评分）：
+
+```
+ThesisLLMRuntime._metered / TechnicalProposalLLMRuntime._score ──▶ llm/usage.metered_call(scorer, call, guard, thinking=信封 runtime_identity.provider.thinking)
+  ├─ 发送前：单篇输入上限（论文）→ ThinkingConsistencyGuard.before_call：已判定不一致则 ThinkingNotDisabledError(sent=False)，请求不发
+  ├─ 调用（成功或抛错都算用量差）→ on_usage(delta) → runtime.last_call_usage
+  └─ after_call：身份 enabled=false 且（厂商报告推理 / 有思考块，或连续两次推算出推理）→ ThinkingNotDisabledError(sent=True)，判定不采用
+rule_executor：_record_attempt → RuleCallJournal.provider_attempts（0 = 复用或没发出，1 = 发出）
+failures.project_rule_execution_failure → PROVIDER_THINKING_NOT_DISABLED（区分 decision discarded / request not sent）
+persistence：ScoringRun.reasoning_tokens / truncated_count ← 本篇用量差；RuleScoringTask.attempt_count ← 执行日志，max_attempts=1
+record_usage_ledger：BYOK 行同样写两列（平台模型的用量仍只在 scoring_runs）
+batch_scoring.jobs：_incomplete_scoring_error 遇到该码直接以它为根因；_finish_item 失败时
+  条目 telemetry 带本篇用量（prompt / completion / reasoning / truncated）；
+  码为 PROVIDER_THINKING_NOT_DISABLED → _stop_pending_items（同任务 pending → canceled，带同一错误码）→ _request_cancel → 任务收尾为 canceled
+```
+
+- 守卫一篇论文一个实例，跟着 LLM 运行时走；同一任务里正在评的其它几篇各自撞上自己的守卫。
+- 旧的未版本化兼容路径（`score_criterion`，`SCORING_ENGINE_MODE=legacy` 下未发布版本的评分标准）不经 `metered_call`，不受守卫约束，`scoring_runs` 的两列为 0；语义一致性检查（`analyze_semantic_coherence`）也直接调 scorer，不经守卫。
+- 运维就绪：`deployment/readiness._model_output_signal` 按 `scoring_runs` 近 24 小时按模型汇总推理与截断，并数 `PROVIDER_THINKING_NOT_DISABLED` 失败的条目；挂在 `signals.batch_jobs.model_output`，平台视图与组织视图（按组织过滤后再汇总）都有，**不参与** `batch_jobs.status` 与 `ready_for_production`。
+- 前端：`lib/score-jobs.itemUsageText` 在任务页每篇用量后加「思考 / 截断」；`modelOutputText` 供运维页两处显示。
+
+维护记录：2026-10-19 · 评分输出观测与思考一致性守卫：head 升为 `0040_provider_output_observations`；接口形状不变（就绪接口返回的是字典，OpenAPI 不变），`public/` 已重新组装。

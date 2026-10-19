@@ -10,6 +10,7 @@ import {
   withClaudeOptions,
 } from "@/lib/claude-options.js";
 import SiteLeadsCard from "@/components/SiteLeadsCard.vue";
+import { compactTokens, modelOutputText } from "@/lib/score-jobs.js";
 import { useSessionStore } from "@/stores/session.js";
 
 /**
@@ -197,7 +198,21 @@ onMounted(async () => {
               </span>
             </dd>
           </div>
+          <div data-test="org-model-output">
+            <dt>模型输出（近 24 小时）</dt>
+            <dd>
+              <span class="chip" :class="signalTone(orgReadiness.signals.batch_jobs.model_output?.status)">
+                {{ modelOutputText(orgReadiness.signals.batch_jobs.model_output) }}
+              </span>
+            </dd>
+          </div>
         </dl>
+        <ul v-if="orgReadiness.signals.batch_jobs.model_output?.models?.length" class="model-list muted">
+          <li v-for="model in orgReadiness.signals.batch_jobs.model_output.models" :key="model.provider + model.model">
+            <span class="mono">{{ model.model }}</span>：评分 {{ model.runs }} 次 · 思考
+            {{ compactTokens(model.reasoning_tokens) }} · 截断 {{ model.truncated_count }} 次
+          </li>
+        </ul>
         <p class="faint field-hint">
           阈值由部署责任人批准并写入配置；本页只展示，不提供修改入口。
         </p>
@@ -356,6 +371,10 @@ onMounted(async () => {
                 <template v-else-if="name === 'batch_jobs'">
                   活动 {{ signal.active_count }} · 超时 {{ signal.stale_count }} ·
                   <span :class="{ danger: signal.sweep?.status === 'fail' }">最近巡检 {{ formatSweep(signal.sweep) }}</span>
+                  <br />
+                  <span data-test="platform-model-output" :class="{ danger: signal.model_output?.status === 'fail' }">
+                    模型输出（近 24 小时，只观察）：{{ modelOutputText(signal.model_output) }}
+                  </span>
                 </template>
                 <template v-else-if="name === 'security'">
                   {{ signal.issue_codes.length ? signal.issue_codes.join("、") : "无问题" }}
@@ -456,5 +475,12 @@ onMounted(async () => {
 
 .detail {
   font-size: 12.5px;
+}
+
+.model-list {
+  margin: 0 0 14px;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.7;
 }
 </style>

@@ -418,6 +418,18 @@ def _record(execution_journal, **values):
         execution_journal.record_semantic_decision(**values)
 
 
+def _record_attempt(execution_journal, rule_codes, llm_runtime):
+    """记下这次调用有没有真的发出请求；运行时没有计量（Mock）时不记。"""
+
+    record = getattr(execution_journal, "record_provider_attempt", None)
+    usage = getattr(llm_runtime, "last_call_usage", None)
+    if not callable(record) or not isinstance(usage, Mapping):
+        return
+    sent = int(usage.get("request_count") or 0) > 0
+    for rule_code in rule_codes:
+        record(rule_code=rule_code, sent=sent)
+
+
 def _semantic_decision(
     *,
     request,
@@ -455,7 +467,10 @@ def _semantic_decision(
             rule["rule_code"],
             error,
         )
-    response = llm_runtime.score(envelope=envelope)
+    try:
+        response = llm_runtime.score(envelope=envelope)
+    finally:
+        _record_attempt(execution_journal, [rule["rule_code"]], llm_runtime)
     decision, error, message = _validated_decision(
         request=request,
         rule=rule,
@@ -601,6 +616,7 @@ def _semantic_group_decisions(
     try:
         responses = llm_runtime.score_group(envelopes=envelopes, group_code=group_code)
     except Exception as exc:  # noqa: BLE001 - projected to a stable rule issue
+        _record_attempt(execution_journal, [rule["rule_code"] for rule in rules], llm_runtime)
         error, message = project_rule_execution_failure(exc)
         logger.warning(
             "rule_group_execution_failed group_code=%s error_code=%s exception_type=%s",
@@ -614,6 +630,7 @@ def _semantic_group_decisions(
         }
     if responses is None:
         return None
+    _record_attempt(execution_journal, [rule["rule_code"] for rule in rules], llm_runtime)
     results = validate(responses)
     if results is None:
         return {

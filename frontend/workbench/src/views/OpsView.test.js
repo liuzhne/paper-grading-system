@@ -40,3 +40,29 @@ it("平台模型可选 Claude，思考强度与结构化输出进 provider_optio
   expect(body).not.toHaveProperty("effort");
   expect(body).not.toHaveProperty("structured_output");
 });
+
+it("组织视图显示近 24 小时的模型输出观测与各模型明细", async () => {
+  const batchJobs = {
+    active_count: 0, stale_count: 0, sweep: null,
+    llm_failure_rate: { status: "unavailable", maximum_observed: null, maximum_allowed: "0.05" },
+    model_output: {
+      status: "fail", runs: 1, completion_tokens: 3304, reasoning_tokens: 36918,
+      truncated_count: 13, thinking_mismatch_items: 0,
+      models: [{ provider: "openai_compatible", model: "google/gemini-2.5-flash", runs: 1, reasoning_tokens: 36918, truncated_count: 13 }],
+    },
+  };
+  api.get.mockImplementation(async (path) => (
+    path === "/system/organization-readiness" ? { signals: { batch_jobs: batchJobs } } : null
+  ));
+  const session = useSessionStore();
+  vi.spyOn(session, "loadCapabilities").mockResolvedValue();
+  vi.spyOn(session, "can").mockImplementation((ability) => ability === "view_organization_ops");
+  const wrapper = mount(OpsView);
+  await flushPromises();
+
+  const cell = wrapper.get('[data-test="org-model-output"]');
+  expect(cell.text()).toContain("思考 3.7 万（占输出 92%）");
+  expect(cell.text()).toContain("截断 13 次");
+  expect(cell.find(".chip-danger").exists()).toBe(true);
+  expect(wrapper.get(".model-list").text()).toContain("google/gemini-2.5-flash");
+});

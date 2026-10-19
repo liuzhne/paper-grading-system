@@ -42,6 +42,7 @@ MIGRATION_SEQUENCE = (
     "0037_ai_task_upload_scope",
     "0038_assistant_conversations",
     "0039_site_leads",
+    "0040_provider_output_observations",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"

@@ -186,6 +186,8 @@ class RuleCallJournal:
     def __init__(self):
         self.reused_rule_codes = set()
         self.group_call_ids = {}
+        # rule_code -> 本次评分为这条规则实际发出的请求次数（规则级：0 或 1）。
+        self.provider_attempts = {}
 
     def record_semantic_decision(self, *, rule_code, reused, group_call_id=None):
         if reused:
@@ -194,6 +196,9 @@ class RuleCallJournal:
             self.reused_rule_codes.discard(rule_code)
         if group_call_id:
             self.group_call_ids[rule_code] = group_call_id
+
+    def record_provider_attempt(self, *, rule_code, sent):
+        self.provider_attempts[rule_code] = 1 if sent else 0
 
 
 def build_decision_ledger(db, *, organization_id, scorer):

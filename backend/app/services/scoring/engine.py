@@ -642,6 +642,7 @@ def _score_paper_core(
         usage=usage,
         reused_rule_codes=execution_journal.reused_rule_codes,
         group_call_ids=execution_journal.group_call_ids,
+        provider_attempts=execution_journal.provider_attempts,
     )
 
 

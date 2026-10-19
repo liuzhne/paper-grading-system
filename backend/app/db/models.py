@@ -279,6 +279,13 @@ class AIUsageLedger(Base):
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 0040：模型实际的思考与截断（观测，不是身份声明）。
+    reasoning_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    truncated_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     estimated_cost: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
@@ -2553,6 +2560,14 @@ class ScoringRun(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    # 0040：推理 token（厂商报告或由合计推算）与因输出上限被截断的应答数。运行身份里
+    # 「思考关闭」只是声明，这两列是观测（docs/评分输出预算与截断恢复改造方案.md P1）。
+    reasoning_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    truncated_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     # 篇章一致性发现（设计§8）：确定性（图表/引文）+ 语义（研究问题↔结论）合并，进报告、供人工复核。
     coherence_findings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     # 格式问题清单（设计§9）：被评论文有效格式 vs 模板 FormatSpec 的比对发现。

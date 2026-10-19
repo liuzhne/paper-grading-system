@@ -189,7 +189,8 @@ jobs:
             0036_ai_tasks \
             0037_ai_task_upload_scope \
             0038_assistant_conversations \
-            0039_site_leads
+            0039_site_leads \
+            0040_provider_output_observations
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
