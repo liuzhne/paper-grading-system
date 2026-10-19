@@ -138,6 +138,9 @@ function describeWriteError(err, fallback, item = null) {
   }
   // 已经是中文的（归档批次、理由必填、权限）原样给出。
   if (/[\u4e00-\u9fff]/.test(message)) return message;
+  // 并发冲突：别人刚改过。不能叫用户「稍后重试」——重试会覆盖别人的改动，
+  // 要先刷新看清当前分数再决定。
+  if (err?.status === 409) return "这份评分刚被别人改过，请刷新页面、看清当前分数后再操作。";
   const status = err?.status ? `（HTTP ${err.status}）` : "";
   return `${fallback}${status}，请稍后重试；问题持续请联系管理员。`;
 }

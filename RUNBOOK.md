@@ -625,10 +625,28 @@ curl -s https://grading-sg.duckdns.org/ | grep -o '"siteLeads": true'
   以后在 CI 脚本里匹配命令输出，别把 `grep -q` 接在管道末尾（2026-10-18，PR #40）。
 - 评分工作区里改分点「保存」没反应（2026-10-19 之前的版本）：报错像是按钮坏了，真正的原因是这一项
   `auto_score_status` 为 `invalid` / `blocked`（AI 没评出有效结果，例如模型输出被截断），普通改分按规则
-  被拒（`PATCH /api/score-items/… 400`，日志里能看到），提示却显示在评分表最底部。现在这种项不再显示
-  「改分」，直接提示去评分进度页「重试失败项」。查某一项状态：在 app 容器里用 ORM 读
-  `ScoreItem.auto_score_status`（只读，不要 SET）。重试会真实调用模型；连接配置改过时重试会被拒，
-  需要为该材料新建评分任务。
+  被拒，提示却显示在评分表最底部。现在这种项不再显示「改分」，直接提示去评分进度页「重试失败项」。
+
+  复现 / 症状：app 日志里有 `PATCH /api/score-items/<评分项 ID> … 400`：
+
+  ```bash
+  ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h app | grep "PATCH /api/score-items"'
+  ```
+
+  诊断（只读，查完回滚，不打印学生信息；ID 取自上面那行或浏览器开发者工具）：
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_score_item <评分项 ID>'
+  ```
+
+  输出里 `checks` 说明改分会被哪道检查拒绝（`ordinary_override` 是 AI 结果无效、`batch_writable` 是批次
+  已归档、`frozen_policy` 是旧版本评分），`batch_jobs` 给出这份材料的评分任务与失败码，`next_step` 是
+  该怎么做。AI 结果无效时到评分进度页「重试失败项」（会真实调用模型）；连接配置改过、重试被拒时为这份
+  材料新建评分任务。
+
+  修复后的核验：打开这份材料的评分工作区，无效项显示「AI 没有评出这一项的有效结果，不能直接改分」与
+  「重试失败项」链接、没有「改分」按钮，两个确认按钮禁用；正常项改分时故意填超出满分的分数，「保存」
+  旁边出现中文提示。发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`，无迁移。
 - 宣传页上没有申请表单，接口却能提交成功：报错像是前端没部署新版本，真正的原因是开关只在 FastAPI
   渲染入口页时下发。依次查：页面源码里有没有 `"siteLeads": true`；实例 `.env` 里有没有
   `SITE_LEADS_ENABLED='true'`（设完变量是否重新部署过）；访问的是不是 Vercel 地址（那里永远没有）。

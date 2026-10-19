@@ -172,3 +172,19 @@ it("没对上的英文报错不原样给用户，给中文说明和状态码", a
   expect(text).not.toContain("unexpected");
   wrapper.unmount();
 });
+
+it("并发冲突（409）提示先刷新看清当前分数，不叫用户「稍后重试」", async () => {
+  withRun([ITEMS[1]], { status: 409, body: { detail: "review revision conflict" } });
+  const wrapper = await mountGrade();
+  await flushPromises();
+
+  await wrapper.get(".edit-trigger").trigger("click");
+  await wrapper.get(".edit-box textarea").setValue("复核后调整");
+  await wrapper.get(".edit-box .btn-primary").trigger("click");
+  await flushPromises();
+
+  const text = wrapper.get('[data-test="edit-error"]').text();
+  expect(text).toBe("这份评分刚被别人改过，请刷新页面、看清当前分数后再操作。");
+  expect(text).not.toContain("稍后重试");
+  wrapper.unmount();
+});

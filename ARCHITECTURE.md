@@ -589,7 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
-| 2026-10-19 | 无效评分项不给改分入口 | 无架构变化：GradeView 按 `ScoreItemRead.auto_score_status` 隐藏 `invalid` / `blocked` 项的改分入口并禁用确认，改分错误就近显示；后端接口与规则不变。 |
+| 2026-10-19 | 无效评分项不给改分入口 | 无架构变化：GradeView 按 `ScoreItemRead.auto_score_status` 隐藏 `invalid` / `blocked` 项的改分入口并禁用确认，改分错误就近显示；后端接口与规则不变。新增只读运维脚本 `scripts/inspect_score_item`（复用改分接口的三道检查）。 |
 | 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 无模块与数据流变化：宣传页在有申请表单时不渲染「申请试用」大按钮，`SiteHeader` 新增 `interceptTrial` / `trial` 事件；生产部署只剩 Lightsail（`deploy-vercel-production` 由仓库变量关闭，任务保留以便 S4 回滚）。 |
 | 2026-10-18 | 官网申请落库 | 新增 `api/routes/site` 与 `services/site_leads`、表 `site_leads`（迁移 0039，`pgs_app` 授权与 RLS）；官网入口页由 FastAPI 渲染时下发 `siteLeads` 开关；worker 巡检每天清理一次过期申请；运维页新增「官网申请」卡片。 |
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 无架构变化：`.vercelignore` 末尾重新包含 `public/`，Vercel 部署包与 Lightsail 镜像里的静态产物一致。 |
