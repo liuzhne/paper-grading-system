@@ -94,9 +94,10 @@ def observed_usage(
 ) -> dict:
     """一次应答的中性用量与行为观测（只有计数和结束原因，不含任何内容）。
 
-    推理 token 优先用厂商报告的值。厂商不报时用「合计 − 输入 − 可见输出」推算：
-    Vertex 的 OpenAI 兼容接口把思考计入合计、不计入 ``completion_tokens``，2026-10-16
-    那次事故就是这样看出来的。推算值标为 ``inferred``，守卫对它更谨慎。
+    推理 token 优先用厂商报告的值。厂商不报时用「合计 − 输入 − 可见输出」推算，标为
+    ``inferred``，守卫对它更谨慎。Vertex 会在 ``completion_tokens_details.reasoning_tokens``
+    报告（2026-10-19 生产核实），而且思考计入合计、不计入 ``completion_tokens``——2026-10-16
+    那次事故还没有解析这个字段，是从合计手算出来的。
     ``thinking_seen`` 用于只给思考块、不单独计数的协议（Claude）。
     """
 

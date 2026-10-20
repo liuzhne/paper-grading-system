@@ -46,7 +46,7 @@ def test_reported_reasoning_wins_and_missing_reasoning_is_inferred_from_the_tota
     reported = observed_usage(prompt=100, completion=30, total=130, reported_reasoning=12)
     assert (reported["reasoning_tokens"], reported["reasoning_source"]) == (12, "reported")
 
-    # Vertex：思考计入合计、不计入 completion_tokens，也不单独报告。
+    # 不单独报告推理 token、但把思考计入合计的厂商（Vertex 实际会报告，这里是推算的兜底）。
     inferred = observed_usage(prompt=1200, completion=70, total=2040)
     assert (inferred["reasoning_tokens"], inferred["reasoning_source"]) == (770, "inferred")
 

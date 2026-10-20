@@ -288,7 +288,7 @@ def _observed_usage_from_chat(data):
     """计量用：计费用量之外，再记推理 token 与结束原因（不含任何内容）。
 
     推理 token 的位置各家不同：OpenAI、DeepSeek、OpenRouter 报在
-    ``usage.completion_tokens_details.reasoning_tokens``；Vertex 不单独报，只能从合计推算；
+    ``usage.completion_tokens_details.reasoning_tokens``（Vertex 也报，2026-10-19 核实）；不报的从合计推算；
     智谱、DeepSeek 还会在 ``message.reasoning_content`` 里给出思考文本。
     """
 
