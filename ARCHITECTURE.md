@@ -1426,7 +1426,7 @@ batch_scoring.jobs：_incomplete_scoring_error 遇到该码直接以它为根因
 
 ### 2026-10-20 Google 主机上连接没配置思考按关闭处理
 
-`llm/factory.get_llm_scorer` 给 BYOK 的 OpenAI 兼容连接传 `thinking_type=options.get("thinking_type", "")`：没配置就是空字符串，平台模型才用全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE`。`thinking_params.effective_thinking_type` 原来把 Google 主机上的空值换算成 `provider-default`（不发参数、按模型默认思考），现在与 `disabled` 等同：2.5 Flash 系列 → `none` 并发 `reasoning_effort: "none"`，关不掉的型号 → `provider-default`。其他主机上的空值仍原样（不发非标准的 `thinking` 字段）。
+`llm/factory.get_llm_scorer` 给 BYOK 的 OpenAI 兼容连接传 `thinking_type=options.get("thinking_type", "")`：没配置就是空字符串，平台模型才用全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE`。`thinking_params.effective_thinking_type` 原来把 Google 主机上的空值换算成 `provider-default`（不发参数、按模型默认思考），现在与 `disabled` 等同：2.5 Flash 系列 → `none` 并发关闭参数（Gemini API 为 `reasoning_effort: "none"`；Vertex 为 `extra_body.google.thinking_config.thinking_budget=0`，见下一节），关不掉的型号 → `provider-default`。其他主机上的空值仍原样（不发非标准的 `thinking` 字段）。
 
 调用链与表结构不变。这类连接的运行身份从 `provider-default` 变为 `none`，决策账本与 Core 缓存按身份区分，不会复用开着思考时的判定；旧路径的 L0 缓存键不含思考，`llm_cache.PROMPT_VERSION` 升为 `2026-10-20-1`。连接快照不变，已有任务的重试照常允许。
 
