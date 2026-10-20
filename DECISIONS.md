@@ -589,6 +589,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 新增决策：BYOK 连接没配置思考时，Google 主机上与显式关闭同样处理；更正 2026-10-16 条背景与 P1 条里「Vertex 不报告推理 token」的说法。写明放弃了什么。 |
 | 2026-10-19 | 评分输出观测与思考一致性守卫（P1） | 新增决策：观测推理 token 与截断；身份说不思考、模型却在思考时本篇失败并停下同任务未开始的材料；规则任务记真实尝试次数。写明放弃了什么。 |
 | 2026-10-19 | 无效评分项不给改分入口 | 新增“AI 没评出有效结果的项不摆改分与确认入口，报错在前端译成中文”；规则本身（D-016）不放宽。 |
 | 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 新增“有申请表单时首屏只留一个主操作”与“用仓库变量停用 Vercel 部署，任务保留”。 |
@@ -1803,7 +1804,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 ### 2026-10-16 Google 主机关闭思考改发 reasoning_effort，评分默认输出上限与上下文窗口同步调大（Accepted）
 
-背景：生产上用 Vertex AI 的 Gemini 2.5 Flash 评一份论文，48 次规则调用里 12 次 `PROVIDER_OUTPUT_TRUNCATED`，按设计整份判失败。用量账本里输入 58,330、可见输出 3,304，合计却是 98,552：约 3.7 万 token 是模型的思考，平均每次约 770，而可见输出平均只有约 70。全局配置 `OPENAI_COMPATIBLE_THINKING_TYPE=disabled`，但适配器发的是智谱写法 `thinking: {"type": "disabled"}`，Vertex 不认、静默忽略；思考 token 计入 1200 的输出上限，思考一长 JSON 就写不完。运行身份却记着“思考已关闭”，与实际不符。
+背景：生产上用 Vertex AI 的 Gemini 2.5 Flash 评一份论文，48 次规则调用里 12 次 `PROVIDER_OUTPUT_TRUNCATED`，按设计整份判失败。用量账本里输入 58,330、可见输出 3,304，合计却是 98,552：约 3.7 万 token 是模型的思考，平均每次约 770，而可见输出平均只有约 70。那是一条没配置思考的 BYOK 连接：全局配置 `OPENAI_COMPATIBLE_THINKING_TYPE=disabled` 只作用于平台模型，工厂给 BYOK 传空字符串，请求里没有任何思考字段，Gemini 按默认思考；思考 token 计入 1200 的输出上限，思考一长 JSON 就写不完。运行身份却记着 `thinking.enabled=false`（`type` 为空），与实际不符。（**更正，2026-10-20**：本条原写作「适配器发了智谱写法 `thinking: {"type": "disabled"}`、被 Vertex 静默忽略」，那是对显式配置为关闭的连接才成立的推测，这条连接并非如此；见 2026-10-20 条。下面的换算对显式关闭的连接仍然需要。）
 
 选择：
 - **按主机换算思考参数**（`services/llm/thinking_params.py`）：Google 主机（Vertex 与 Gemini API）上配置为关闭时，发 Google 文档给出的 `reasoning_effort: "none"`；只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，就不发参数，运行身份记为 `provider-default`（思考开启）。其他主机照旧发 `thinking` 字段。
@@ -1968,7 +1969,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 背景：2026-10-16 那次评分（任务 `31df7ef2`）的运行身份写着「思考关闭」，模型实际思考了约 3.7 万 token，13 次调用被截断，整篇失败。系统里没有任何地方记录模型到底有没有思考，只能事后用「合计 − 输入 − 可见输出」手算。方案 `docs/评分输出预算与截断恢复改造方案.md` 第 5 节（P1），Q1–Q8 用户按推荐确认。
 
 选择：
-- **观测**：每次应答记结束原因与推理 token。厂商报告的优先（OpenAI / DeepSeek / OpenRouter 的 `completion_tokens_details.reasoning_tokens`、Responses 的 `output_tokens_details.reasoning_tokens`）；不报的用合计推算并标 `inferred`（Vertex）；只有思考块、没有计数的（Claude 的 `thinking` 块、智谱的 `reasoning_content`）记「思考过」。写进调用日志、`scoring_runs` 与 `ai_usage_ledger` 两列（迁移 0040）和批量条目的 telemetry。
+- **观测**：每次应答记结束原因与推理 token。厂商报告的优先（OpenAI / DeepSeek / OpenRouter 的 `completion_tokens_details.reasoning_tokens`、Responses 的 `output_tokens_details.reasoning_tokens`）；不报的用合计推算并标 `inferred`（Vertex 其实也报在 `completion_tokens_details` 里，2026-10-19 线上核实）；只有思考块、没有计数的（Claude 的 `thinking` 块、智谱的 `reasoning_content`）记「思考过」。写进调用日志、`scoring_runs` 与 `ai_usage_ledger` 两列（迁移 0040）和批量条目的 telemetry。
 - **守卫**：Core 规则评分的每次调用经 `llm/usage.metered_call`。运行身份 `thinking.enabled` 为 false 而观测到思考时，这次的判定不采用，本篇其余规则不再发出，错误码 `PROVIDER_THINKING_NOT_DISABLED`；只有推算值时要连续两次应答都推算出推理才判定（Q1 之外的细节，按方案）。截断时也先核对：思考耗尽额度最常见的样子就是截断，这时报根因而不是截断。
 - **停下整个任务的剩余部分**（Q1）：批量任务里一篇报这个码，同任务还没开始的材料直接取消（带同一错误码与「未产生费用」的说明），任务收尾为「已取消」；已完成的保留，换模型后可以照常重试。
 - **身份 `enabled=false` 一律核对，包括没有发出任何思考设置的连接**（`type` 为空，例如 OpenAI Responses 协议）。身份写的就是 false；这类连接上的推理模型因此会被拦下，提示换模型。
@@ -1986,3 +1987,21 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 代价/约束：OpenAI Responses 协议的推理模型在 Core 评分里被拦下；推算的第一次应答会被采用；运维页的观测按 `scoring_runs.created_at` 统计，失败的那篇也计入。
 
 维护记录：2026-10-19 · 评分输出观测与思考一致性守卫（P1）：迁移 0040、计量与日志、守卫、停止同任务、真实尝试次数、运维观测。
+
+### 2026-10-20 Google 主机上连接没配置思考，按关闭处理（Accepted）
+
+背景：P1 上线后对 2026-10-16 失败的那份论文「重试失败项」（2026-10-19，用户授权的真实调用）。48 次调用每次都由 Vertex 报告了推理 token，合计 46,463；5 次撞上 2048 的输出上限，13 条规则失败，整份又失败，这次共花约 10.9 万 token。运行身份记的是 `provider-default`（思考开启），所以守卫按设计没拦。原因：这条 BYOK 连接没配置 `thinking_type`，`llm/factory` 对 BYOK 传空字符串（本意是不给只协议兼容的服务发非标准的 `thinking` 字段），`thinking_params` 在 Google 主机上把空值当作「按模型默认」，于是 #34 的 `reasoning_effort: "none"` 根本没发。账户页也没有思考设置，用户从界面上关不掉。
+
+同时更正两处说法：2026-10-16 条的背景（那次全局默认没作用到这条连接，请求里没有任何思考字段，不是「发了智谱写法被忽略」）；P1 条的「Vertex 不单独报告推理 token」——Vertex 在 `completion_tokens_details.reasoning_tokens` 里报告，10-16 是因为还没解析这个字段才从合计手算。
+
+选择（用户确认）：Google 主机上连接没配置思考，与显式关闭同样处理——2.5 Flash 系列发 `reasoning_effort: "none"`、身份记 `none`；关不掉的型号仍不发参数、记 `provider-default`。其他主机不变。旧路径缓存版本升为 `2026-10-20-1`。
+
+放弃了什么：
+- **在账户页加「思考」设置，让用户自己选、默认不变**：要改前端表单、校验与说明，而且默认值仍是开启，没配置的连接照样撞上同一个问题；评分要的是可复现的判定，默认就该关。需要开思考的连接仍可以通过接口设 `thinking_type`；界面设置留给 P3 的能力探测一并做。
+- **只改这一条生产连接的 `provider_options`**：改了连接配置，原任务的重试会被 `AI_CONNECTION_CONFIG_CHANGED` 拒绝，要新建任务；而下一个没配置的 Google 连接还会再踩一次。
+- **对所有主机的空值都按关闭处理**：其他主机只能发非标准的 `thinking` 字段，只协议兼容的服务可能 400，这正是工厂传空字符串的原因；`reasoning_effort` 是标准参数，Google 认，顾虑只在 Google 主机上不成立。
+- **只调大这条连接的输出上限**：思考照样发生、照样按输出计费（这次推理 token 是可见输出的 11 倍），截断只是变少。
+
+代价：没配置思考的 Google 连接，判定会变（思考关掉了），按 §15 正式使用前要用 QWK 留出集重新锚定（需要维护者授权）。这类连接的身份变一次，开着思考时的判定不再复用（本来也不该复用）。如果 Vertex 不认 `reasoning_effort: "none"`，P1 的守卫会在第一次应答就拦下（身份记的是关闭，而 Vertex 会报告推理 token），只花一次调用。
+
+维护记录：2026-10-20 · Google 主机上连接没配置思考按关闭处理：`thinking_params`、`llm_cache.PROMPT_VERSION=2026-10-20-1`；更正两处文档说法。

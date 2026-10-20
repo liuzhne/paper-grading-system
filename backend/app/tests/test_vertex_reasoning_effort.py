@@ -59,9 +59,13 @@ def test_only_gemini_25_flash_can_disable_thinking(model, can_disable):
         # Vertex + 2.5 Flash：关闭思考改发 reasoning_effort，不再发 Vertex 不认的 thinking 字段。
         (VERTEX, "google/gemini-2.5-flash", "disabled", "none", {"reasoning_effort": "none"}),
         (GEMINI_API, "gemini-2.5-flash", "off", "none", {"reasoning_effort": "none"}),
-        # 关不掉或没配置：不发参数，身份如实记为按模型默认思考。
+        # 没配置（BYOK 连接传空字符串）与显式关闭一样（2026-10-20）。
+        (VERTEX, "google/gemini-2.5-flash", None, "none", {"reasoning_effort": "none"}),
+        (VERTEX, "google/gemini-2.5-flash", "", "none", {"reasoning_effort": "none"}),
+        # 关不掉：不发参数，身份如实记为按模型默认思考。
         (VERTEX, "google/gemini-2.5-pro", "disabled", GOOGLE_PROVIDER_DEFAULT, {}),
-        (VERTEX, "google/gemini-2.5-flash", None, GOOGLE_PROVIDER_DEFAULT, {}),
+        (VERTEX, "google/gemini-2.5-pro", "", GOOGLE_PROVIDER_DEFAULT, {}),
+        # 显式开启：不发参数，按模型默认思考。
         (VERTEX, "google/gemini-2.5-flash", "enabled", "enabled", {}),
         # 其他主机原样：智谱的 thinking 字段照发。
         (ZHIPU, "glm-4.7-flash", "disabled", "disabled", {"thinking": {"type": "disabled"}}),
@@ -91,6 +95,28 @@ def test_vertex_flash_requests_disable_thinking_with_reasoning_effort():
     scorer.complete_json("系统", {"units": []}, attempts_limit=1)
     assert calls[0]["reasoning_effort"] == "none"
     assert "thinking" not in calls[0]
+
+
+def test_byok_connection_without_a_thinking_setting_disables_thinking_on_vertex():
+    """2026-10-19 生产：BYOK 连接没配思考，工厂传空字符串，旧版本按模型默认（开启）处理，
+    48 次调用全在思考、5 次截断。现在与显式关闭一样发 reasoning_effort: none。"""
+
+    calls = []
+    scorer = _scorer(VERTEX, "google/gemini-2.5-flash", calls, thinking_type="")
+    scorer.complete_json("系统", {"units": []}, attempts_limit=1)
+    assert calls[0]["reasoning_effort"] == "none"
+    assert "thinking" not in calls[0]
+    contract = core_runtime_provider_contract(scorer, artifact_hash="sha256:" + "0" * 64)
+    assert contract["thinking"] == {"enabled": False, "type": "none"}
+
+
+def test_byok_connection_without_a_thinking_setting_sends_nothing_elsewhere():
+    # 其他主机仍不发非标准的 thinking 字段：只协议兼容的服务可能拒收。
+    calls = []
+    scorer = _scorer(ZHIPU, "glm-4.7-flash", calls, thinking_type="")
+    scorer.complete_json("系统", {"units": []}, attempts_limit=1)
+    assert "thinking" not in calls[0]
+    assert "reasoning_effort" not in calls[0]
 
 
 def test_other_hosts_keep_the_thinking_field():

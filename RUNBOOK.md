@@ -644,9 +644,20 @@ ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 1h work
   ```
 
   `reasoning=reported` 是厂商报告了推理 token 或返回了思考块；`inferred` 是由「合计 − 输入 − 可见输出」推算的
-  （Vertex 就是这样，连续两次才判定）。处理：换一个能关闭思考的模型（Vertex / Gemini API 上只有 2.5 Flash 系列
+  （厂商不单独报告时才用，连续两次才判定；Vertex 会报告，所以是 `reported`）。处理：换一个能关闭思考的模型（Vertex / Gemini API 上只有 2.5 Flash 系列
   能关；OpenAI Responses 协议没有思考设置，推理模型只能换掉），或者把连接的思考设置改为开启并调大输出上限，然后
   **新建**评分任务——改了连接配置，原任务的重试会被 `AI_CONNECTION_CONFIG_CHANGED` 拒绝。
+- BYOK 的 Gemini（Vertex / Gemini API）连接评分仍被截断，日志里每行都是 `reasoning=reported`、`reasoning_tokens`
+  几百到近两千，守卫却没拦：报错指向输出上限太小，真正的原因是这条连接**没配置思考**——2026-10-20 之前，
+  BYOK 连接没配置时在 Google 主机上按模型默认（开启）处理，不发 `reasoning_effort`，运行身份如实记成
+  `provider-default`，守卫只拦「身份说关、实际在想」。2026-10-20 起没配置按关闭处理。核对这次运行记的是哪种：
+
+  ```bash
+  ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 1h worker | grep " llm_call " | tail -3'
+  ```
+
+  新版本下 2.5 Flash 应是 `reasoning_tokens=0 reasoning=none`；若仍有推理，任务会以
+  `PROVIDER_THINKING_NOT_DISABLED` 停下（Vertex 不认关闭参数），这时只能换模型或调大输出上限。
 - CI 的 `docker-compose-smoke` 偶尔在「Verify the workbench ships inside the image」以退出码 23 失败，
   重跑又过了：报错指向 curl（写入失败），真正的原因是脚本里的 `curl … | grep -q`——`pipefail` 下
   grep 一匹配就退出，curl 还在写就收到断开的管道。这一步已改成先 `--output` 存文件再 `grep`；
@@ -1046,6 +1057,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无新命令与开关；Vertex 接入说明改为「没配置也按关闭」；新增一条排错（BYOK Gemini 仍在思考、仍截断，真实原因是连接没配置思考）；更正「Vertex 不报告推理 token」的说法。 |
 | 2026-10-19 | 评分输出观测与思考一致性守卫（P1） | 新增「评分输出观测」：上线顺序（先迁移 0040 再合并）、日志字段、运维页观测与回滚；新增一条排错（任务显示「已取消」，真实原因是模型没按设置关闭思考）；截断排错改为直接看日志与 `scoring_runs` 两列，不再手算。`public/` 已重建。 |
 | 2026-10-19 | 无效评分项不给改分入口 | 新增一条排错（改分保存没反应，真实原因是该项 AI 评分无效、普通改分被拒）；处理方式为重试失败项。`public/` 已重建。 |
 | 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 新增一条排错（CI 冒烟偶发退出码 23，真实原因是 `curl | grep -q`，已改为先存文件再匹配）。切流量（S3）第一步已完成：`VERCEL_DEPLOY_ENABLED=false`，记下剩余步骤；宣传页动效区分随 Vercel 任务一起停用。首屏改动不涉及运维命令。`public/` 已重建。 |
@@ -1951,7 +1963,11 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 | API Key | Vertex AI express 模式的 API Key（`AQ.` 开头） |
 
 - Key 由系统放在 `x-goog-api-key` 头里发送，不用 Bearer；其它 OpenAI 兼容服务（包括 Gemini API 的 `generativelanguage.googleapis.com`）仍用 Bearer。
-- 思考：连接的 `thinking_type=disabled`（全局默认）在 Vertex 与 Gemini API 上改发 `reasoning_effort: "none"`（只有 2.5 Flash 系列能关；2026-10-16 起）。`diagnose_llm` 的输出里 `thinking` 为 `null`、`reasoning_effort` 为 `"none"` 是正常的。
+- 思考：连接配置为关闭（`thinking_type=disabled`）或没配置（2026-10-20 起）时，按型号区分：
+  - Gemini 2.5 Flash 系列（含 Flash-Lite 与预览版）发 `reasoning_effort: "none"`，运行身份记 `none`（2026-10-16 起）；
+  - 2.5 Pro、Gemini 3 等关不掉思考的型号不发参数，运行身份记 `provider-default`（思考开启），只能靠输出上限兜底。
+
+  全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE` 只作用于平台模型，BYOK 连接看自己的配置。`diagnose_llm` 按平台模型（`OPENAI_COMPATIBLE_MODEL`）拼请求：2.5 Flash 系列输出里 `thinking` 为 `null`、`reasoning_effort` 为 `"none"`；关不掉的型号两者都为 `null`。
 - 学生论文会发给 Google：项目要绑定结算账号，按付费条款处理数据。
 - 换模型会改变评分结果，正式使用前按 §15 重新锚定 QWK（需要维护者授权真实调用与预算）。
 

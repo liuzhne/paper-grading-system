@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无模块与数据流变化：`thinking_params.effective_thinking_type` 在 Google 主机上把空值（BYOK 连接没配置时工厂传空字符串）与显式关闭同样换算，2.5 Flash 系列发 `reasoning_effort: "none"`、身份记 `none`；关不掉的型号仍记 `provider-default`。`llm_cache.PROMPT_VERSION=2026-10-20-1`。无迁移。 |
 | 2026-10-19 | 评分输出观测与思考一致性守卫（输出预算方案 P1） | 新增迁移 0040（`scoring_runs`、`ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`）；三个适配器的计量回调多记推理 token 与结束原因，`llm/usage` 新增 `ThinkingConsistencyGuard` 与 `metered_call`，论文与技术方案的 LLM 运行时经它发出每次 Core 调用；规则任务的尝试次数改由执行日志如实记录；批量任务遇到 `PROVIDER_THINKING_NOT_DISABLED` 取消同任务未开始的条目；运维就绪的 `batch_jobs` 下新增只观察的 `model_output`。 |
 | 2026-10-19 | 无效评分项不给改分入口 | 无架构变化：GradeView 按 `ScoreItemRead.auto_score_status` 隐藏 `invalid` / `blocked` 项的改分入口并禁用确认，改分错误就近显示；后端接口与规则不变。新增只读运维脚本 `scripts/inspect_score_item`（复用改分接口的三道检查）。 |
 | 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 无模块与数据流变化：宣传页在有申请表单时不渲染「申请试用」大按钮，`SiteHeader` 新增 `interceptTrial` / `trial` 事件；生产部署只剩 Lightsail（`deploy-vercel-production` 由仓库变量关闭，任务保留以便 S4 回滚）。 |
@@ -946,8 +947,8 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 
 | 主机 | 连接配置 | 发出的字段 | 运行身份 `thinking.type` |
 |---|---|---|---|
-| Vertex（`aiplatform.googleapis.com` 与区域端点）、Gemini API（`generativelanguage.googleapis.com`） | 关闭（`disabled` 等），模型是 2.5 Flash 系列 | `reasoning_effort: "none"` | `none`（关闭） |
-| 同上 | 关闭，但模型关不掉思考（2.5 Pro、Gemini 3）；或没配置 | 不发 | `provider-default`（开启） |
+| Vertex（`aiplatform.googleapis.com` 与区域端点）、Gemini API（`generativelanguage.googleapis.com`） | 关闭（`disabled` 等）或没配置（2026-10-20 起），模型是 2.5 Flash 系列 | `reasoning_effort: "none"` | `none`（关闭） |
+| 同上 | 关闭或没配置，但模型关不掉思考（2.5 Pro、Gemini 3） | 不发 | `provider-default`（开启） |
 | 其他主机 | 原样 | `thinking: {"type": …}` | 原样 |
 
 `OpenAICompatibleChatScorer` 在初始化时把 `thinking_type` 换算成身份值；`score_criterion`、`score_envelope`、`_post_core_request`、`complete_json` 与 `scripts/diagnose_llm.py` 都经 `thinking_request_fields` 拼请求体；`diagnose_llm` 的输出同时报告 `thinking` 与 `reasoning_effort`。身份变了，决策账本与 Core 缓存就不会把开着思考时的旧判定当作同一请求复用；旧路径的 L0 缓存键不含思考与输出上限，所以 `llm_cache.PROMPT_VERSION` 升为 `2026-10-16-1`。
@@ -1420,3 +1421,11 @@ batch_scoring.jobs：_incomplete_scoring_error 遇到该码直接以它为根因
 - 前端：`lib/score-jobs.itemUsageText` 在任务页每篇用量后加「思考 / 截断」；`modelOutputText` 供运维页两处显示。
 
 维护记录：2026-10-19 · 评分输出观测与思考一致性守卫：head 升为 `0040_provider_output_observations`；接口形状不变（就绪接口返回的是字典，OpenAPI 不变），`public/` 已重新组装。
+
+### 2026-10-20 Google 主机上连接没配置思考按关闭处理
+
+`llm/factory.get_llm_scorer` 给 BYOK 的 OpenAI 兼容连接传 `thinking_type=options.get("thinking_type", "")`：没配置就是空字符串，平台模型才用全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE`。`thinking_params.effective_thinking_type` 原来把 Google 主机上的空值换算成 `provider-default`（不发参数、按模型默认思考），现在与 `disabled` 等同：2.5 Flash 系列 → `none` 并发 `reasoning_effort: "none"`，关不掉的型号 → `provider-default`。其他主机上的空值仍原样（不发非标准的 `thinking` 字段）。
+
+调用链与表结构不变。这类连接的运行身份从 `provider-default` 变为 `none`，决策账本与 Core 缓存按身份区分，不会复用开着思考时的判定；旧路径的 L0 缓存键不含思考，`llm_cache.PROMPT_VERSION` 升为 `2026-10-20-1`。连接快照不变，已有任务的重试照常允许。
+
+维护记录：2026-10-20 · Google 主机上连接没配置思考按关闭处理：接口、数据库不变，head `0040_provider_output_observations` 不变。

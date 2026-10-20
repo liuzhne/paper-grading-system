@@ -9,6 +9,11 @@ Google 的 OpenAI 兼容接口用 ``reasoning_effort`` 控制思考，``"none"``
 能关（2.5 Pro、Gemini 3 关不掉）。关不掉的模型不发参数，运行身份记为 ``provider-default``
 （思考开启），如实反映实际行为。
 
+连接**没配置**思考时，Google 主机上同样按「关闭」处理（2026-10-20）。BYOK 连接没配时工厂传空字符串，
+本意是不给只协议兼容的服务发非标准的 ``thinking`` 字段；``reasoning_effort`` 是标准参数，Google 认它，
+这层顾虑不成立。之前没配置按模型默认（开启）处理，2026-10-19 生产重试那份论文时 48 次调用全在思考
+（Vertex 报告推理 46,463 token），5 次撞上 2048 的输出上限，整份又失败。
+
 运行身份（决策账本、L0 缓存都按它区分）记的是这里换算后的值，所以改了写法，旧判定不会被
 当作同一请求复用。
 """
@@ -47,13 +52,17 @@ def google_can_disable_thinking(model_name) -> bool:
 
 
 def effective_thinking_type(base_url, model_name, thinking_type):
-    """连接配置的思考设置 → 实际发出的写法对应的身份值；非 Google 主机原样返回。"""
+    """连接配置的思考设置 → 实际发出的写法对应的身份值；非 Google 主机原样返回。
+
+    Google 主机上没配置（空值）按关闭处理。
+    """
 
     if not is_google_openai_host(base_url):
         return thinking_type
     value = str(thinking_type or "").strip()
     if not value or value.casefold() in _DISABLED:
-        return "none" if value and google_can_disable_thinking(model_name) else GOOGLE_PROVIDER_DEFAULT
+        # 没配置与显式关闭一样：能关的发 reasoning_effort: none，关不掉的如实记按模型默认。
+        return "none" if google_can_disable_thinking(model_name) else GOOGLE_PROVIDER_DEFAULT
     return value
 
 
