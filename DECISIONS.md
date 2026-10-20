@@ -589,6 +589,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 新增决策：Vertex 不收 `reasoning_effort: "none"`，改发 `extra_body.google.thinking_config.thinking_budget=0`；更正 2026-10-16 条的放弃项。写明放弃了什么。 |
 | 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 新增决策：BYOK 连接没配置思考时，Google 主机上与显式关闭同样处理；更正 2026-10-16 条背景与 P1 条里「Vertex 不报告推理 token」的说法。写明放弃了什么。 |
 | 2026-10-19 | 评分输出观测与思考一致性守卫（P1） | 新增决策：观测推理 token 与截断；身份说不思考、模型却在思考时本篇失败并停下同任务未开始的材料；规则任务记真实尝试次数。写明放弃了什么。 |
 | 2026-10-19 | 无效评分项不给改分入口 | 新增“AI 没评出有效结果的项不摆改分与确认入口，报错在前端译成中文”；规则本身（D-016）不放宽。 |
@@ -1813,7 +1814,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 放弃了什么：
 - **只调大输出上限、不关思考**：思考照样发生、照样按输出计费（这份论文约 37% 的 token 花在思考上），思考长度也不可控，只是把截断概率压低。
-- **用 `extra_body.google.thinking_config.thinking_budget=0`**：Google 文档说它和 `reasoning_effort` 重叠，不要混用；`reasoning_effort` 是 OpenAI 写法，LiteLLM 等也这么映射。代价：只能按档位控制。
+- **用 `extra_body.google.thinking_config.thinking_budget=0`**：Google 文档说它和 `reasoning_effort` 重叠，不要混用；`reasoning_effort` 是 OpenAI 写法，LiteLLM 等也这么映射。代价：只能按档位控制。（**更正，2026-10-20**：Vertex 的 `reasoning_effort` 不收 `none`，生产 400；Vertex 改用这一写法，见 2026-10-20「Vertex 关闭思考」条。）
 - **对关不掉思考的模型改发 `reasoning_effort: "low"`**：会把用户配置的“关闭”悄悄变成“低”。改为不发参数、如实记为开启，靠 2048 上限兜底。
 - **新增连接选项，让用户直接填 `reasoning_effort`**：要改前端、校验和身份字段；沿用已有的 `thinking_type` 语义就够了。
 - **只对 Google 主机调大输出上限**：这个连接的输入预算会从 5968 降到 5120，每条规则能带的证据少约 15%。
@@ -1994,7 +1995,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 同时更正两处说法：2026-10-16 条的背景（那次全局默认没作用到这条连接，请求里没有任何思考字段，不是「发了智谱写法被忽略」）；P1 条的「Vertex 不单独报告推理 token」——Vertex 在 `completion_tokens_details.reasoning_tokens` 里报告，10-16 是因为还没解析这个字段才从合计手算。
 
-选择（用户确认）：Google 主机上连接没配置思考，与显式关闭同样处理——2.5 Flash 系列发 `reasoning_effort: "none"`、身份记 `none`；关不掉的型号仍不发参数、记 `provider-default`。其他主机不变。旧路径缓存版本升为 `2026-10-20-1`。
+选择（用户确认）：Google 主机上连接没配置思考，与显式关闭同样处理——2.5 Flash 系列发关闭参数（Gemini API 为 `reasoning_effort: "none"`，Vertex 见下一条）、身份记 `none`；关不掉的型号仍不发参数、记 `provider-default`。其他主机不变。旧路径缓存版本升为 `2026-10-20-1`。
 
 放弃了什么：
 - **在账户页加「思考」设置，让用户自己选、默认不变**：要改前端表单、校验与说明，而且默认值仍是开启，没配置的连接照样撞上同一个问题；评分要的是可复现的判定，默认就该关。需要开思考的连接仍可以通过接口设 `thinking_type`；界面设置留给 P3 的能力探测一并做。
@@ -2005,3 +2006,19 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 代价：没配置思考的 Google 连接，判定会变（思考关掉了），按 §15 正式使用前要用 QWK 留出集重新锚定（需要维护者授权）。这类连接的身份变一次，开着思考时的判定不再复用（本来也不该复用）。如果 Vertex 不认 `reasoning_effort: "none"`，P1 的守卫会在第一次应答就拦下（身份记的是关闭，而 Vertex 会报告推理 token），只花一次调用。
 
 维护记录：2026-10-20 · Google 主机上连接没配置思考按关闭处理：`thinking_params`、`llm_cache.PROMPT_VERSION=2026-10-20-1`；更正两处文档说法。
+
+### 2026-10-20 Vertex 关闭思考改发 thinking_budget 0（Accepted）
+
+背景：上一条（没配置按关闭处理）上线后，对那份论文再次「重试失败项」：48 次请求全部 400，厂商说明为 `Expected 'reasoning_effort' to be one of: 'high', 'low', 'max', 'medium', 'minimal'; found 'none'.` 被拒的请求不产生 token，但这条 Vertex 连接每次评分都失败。`reasoning_effort: "none"` 出自 Gemini API 的 OpenAI 兼容文档，2026-10-16 引入时没有在 Vertex 上真实验证过；之前显式配置为关闭的 Vertex 连接同样会 400，只是生产上没有这样的连接。Vertex 文档：OpenAI 兼容接口的 `reasoning_effort` 只有 `minimal/low/medium/high` 几档；直接控制思考用 Gemini 专属参数 `extra_body.google.thinking_config`，原始 HTTP 请求体里是顶层的 `extra_body` 键，且与 `reasoning_effort` 只能指定其一。2.5 Flash 的 `thinking_budget` 为 0 即关闭思考。
+
+选择：Vertex 主机上关闭 2.5 Flash 的思考改发 `{"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}`，不再发 `reasoning_effort`；Gemini API 不变（`reasoning_effort: "none"`，按其文档）。身份值仍是 `none`（含义都是关闭）。
+
+放弃了什么：
+- **回滚「没配置按关闭处理」**：能马上恢复可用，但回到思考开着、按概率截断的状态，那份论文照样评不出来。
+- **Vertex 上改发 `reasoning_effort: "minimal"`**：Vertex 把它映射到 Gemini 3 的 `thinking_level`，对 2.5 Flash 是否等于不思考没有文档依据；`minimal` 也不是「关闭」，身份记 `none` 会名不副实。
+- **两种写法一起发**：Google 文档说二者只能指定其一，同时发可能被拒。
+- **Gemini API 也改用 `thinking_budget`**：它的文档明确给出 `reasoning_effort: "none"`，没有理由改；按主机分开，各自照自己的文档。
+
+代价/约束：`thinking_budget: 0` 在 Vertex 的 OpenAI 兼容接口上同样只有文档依据，要靠下一次真实评分核实。P1 守卫兜底：若 Vertex 仍在思考，身份记的是关闭，第一次应答就会以 `PROVIDER_THINKING_NOT_DISABLED` 停下；若请求再被拒，400 不产生 token。
+
+维护记录：2026-10-20 · Vertex 关闭思考改发 thinking_budget 0：`thinking_params`、`diagnose_llm` 报 `thinking_config`；更正 2026-10-16 条的放弃项。

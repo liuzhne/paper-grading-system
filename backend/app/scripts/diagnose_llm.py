@@ -9,6 +9,10 @@ from backend.app.services.llm.thinking_params import effective_thinking_type
 from backend.app.services.llm.thinking_params import thinking_request_fields
 
 
+def _thinking_config(payload):
+    return ((payload.get("extra_body") or {}).get("google") or {}).get("thinking_config")
+
+
 def main():
     if not settings.OPENAI_COMPATIBLE_API_KEY:
         print_json({"ok": False, "stage": "config", "error": "OPENAI_COMPATIBLE_API_KEY is not configured"})
@@ -24,7 +28,8 @@ def main():
         "temperature": 0.2,
         "max_tokens": 200,
     }
-    # 与评分适配器同一套换算：Google 主机关闭思考发 reasoning_effort，其余发 thinking 字段。
+    # 与评分适配器同一套换算：Google 主机关闭思考发 reasoning_effort（Gemini API）或
+    # extra_body.google.thinking_config（Vertex），其余发 thinking 字段。
     thinking_type = effective_thinking_type(
         url, settings.OPENAI_COMPATIBLE_MODEL, settings.OPENAI_COMPATIBLE_THINKING_TYPE,
     )
@@ -51,6 +56,7 @@ def main():
                 "model": settings.OPENAI_COMPATIBLE_MODEL,
                 "thinking": payload.get("thinking"),
                 "reasoning_effort": payload.get("reasoning_effort"),
+                "thinking_config": _thinking_config(payload),
                 "response_format": payload.get("response_format"),
                 "error_type": exc.__class__.__name__,
                 "error": str(exc),
@@ -66,8 +72,10 @@ def main():
         "url": url,
         "model": settings.OPENAI_COMPATIBLE_MODEL,
         "thinking": payload.get("thinking"),
-        # Google 主机关闭思考发的是 reasoning_effort（thinking 为 null），两者都报出来便于核对。
+        # Google 主机关闭思考不发 thinking：Gemini API 发 reasoning_effort，Vertex 发
+        # extra_body.google.thinking_config，三者都报出来便于核对。
         "reasoning_effort": payload.get("reasoning_effort"),
+        "thinking_config": _thinking_config(payload),
         "response_format": payload.get("response_format"),
         "status_code": response.status_code,
         "content_type": response.headers.get("content-type"),
