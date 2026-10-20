@@ -16,6 +16,12 @@ def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
         normalized = direct_code.strip().upper()
         if normalized == "TOKEN_BUDGET_EXCEEDED":
             return normalized, "paper input-token budget exhausted; request not sent"
+        if normalized == "PROVIDER_THINKING_NOT_DISABLED":
+            # 运行身份说不思考，模型却在思考：判定不采用；之前已发现时这次根本没发。
+            return normalized, (
+                "provider reasoned although the run identity disables thinking; "
+                + ("decision discarded" if getattr(exc, "sent", False) else "request not sent")
+            )
         if normalized == "PROVIDER_CIRCUIT_OPEN":
             # Not an input problem: the request was never sent because earlier
             # provider failures opened the connection's circuit breaker.

@@ -451,6 +451,30 @@ rollback;
 SQL
 ```
 
+要用到应用自己的模型或检查函数时（例如按改分接口同一套检查判断一项能不能改），写一个 Python 只读脚本，用应用的 `SessionLocal`，**不 `commit`，最后不管结果如何都 `rollback`**，也不执行会话级 `set`。现成的例子是 `backend/app/scripts/inspect_score_item.py`：
+
+```python
+from sqlalchemy import text
+
+from backend.app.db.session import SessionLocal
+
+db = SessionLocal()
+try:
+    print(db.execute(text("select version_num from alembic_version")).scalar_one())
+    # 只读：select 或 ORM 查询；不 add、不 delete、不 commit
+finally:
+    db.rollback()
+    db.close()
+```
+
+一次性脚本不用放进镜像，在实例上经标准输入交给 app 容器里的 Python（工作目录是 `/app`，`import backend` 才找得到）：
+
+```bash
+docker compose -p pgs -f compose.yml exec -T app python - < check.py
+```
+
+这种写法靠「不提交、最后回滚」防误写，不是数据库层面的只读：脚本里真写了，事务结束时也会撤掉，但执行期间照样拿行锁，所以脚本要短、查完就走。2026-10-20 实测：返回当前 head，连接上的 `default_transaction_read_only` 仍是 `off`。
+
 下面几条规矩都是因为事务池会把连接状态留给下一个使用者，而应用和 worker 用的是同一批后端连接：
 
 - 不要执行不带 `local` 的 `set …`，也别指望 `PGOPTIONS`。前者会留在共用的后端连接上，被应用接着用到（见下面排错里的只读报错）；后者会被连接池丢弃，看起来设了、其实没生效。临时设置只在事务里用 `set local`。
@@ -462,7 +486,7 @@ SQL
 
 每月挑低峰手动重启一次让内核更新生效（`sudo reboot`，服务约 1 分钟后自动恢复）；系统安全更新由 `unattended-upgrades` 自动安装、不自动重启。
 
-切流量（S3）：先把仓库变量 `VERCEL_DEPLOY_ENABLED` 设为 `false`，再把 Vercel 项目改为只有 308 跳转规则的部署，跳到新域名并保留路径与查询参数。顺序不能反：变量没关时，下一次合并会把整个应用重新部署回 Vercel，盖掉跳转。新地址稳定后，由维护者在 Supabase 后台删除旧项目 `euizniwqisnhfhxwiqsg`（不可恢复；数据已确认不保留），旧项目的数据库密码与 API 密钥随之失效。
+切流量（S3）：**2026-10-18 已完成第一步**——`VERCEL_DEPLOY_ENABLED=false`（用户已通知迁移），合并到 main 不再部署 Vercel，Vercel 停在最后一次部署（`fd4226a`）上。剩下：Vercel 改为只跳转、观察 48 小时、删除旧项目。原文顺序：先把仓库变量 `VERCEL_DEPLOY_ENABLED` 设为 `false`，再把 Vercel 项目改为只有 308 跳转规则的部署，跳到新域名并保留路径与查询参数。顺序不能反：变量没关时，下一次合并会把整个应用重新部署回 Vercel，盖掉跳转。新地址稳定后，由维护者在 Supabase 后台删除旧项目 `euizniwqisnhfhxwiqsg`（不可恢复；数据已确认不保留），旧项目的数据库密码与 API 密钥随之失效。
 
 排错：
 
@@ -604,8 +628,167 @@ DATABASE_URL='<目标库>' .venv/bin/python -m backend.app.scripts.backfill_expo
 确认该通道应映射到哪个展示通道，补进 `services/batches/exports.LEGACY_CHANNELS`
 后重新执行。
 
-**默认入口**：根路径直接是 v2 工作台，旧 SPA 已下线（用户决定，2026-09-08）。
-`WORKBENCH_DEFAULT_ENTRY` 开关与常驻 `/legacy/` 一并取消。
+**默认入口**：根路径是宣传页、`/about` 是官网子页，工作台在 `/workbench/`（用户决定，
+2026-10-17）。旧 SPA 已下线（2026-09-08），`WORKBENCH_DEFAULT_ENTRY` 开关与常驻 `/legacy/`
+一并取消。已登录的人打开 `/` 会自动跳到工作台；关闭鉴权的本地环境不跳，直接看得到宣传页。
+
+官网两页的源码在 `frontend/workbench/src/site/`，与工作台同一次构建：本地看效果用
+`cd frontend/workbench && npm run dev` 后打开 `http://localhost:5173/workbench/site/`（子页是 `…/site/about/#docs`），
+或照常 `python scripts/build_web_static.py --with-workbench` 后经 FastAPI 打开 `/`。
+
+**宣传页动效按部署区分**（用户决定，2026-10-17；2026-10-18 起 Vercel 不再部署，这一步随 Vercel 任务一起停用，Vercel 上停留的仍是少动效版）：Vercel 固定少动效版（四步平铺成静态画面、
+波浪不随滚动），Lightsail 正常动效（访客自己开了「减少动态效果」时同样显示少动效版）。开关是入口页
+的 `window.__PGS_CONFIG__.landingMotion`，只由 CI 的 Vercel 部署任务在 `vercel build` 之前写入：
+
+```bash
+python3 scripts/build_web_static.py --landing-motion reduced
+```
+
+想让 Vercel 恢复正常动效，删掉 `ci.yml` 里这一步即可。**不要在本地跑完把结果提交**：它占掉了
+FastAPI 注入 `API_PREFIX` 的标记（测试会拦）。
+
+- 拨测（如 UptimeRobot）报首页故障、状态 405，浏览器里打开却正常：报错指向首页挂了，真正的原因
+  是拨测发的是 `HEAD`，而 FastAPI 的 `app.get` 只登记 GET。浏览器页面已改用 `page_route`（GET 与
+  HEAD）；以后新增页面路由也用它，别直接写 `app.get`。`/api/*` 仍只接各自声明的方法。
+  复现与核验（修复后页面应为 200，接口仍为 405）：
+
+  ```bash
+  curl -sI https://grading-sg.duckdns.org/ | head -1
+  ```
+
+  ```bash
+  curl -sI https://grading-sg.duckdns.org/api/system/integrations | head -1
+  ```
+
+  拨测本身改用 GET 也能绕开，但别只改拨测：Vercel 与 Lightsail 对同一页面的 HEAD 应一致。
+  发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`，无迁移、无数据回退。
+- Vercel 上某个静态文件（如 `/workbench/favicon.svg`）返回的是工作台首页的 HTML，Lightsail 上却正常：
+  报错像是 `vercel.json` 里 `/workbench/*` 的 SPA 回退抢了路由，真正的原因是 `.vercelignore` 按扩展名
+  排除了 `*.svg` `*.png` `*.md`，文件根本没上传，请求才落到回退上。`public/` 已在文件末尾用
+  `!/public/**` 整体重新包含；新增排除规则要写在它前面。核对：
+
+  ```bash
+  curl -s -o /dev/null -w '%{content_type}\n' https://paper-grading-system-kohl.vercel.app/workbench/favicon.svg
+  ```
+
+**官网申请**（2026-10-18，`docs/官网申请落库改造方案.md`）：宣传页首屏「申请试用」与子页「预约部署评估」
+两个表单把申请写进 `site_leads`，平台管理员在工作台「运维」页的「官网申请」卡片里看、改状态、删除。
+开关 `SITE_LEADS_ENABLED` 默认关闭；生产在 GitHub 仓库变量里设为 `true`（只收 `true` / `false`），
+**再重新部署一次**才生效——实例的 `.env` 只在部署时生成。Vercel 上永远不出现表单。
+
+上线顺序：先在 Actions 里跑 `production-migrate.yml`（分支选本次的 PR 分支，`expected_head=0039_site_leads`，
+先 `dry_run` 再正式），再合并；合并部署后设变量、重新部署，核验：
+
+```bash
+curl -s https://grading-sg.duckdns.org/ | grep -o '"siteLeads": true'
+```
+
+然后在页面上各提交一次两种申请，到运维页确认能看到、能改状态、能删除。关掉：变量设回 `false` 再部署，
+表单消失、数据保留；有数据时不做数据库降级（0039 会拒绝）。
+
+本地试：`SITE_LEADS_ENABLED=true` 起服务，打开 `/`。限流与保留期可用 `SITE_LEADS_PER_IP_HOURLY`
+`SITE_LEADS_PER_IP_DAILY` `SITE_LEADS_DAILY_LIMIT` `SITE_LEADS_RETENTION_DAYS` 调。
+
+**评分输出观测**（2026-10-19，`docs/评分输出预算与截断恢复改造方案.md` P1）：每次模型应答记结束原因与推理
+token，运行身份写着「不思考」而模型在思考时，本篇失败（`PROVIDER_THINKING_NOT_DISABLED`），同一任务里还没开始的
+材料一并取消。没有新开关，上线即生效。
+
+上线顺序：先在 Actions 里跑 `production-migrate.yml`（分支选本次的 PR 分支，
+`expected_head=0040_provider_output_observations`，先 `dry_run` 再正式），再合并。0040 只给 `scoring_runs`
+与 `ai_usage_ledger` 加两列（默认 0），表级授权已覆盖，不需要另外授权。下一次真实评分后核验：
+
+```bash
+ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 1h worker | grep " llm_call " | tail -5'
+```
+
+每行末尾应有 `finish_reason=… prompt_tokens=… completion_tokens=… reasoning_tokens=… reasoning=none|reported|inferred`。
+运维页「平台运行状况 → batch_jobs」与组织视图「模型输出（近 24 小时）」按模型显示思考、截断与停下的份数，只观察，
+不影响「就绪」。回滚：回退代码即可，两列保留；有非零观测时 0040 拒绝降级，不要降级数据库。
+
+- 评分任务显示「已取消」，但没人点过取消；失败的那份写着「模型没有按运行设置关闭思考」，其余写着「已随任务停止，
+  未产生费用」：报错像是有人取消了任务，真正的原因是模型在身份声明「不思考」时仍在思考（2026-10-19 起的守卫，
+  见上一段）。确认：
+
+  ```bash
+  ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h worker | grep -E "batch_scoring_job_stopped| llm_call .*reasoning=(reported|inferred)" | tail -20'
+  ```
+
+  `reasoning=reported` 是厂商报告了推理 token 或返回了思考块；`inferred` 是由「合计 − 输入 − 可见输出」推算的
+  （厂商不单独报告时才用，连续两次才判定；Vertex 会报告，所以是 `reported`）。处理：换一个能关闭思考的模型（Vertex / Gemini API 上只有 2.5 Flash 系列
+  能关；OpenAI Responses 协议没有思考设置，推理模型只能换掉），或者把连接的思考设置改为开启并调大输出上限，然后
+  **新建**评分任务——改了连接配置，原任务的重试会被 `AI_CONNECTION_CONFIG_CHANGED` 拒绝。
+- BYOK 的 Gemini（Vertex / Gemini API）连接评分仍被截断，日志里每行都是 `reasoning=reported`、`reasoning_tokens`
+  几百到近两千，守卫却没拦：报错指向输出上限太小，真正的原因是这条连接**没配置思考**——2026-10-20 之前，
+  BYOK 连接没配置时在 Google 主机上按模型默认（开启）处理，不发 `reasoning_effort`，运行身份如实记成
+  `provider-default`，守卫只拦「身份说关、实际在想」。2026-10-20 起没配置按关闭处理。核对这次运行记的是哪种：
+
+  ```bash
+  ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 1h worker | grep " llm_call " | tail -3'
+  ```
+
+  新版本下 2.5 Flash 应是 `reasoning_tokens=0 reasoning=none`；若仍有推理，任务会以
+  `PROVIDER_THINKING_NOT_DISABLED` 停下（Vertex 不认关闭参数），这时只能换模型或调大输出上限。
+- Vertex 上的 Gemini 2.5 Flash 评分全部失败，错误码 `PROVIDER_INVALID_REQUEST`，`llm_call_failed` 行尾
+  `provider_message="Expected 'reasoning_effort' to be one of: 'high', 'low', 'max', 'medium', 'minimal'; found 'none'."`：
+  报错像是请求参数写错了（确实如此），真正的原因是 2026-10-16 起按 Gemini API 的文档给 Google 主机发
+  `reasoning_effort: "none"`，而 Vertex 不收 `none`（2026-10-20 生产 48 次请求全被拒，被拒的请求不产生 token）。
+  2026-10-20 起 Vertex 改发 `extra_body.google.thinking_config.thinking_budget=0`。核对线上版本发的是哪种：
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-worker-1 python -c "from backend.app.services.llm.thinking_params import thinking_request_fields as f; print(f(\"https://aiplatform.googleapis.com/v1/x\", \"google/gemini-2.5-flash\", \"none\"))"'
+  ```
+
+  应输出 `{'extra_body': {'google': {'thinking_config': {'thinking_budget': 0}}}}`。若 Vertex 连这个也拒，
+  照样是 `PROVIDER_INVALID_REQUEST` 且不花钱；若它收下却仍在思考，P1 守卫会以 `PROVIDER_THINKING_NOT_DISABLED` 停下。
+- CI 的 `docker-compose-smoke` 偶尔在「Verify the workbench ships inside the image」以退出码 23 失败，
+  重跑又过了：报错指向 curl（写入失败），真正的原因是脚本里的 `curl … | grep -q`——`pipefail` 下
+  grep 一匹配就退出，curl 还在写就收到断开的管道。这一步已改成先 `--output` 存文件再 `grep`；
+  以后在 CI 脚本里匹配命令输出，别把 `grep -q` 接在管道末尾（2026-10-18，PR #40）。
+- 评分工作区里改分点「保存」没反应（2026-10-19 之前的版本）：报错像是按钮坏了，真正的原因是这一项
+  `auto_score_status` 为 `invalid` / `blocked`（AI 没评出有效结果，例如模型输出被截断），普通改分按规则
+  被拒，提示却显示在评分表最底部。现在这种项不再显示「改分」，直接提示去评分进度页「重试失败项」。
+
+  复现 / 症状：app 日志里有 `PATCH /api/score-items/<评分项 ID> … 400`：
+
+  ```bash
+  ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h app | grep "PATCH /api/score-items"'
+  ```
+
+  诊断（只读，查完回滚，不打印学生信息；ID 取自上面那行或浏览器开发者工具）：
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_score_item <评分项 ID>'
+  ```
+
+  输出里 `checks` 说明改分会被哪道检查拒绝（`ordinary_override` 是 AI 结果无效、`batch_writable` 是批次
+  已归档、`frozen_policy` 是旧版本评分），`batch_jobs` 给出这份材料的评分任务与失败码，`next_step` 是
+  该怎么做。AI 结果无效时到评分进度页「重试失败项」（会真实调用模型）；连接配置改过、重试被拒时为这份
+  材料新建评分任务。
+
+  修复后的核验：打开这份材料的评分工作区，无效项显示「AI 没有评出这一项的有效结果，不能直接改分」与
+  「重试失败项」链接、没有「改分」按钮，两个确认按钮禁用；正常项改分时故意填超出满分的分数，「保存」
+  旁边出现中文提示。发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`，无迁移。
+- 宣传页上没有申请表单，接口却能提交成功：报错像是前端没部署新版本，真正的原因是开关只在 FastAPI
+  渲染入口页时下发。依次查：页面源码里有没有 `"siteLeads": true`；实例 `.env` 里有没有
+  `SITE_LEADS_ENABLED='true'`（设完变量是否重新部署过）；访问的是不是 Vercel 地址（那里永远没有）。
+- 子页预约区一直是「发邮件预约」，宣传页却有表单：报错指向子页组件，真正的原因是入口 HTML 缺了
+  `<!-- PGS_CLIENT_CONFIG -->` 标记，FastAPI 无处注入。`build_web_static.py` 现在会拦下缺标记的产物；
+  手改 `frontend/workbench/site/**/index.html` 时别删它。
+- 访客说提交提示「太频繁」：同一来源每小时 5 次、每天 20 次（同一办公网出口算一个来源）。日志查
+  `site_lead_rejected reason=per_ip_hourly`；全站当天超过 300 条会有 WARNING `site_lead_daily_limit_reached`。
+  日志里只有申请 ID 与类型，没有邮箱。
+
+- 本地 `public/index.html` 里找不到 `landingMotion`、Lightsail 上宣传页是正常动效：这是预期，
+  不是没生效——只有 Vercel 的部署工作区里才有这个值。核对 Vercel 时看线上页面源码里有没有
+  `"landingMotion": "reduced"`。
+
+- 普通构建（不带 `--with-workbench`）报 `public/workbench/site/index.html 缺失`：报错指向组装
+  脚本，真正的原因是 `public/workbench/` 还是旧产物（宣传页之前构建的）。带 `--with-workbench`
+  重建一次；`public/workbench/site/` 是入口页的来源，不能当成多余目录删掉。
+- e2e 里点「探索更多」一直报 `element is outside of the viewport`：报错像是元素被遮住，
+  真正的原因是视口——箭头按原型压在首屏底部而不是视口底部，1280 宽时产品卡片换行到文案下方，
+  首屏比一屏高，箭头在折叠线下；它是固定定位，Playwright 也滚不动它。用 1440×900 这类首屏正好
+  一屏的视口。
 
 `/login`、`/register`、`/reset-password` 由工作台承接。**这三条不能只剩 404**：
 邮件里已经发出去的邀请与重置链接指向后两条，收件人不会重新拿到新链接。
@@ -956,7 +1139,17 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-10-16 | 生产容器与数据库查看 | 9.4 新增「看容器与数据库」：容器状态、资源占用、健康检查，以及在 app 容器里用 psql、包在只读事务里查库；新增排错：事务池上的会话级 `set` 残留到应用连接，worker 报 `ReadOnlySqlTransaction`。 |
+| 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 无新命令与开关；Vertex 接入说明按主机区分关闭写法与 `diagnose_llm` 预期；新增一条排错（Vertex 评分全部 400，真实原因是 `reasoning_effort` 不收 `none`）。 |
+| 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无新命令与开关；Vertex 接入说明改为「没配置也按关闭」；新增一条排错（BYOK Gemini 仍在思考、仍截断，真实原因是连接没配置思考）；更正「Vertex 不报告推理 token」的说法。 |
+| 2026-10-19 | 评分输出观测与思考一致性守卫（P1） | 新增「评分输出观测」：上线顺序（先迁移 0040 再合并）、日志字段、运维页观测与回滚；新增一条排错（任务显示「已取消」，真实原因是模型没按设置关闭思考）；截断排错改为直接看日志与 `scoring_runs` 两列，不再手算。`public/` 已重建。 |
+| 2026-10-19 | 无效评分项不给改分入口 | 新增一条排错（改分保存没反应，真实原因是该项 AI 评分无效、普通改分被拒）；处理方式为重试失败项。`public/` 已重建。 |
+| 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 新增一条排错（CI 冒烟偶发退出码 23，真实原因是 `curl | grep -q`，已改为先存文件再匹配）。切流量（S3）第一步已完成：`VERCEL_DEPLOY_ENABLED=false`，记下剩余步骤；宣传页动效区分随 Vercel 任务一起停用。首屏改动不涉及运维命令。`public/` 已重建。 |
+| 2026-10-18 | 官网申请落库 | 新增「官网申请」：开关、上线顺序（先迁移 0039 再合并，设变量后重新部署）、核验与关闭；三条排错（页面没表单、子页缺注入标记、提交太频繁）。 |
+| 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增一条排错（静态文件返回工作台 HTML，真实原因是 `.vercelignore` 按扩展名排除了 `*.svg`）；`.vercelignore` 末尾 `!/public/**` 重新包含静态产物。 |
+| 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增一条排错（拨测报首页 405，真实原因是页面路由不接 HEAD）；新增页面路由要用 `page_route`。`public/` 已重建（含 `favicon.svg` 与入口页的图标声明）。 |
+| 2026-10-17 | 宣传页成为首页 | “默认入口”改为宣传页 + `/about` + `/workbench/`；补本地预览方式（`cd frontend/workbench && npm run dev`）、宣传页动效按部署区分（Vercel 少动效、Lightsail 正常）与三条排错（普通构建报宣传页缺失、e2e 点不到「探索更多」、本地与 Lightsail 看不到 `landingMotion`）。生产 Caddy 的入口缓存规则加 `/about`。新增 `.coderabbit.yaml` 排除 `public/**`（构建产物把 PR 撑过 CodeRabbit 100 个文件的上限，整次评审被跳过）。`public/` 已重建。 |
+| 2026-10-16 | 生产容器与数据库查看 | 9.4 新增「看容器与数据库」：容器状态、资源占用、健康检查，以及在 app 容器里用 psql、包在只读事务里查库（2026-10-20 合入时补：Python 只读脚本经标准输入运行、不提交、查完回滚）；新增排错：事务池上的会话级 `set` 残留到应用连接，worker 报 `ReadOnlySqlTransaction`。 |
+| 2026-10-16 | Gemini 关闭思考与评分输出上限 | Google 主机关闭思考改发 `reasoning_effort: "none"`；默认输出上限 1200→2048、上下文窗口 8192→9040（输入预算不变），`llm_cache.PROMPT_VERSION=2026-10-16-1`；截断排错补上 Vertex/Gemini 的情况与用量账本的判断方法，Vertex 接入说明补思考一条；`diagnose_llm` 输出补 `reasoning_effort`。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | 厂商报“约束状态太多”时同一批自动改用精简 Schema 重发一次（日志 `rubric_ai_draft_schema_fallback`）；精简版去掉的约束在代码里补齐（扣分至少 0.01、来源必须在输入里真实存在）；请求被拒的提示不再猜“内容限制”；排错补上 T02 的真实原因，新增一条（精简格式也被拒）。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | 请求被拒时 `llm_call_failed` 行尾附 `provider_message`（脱敏、截断 300 字）；Google 数组错误体可解析，`provider_type` 取 `error.status`；说明里的密钥（含带引号的 `"api_key": "…"` 与 `AIza…` 形状）先遮蔽；起草的 HTTP 4xx 分“请求被拒”“连接被拒”两种提示，402 走额度提示，请求被拒引导重新起草而不是重试（重试原样重发冻结输入）；新增一条排错（某一批起草总被 400 拒绝），更新两条（Gemini 403、看厂商原文的方法）。 |
@@ -967,18 +1160,24 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增 9.4：实例准备、`.env` 生成、部署与回滚、切流量顺序和四条排错；新增 `GET /api/system/health`、`INLINE_JOB_RUN_ENABLED`、worker `--drain-seconds`；CI 新增 `production-config` 与默认关闭的 `deploy-lightsail-production`，Vercel 部署任务可用 `VERCEL_DEPLOY_ENABLED=false` 关闭。 |
 | 2026-10-10 | 发布 0035–0037 | 先迁移后合并；运行角色复验清单补 `work_runtime_state`、`ai_tasks`、`ai_task_items`，守护测试改为识别常量写法的授权。 |
 | 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 新增审查/结构识别任务与三个估算接口，三个旧接口 410；迁移 head → 0037；新增改契约版本后须重建 `public/` 等排查。 |
+| 2026-09-15 | AI 规则组上限与单条上限冲突 | 落实组/单条上限分离、中文校验及存量修复验证；生产执行结果见上线清单。 |
+| 2026-09-15 | AI 规则组上限修复部署验收 | e0dcb18 经完整 CI 34913724818 部署，线上检查 8/8；生产草稿由 draft.4 修复为 draft.5，15 个上限阻断消除，刷新后 21 条字段对照仅上限变化，审核状态仍为 17 已确认/4 待确认，未发布模板。 |
+| 2026-09-15 | 发布流程按人工步骤呈现 | 检查、提交审核、确认发布按阶段集中在第 3 步；沿用现有设计组件，后端状态机和生产模板状态不变。 |
+| 2026-09-15 | 发布流程引导生产验收 | 995da3a 经完整 CI 34919369965 部署，线上检查 8/8；Chrome 验证检查就绪提示及卡片内提交审核入口，未改变真实模板审核/发布状态。 |
+| 2026-09-14 | OpenRouter 规则起草错误处理 | 记录输出校验、错误分类、有限纠正和分项保留结果；未改变确认及发布边界。CI 验收等待确认成功提示后再查审核状态，不能以建议面板消失代替确认完成。 |
+| 2026-09-14 | OpenRouter 起草输出预算 | 依据生产 output_truncated 增加独立默认预算，保留显式限制和原有评分预算；需再次经完整 CI 发布验证。 |
+| 2026-09-14 | OpenRouter 起草执行时限 | 根据生产 60 秒硬超时调整 Vercel 上限至 300 秒，关闭未显式启用的额外推理并限制起草传输重试；无数据迁移。 |
+| 2026-09-14 | OpenRouter 数字错误码兼容 | 修复错误投影自身的 TypeError，保留数字码分类，忽略非标量诊断字段。 |
+| 2026-09-14 | OpenRouter 规则生成生产验收完成 | 最终 f350092 经 main CI 34819189045 全门禁部署；1934 项后端测试通过，生产健康/资源检查 8/8。生成链路 f453834 已实测 6/6 请求 200、40 条待确认建议；最终提交仅修复错误投影，保留页面建议，未确认或发布模板。详情见 docs/上线清单.md。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 本地后端 1911 passed，后续总分补充修复专项 10 passed；前端 176 passed、类型与接口快照通过；浏览器 139 passed、3 skipped。主线完整 CI 和 production 部署通过，线上健康与资源已验证；待登录后的合成流程，不降级数据库。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 新增复现、状态区分、确认回归及发布/回滚检查；实施与验证进行中，尚未发布。 |
+| 2026-09-11 | 平台模型配置默认折叠 | 验收：未配置显示完整表单；已配置刷新后显示摘要、展开入口与测试按钮，展开后可保存/停用；保存成功收起，失败保留表单，测试反馈在折叠状态可见。运行 `cd frontend/workbench && npm run test:unit && npm run typecheck`；根目录运行 `.venv/bin/python scripts/build_web_static.py --with-workbench` 重建提交产物。发布沿用 main CI 门禁；回滚撤销前端变更并重建产物，无数据库回退。未执行生产发布。 |
 | 2026-09-10 | 未配置模型的拦截修复 | 新增 §11.20（被静默弹回的排查顺序、模块级 ref 的测试污染）与 §11.21（能力表刷新时机表、反向的洞）。未运行生产操作。 |
 | 2026-09-10 | 按钮居中与文件选择框 | 新增 §11.18（视觉契约静默跳过）与 §11.19（同一视觉问题修三次的判断依据）。未运行生产操作。 |
 | 2026-09-10 | 复核进度条 | 无新命令；空批次不画进度条属预期，不是渲染失败。未运行生产操作。 |
 | 2026-09-10 | 工作区中栏三页签 | 新增 §11.17：发现项在哪看、「未计入」是什么意思、历史 run 为什么是空的。未运行生产操作。 |
 | 2026-09-10 | AI 起草闭环与旧入口清理 | 新增 §11.15（起草端点不落库，「什么都没发生」的排查顺序）与 §11.16（已下线入口的源码契约）。未运行生产操作。 |
 | 2026-09-10 | 复核表行内动作与验收数据竞争 | 新增 §11.13（用例抢同一行种子数据；「少一行」要先等目标行出现再数）与 §11.14（改种子要查数字断言）。未运行生产操作。 |
-| 2026-09-01 | 初始化三文档 | 汇总 SQLite/PostgreSQL/CLI/Compose/Vercel 启动、测试、诊断、批任务、备份恢复、发布和回滚步骤；未执行生产变更。 |
-| 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
-| 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
-| 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
 | 2026-09-10 | 弹窗可关闭与「验可见≠验可用」 | 新增 §11.8：覆盖层之下元素照样 visible，要用 click/fill 验可操作性。后续小节顺延编号。未运行生产操作。 |
 | 2026-09-09 | V3-4 与含迁移发布 | 新增 §11.9（本地绿是因为用了环境里的东西）与 §11.10（含迁移的发布顺序）。上线记录见 `docs/上线清单.md` §14。未运行生产操作。 |
 | 2026-09-09 | V3-3 发布区与验收排错 | 新增 §11.8：验收失败的三种常见误判（产物未重建、spec 被错误 project 捡走、选择器命中多个）。未运行生产操作。 |
@@ -988,17 +1187,11 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-09-08 | 入口切换上线与门禁修复 | 导出出口全量角色门控；取消应用内组织切换；旧 SPA 下线、`/register` `/reset-password` 由工作台承接；修 `MIGRATION_SEQUENCE` 过期与验收进程继承 `.env.local`。生产部署经 main 门禁执行。 |
 | 2026-09-08 | 运维脚本目标库守卫 | `backfill_export_events` 对非本地目标默认拒绝并要求显式确认；RUNBOOK 命令补 `DATABASE_URL`。`seed_dev` / `build_anchors` **未加同款守卫**：前者在 Docker 冒烟里于容器内执行，那里的库主机本就不是 localhost，照搬会打断一条正当流程。未运行生产变更。 |
 | 2026-09-08 | 阶段 6B、浏览器验收与合同门禁 | 旧导出日志补录入口、默认入口开关与常驻 `/legacy/`、Playwright 25 项验收接入 CI（前端 job 补装后端依赖）；覆盖 V03–V07/V09/V11/V12，V01/V02/V08/V10/V13 仍待补。补齐 §12.2 的类型与 OpenAPI 合同门禁（`api:dump` / `api:check` + 前端调用路径静态契约）。未运行生产操作。 |
+| 2026-09-07 | 前端 v2 计划审查 | 增加现有合同复查命令、15 项定向测试结果及后续浏览器/迁移验收要求；未运行生产操作，发布与回滚入口不变。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 同步计划 R1–R8/V01–V13、阶段退出条件、文档检查命令与导出扩展/兼容回退顺序；新增脚本和迁移明确为待实施，未运行生产操作。 |
-| 2026-09-11 | 平台模型配置默认折叠 | 验收：未配置显示完整表单；已配置刷新后显示摘要、展开入口与测试按钮，展开后可保存/停用；保存成功收起，失败保留表单，测试反馈在折叠状态可见。运行 `cd frontend/workbench && npm run test:unit && npm run typecheck`；根目录运行 `.venv/bin/python scripts/build_web_static.py --with-workbench` 重建提交产物。发布沿用 main CI 门禁；回滚撤销前端变更并重建产物，无数据库回退。未执行生产发布。 |
-| 2026-09-14 | OpenRouter 规则起草错误处理 | 记录输出校验、错误分类、有限纠正和分项保留结果；未改变确认及发布边界。CI 验收等待确认成功提示后再查审核状态，不能以建议面板消失代替确认完成。 |
-| 2026-09-14 | OpenRouter 起草输出预算 | 依据生产 output_truncated 增加独立默认预算，保留显式限制和原有评分预算；需再次经完整 CI 发布验证。 |
-| 2026-09-14 | OpenRouter 起草执行时限 | 根据生产 60 秒硬超时调整 Vercel 上限至 300 秒，关闭未显式启用的额外推理并限制起草传输重试；无数据迁移。 |
-| 2026-09-14 | OpenRouter 数字错误码兼容 | 修复错误投影自身的 TypeError，保留数字码分类，忽略非标量诊断字段。 |
-| 2026-09-14 | OpenRouter 规则生成生产验收完成 | 最终 f350092 经 main CI 34819189045 全门禁部署；1934 项后端测试通过，生产健康/资源检查 8/8。生成链路 f453834 已实测 6/6 请求 200、40 条待确认建议；最终提交仅修复错误投影，保留页面建议，未确认或发布模板。详情见 docs/上线清单.md。 |
-| 2026-09-15 | AI 规则组上限与单条上限冲突 | 落实组/单条上限分离、中文校验及存量修复验证；生产执行结果见上线清单。 |
-| 2026-09-15 | AI 规则组上限修复部署验收 | e0dcb18 经完整 CI 34913724818 部署，线上检查 8/8；生产草稿由 draft.4 修复为 draft.5，15 个上限阻断消除，刷新后 21 条字段对照仅上限变化，审核状态仍为 17 已确认/4 待确认，未发布模板。 |
-| 2026-09-15 | 发布流程按人工步骤呈现 | 检查、提交审核、确认发布按阶段集中在第 3 步；沿用现有设计组件，后端状态机和生产模板状态不变。 |
-| 2026-09-15 | 发布流程引导生产验收 | 995da3a 经完整 CI 34919369965 部署，线上检查 8/8；Chrome 验证检查就绪提示及卡片内提交审核入口，未改变真实模板审核/发布状态。 |
+| 2026-09-04 | 评分韧性、规则检查点与人工复核 | 增加 V4 上下文/Provider 故障诊断、规则与人工任务操作、0023 迁移/有损回退保护及进程内 circuit 的恢复边界。 |
+| 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 增加 metadata-only Langfuse v4 配置、Trace 验证、敏感内容事故处理和一键关闭 Exporter 回滚步骤。 |
+| 2026-09-01 | 初始化三文档 | 汇总 SQLite/PostgreSQL/CLI/Compose/Vercel 启动、测试、诊断、批任务、备份恢复、发布和回滚步骤；未执行生产变更。 |
 
 
 ### 2026-09-15 上传后解析衔接
@@ -1547,6 +1740,7 @@ npm --prefix frontend/workbench run api:generate
     这次的根因是 `PROVIDER_INVALID_REQUEST`：百炼 kimi-k3 拒绝 `top_p=1.0`。修复后，批次页会优先显示根因码。错误码不含厂商原文。2026-10-15 起，请求被拒（400/413/422 这类）的厂商说明会脱敏后附在 `llm_call_failed` 行尾（`provider_message`），先看日志；其他类型的错误仍不记说明，需要时用该连接发一个最小请求复现，只看状态码和错误体，不要写进日志或数据库。
 - **现象**：`RULE_EXECUTION_FAILED (exception_type=ValueError)`，或日志里出现 `did not contain text output`。新版本会显示 `PROVIDER_OUTPUT_TRUNCATED`。
   - 真正原因：推理模型把 `max_output_tokens` 全部用在了推理上。可以关闭思考（Chat 协议，连接选项设 `thinking_type=disabled`），也可以调大 `max_output_tokens` 和 `timeout_seconds`。保留推理时，kimi-k3 单条规则约 30 秒。
+  - **Vertex / Gemini 上，2026-10-16 之前 `thinking_type=disabled` 不生效。** 报错像输出上限太小，真正原因是 Google 的 OpenAI 兼容端点不认 `thinking` 字段，Gemini 2.5 Flash 一直在思考，思考 token 计入输出上限。判断方法：看用量账本 `ai_usage_ledger`，`total_tokens` 明显大于 `prompt_tokens + completion_tokens`，差值就是思考 token（10-16 那份论文：58,330 + 3,304，合计却是 98,552）。2026-10-19 起不用手算：`llm_call` 日志行带 `finish_reason` 与 `reasoning_tokens`，`scoring_runs` / `ai_usage_ledger` 有 `reasoning_tokens` 与 `truncated_count` 两列，任务页每篇用量后面直接显示「思考 / 截断」；身份声明不思考时，这种情况会报 `PROVIDER_THINKING_NOT_DISABLED` 而不是截断。2026-10-16 起，Google 主机关闭思考不再发 `thinking` 字段：Gemini API 发 `reasoning_effort: "none"`；Vertex 不收 `none`（会 400，见本手册「Vertex 上的 Gemini 2.5 Flash 评分全部失败」一条），2026-10-20 起改发 `extra_body.google.thinking_config.thinking_budget=0`。只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，只能靠输出上限（默认 2048）兜底，或给连接设更大的 `max_tokens`。调大连接的 `max_tokens` 会挤掉证据预算（输入预算 = `SCORING_CONTEXT_WINDOW_TOKENS` − 输出上限 − 安全余量），而且改了连接配置的旧评分任务会报 `AI_CONNECTION_CONFIG_CHANGED`，要新建任务。
 - **现象**：改完连接配置后重试，材料立刻失败。旧版本显示 `scoring_failure (exception_type=ValueError)`，新版本显示 `AI_CONNECTION_CONFIG_CHANGED`。
   - 报错指向：评分执行。
   - 真正原因：批次创建时冻结了连接快照，连接配置变了，评分就拒绝执行；这是有意的保护。正规做法是新建评分任务并重新上传材料。只有确认是同一连接、同一密钥，且变更是有意为之时，才在库里更新该批次的 `ai_connection_snapshot`，并写一条审计。
@@ -1853,6 +2047,11 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 | API Key | Vertex AI express 模式的 API Key（`AQ.` 开头） |
 
 - Key 由系统放在 `x-goog-api-key` 头里发送，不用 Bearer；其它 OpenAI 兼容服务（包括 Gemini API 的 `generativelanguage.googleapis.com`）仍用 Bearer。
+- 思考：连接配置为关闭（`thinking_type=disabled`）或没配置（2026-10-20 起）时，按型号区分：
+  - Gemini 2.5 Flash 系列（含 Flash-Lite 与预览版）：Vertex 上发 `extra_body.google.thinking_config.thinking_budget=0`（2026-10-20 起；Vertex 的 `reasoning_effort` 不收 `none`），Gemini API 上发 `reasoning_effort: "none"`；运行身份都记 `none`；
+  - 2.5 Pro、Gemini 3 等关不掉思考的型号不发参数，运行身份记 `provider-default`（思考开启），只能靠输出上限兜底。
+
+  全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE` 只作用于平台模型，BYOK 连接看自己的配置。`diagnose_llm` 按平台模型（`OPENAI_COMPATIBLE_MODEL`）拼请求：Vertex 上的 2.5 Flash 输出里 `thinking_config` 为 `{"thinking_budget": 0}`、另两项为 `null`；Gemini API 上 `reasoning_effort` 为 `"none"`；关不掉的型号三者都为 `null`。
 - 学生论文会发给 Google：项目要绑定结算账号，按付费条款处理数据。
 - 换模型会改变评分结果，正式使用前按 §15 重新锚定 QWK（需要维护者授权真实调用与预算）。
 

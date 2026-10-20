@@ -1,0 +1,8 @@
+# CodeRabbit 评审配置。
+#
+# public/ 是 scripts/build_web_static.py 的构建产物（带指纹的 JS/CSS 与入口页），
+# 由 CI 的漂移门禁核对，不需要人或机器逐行评审。前端改动一次就会让它换掉几十个
+# 文件，PR 超过 CodeRabbit 100 个文件的上限后整次评审被跳过（PR #35）。
+reviews:
+  path_filters:
+    - "!public/**"

@@ -26,6 +26,7 @@ from backend.app.api.routes import papers
 from backend.app.api.routes import release_gates
 from backend.app.api.routes import rubrics
 from backend.app.api.routes import scoring
+from backend.app.api.routes import site
 from backend.app.api.routes import system
 from backend.app.api.routes import submissions_v2
 from backend.app.core.config import settings
@@ -48,17 +49,18 @@ async def lifespan(app):
     yield
 
 
-def _inject_client_config(html: str) -> str:
+def _inject_client_config(html: str, extra: dict | None = None) -> str:
     """Inject the served API prefix into a browser entrypoint.
 
     The path comes from the running service configuration; the frontend offers
     no editable entry for it. JSON encoding keeps special characters in the
     configuration from breaking out of the page's script context. Both the
     legacy SPA and the v2 workbench read the same ``window.__PGS_CONFIG__``.
+    ``extra`` carries page-specific switches (the product site's lead forms).
     """
 
     client_config = json.dumps(
-        {"apiBase": settings.API_PREFIX.rstrip("/")}, ensure_ascii=False
+        {"apiBase": settings.API_PREFIX.rstrip("/"), **(extra or {})}, ensure_ascii=False
     ).replace("</", "<\\/")
     return html.replace(
         "<!-- PGS_CLIENT_CONFIG -->",
@@ -142,10 +144,21 @@ def create_app():
     )
     app.include_router(exports.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(system.router, prefix=settings.API_PREFIX)
+    # 官网申请：公开提交不登录，管理接口在路由里逐个校验平台管理员。
+    app.include_router(site.router, prefix=settings.API_PREFIX)
     app.include_router(calibration.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(assistant.router, prefix=settings.API_PREFIX, dependencies=guarded)
 
     repo_root = Path(__file__).resolve().parents[2]
+
+    def page_route(path: str):
+        """登记一个浏览器页面：GET 之外也接 HEAD。
+
+        FastAPI 的 `app.get` 只登记 GET（Starlette 的 Route 会自动补 HEAD，FastAPI 的
+        APIRoute 不会），`HEAD /` 于是得到 405。默认用 HEAD 的拨测会把正常的首页判成
+        故障，而 Vercel 静态托管同一批页面时 HEAD 一直是 200——两个宿主不一致。
+        """
+        return app.api_route(path, methods=["GET", "HEAD"], include_in_schema=False)
 
     # v2 评审工作台（计划 §8.3）：新页统一挂在 /workbench/ 下，与旧 SPA 并存。
     # 托管的是 scripts/build_web_static.py 的统一组装产物，而非 Vite 源码目录。
@@ -159,8 +172,8 @@ def create_app():
             name="workbench-assets",
         )
 
-        @app.get("/workbench", include_in_schema=False)
-        @app.get("/workbench/{path:path}", include_in_schema=False)
+        @page_route("/workbench")
+        @page_route("/workbench/{path:path}")
         def workbench_app(path: str = ""):
             # 产物根目录下的真实文件先按文件返回（字体许可证就在这里）。SIL OFL
             # 1.1 要求许可证随字体分发；把它交给 SPA 回退，取到的会是一份 HTML，
@@ -178,24 +191,61 @@ def create_app():
                 )
             )
 
-    # 旧 SPA 已下线（用户决定，2026-09-08）：根路径直接给工作台，不再保留
-    # `/legacy/` 与 WORKBENCH_DEFAULT_ENTRY 开关。
+    # 根路径是宣传页、`/about` 是官网子页（用户决定，2026-10-17）；两张页与
+    # 工作台出自同一次构建，来源在 public/workbench/site/。产物里没有宣传页时
+    # （只组装过旧版本的工作台），根路径回落工作台，不让首页变成 404。
+    #
+    # 已登录的人由宣传页自己查会话后跳工作台；这里不读 Cookie，Vercel 静态托管
+    # 的 `/` 同样不经过 Python，两个宿主行为一致。
+    site_pages = {
+        "/": workbench_dir / "site" / "index.html",
+        "/about": workbench_dir / "site" / "about" / "index.html",
+    }
+    has_site = all(page.is_file() for page in site_pages.values())
+    if has_site:
+
+        def _site_page(page: Path):
+            def serve():
+                # 申请表单只在开关打开的宿主上出现；每次请求读开关，改环境变量重启即生效。
+                extra = (
+                    {
+                        "siteLeads": True,
+                        "siteLeadsRetentionDays": settings.SITE_LEADS_RETENTION_DAYS,
+                    }
+                    if settings.SITE_LEADS_ENABLED
+                    else None
+                )
+                return HTMLResponse(
+                    _inject_client_config(page.read_text(encoding="utf-8"), extra)
+                )
+
+            return serve
+
+        page_route("/")(_site_page(site_pages["/"]))
+        about = _site_page(site_pages["/about"])
+        page_route("/about")(about)
+        page_route("/about/")(about)
+
+    # 旧 SPA 已下线（用户决定，2026-09-08），不再保留 `/legacy/` 与
+    # WORKBENCH_DEFAULT_ENTRY 开关。
     #
     # `/login` `/register` `/reset-password` 交给工作台的同一份 index.html：
     # 邮件里已经发出去的邀请与重置链接指向这两条路由，收件人不会重新拿到新
     # 链接，不接就等于把所有在途邀请作废，而他们只会看到 404。
     if (workbench_dir / "index.html").is_file():
 
-        @app.get("/", include_in_schema=False)
-        @app.get("/login", include_in_schema=False)
-        @app.get("/register", include_in_schema=False)
-        @app.get("/reset-password", include_in_schema=False)
         def workbench_entry():
             return HTMLResponse(
                 _inject_client_config(
                     (workbench_dir / "index.html").read_text(encoding="utf-8")
                 )
             )
+
+        entry_paths = ["/login", "/register", "/reset-password"]
+        if not has_site:
+            entry_paths.insert(0, "/")
+        for entry_path in entry_paths:
+            page_route(entry_path)(workbench_entry)
 
     return app
 

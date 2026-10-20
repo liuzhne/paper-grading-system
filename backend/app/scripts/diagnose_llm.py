@@ -5,6 +5,12 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.services.llm.auth_headers import openai_auth_headers
+from backend.app.services.llm.thinking_params import effective_thinking_type
+from backend.app.services.llm.thinking_params import thinking_request_fields
+
+
+def _thinking_config(payload):
+    return ((payload.get("extra_body") or {}).get("google") or {}).get("thinking_config")
 
 
 def main():
@@ -22,9 +28,12 @@ def main():
         "temperature": 0.2,
         "max_tokens": 200,
     }
-    thinking_type = (settings.OPENAI_COMPATIBLE_THINKING_TYPE or "").strip()
-    if thinking_type:
-        payload["thinking"] = {"type": thinking_type}
+    # 与评分适配器同一套换算：Google 主机关闭思考发 reasoning_effort（Gemini API）或
+    # extra_body.google.thinking_config（Vertex），其余发 thinking 字段。
+    thinking_type = effective_thinking_type(
+        url, settings.OPENAI_COMPATIBLE_MODEL, settings.OPENAI_COMPATIBLE_THINKING_TYPE,
+    )
+    payload.update(thinking_request_fields(url, settings.OPENAI_COMPATIBLE_MODEL, thinking_type))
     if settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON:
         payload["response_format"] = {"type": "json_object"}
 
@@ -46,6 +55,8 @@ def main():
                 "url": url,
                 "model": settings.OPENAI_COMPATIBLE_MODEL,
                 "thinking": payload.get("thinking"),
+                "reasoning_effort": payload.get("reasoning_effort"),
+                "thinking_config": _thinking_config(payload),
                 "response_format": payload.get("response_format"),
                 "error_type": exc.__class__.__name__,
                 "error": str(exc),
@@ -61,6 +72,10 @@ def main():
         "url": url,
         "model": settings.OPENAI_COMPATIBLE_MODEL,
         "thinking": payload.get("thinking"),
+        # Google 主机关闭思考不发 thinking：Gemini API 发 reasoning_effort，Vertex 发
+        # extra_body.google.thinking_config，三者都报出来便于核对。
+        "reasoning_effort": payload.get("reasoning_effort"),
+        "thinking_config": _thinking_config(payload),
         "response_format": payload.get("response_format"),
         "status_code": response.status_code,
         "content_type": response.headers.get("content-type"),

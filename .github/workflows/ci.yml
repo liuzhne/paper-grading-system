@@ -188,7 +188,9 @@ jobs:
             0035_unified_work_queue \
             0036_ai_tasks \
             0037_ai_task_upload_scope \
-            0038_assistant_conversations
+            0038_assistant_conversations \
+            0039_site_leads \
+            0040_provider_output_observations
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
@@ -360,11 +362,16 @@ jobs:
       - name: Verify the workbench ships inside the image
         run: |
           set -euo pipefail
-          # 旧 SPA 已下线：根路径必须是工作台，`/legacy/` 必须没有页面。
+          # 根路径是宣传页（2026-10-17），`/legacy/` 必须没有页面。
           # 这条只在容器里才测得到——Vercel 走静态文件，本地走 uvicorn，
           # 三种托管各自可能只对一半。
+          #
+          # 一律先存文件再匹配：pipefail 下 `curl … | grep -q` 里 grep 一匹配就退出，
+          # curl 还没写完就收到断开的管道，以退出码 23 失败——时有时无，2026-10-18
+          # 在 PR #40 上踩到（与改动无关）。
           curl --fail --silent --show-error --insecure https://localhost/ \
-            | grep -q "/workbench/assets/"
+            --output pgs_docker_artifacts/root-index.html
+          grep -q "/workbench/assets/site-" pgs_docker_artifacts/root-index.html
           legacy="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --insecure https://localhost/legacy/)"
           if [[ "$legacy" != "404" ]]
@@ -374,12 +381,13 @@ jobs:
           fi
           curl --fail --silent --show-error --insecure \
             https://localhost/workbench/ \
-            | tee pgs_docker_artifacts/workbench-index.html \
-            | grep -q '/workbench/assets/'
+            --output pgs_docker_artifacts/workbench-index.html
+          grep -q '/workbench/assets/' pgs_docker_artifacts/workbench-index.html
           # 字体与许可证都要在镜像里，离线运行不访问 CDN。
           curl --fail --silent --show-error --insecure \
             https://localhost/workbench/LICENSE-IBM-Plex-Mono.txt \
-            | grep -qi 'SIL OPEN FONT LICENSE'
+            --output pgs_docker_artifacts/font-licence.txt
+          grep -qi 'SIL OPEN FONT LICENSE' pgs_docker_artifacts/font-licence.txt
           asset="$(grep -o '/workbench/assets/[A-Za-z0-9_.-]*\.js' \
             pgs_docker_artifacts/workbench-index.html | head -1)"
           # 匹配不到时 curl 会退化成请求根路径并通过——一个检不出自己失效的
@@ -495,6 +503,11 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - name: Pin the reduced-motion landing page for Vercel
+        # 用户决定（2026-10-17）：Vercel 上的宣传页固定为少动效版，Lightsail 保持正常
+        # 动效（仍照顾访客自己开的「减少动态效果」）。只改本次部署的工作区，
+        # 仓库里的 public/ 不带这个设置。必须在 vercel build 之前：它把 public/ 拷进产物。
+        run: python3 scripts/build_web_static.py --landing-motion reduced
       - name: Build the production deployment
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -629,6 +642,8 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
+          # 官网申请表单的开关（docs/官网申请落库改造方案.md）；没设即关闭。
+          SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

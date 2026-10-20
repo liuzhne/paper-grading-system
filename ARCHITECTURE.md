@@ -223,10 +223,19 @@ FastAPI 中数据路由受 `enforce_auth` 保护；auth、公开集成自检和�
 - **前端产物**：`frontend/workbench/`（Vite + Vue 3 + JS）经 `scripts/build_web_static.py --with-workbench`
   组装进 `public/`。FastAPI、Vercel、Docker 托管同一份产物；Docker 镜像 COPY `public/`（此前没有，
   容器里 `/workbench/*` 全是 404）。自托管 IBM Plex Mono 的 SIL OFL 许可证随产物发布并可经 HTTP 取到。
-- **入口（2026-09-08 起）**：`/` 直接是工作台，**旧 SPA 已下线**，`/legacy/` 返回 404，
+- **入口（2026-09-08 起）**：**旧 SPA 已下线**，`/legacy/` 返回 404，
   `WORKBENCH_DEFAULT_ENTRY` 开关取消。`/login` `/register` `/reset-password` 由工作台承接——
   邮件里已发出的邀请与重置链接指向后两条。**入口在两处生效**：FastAPI 的路由，以及
   `build_web_static.py` 写出的 `public/index.html`；Vercel 直接静态托管后者，只改前者在生产上无效。
+- **官网（2026-10-17 起）**：`/` 是宣传页、`/about#deploy|security|docs` 是官网子页，工作台的
+  规范地址是 `/workbench/`。源码在 `frontend/workbench/src/site/`，与工作台同一次 Vite 构建（多入口
+  `site/index.html`、`site/about/index.html`），资源同在 `/workbench/assets/`，宣传页不加载工作台主包。
+  组装：`public/workbench/site/**` → `public/index.html`、`public/about/index.html`；FastAPI 从同一来源
+  提供 `/` `/about` `/about/` 并注入 `API_PREFIX`，产物里没有宣传页时 `/` 回落工作台。宣传页挂载后请求
+  `/api/auth/me`，`auth_required` 为真且有用户时跳 `/workbench/`。官网不调用其他接口、不收集任何数据。
+  滚动动画是 `landing-motion.js` 的纯函数；`prefers-reduced-motion` 时改用 `stillProductStates` 的四张静态画面。
+  入口页全局配置 `landingMotion: "reduced"` 把宣传页固定为少动效版：只有 CI 的 Vercel 部署任务在构建前写入
+  （`build_web_static.py --landing-motion reduced`），仓库产物与 Lightsail 不带，即正常动效。
 - **状态机**：`0024` 落七态 CHECK 与 `state_version`；所有转移经 `services/batches/state`。
   归档/重开是显式端点，目标阶段由服务端从当前结果推导。**旧写入口（`PATCH /score-items`、
   `POST /scoring-runs/{id}/review`）与新端点共用归档守卫，改分同样 bump `review_revision`**——
@@ -580,7 +589,17 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 无模块与数据流变化：`thinking_params.thinking_request_fields` 在 Vertex 主机上关闭 2.5 Flash 的思考改发 `extra_body.google.thinking_config.thinking_budget=0`（Vertex 的 `reasoning_effort` 不收 `none`，生产 400）；Gemini API 仍发 `reasoning_effort: "none"`；身份值不变（`none`）。`diagnose_llm` 多报 `thinking_config`。无迁移。 |
+| 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无模块与数据流变化：`thinking_params.effective_thinking_type` 在 Google 主机上把空值（BYOK 连接没配置时工厂传空字符串）与显式关闭同样换算，2.5 Flash 系列发 `reasoning_effort: "none"`、身份记 `none`；关不掉的型号仍记 `provider-default`。`llm_cache.PROMPT_VERSION=2026-10-20-1`。无迁移。 |
+| 2026-10-19 | 评分输出观测与思考一致性守卫（输出预算方案 P1） | 新增迁移 0040（`scoring_runs`、`ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`）；三个适配器的计量回调多记推理 token 与结束原因，`llm/usage` 新增 `ThinkingConsistencyGuard` 与 `metered_call`，论文与技术方案的 LLM 运行时经它发出每次 Core 调用；规则任务的尝试次数改由执行日志如实记录；批量任务遇到 `PROVIDER_THINKING_NOT_DISABLED` 取消同任务未开始的条目；运维就绪的 `batch_jobs` 下新增只观察的 `model_output`。 |
+| 2026-10-19 | 无效评分项不给改分入口 | 无架构变化：GradeView 按 `ScoreItemRead.auto_score_status` 隐藏 `invalid` / `blocked` 项的改分入口并禁用确认，改分错误就近显示；后端接口与规则不变。新增只读运维脚本 `scripts/inspect_score_item`（复用改分接口的三道检查）。 |
+| 2026-10-18 | 首屏单一主操作、停用 Vercel 部署 | 无模块与数据流变化：宣传页在有申请表单时不渲染「申请试用」大按钮，`SiteHeader` 新增 `interceptTrial` / `trial` 事件；生产部署只剩 Lightsail（`deploy-vercel-production` 由仓库变量关闭，任务保留以便 S4 回滚）。 |
+| 2026-10-18 | 官网申请落库 | 新增 `api/routes/site` 与 `services/site_leads`、表 `site_leads`（迁移 0039，`pgs_app` 授权与 RLS）；官网入口页由 FastAPI 渲染时下发 `siteLeads` 开关；worker 巡检每天清理一次过期申请；运维页新增「官网申请」卡片。 |
+| 2026-10-17 | Vercel 上图标被当成工作台首页 | 无架构变化：`.vercelignore` 末尾重新包含 `public/`，Vercel 部署包与 Lightsail 镜像里的静态产物一致。 |
+| 2026-10-17 | 页面路由接 HEAD、补网站图标 | `main.py` 的浏览器页面（`/`、`/about`、三条邮件链接、`/workbench/*`）经 `page_route` 同时登记 GET 与 HEAD，`/api/*` 不变；图标 `favicon.svg` 随 Vite 产物发布在 `/workbench/favicon.svg`，入口页声明。无接口、表结构与迁移变化。 |
+| 2026-10-17 | 宣传页成为首页 | §7.2 新增“官网”：`/` 宣传页、`/about` 官网子页由同一次 Vite 构建产出（多入口），`build_web_static.py` 与 FastAPI 从 `public/workbench/site/` 取页；工作台规范地址 `/workbench/`，三条已发出链接的路由不变。后端只改静态入口路由，无接口、表结构与迁移变化。Vercel 部署任务在构建前把宣传页固定为少动效版，Lightsail 正常动效。 |
 | 2026-10-16 | 生产库人工查询 | 无架构变化：只补运维写法（在 app 容器里用 psql、包在只读事务里查库）。运行时连接仍是 `pgs_app` 经事务池（6543）；人工会话与应用共用这批后端连接，所以会话级设置会影响应用，这一点写进了 RUNBOOK 9.4。 |
+| 2026-10-16 | Gemini 关闭思考与评分输出上限 | 新增 `services/llm/thinking_params.py`：OpenAI 兼容适配器的四处请求与 `diagnose_llm` 共用，Google 主机（Vertex、Gemini API）关闭思考改发 `reasoning_effort: "none"`（仅 2.5 Flash 系列），其余主机照发 `thinking` 字段；`OpenAICompatibleChatScorer.thinking_type` 记换算后的值，运行身份如实。默认输出上限 1200→2048、上下文窗口 8192→9040（输入预算不变）；`llm_cache.PROMPT_VERSION=2026-10-16-1`。调用链与表结构不变，无迁移。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | `ai_rule_drafter._draft_deduction_rules_once` 在厂商报“约束状态太多”（`llm/errors.schema_too_complex`）时，同一批立即用 `_lean_draft_output_schema` 再发一次；精简版去掉的约束由 `validate_ai_rule_draft` 在返回后检查。单批元数据记 `output_schema`，合并后记 `lean_schema_batches`；起草版本升为 `rubric-rule-draft@9`。调用链与表结构不变，无迁移。 |
 | 2026-10-15 | 评分助手保存模型设置失败 | 无架构变化：前端 `api/client.js` 补齐 `put`，与后端 `PUT /api/assistant/settings` 对齐。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | `llm/errors` 兼容 Google 的数组错误体，类型取 `error.status`；`llm/call_log` 对请求范围的 HTTP 错误在 `llm_call_failed` 附脱敏后的厂商说明；`ai_tasks/execution` 在 `attempt_history` 记 `http_status`、`provider_code`、`provider_type`；起草 4xx 按错误范围分两种提示（直接抛出的 HTTP 错误也先经 `project_provider_error` 分类）；补记“重试复用冻结输入”的边界。调用链与表结构不变，无迁移。 |
@@ -590,15 +609,24 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 2026-10-13 | 部署平台迁移到 AWS Lightsail（S1） | 新增生产拓扑（Caddy + app + worker 单机，数据库与存储不变）；执行模型不变，生产的叫醒层改为 worker 循环；新增公开健康检查；无迁移。 |
 | 2026-10-10 | 发布 0035–0037 | 无架构变化；生产迁移工作流的运行角色复验覆盖 0035/0036 新表。 |
 | 2026-10-10 | AI 任务 C：规则审查、表格结构识别 | 四类 AI 操作全部改为任务；三个同步接口 410，估算拆为独立接口；0037 让导入前的结构识别任务不挂评分标准；新增 `on_task_success` 钩子与 `ai_tasks/provider_errors`。 |
+| 2026-09-15 | AI 规则组上限与单条上限冲突 | 落实组/单条上限分离、中文校验及存量修复验证；生产执行结果见上线清单。 |
+| 2026-09-15 | AI 规则组上限修复部署验收 | e0dcb18 经完整 CI 34913724818 部署，线上检查 8/8；生产草稿由 draft.4 修复为 draft.5，15 个上限阻断消除，刷新后 21 条字段对照仅上限变化，审核状态仍为 17 已确认/4 待确认，未发布模板。 |
+| 2026-09-15 | 发布流程按人工步骤呈现 | 检查、提交审核、确认发布按阶段集中在第 3 步；沿用现有设计组件，后端状态机和生产模板状态不变。 |
+| 2026-09-15 | 发布流程引导生产验收 | 995da3a 经完整 CI 34919369965 部署，线上检查 8/8；Chrome 验证检查就绪提示及卡片内提交审核入口，未改变真实模板审核/发布状态。 |
+| 2026-09-14 | OpenRouter 规则起草错误处理 | 记录输出校验、错误分类、有限纠正和分项保留结果；未改变确认及发布边界。CI 验收等待确认成功提示后再查审核状态，不能以建议面板消失代替确认完成。 |
+| 2026-09-14 | OpenRouter 起草输出预算 | 依据生产 output_truncated 增加独立默认预算，保留显式限制和原有评分预算；需再次经完整 CI 发布验证。 |
+| 2026-09-14 | OpenRouter 起草执行时限 | 根据生产 60 秒硬超时调整 Vercel 上限至 300 秒，关闭未显式启用的额外推理并限制起草传输重试；无数据迁移。 |
+| 2026-09-14 | OpenRouter 数字错误码兼容 | 修复错误投影自身的 TypeError，保留数字码分类，忽略非标量诊断字段。 |
+| 2026-09-14 | OpenRouter 规则生成生产验收完成 | 最终 f350092 经 main CI 34819189045 全门禁部署；1934 项后端测试通过，生产健康/资源检查 8/8。生成链路 f453834 已实测 6/6 请求 200、40 条待确认建议；最终提交仅修复错误投影，保留页面建议，未确认或发布模板。详情见 docs/上线清单.md。 |
 | 2026-09-13 | 评分标准条款确认与原型还原 | 完成原子编辑、完整来源复制、AI 追加、锁内内容摘要复核及结构阻断展示；本地 1911 项后端与 139 项浏览器回归通过，后续总分补充修复的 10 项专项测试通过。主线 95d189f 经完整 CI 部署；数据库与默认 legacy 不变，线上资源一致、健康 200、未登录审核接口 401，待登录后业务验收。 |
 | 2026-09-11 | 评分标准条款确认与原型还原 | 核对导入、规则审核、编译与发布边界；新增独立审核投影及带内容校验的确认入口，安全恢复读模型与评分语义不变。实施和验证进行中。 |
+| 2026-09-11 | 平台模型配置默认折叠 | 核对 OpsView：按接口 configured 判断，未配置展开，已配置默认收起（含停用配置）；保存成功收起，测试连接独立于表单。API、数据流、权限、迁移 head `0030_platform_llm_config` 与评分边界不变。 |
 | 2026-09-10 | 未配置模型的拦截修复 | 新增 §7.18：判定/拦截/留痕/呈现四分；`pendingBlock` 取代组件级 `dismissed`；能力表刷新时机列表。无后端改动。 |
 | 2026-09-10 | 按钮居中与文件选择框 | 新增 §7.17：`.btn` 的居中回到类本身，删两处局部补丁；文件框走 `::file-selector-button`。无后端改动。 |
 | 2026-09-10 | 复核进度条 | 复核进度补进度条，总数为 0 时不画。无后端改动。 |
 | 2026-09-10 | 工作区中栏三页签 | 新增 §7.16：篇章与格式发现接进工作区，数据复用已到手的 run 对象。无后端改动、无新请求。 |
 | 2026-09-10 | AI 起草落库闭环 | 新增 §7.15：起草端点不落库，确认后经 `recompile` 写入；完整 criteria 取自 `GET /rubrics/{id}` 而非安全读模型的执行草稿。无后端改动、无新迁移。 |
 | 2026-09-10 | 复核队列行内动作 | 新增 §7.14：逐项确认与批量采纳共用一条提交路径；「查看原文」带 `?paper=` 深链接，工作区校验材料归属后再选中。无后端改动。 |
-| 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
 | 2026-09-10 | 评分任务补「评分标准」列 | 新增 §7.13：outerjoin 带回标准名与版本，字段避开 ORM 关系属性同名。对齐设计稿。 |
 | 2026-09-10 | 弹窗可关闭与按钮居中 | 弹窗补 ✕ 与点链接自动收起（遮罩曾挡住配置表单）；`.btn` 用在 `<a>` 上补 display 修文字居中；验收改为验可点击而非可见。无后端改动。 |
 | 2026-09-09 | 模型未配置改为弹窗引导 | 新增 `ModelSetupDialog`（阻断式、不可关闭、按角色给出路），移除路由跳转与账户页横幅；判定与呈现分开。无后端改动。 |
@@ -613,20 +641,11 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 2026-09-09 | 平台默认模型改为管理员配置 | 新增 §7.3：模型解析顺序改为「BYOK → 平台配置表 → 抛错」，判断排到 mock 分支之前；`PLATFORM_MANAGED_LLM_ENABLED` 不再授权；加密用独立 AAD 域；会话由调用方传入。新增 `platform_llm_config` 表与迁移 0030，head 更新到 `0030_platform_llm_config`。评分语义与 GATE-03 边界不变。 |
 | 2026-09-09 | 三文档同步规则入库 | 把「每次方案落地同步 ARCHITECTURE/DECISIONS/RUNBOOK」写入 CLAUDE.md 并说明各自回答什么；核对 §7.2 与生产实际一致（head `0029`、旧 SPA 已下线、导出出口全量门控、新表运行角色授权）。架构边界不变。 |
 | 2026-09-08 | 前端 v2 阶段 0–6B 落地 | 新增 §7.2 落地事实：统一组装产物与三宿主托管、批次状态机与旧写入口共用守卫、结果选择器单一口径、证据投影与 no-store、导出三态、多组织切换清场、前端类型/合同/浏览器门禁。评分语义、`SCORING_ENGINE_MODE=legacy` 与 GATE-03 发布权限不变；迁移 head `0028_export_event_backfill`。|
-| 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 核对 LLM/Core/批任务边界；新增稳定 ProviderError 投影和 fail-open Langfuse v4/OpenTelemetry Trace。评分、缓存、证据校验与 Core 计分边界不变。 |
-| 2026-09-04 | 评分韧性、规则检查点与人工复核 | 核对 Profile/Core/LLM/持久化/API/迁移边界；新增 V4 预算化词法证据选择、规则失败隔离、0023 规则检查点与人工复核、进程内 Provider 保护。明确向量检索、进程中断续跑、DAG 并发和分布式配额仍未实现。 |
 | 2026-09-07 | 前端 v2 计划审查 | 核对 Core 证据、阻塞复核、直传、日志通道、静态部署与运维权限；补正 Excel 也写日志的事实。实现边界、迁移 head 与默认 legacy 不变，计划建议尚未实施。 |
 | 2026-09-07 | 前端 v2 八条审查意见落实 | 核对并同步修订计划的证据/复核/直传/日志/权限/部署/状态/验收边界；新增目标明确标为待实施，当前核心调用链、数据流、0023 head 和发布约束不变。 |
-| 2026-09-11 | 平台模型配置默认折叠 | 核对 OpsView：按接口 configured 判断，未配置展开，已配置默认收起（含停用配置）；保存成功收起，测试连接独立于表单。API、数据流、权限、迁移 head `0030_platform_llm_config` 与评分边界不变。 |
-| 2026-09-14 | OpenRouter 规则起草错误处理 | 记录输出校验、错误分类、有限纠正和分项保留结果；未改变确认及发布边界。CI 验收等待确认成功提示后再查审核状态，不能以建议面板消失代替确认完成。 |
-| 2026-09-14 | OpenRouter 起草输出预算 | 依据生产 output_truncated 增加独立默认预算，保留显式限制和原有评分预算；需再次经完整 CI 发布验证。 |
-| 2026-09-14 | OpenRouter 起草执行时限 | 根据生产 60 秒硬超时调整 Vercel 上限至 300 秒，关闭未显式启用的额外推理并限制起草传输重试；无数据迁移。 |
-| 2026-09-14 | OpenRouter 数字错误码兼容 | 修复错误投影自身的 TypeError，保留数字码分类，忽略非标量诊断字段。 |
-| 2026-09-14 | OpenRouter 规则生成生产验收完成 | 最终 f350092 经 main CI 34819189045 全门禁部署；1934 项后端测试通过，生产健康/资源检查 8/8。生成链路 f453834 已实测 6/6 请求 200、40 条待确认建议；最终提交仅修复错误投影，保留页面建议，未确认或发布模板。详情见 docs/上线清单.md。 |
-| 2026-09-15 | AI 规则组上限与单条上限冲突 | 落实组/单条上限分离、中文校验及存量修复验证；生产执行结果见上线清单。 |
-| 2026-09-15 | AI 规则组上限修复部署验收 | e0dcb18 经完整 CI 34913724818 部署，线上检查 8/8；生产草稿由 draft.4 修复为 draft.5，15 个上限阻断消除，刷新后 21 条字段对照仅上限变化，审核状态仍为 17 已确认/4 待确认，未发布模板。 |
-| 2026-09-15 | 发布流程按人工步骤呈现 | 检查、提交审核、确认发布按阶段集中在第 3 步；沿用现有设计组件，后端状态机和生产模板状态不变。 |
-| 2026-09-15 | 发布流程引导生产验收 | 995da3a 经完整 CI 34919369965 部署，线上检查 8/8；Chrome 验证检查就绪提示及卡片内提交审核入口，未改变真实模板审核/发布状态。 |
+| 2026-09-04 | 评分韧性、规则检查点与人工复核 | 核对 Profile/Core/LLM/持久化/API/迁移边界；新增 V4 预算化词法证据选择、规则失败隔离、0023 规则检查点与人工复核、进程内 Provider 保护。明确向量检索、进程中断续跑、DAG 并发和分布式配额仍未实现。 |
+| 2026-09-03 | P0 Provider 错误与 Langfuse 可观测性 | 核对 LLM/Core/批任务边界；新增稳定 ProviderError 投影和 fail-open Langfuse v4/OpenTelemetry Trace。评分、缓存、证据校验与 Core 计分边界不变。 |
+| 2026-09-01 | 初始化三文档 | 按当前 v1/v2 双链路、AtomicRule Core、Profile、0022 多租户/BYOK、可恢复批任务、Local/Supabase 存储和 CI/Vercel 发布链路建立事实基线。 |
 
 
 ### 2026-09-15 上传后解析衔接
@@ -923,6 +942,23 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 合并后的规则只引用真实原文编号或评分项字段，不再残留只在单批内部有意义的位置指针。
 
 维护记录：2026-09-30 · AI 起草来源引用归一化：起草 prompt 升为 `rubric-rule-draft@8`，全局缓存版本升为 `2026-09-30-1`；接口和数据库不变，head `0032_single_active_ai_connection` 不变。
+
+### 2026-10-16 Gemini 关闭思考与评分输出上限
+
+连接的 `thinking_type` 沿用智谱写法 `thinking: {"type": …}`。Google 的 OpenAI 兼容端点不认这个字段，会静默忽略，Gemini 2.5 Flash 于是一直按默认开着思考。`services/llm/thinking_params.py` 按主机换算：
+
+| 主机 | 连接配置 | 发出的字段 | 运行身份 `thinking.type` |
+|---|---|---|---|
+| Gemini API（`generativelanguage.googleapis.com`） | 关闭（`disabled` 等）或没配置（2026-10-20 起），模型是 2.5 Flash 系列 | `reasoning_effort: "none"` | `none`（关闭） |
+| Vertex（`aiplatform.googleapis.com` 与区域端点） | 同上 | `extra_body: {google: {thinking_config: {thinking_budget: 0}}}`（2026-10-20 起；Vertex 的 `reasoning_effort` 不收 `none`） | `none`（关闭） |
+| 同上 | 关闭或没配置，但模型关不掉思考（2.5 Pro、Gemini 3） | 不发 | `provider-default`（开启） |
+| 其他主机 | 原样 | `thinking: {"type": …}` | 原样 |
+
+`OpenAICompatibleChatScorer` 在初始化时把 `thinking_type` 换算成身份值；`score_criterion`、`score_envelope`、`_post_core_request`、`complete_json` 与 `scripts/diagnose_llm.py` 都经 `thinking_request_fields` 拼请求体；`diagnose_llm` 的输出同时报告 `thinking` 与 `reasoning_effort`。身份变了，决策账本与 Core 缓存就不会把开着思考时的旧判定当作同一请求复用；旧路径的 L0 缓存键不含思考与输出上限，所以 `llm_cache.PROMPT_VERSION` 升为 `2026-10-16-1`。
+
+默认输出上限 `OPENAI_COMPATIBLE_MAX_TOKENS` 1200→2048，给关不掉思考的模型留余量。评分的输入预算是 `SCORING_CONTEXT_WINDOW_TOKENS − 输出上限 − SCORING_CONTEXT_SAFETY_MARGIN_TOKENS`，所以窗口同步 8192→9040，OpenAI 兼容连接的输入预算保持 5968、证据选择与请求体大小不变；OpenAI Responses（1200）与 Claude（4096）的输入预算各多 848。
+
+维护记录：2026-10-16 · Gemini 关闭思考与评分输出上限：接口、数据库不变，head `0038_assistant_conversations` 不变。
 
 ### 2026-10-16 起草 Schema 太复杂时改用精简 Schema
 
@@ -1326,3 +1362,79 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 核对 `init_database → Alembic env.py → SQLAlchemy/psycopg` 的 owner 连接链路。Alembic 写入 ConfigParser 前将 `%` 转义为 `%%`，读取后仍使用原始 URL 编码，支持 owner 密码包含特殊字符。初始化入口的数据库异常只报告异常类别和 SQLSTATE；迁移子进程输出由入口捕获，失败只报告退出码，不向终端转发可能含连接串或角色密码的 traceback。连接来源仍为隐藏输入或环境变量，现有五步初始化、授权/RLS 策略、head `0038_assistant_conversations` 与评分边界不变。
 
 维护记录：2026-10-13 · 初始化连接串编码与凭据保护：核对连接串编码、失败输出与凭据边界；不新增迁移。
+
+### 2026-10-18 官网试用与部署评估申请
+
+方案：`docs/官网申请落库改造方案.md`（Q1–Q8 已确认）。
+
+调用链：
+
+```
+宣传页首屏 / 子页预约区（src/site，fetch）──POST /api/site/leads──▶ api/routes/site.submit_site_lead
+   ├─ SITE_LEADS_ENABLED 为假 → 404 site_leads_disabled
+   ├─ 蜜罐字段非空 → 202，静默丢弃
+   ├─ 字段校验（逐字段中文提示，422）
+   └─ services/site_leads.submit_lead：按 ip_hash 每小时 / 每天限流 → 30 天内同类型同邮箱合并 → 全站日上限 → 写 site_leads → 202
+运维页 SiteLeadsCard（平台管理员）──GET / PATCH / DELETE /api/site/leads…──▶ 列表、改状态（handled_by / handled_at）、删除；改状态与删除写 audit_logs（不含邮箱）
+worker run_global_sweep ──▶ site_leads.purge_expired_if_due（work_runtime_state 的 site_leads_purge，每天最多一次）
+```
+
+- 路由挂在 `guarded` 之外（公开提交不登录、不带组织上下文）；三个管理接口逐个 `current_principal` + `require_platform_admin`。
+- 页面怎么知道开没开：FastAPI 渲染 `/`、`/about` 时，若开关为真，往 `window.__PGS_CONFIG__` 加 `siteLeads` 与 `siteLeadsRetentionDays`。Vercel 的入口页是静态文件，拿不到，表单不出现（它连旧库）。两张官网入口 HTML 都带 `PGS_CLIENT_CONFIG` 标记，`build_web_static.py` 构建时检查。
+- 持久化：`site_leads` 是平台级表（不挂组织）；原始 IP 不落库，`ip_hash = HMAC-SHA256(AUTH_SECRET, IP)`；保留期 `SITE_LEADS_RETENTION_DAYS`（默认 180）按 `last_submitted_at` 计。日志与审计不记邮箱。
+- 生产开关：GitHub 仓库变量 `SITE_LEADS_ENABLED` → 部署任务 → `production_env.py` 写进实例 `.env`；没设即关闭。
+
+维护记录：2026-10-18 · 官网申请落库：新增模块、表与调用链；head 升为 `0039_site_leads`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
+
+### 2026-10-19 评分输出观测与思考一致性守卫（输出预算方案 P1）
+
+方案：`docs/评分输出预算与截断恢复改造方案.md`（Q1–Q8 已确认，本节是 P1）。运行身份里的 `thinking.enabled=false` 是声明；这里补上观测，并在两者不一致时停下。
+
+观测（每次应答，只有计数与结束原因）：
+
+```
+适配器 _post_with_retry ──usage_of=_observed_usage_from_chat / _observed_usage_from_responses / observed_usage_from_messages──▶
+  llm/usage.observed_usage：输入、可见输出、合计、推理 token（厂商报告优先，否则 合计 − 输入 − 可见输出 并标 inferred）、
+                           有无思考块 / reasoning_content、finish_reason、是否截断
+transport.post_with_retry ──▶ call_log「llm_call … finish_reason= prompt_tokens= completion_tokens= reasoning_tokens= reasoning=」
+                          ──▶ UsageMeter：reasoning_tokens、reasoning_requests、inferred_reasoning_requests、truncated_count
+```
+
+适配器写进评分输出的 `output["usage"]` 不变（旧路径的缓存与原始输出不受影响），只有计量回调多带这些字段。
+
+守卫与停止（Core 规则评分）：
+
+```
+ThesisLLMRuntime._metered / TechnicalProposalLLMRuntime._score ──▶ llm/usage.metered_call(scorer, call, guard, thinking=信封 runtime_identity.provider.thinking)
+  ├─ 发送前：单篇输入上限（论文）→ ThinkingConsistencyGuard.before_call：已判定不一致则 ThinkingNotDisabledError(sent=False)，请求不发
+  ├─ 调用（成功或抛错都算用量差）→ on_usage(delta) → runtime.last_call_usage
+  └─ after_call：身份 enabled=false 且（厂商报告推理 / 有思考块，或连续两次推算出推理）→ ThinkingNotDisabledError(sent=True)，判定不采用
+rule_executor：_record_attempt → RuleCallJournal.provider_attempts（0 = 复用或没发出，1 = 发出）
+failures.project_rule_execution_failure → PROVIDER_THINKING_NOT_DISABLED（区分 decision discarded / request not sent）
+persistence：ScoringRun.reasoning_tokens / truncated_count ← 本篇用量差；RuleScoringTask.attempt_count ← 执行日志，max_attempts=1
+record_usage_ledger：BYOK 行同样写两列（平台模型的用量仍只在 scoring_runs）
+batch_scoring.jobs：_incomplete_scoring_error 遇到该码直接以它为根因；_finish_item 失败时
+  条目 telemetry 带本篇用量（prompt / completion / reasoning / truncated）；
+  码为 PROVIDER_THINKING_NOT_DISABLED → _stop_pending_items（同任务 pending → canceled，带同一错误码）→ _request_cancel → 任务收尾为 canceled
+```
+
+- 守卫一篇论文一个实例，跟着 LLM 运行时走；同一任务里正在评的其它几篇各自撞上自己的守卫。
+- 旧的未版本化兼容路径（`score_criterion`，`SCORING_ENGINE_MODE=legacy` 下未发布版本的评分标准）不经 `metered_call`，不受守卫约束，`scoring_runs` 的两列为 0；语义一致性检查（`analyze_semantic_coherence`）也直接调 scorer，不经守卫。
+- 运维就绪：`deployment/readiness._model_output_signal` 按 `scoring_runs` 近 24 小时按模型汇总推理与截断，并数 `PROVIDER_THINKING_NOT_DISABLED` 失败的条目；挂在 `signals.batch_jobs.model_output`，平台视图与组织视图（按组织过滤后再汇总）都有，**不参与** `batch_jobs.status` 与 `ready_for_production`。
+- 前端：`lib/score-jobs.itemUsageText` 在任务页每篇用量后加「思考 / 截断」；`modelOutputText` 供运维页两处显示。
+
+维护记录：2026-10-19 · 评分输出观测与思考一致性守卫：head 升为 `0040_provider_output_observations`；接口形状不变（就绪接口返回的是字典，OpenAPI 不变），`public/` 已重新组装。
+
+### 2026-10-20 Google 主机上连接没配置思考按关闭处理
+
+`llm/factory.get_llm_scorer` 给 BYOK 的 OpenAI 兼容连接传 `thinking_type=options.get("thinking_type", "")`：没配置就是空字符串，平台模型才用全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE`。`thinking_params.effective_thinking_type` 原来把 Google 主机上的空值换算成 `provider-default`（不发参数、按模型默认思考），现在与 `disabled` 等同：2.5 Flash 系列 → `none` 并发关闭参数（Gemini API 为 `reasoning_effort: "none"`；Vertex 为 `extra_body.google.thinking_config.thinking_budget=0`，见下一节），关不掉的型号 → `provider-default`。其他主机上的空值仍原样（不发非标准的 `thinking` 字段）。
+
+调用链与表结构不变。这类连接的运行身份从 `provider-default` 变为 `none`，决策账本与 Core 缓存按身份区分，不会复用开着思考时的判定；旧路径的 L0 缓存键不含思考，`llm_cache.PROMPT_VERSION` 升为 `2026-10-20-1`。连接快照不变，已有任务的重试照常允许。
+
+维护记录：2026-10-20 · Google 主机上连接没配置思考按关闭处理：接口、数据库不变，head `0040_provider_output_observations` 不变。
+
+### 2026-10-20 Vertex 关闭思考改发 thinking_budget 0
+
+`thinking_params.thinking_request_fields` 在 Google 主机上、对能关思考的 2.5 Flash 系列按主机分两种写法：Gemini API 发 `reasoning_effort: "none"`；Vertex 发 `{"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}`——原始 HTTP 请求体里就是顶层 `extra_body` 键（Vertex 文档的 curl 示例）。两种写法不混用。运行身份值（`none`）不变，`effective_thinking_type` 不变；`scripts/diagnose_llm` 的输出多一个 `thinking_config`。调用链与表结构不变。
+
+维护记录：2026-10-20 · Vertex 关闭思考改发 thinking_budget 0：接口、数据库不变，head `0040_provider_output_observations` 不变。

@@ -1092,10 +1092,22 @@ def _seed_connection(engine, *, connection_id, provider_type, status="active"):
         ))
         db.flush()
         # A row that references the connection must survive the SQLite table rebuild.
-        db.add(models.AIUsageLedger(
-            organization_id="org-claude", owner_id=user.id, ai_connection_id=connection_id,
-            provider_type=provider_type, model_name="fixture",
-        ))
+        # Raw SQL: the ORM model carries columns added by later migrations (0040).
+        db.execute(
+            text(
+                "INSERT INTO ai_usage_ledger (id, organization_id, owner_id, ai_connection_id,"
+                " provider_type, model_name, prompt_tokens, completion_tokens, total_tokens,"
+                " request_count, failure_count, created_at)"
+                " VALUES (:id, 'org-claude', :owner, :connection, :provider, 'fixture',"
+                " 0, 0, 0, 0, 0, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "id": "usage-" + connection_id,
+                "owner": user.id,
+                "connection": connection_id,
+                "provider": provider_type,
+            },
+        )
         db.commit()
 
 
@@ -1658,3 +1670,101 @@ def test_0038_refuses_to_downgrade_with_assistant_data(monkeypatch, tmp_path, ta
 
     with pytest.raises(RuntimeError, match=table):
         command.downgrade(config, "0037_ai_task_upload_scope")
+
+
+def test_0039_creates_site_leads_and_downgrades_when_empty(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "site-leads-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0039_site_leads")
+    engine = create_engine(url)
+    try:
+        assert "site_leads" in set(inspect(engine).get_table_names())
+        indexes = {index["name"] for index in inspect(engine).get_indexes("site_leads")}
+        assert {
+            "ix_site_leads_kind_email",
+            "ix_site_leads_ip_hash_submitted",
+            "ix_site_leads_status_submitted",
+        } <= indexes
+        command.downgrade(config, "0038_assistant_conversations")
+        assert "site_leads" not in set(inspect(engine).get_table_names())
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
+
+
+def test_0039_refuses_to_downgrade_with_site_leads(monkeypatch, tmp_path):
+    """访客的申请可能还没回复，不是缓存：有数据时拒绝降级。"""
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "site-leads-data.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0039_site_leads")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as db:
+            db.execute(text(
+                "INSERT INTO site_leads (id, kind, email, source_path, status, submit_count,"
+                " created_at, last_submitted_at)"
+                " VALUES ('l1', 'trial', 'a@b.cn', '/', 'new', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="site_leads"):
+        command.downgrade(config, "0038_assistant_conversations")
+
+
+def _seed_0040_run_observation(engine, *, table):
+    """一行带非零观测的 0040 数据：评分运行或用量账本。"""
+
+    with engine.begin() as db:
+        db.execute(text("UPDATE %s SET reasoning_tokens = 7" % table))
+
+
+def test_0040_adds_observation_columns_and_downgrades_when_all_zero(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "observations-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0039_site_leads")
+    engine = create_engine(url)
+    try:
+        _seed_connection(engine, connection_id="conn-0040", provider_type="openai_compatible")
+        command.upgrade(config, "0040_provider_output_observations")
+        for table in ("scoring_runs", "ai_usage_ledger"):
+            columns = {column["name"]: column for column in inspect(engine).get_columns(table)}
+            assert {"reasoning_tokens", "truncated_count"} <= set(columns)
+            assert columns["reasoning_tokens"]["nullable"] is False
+        with engine.connect() as db:
+            # 已有的用量行补 0，而不是 NULL。
+            assert db.execute(text(
+                "SELECT reasoning_tokens, truncated_count FROM ai_usage_ledger"
+            )).one() == (0, 0)
+        command.downgrade(config, "0039_site_leads")
+        assert "reasoning_tokens" not in {
+            column["name"] for column in inspect(engine).get_columns("ai_usage_ledger")
+        }
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
+
+
+def test_0040_refuses_to_downgrade_with_observations(monkeypatch, tmp_path):
+    """观测事后无法重建：有非零值时拒绝降级。"""
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "observations-data.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0039_site_leads")
+    engine = create_engine(url)
+    try:
+        _seed_connection(engine, connection_id="conn-0040", provider_type="openai_compatible")
+        command.upgrade(config, "0040_provider_output_observations")
+        _seed_0040_run_observation(engine, table="ai_usage_ledger")
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="ai_usage_ledger"):
+        command.downgrade(config, "0039_site_leads")

@@ -72,6 +72,10 @@ class ExecutionJournal(Protocol):
 
     ``reused`` marks a decision replayed from the ledger; ``group_call_id``
     links the tiers of a mutex group judged by one provider call.
+
+    A journal may also implement ``record_provider_attempt(*, rule_code, sent)``
+    (optional, looked up with ``getattr``): whether judging the rule actually
+    sent a provider request, so the rule task records real attempts.
     """
 
     def record_semantic_decision(

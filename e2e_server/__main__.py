@@ -59,6 +59,9 @@ def main() -> None:
             "LLM_PROVIDER": "mock",
             "SHEET_WRITER_PROVIDER": "mock",
             "LLM_DEBUG_LOG_ENABLED": "false",
+            # 官网申请表单只在鉴权后端打开：平台管理员要在运维页看到申请。默认后端
+            # 保持关闭，等于 Vercel 那种没开开关的宿主——宣传页上不出现表单。
+            "SITE_LEADS_ENABLED": "true" if with_auth else "false",
         }
     )
 

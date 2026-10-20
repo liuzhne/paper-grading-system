@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     BYOK_MASTER_KEY: Optional[str] = None
     BYOK_KEY_VERSION: int = 1
     AI_CONNECTION_RATE_LIMIT_PER_MINUTE: int = 20
+    # 官网试用与部署评估申请（docs/官网申请落库改造方案.md）。默认关闭：本地、CI 与
+    # 内网部署不收申请；生产（Lightsail）经 GitHub 仓库变量打开。Vercel 的首页是静态
+    # 文件，拿不到这个开关，表单自然不出现——它连的是切流量后要删除的旧库。
+    SITE_LEADS_ENABLED: bool = False
+    SITE_LEADS_RETENTION_DAYS: int = 180
+    SITE_LEADS_PER_IP_HOURLY: int = 5
+    SITE_LEADS_PER_IP_DAILY: int = 20
+    SITE_LEADS_DAILY_LIMIT: int = 300
     LLM_PROVIDER: str = "mock"
     # A protected multi-user deployment must not accidentally bill/expose work
     # through the deployment-wide key.  Set this only for a reviewed migration,
@@ -125,7 +133,9 @@ class Settings(BaseSettings):
     # Keep the serialized chat request below providers' HTTP body limit as well
     # as the model context window.  16k leaves room for JSON/chat framing on
     # providers such as Groq that reject an otherwise token-valid body with 413.
-    SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=8192, ge=1024)
+    # 输入预算 = 本值 − 输出上限 − 安全余量。2026-10-16 把 OpenAI 兼容的默认输出上限
+    # 1200 → 2048 时同步 8192 → 9040，输入预算保持 5968，送给模型的证据（与请求体大小）不变。
+    SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=9040, ge=1024)
     SCORING_CONTEXT_SAFETY_MARGIN_TOKENS: int = Field(default=1024, ge=0)
     SCORING_RULE_TASKS_ENABLED: bool = True
     # Rule-level decision ledger: reuse a validated semantic decision whose full
@@ -189,7 +199,9 @@ class Settings(BaseSettings):
     OPENAI_COMPATIBLE_MODEL: str = "glm-4.7-flash"
     OPENAI_COMPATIBLE_PROVIDER_NAME: str = "zhipu"
     OPENAI_COMPATIBLE_TIMEOUT_SECONDS: float = 60
-    OPENAI_COMPATIBLE_MAX_TOKENS: int = 1200
+    # 留给会思考的模型余量：2026-10-16 Gemini 2.5 Flash 的思考撑满 1200 被截断。上限只是封顶，
+    # 不是必然消耗；调整时要同步 SCORING_CONTEXT_WINDOW_TOKENS，否则会挤掉证据预算。
+    OPENAI_COMPATIBLE_MAX_TOKENS: int = 2048
     OPENAI_COMPATIBLE_MAX_RETRIES: int = 2
     OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON: bool = False
     OPENAI_COMPATIBLE_THINKING_TYPE: Optional[str] = "disabled"

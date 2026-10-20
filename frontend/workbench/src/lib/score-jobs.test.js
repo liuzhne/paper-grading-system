@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { compactTokens, finishedCount, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel, lastHeartbeat } from "./score-jobs.js";
+import { compactTokens, finishedCount, itemStatusLabel, itemUsageText, jobPercent, jobStatusLabel, lastHeartbeat, modelOutputText } from "./score-jobs.js";
 
 describe("score job presentation", () => {
   it("distinguishes a stale runner from ordinary running", () => {
@@ -34,6 +34,27 @@ describe("itemUsageText", () => {
   it("没有记录时不冒充 0", () => {
     expect(itemUsageText({ telemetry: { cache_hits: 0 } })).toBe("—");
     expect(itemUsageText({})).toBe("—");
+  });
+
+  it("有思考或截断时一并显示", () => {
+    expect(itemUsageText({ telemetry: { prompt_tokens: 58330, completion_tokens: 3304, reasoning_tokens: 36918, truncated_count: 13 } }))
+      .toBe("输入 5.8 万 / 输出 3304 · 思考 3.7 万 · 截断 13 次");
+  });
+});
+
+describe("modelOutputText", () => {
+  it("没有评分时直说", () => {
+    expect(modelOutputText({ status: "unavailable" })).toBe("近 24 小时无评分");
+    expect(modelOutputText(undefined)).toBe("近 24 小时无评分");
+  });
+
+  it("给出思考占输出的比例、截断与停下的材料", () => {
+    expect(modelOutputText({
+      status: "fail", runs: 1, completion_tokens: 3304, reasoning_tokens: 36918,
+      truncated_count: 13, thinking_mismatch_items: 1,
+    })).toBe("评分 1 次 · 思考 3.7 万（占输出 92%） · 截断 13 次 · 思考未关闭停下 1 份");
+    expect(modelOutputText({ status: "pass", runs: 4, completion_tokens: 900, reasoning_tokens: 0, truncated_count: 0 }))
+      .toBe("评分 4 次 · 无思考 · 截断 0 次");
   });
 });
 

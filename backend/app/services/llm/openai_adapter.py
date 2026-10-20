@@ -19,6 +19,7 @@ from backend.app.services.llm.legacy_prompts import score_schema as _score_schem
 from backend.app.services.llm.legacy_prompts import strip_json_fence as _strip_json_fence
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
+from backend.app.services.llm.usage import observed_usage
 
 
 class ResponsesJSONOutputError(ProviderJSONOutputError):
@@ -255,7 +256,7 @@ class OpenAIResponsesScorer(LLMScorer):
                 "max_output_tokens": payload.get("max_output_tokens"),
             },
             configured_retries=settings.OPENAI_MAX_RETRIES,
-            usage_of=_usage_from_responses,
+            usage_of=_observed_usage_from_responses,
             attempts_limit=attempts_limit,
             timeout_seconds=timeout_seconds,
             rate_limit_retries=rate_limit_retries,
@@ -301,6 +302,30 @@ def _usage_from_responses(data):
         "completion_tokens": usage.get("output_tokens"),
         "total_tokens": usage.get("total_tokens"),
     }
+
+
+def _observed_usage_from_responses(data):
+    """计量用：计费用量之外，再记推理 token 与结束原因（不含任何内容）。"""
+
+    data = data if isinstance(data, dict) else {}
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    details = usage.get("output_tokens_details")
+    incomplete = (data.get("incomplete_details") or {}).get("reason") if isinstance(
+        data.get("incomplete_details"), dict
+    ) else None
+    truncated = data.get("status") == "incomplete" and incomplete == "max_output_tokens"
+    output = data.get("output") if isinstance(data.get("output"), list) else []
+    return observed_usage(
+        prompt=usage.get("input_tokens"),
+        completion=usage.get("output_tokens"),
+        total=usage.get("total_tokens"),
+        reported_reasoning=details.get("reasoning_tokens") if isinstance(details, dict) else None,
+        thinking_seen=any(
+            isinstance(item, dict) and item.get("type") == "reasoning" for item in output
+        ),
+        finish_reason=incomplete or data.get("status"),
+        truncated=truncated,
+    )
 
 
 def _instructions():

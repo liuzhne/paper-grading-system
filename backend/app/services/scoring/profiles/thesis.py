@@ -421,19 +421,34 @@ _CHECKERS = (
 )
 
 
+def _envelope_thinking(envelope):
+    """信封运行身份里冻结的思考设置；取不到时返回 None（守卫不核对）。"""
+
+    try:
+        value = envelope.to_mapping() if hasattr(envelope, "to_mapping") else envelope
+        return value["runtime_identity"]["provider"]["thinking"]
+    except (KeyError, TypeError):
+        return None
+
+
 class ThesisLLMRuntime:
     """Profile-owned bridge from legacy scorers to the Core LLM port."""
 
     def __init__(self, scorer, *, input_token_cap=None):
+        from backend.app.services.llm.usage import ThinkingConsistencyGuard
         from backend.app.services.llm.usage import scorer_usage_snapshot
 
         self.scorer = scorer
-        # Usage of the most recent provider call, for the decision ledger.
+        # Usage of the most recent provider call, for the decision ledger and
+        # the rule task's attempt count (zeros: nothing was sent; None: the
+        # scorer is not metered, e.g. the Mock).
         self.last_call_usage = None
         # 0/None disables the cap.  Usage is attributed from a baseline because
         # one scorer may be shared by several papers in a synchronous batch.
         self.input_token_cap = int(input_token_cap or 0)
         self._usage_baseline = scorer_usage_snapshot(scorer)
+        # 一篇论文一个守卫：身份声明不思考、模型却在思考时，本篇其余调用不再发出。
+        self.thinking_guard = ThinkingConsistencyGuard()
 
     def score(self, *, envelope):
         from backend.app.services.llm_observability import observation
@@ -461,25 +476,27 @@ class ThesisLLMRuntime:
         ):
             return self._score(envelope=envelope, value=value, rule=rule)
 
-    def _metered(self, call):
-        """Enforce the paper input cap, then attribute this call's usage."""
+    def _metered(self, call, *, envelope):
+        """Enforce the paper input cap and the thinking check, then attribute usage."""
 
         from backend.app.services.llm.usage import TokenBudgetExceededError
-        from backend.app.services.llm.usage import scorer_usage_snapshot
+        from backend.app.services.llm.usage import metered_call
         from backend.app.services.llm.usage import usage_delta
 
-        before = scorer_usage_snapshot(self.scorer)
-        if self.input_token_cap and before is not None:
-            used = usage_delta(before, self._usage_baseline)["prompt_tokens"]
-            if used >= self.input_token_cap:
-                raise TokenBudgetExceededError(used=used, cap=self.input_token_cap)
-        self.last_call_usage = None
-        try:
-            return call()
-        finally:
-            after = scorer_usage_snapshot(self.scorer)
-            if before is not None and after is not None:
-                self.last_call_usage = usage_delta(after, before)
+        def enforce_input_cap(before):
+            if self.input_token_cap and before is not None:
+                used = usage_delta(before, self._usage_baseline)["prompt_tokens"]
+                if used >= self.input_token_cap:
+                    raise TokenBudgetExceededError(used=used, cap=self.input_token_cap)
+
+        return metered_call(
+            self.scorer,
+            call,
+            guard=self.thinking_guard,
+            thinking=_envelope_thinking(envelope),
+            before_send=enforce_input_cap,
+            on_usage=lambda delta: setattr(self, "last_call_usage", delta),
+        )
 
     @property
     def supports_group_calls(self) -> bool:
@@ -493,16 +510,19 @@ class ThesisLLMRuntime:
         """
 
         explicit = getattr(self.scorer, "score_core_group", None)
+        self.last_call_usage = None
         if not callable(explicit):
             return None
         return self._metered(
-            lambda: explicit(envelopes=envelopes, group_code=group_code)
+            lambda: explicit(envelopes=envelopes, group_code=group_code),
+            envelope=envelopes[0] if envelopes else None,
         )
 
     def _score(self, *, envelope, value, rule):
+        self.last_call_usage = None
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
-            return self._metered(lambda: explicit(envelope=envelope))
+            return self._metered(lambda: explicit(envelope=envelope), envelope=value)
         if getattr(self.scorer, "provider", None) != "mock":
             raise LLMScoringError(
                 "selected provider does not implement PromptEnvelopeV3 Core scoring"

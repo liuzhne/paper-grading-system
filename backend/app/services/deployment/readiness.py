@@ -18,6 +18,7 @@ from backend.app.core.config import settings
 from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
+from backend.app.db.models import ScoringRun
 from backend.app.db.models import WorkRuntimeState
 from backend.app.db.models import utcnow
 from backend.app.services.work_queue.limits import SWEEP_INTERVAL_SECONDS
@@ -94,6 +95,76 @@ def _scoped(statement, organization_id):
     return statement.join(
         GradingBatch, GradingBatch.id == BatchScoringJob.grading_batch_id
     ).where(GradingBatch.organization_id == organization_id)
+
+
+MODEL_OUTPUT_WINDOW_HOURS = 24
+THINKING_NOT_DISABLED_CODE = "PROVIDER_THINKING_NOT_DISABLED"
+
+
+def _model_output_signal(db, now, organization_id=None):
+    """近 24 小时各模型的推理 token、截断次数，以及「思考没关掉」停下的材料数。
+
+    只是观察：不计入 ``ready_for_production``——某个组织的连接配错了，不代表平台没就绪。
+    推理与截断是模型行为的观测，不是身份声明（docs/评分输出预算与截断恢复改造方案.md P1）。
+    """
+
+    since = now - timedelta(hours=MODEL_OUTPUT_WINDOW_HOURS)
+    runs = (
+        select(
+            ScoringRun.model_provider,
+            ScoringRun.model_name,
+            func.count(ScoringRun.id),
+            func.coalesce(func.sum(ScoringRun.completion_tokens), 0),
+            func.coalesce(func.sum(ScoringRun.reasoning_tokens), 0),
+            func.coalesce(func.sum(ScoringRun.truncated_count), 0),
+        )
+        .where(ScoringRun.created_at >= since)
+        .group_by(ScoringRun.model_provider, ScoringRun.model_name)
+        .order_by(ScoringRun.model_provider, ScoringRun.model_name)
+    )
+    if organization_id is not None:
+        runs = runs.where(ScoringRun.organization_id == organization_id)
+    models = [
+        {
+            "provider": provider or "unknown",
+            "model": model or "unknown",
+            "runs": int(count),
+            "completion_tokens": int(completion),
+            "reasoning_tokens": int(reasoning),
+            "truncated_count": int(truncated),
+        }
+        for provider, model, count, completion, reasoning, truncated in db.execute(runs)
+    ]
+    mismatches = db.scalar(
+        _scoped(
+            select(func.count(BatchScoringItem.id))
+            .select_from(BatchScoringItem)
+            .join(BatchScoringJob, BatchScoringJob.id == BatchScoringItem.job_id)
+            .where(
+                BatchScoringItem.status == "failed",
+                BatchScoringItem.error_code == THINKING_NOT_DISABLED_CODE,
+                BatchScoringItem.finished_at >= since,
+            ),
+            organization_id,
+        )
+    ) or 0
+    truncated = sum(model["truncated_count"] for model in models)
+    if not models and not mismatches:
+        status = "unavailable"
+    elif mismatches or truncated:
+        status = "fail"
+    else:
+        status = "pass"
+    return {
+        "status": status,
+        "window_hours": MODEL_OUTPUT_WINDOW_HOURS,
+        "runs": sum(model["runs"] for model in models),
+        "completion_tokens": sum(model["completion_tokens"] for model in models),
+        "reasoning_tokens": sum(model["reasoning_tokens"] for model in models),
+        "truncated_count": truncated,
+        "thinking_mismatch_items": int(mismatches),
+        "models": models,
+    }
 
 
 def _sweep_signal(db, now, *, active):
@@ -200,6 +271,8 @@ def _batch_signal(db, organization_id=None):
     )
     return {
         "status": "pass" if not stale and sweep["status"] != "fail" else "fail",
+        # 只观察、不参与 status 与就绪判断（见 _model_output_signal）。
+        "model_output": _model_output_signal(db, now, organization_id),
         "active_count": len(jobs),
         "stale_count": len(stale),
         "stale_job_ids": stale,

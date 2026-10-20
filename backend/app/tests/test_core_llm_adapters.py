@@ -239,6 +239,35 @@ def test_openai_compatible_scores_prompt_envelope_v3_with_connection_controls(
     )
 
 
+def test_vertex_gemini_core_scoring_disables_thinking_with_a_zero_budget():
+    # 2026-10-16：Vertex 不认 thinking 字段，Gemini 2.5 Flash 照常思考，撑满 1200 的输出上限被截断。
+    # 2026-10-20：Vertex 的 reasoning_effort 也不收 none（400），改发 thinking_budget 0。
+    class VertexClient(_CompatibleCoreClient):
+        def post(self, url, headers, json):
+            assert headers["x-goog-api-key"] == "test-key"  # Vertex 不用 Bearer
+            return super().post(url, {**headers, "Authorization": "Bearer test-key"}, json)
+
+    client = VertexClient()
+    scorer = OpenAICompatibleChatScorer(
+        api_key="test-key",
+        base_url="https://aiplatform.googleapis.com/v1/projects/demo/locations/global/endpoints/openapi",
+        model_name="google/gemini-2.5-flash",
+        client=client,
+        thinking_type="disabled",
+    )
+    envelope = _core_envelope(scorer)
+    client.output = _provider_response(envelope)
+
+    ThesisLLMRuntime(scorer).score(envelope=envelope)
+
+    assert client.payload["extra_body"] == {"google": {"thinking_config": {"thinking_budget": 0}}}
+    assert "reasoning_effort" not in client.payload
+    assert "thinking" not in client.payload
+    assert envelope.to_mapping()["runtime_identity"]["provider"]["thinking"] == {
+        "enabled": False, "type": "none",
+    }
+
+
 @pytest.mark.parametrize("profile", [ThesisProfile(), TechnicalProposalProfile()])
 def test_production_profile_freezes_real_connection_controls(profile):
     scorer = OpenAICompatibleChatScorer(
@@ -366,7 +395,10 @@ def test_openai_responses_omits_default_top_p_but_keeps_it_in_identity():
 
 
 def test_openai_responses_names_reasoning_truncation_for_rule_tasks():
+    """推理模型把额度花在思考上被截断：身份写着不思考，真正的原因是思考没关掉。"""
+
     from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
+    from backend.app.services.llm.usage import ThinkingNotDisabledError
     from backend.app.services.scoring.core.failures import (
         project_rule_execution_failure,
     )
@@ -380,6 +412,12 @@ def test_openai_responses_names_reasoning_truncation_for_rule_tasks():
                     "status": "incomplete",
                     "incomplete_details": {"reason": "max_output_tokens"},
                     "output": [{"type": "reasoning", "content": None}],
+                    "usage": {
+                        "input_tokens": 900,
+                        "output_tokens": 1200,
+                        "total_tokens": 2100,
+                        "output_tokens_details": {"reasoning_tokens": 1200},
+                    },
                 }
             )
 
@@ -390,14 +428,63 @@ def test_openai_responses_names_reasoning_truncation_for_rule_tasks():
         temperature=0,
     )
     envelope = _core_envelope(scorer)
+    runtime = ThesisLLMRuntime(scorer)
+
+    with pytest.raises(ThinkingNotDisabledError) as caught:
+        runtime.score(envelope=envelope)
+
+    # 截断仍留在异常链上，报告的是根因。
+    assert isinstance(caught.value.__cause__, ResponsesJSONOutputError)
+    assert caught.value.__cause__.reason == "output_truncated"
+    assert project_rule_execution_failure(caught.value) == (
+        "PROVIDER_THINKING_NOT_DISABLED",
+        "provider reasoned although the run identity disables thinking; decision discarded",
+    )
+    assert runtime.last_call_usage["reasoning_tokens"] == 1200
+    assert runtime.last_call_usage["truncated_count"] == 1
+    # 之后的调用不再发出。
+    scorer.client.payload = None
+    with pytest.raises(ThinkingNotDisabledError) as again:
+        runtime.score(envelope=envelope)
+    assert again.value.sent is False
+    assert scorer.client.payload is None
+    assert runtime.last_call_usage["request_count"] == 0
+
+
+def test_truncation_without_reasoning_is_still_reported_as_truncation():
+    from backend.app.services.llm.openai_adapter import ResponsesJSONOutputError
+    from backend.app.services.scoring.core.failures import (
+        project_rule_execution_failure,
+    )
+
+    class _TruncatedClient(_OpenAICoreClient):
+        def post(self, url, headers, json):
+            self.payload = json
+            return _Response(
+                {
+                    "id": "resp_truncated",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "output": [],
+                    "usage": {"input_tokens": 900, "output_tokens": 512, "total_tokens": 1412},
+                }
+            )
+
+    scorer = OpenAIResponsesScorer(
+        api_key="test-key",
+        model_name="gpt-core-test",
+        client=_TruncatedClient(),
+        temperature=0,
+    )
+    runtime = ThesisLLMRuntime(scorer)
 
     with pytest.raises(ResponsesJSONOutputError) as caught:
-        ThesisLLMRuntime(scorer).score(envelope=envelope)
+        runtime.score(envelope=_core_envelope(scorer))
 
     assert caught.value.reason == "output_truncated"
-    assert project_rule_execution_failure(caught.value)[0] == (
-        "PROVIDER_OUTPUT_TRUNCATED"
-    )
+    assert project_rule_execution_failure(caught.value)[0] == "PROVIDER_OUTPUT_TRUNCATED"
+    assert runtime.last_call_usage["truncated_count"] == 1
+    assert runtime.last_call_usage["reasoning_requests"] == 0
 
 
 def test_circuit_open_rule_failure_is_not_reported_as_bad_input():
