@@ -493,12 +493,20 @@ docker compose -p pgs -f compose.yml exec -T app python - < check.py
 - **部署任务卡在 `docker load`，报 `permission denied ... docker.sock`。** 报错指向 Docker，真正原因是部署用户不在 `docker` 组：`bootstrap.sh` 没跑，或者跑之前已经用 `deploy` 登录过（组成员要新登录才生效）。重跑 `bootstrap.sh`。
 - **冒烟请求报 TLS 错误，Caddy 日志里是 ACME 校验失败。** 报错指向证书，真正原因通常是 DuckDNS 的 A 记录没指向静态 IP，或者防火墙没开 80 端口（Let's Encrypt 的 HTTP 校验走 80）。首次部署签证书要几十秒，冒烟会重试 60 秒。
 - **`/api/system/health` 返回 503，`worker` 为 `fail`，但 `docker compose ps` 里 worker 在运行。** 报错指向 worker，真正原因常在数据库：`RUNTIME_DATABASE_URL` 不通（密码、`pgs_app.<项目 ref>` 用户名格式），worker 每次巡检都失败（日志里是 `work_sweep_failed`）。
-- **worker 或 app 突然报 `ReadOnlySqlTransaction: cannot execute UPDATE in a read-only transaction`（例如 `work_sweep_failed`），代码和配置都没改过。** 报错指向应用写库的代码，真正原因是有人在生产 `DATABASE_URL` 上执行了会话级设置：事务池（6543）把 `set default_transaction_read_only = on` 留在了共用的后端连接上，应用和 worker 的连接接着用到它。2026-10-16 调试只读查询时发生过，worker 巡检失败一次，约 1.5 分钟后恢复。恢复办法是开几次新连接逐个复位，再查一遍，全部是 `off` 才算清干净（流量低时新连接多半落在同一个后端连接上，但不保证）。`reset` 只是把设置恢复成默认值，多跑几次没有副作用：
+- **worker 或 app 突然报 `ReadOnlySqlTransaction: cannot execute UPDATE in a read-only transaction`（例如 `work_sweep_failed`），代码和配置都没改过。** 报错指向应用写库的代码，真正原因是有人在生产 `DATABASE_URL` 上执行了会话级设置：事务池（6543）把 `set default_transaction_read_only = on` 留在了共用的后端连接上，应用和 worker 的连接接着用到它。2026-10-16 调试只读查询时发生过，worker 巡检失败一次，约 1.5 分钟后恢复。先开几次新连接逐个复位、再查一遍。这只是**尽力抽样**：事务池会轮换着分配后端连接，几次都查到 `off` 不能证明每个后端都复位了，被污染的连接可能隔一阵又让应用偶发报错（2026-10-16 那次流量低，新连接多半落在同一个后端上，抽样后没有再出现）。`reset` 只是把设置恢复成默认值，多跑几次没有副作用：
 
   ```bash
   for i in 1 2 3 4 5 6; do docker compose -p pgs -f compose.yml exec -T app sh -c 'psql "$DATABASE_URL" -X -A -t -c "reset default_transaction_read_only; show default_transaction_read_only"'; done
   for i in 1 2 3 4 5 6; do docker compose -p pgs -f compose.yml exec -T app sh -c 'psql "$DATABASE_URL" -X -A -t -c "show default_transaction_read_only"'; done
   ```
+
+  抽样之后报错仍偶尔出现，或者要确定清干净：在 Supabase 控制台的 SQL Editor（项目所有者身份）结束运行角色的全部后端连接，连接池会按默认设置重新建连。这会打断此刻正在执行的请求和巡检（worker 下一轮会重试），挑空闲时做；这是 PostgreSQL 的标准做法，本项目还没在生产上执行过：
+
+  ```sql
+  select pg_terminate_backend(pid) from pg_stat_activity where usename = 'pgs_app';
+  ```
+
+  之后看 `/api/system/health` 两项都是 `pass`、worker 日志不再有 `work_sweep_failed` 即可。
 
   预防：人工查询按上面「查数据库」的只读事务写法。
 - **新库上应用报 `permission denied for table …`，但迁移是成功的。** 报错像代码问题，真正原因是只跑了迁移、没跑 `init_database`：0023 之前那批表没有给 `pgs_app` 授权。在新库上运行 `init_database`（重跑无副作用），它最后会逐表核对。以后新增表仍然要在迁移里授权（0023 的做法），这个脚本只管新环境的初始化。
