@@ -658,6 +658,18 @@ ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 1h work
 
   新版本下 2.5 Flash 应是 `reasoning_tokens=0 reasoning=none`；若仍有推理，任务会以
   `PROVIDER_THINKING_NOT_DISABLED` 停下（Vertex 不认关闭参数），这时只能换模型或调大输出上限。
+- Vertex 上的 Gemini 2.5 Flash 评分全部失败，错误码 `PROVIDER_INVALID_REQUEST`，`llm_call_failed` 行尾
+  `provider_message="Expected 'reasoning_effort' to be one of: 'high', 'low', 'max', 'medium', 'minimal'; found 'none'."`：
+  报错像是请求参数写错了（确实如此），真正的原因是 2026-10-16 起按 Gemini API 的文档给 Google 主机发
+  `reasoning_effort: "none"`，而 Vertex 不收 `none`（2026-10-20 生产 48 次请求全被拒，被拒的请求不产生 token）。
+  2026-10-20 起 Vertex 改发 `extra_body.google.thinking_config.thinking_budget=0`。核对线上版本发的是哪种：
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-worker-1 python -c "from backend.app.services.llm.thinking_params import thinking_request_fields as f; print(f(\"https://aiplatform.googleapis.com/v1/x\", \"google/gemini-2.5-flash\", \"none\"))"'
+  ```
+
+  应输出 `{'extra_body': {'google': {'thinking_config': {'thinking_budget': 0}}}}`。若 Vertex 连这个也拒，
+  照样是 `PROVIDER_INVALID_REQUEST` 且不花钱；若它收下却仍在思考，P1 守卫会以 `PROVIDER_THINKING_NOT_DISABLED` 停下。
 - CI 的 `docker-compose-smoke` 偶尔在「Verify the workbench ships inside the image」以退出码 23 失败，
   重跑又过了：报错指向 curl（写入失败），真正的原因是脚本里的 `curl … | grep -q`——`pipefail` 下
   grep 一匹配就退出，curl 还在写就收到断开的管道。这一步已改成先 `--output` 存文件再 `grep`；
@@ -1057,6 +1069,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 无新命令与开关；Vertex 接入说明按主机区分关闭写法与 `diagnose_llm` 预期；新增一条排错（Vertex 评分全部 400，真实原因是 `reasoning_effort` 不收 `none`）。 |
 | 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无新命令与开关；Vertex 接入说明改为「没配置也按关闭」；新增一条排错（BYOK Gemini 仍在思考、仍截断，真实原因是连接没配置思考）；更正「Vertex 不报告推理 token」的说法。 |
 | 2026-10-19 | 评分输出观测与思考一致性守卫（P1） | 新增「评分输出观测」：上线顺序（先迁移 0040 再合并）、日志字段、运维页观测与回滚；新增一条排错（任务显示「已取消」，真实原因是模型没按设置关闭思考）；截断排错改为直接看日志与 `scoring_runs` 两列，不再手算。`public/` 已重建。 |
 | 2026-10-19 | 无效评分项不给改分入口 | 新增一条排错（改分保存没反应，真实原因是该项 AI 评分无效、普通改分被拒）；处理方式为重试失败项。`public/` 已重建。 |
@@ -1656,7 +1669,7 @@ npm --prefix frontend/workbench run api:generate
     这次的根因是 `PROVIDER_INVALID_REQUEST`：百炼 kimi-k3 拒绝 `top_p=1.0`。修复后，批次页会优先显示根因码。错误码不含厂商原文。2026-10-15 起，请求被拒（400/413/422 这类）的厂商说明会脱敏后附在 `llm_call_failed` 行尾（`provider_message`），先看日志；其他类型的错误仍不记说明，需要时用该连接发一个最小请求复现，只看状态码和错误体，不要写进日志或数据库。
 - **现象**：`RULE_EXECUTION_FAILED (exception_type=ValueError)`，或日志里出现 `did not contain text output`。新版本会显示 `PROVIDER_OUTPUT_TRUNCATED`。
   - 真正原因：推理模型把 `max_output_tokens` 全部用在了推理上。可以关闭思考（Chat 协议，连接选项设 `thinking_type=disabled`），也可以调大 `max_output_tokens` 和 `timeout_seconds`。保留推理时，kimi-k3 单条规则约 30 秒。
-  - **Vertex / Gemini 上，2026-10-16 之前 `thinking_type=disabled` 不生效。** 报错像输出上限太小，真正原因是 Google 的 OpenAI 兼容端点不认 `thinking` 字段，Gemini 2.5 Flash 一直在思考，思考 token 计入输出上限。判断方法：看用量账本 `ai_usage_ledger`，`total_tokens` 明显大于 `prompt_tokens + completion_tokens`，差值就是思考 token（10-16 那份论文：58,330 + 3,304，合计却是 98,552）。2026-10-19 起不用手算：`llm_call` 日志行带 `finish_reason` 与 `reasoning_tokens`，`scoring_runs` / `ai_usage_ledger` 有 `reasoning_tokens` 与 `truncated_count` 两列，任务页每篇用量后面直接显示「思考 / 截断」；身份声明不思考时，这种情况会报 `PROVIDER_THINKING_NOT_DISABLED` 而不是截断。2026-10-16 起，Google 主机关闭思考改发 `reasoning_effort: "none"`；只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，只能靠输出上限（默认 2048）兜底，或给连接设更大的 `max_tokens`。调大连接的 `max_tokens` 会挤掉证据预算（输入预算 = `SCORING_CONTEXT_WINDOW_TOKENS` − 输出上限 − 安全余量），而且改了连接配置的旧评分任务会报 `AI_CONNECTION_CONFIG_CHANGED`，要新建任务。
+  - **Vertex / Gemini 上，2026-10-16 之前 `thinking_type=disabled` 不生效。** 报错像输出上限太小，真正原因是 Google 的 OpenAI 兼容端点不认 `thinking` 字段，Gemini 2.5 Flash 一直在思考，思考 token 计入输出上限。判断方法：看用量账本 `ai_usage_ledger`，`total_tokens` 明显大于 `prompt_tokens + completion_tokens`，差值就是思考 token（10-16 那份论文：58,330 + 3,304，合计却是 98,552）。2026-10-19 起不用手算：`llm_call` 日志行带 `finish_reason` 与 `reasoning_tokens`，`scoring_runs` / `ai_usage_ledger` 有 `reasoning_tokens` 与 `truncated_count` 两列，任务页每篇用量后面直接显示「思考 / 截断」；身份声明不思考时，这种情况会报 `PROVIDER_THINKING_NOT_DISABLED` 而不是截断。2026-10-16 起，Google 主机关闭思考不再发 `thinking` 字段：Gemini API 发 `reasoning_effort: "none"`；Vertex 不收 `none`（会 400，见本手册「Vertex 上的 Gemini 2.5 Flash 评分全部失败」一条），2026-10-20 起改发 `extra_body.google.thinking_config.thinking_budget=0`。只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，只能靠输出上限（默认 2048）兜底，或给连接设更大的 `max_tokens`。调大连接的 `max_tokens` 会挤掉证据预算（输入预算 = `SCORING_CONTEXT_WINDOW_TOKENS` − 输出上限 − 安全余量），而且改了连接配置的旧评分任务会报 `AI_CONNECTION_CONFIG_CHANGED`，要新建任务。
 - **现象**：改完连接配置后重试，材料立刻失败。旧版本显示 `scoring_failure (exception_type=ValueError)`，新版本显示 `AI_CONNECTION_CONFIG_CHANGED`。
   - 报错指向：评分执行。
   - 真正原因：批次创建时冻结了连接快照，连接配置变了，评分就拒绝执行；这是有意的保护。正规做法是新建评分任务并重新上传材料。只有确认是同一连接、同一密钥，且变更是有意为之时，才在库里更新该批次的 `ai_connection_snapshot`，并写一条审计。
@@ -1964,10 +1977,10 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 
 - Key 由系统放在 `x-goog-api-key` 头里发送，不用 Bearer；其它 OpenAI 兼容服务（包括 Gemini API 的 `generativelanguage.googleapis.com`）仍用 Bearer。
 - 思考：连接配置为关闭（`thinking_type=disabled`）或没配置（2026-10-20 起）时，按型号区分：
-  - Gemini 2.5 Flash 系列（含 Flash-Lite 与预览版）发 `reasoning_effort: "none"`，运行身份记 `none`（2026-10-16 起）；
+  - Gemini 2.5 Flash 系列（含 Flash-Lite 与预览版）：Vertex 上发 `extra_body.google.thinking_config.thinking_budget=0`（2026-10-20 起；Vertex 的 `reasoning_effort` 不收 `none`），Gemini API 上发 `reasoning_effort: "none"`；运行身份都记 `none`；
   - 2.5 Pro、Gemini 3 等关不掉思考的型号不发参数，运行身份记 `provider-default`（思考开启），只能靠输出上限兜底。
 
-  全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE` 只作用于平台模型，BYOK 连接看自己的配置。`diagnose_llm` 按平台模型（`OPENAI_COMPATIBLE_MODEL`）拼请求：2.5 Flash 系列输出里 `thinking` 为 `null`、`reasoning_effort` 为 `"none"`；关不掉的型号两者都为 `null`。
+  全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE` 只作用于平台模型，BYOK 连接看自己的配置。`diagnose_llm` 按平台模型（`OPENAI_COMPATIBLE_MODEL`）拼请求：Vertex 上的 2.5 Flash 输出里 `thinking_config` 为 `{"thinking_budget": 0}`、另两项为 `null`；Gemini API 上 `reasoning_effort` 为 `"none"`；关不掉的型号三者都为 `null`。
 - 学生论文会发给 Google：项目要绑定结算账号，按付费条款处理数据。
 - 换模型会改变评分结果，正式使用前按 §15 重新锚定 QWK（需要维护者授权真实调用与预算）。
 

@@ -1,4 +1,8 @@
-"""Google 主机上关闭思考要发 reasoning_effort（2026-10-16 评分调用被 Gemini 思考撑满输出上限而截断）。"""
+"""Google 主机上关闭思考的写法（2026-10-16 评分调用被 Gemini 思考撑满输出上限而截断）。
+
+Gemini API 发 reasoning_effort: none；Vertex 不收 none（2026-10-20 生产 400），改发
+extra_body.google.thinking_config.thinking_budget = 0。
+"""
 
 from __future__ import annotations
 
@@ -56,12 +60,13 @@ def test_only_gemini_25_flash_can_disable_thinking(model, can_disable):
 @pytest.mark.parametrize(
     "base_url, model, configured, effective, fields",
     [
-        # Vertex + 2.5 Flash：关闭思考改发 reasoning_effort，不再发 Vertex 不认的 thinking 字段。
-        (VERTEX, "google/gemini-2.5-flash", "disabled", "none", {"reasoning_effort": "none"}),
+        # Vertex + 2.5 Flash：关闭思考发 thinking_budget 0（Vertex 的 reasoning_effort 不收 none）。
+        (VERTEX, "google/gemini-2.5-flash", "disabled", "none", {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}),
         (GEMINI_API, "gemini-2.5-flash", "off", "none", {"reasoning_effort": "none"}),
         # 没配置（BYOK 连接传空字符串）与显式关闭一样（2026-10-20）。
-        (VERTEX, "google/gemini-2.5-flash", None, "none", {"reasoning_effort": "none"}),
-        (VERTEX, "google/gemini-2.5-flash", "", "none", {"reasoning_effort": "none"}),
+        (VERTEX, "google/gemini-2.5-flash", None, "none", {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}),
+        (VERTEX, "google/gemini-2.5-flash", "", "none", {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}),
+        (GEMINI_API, "gemini-2.5-flash", "", "none", {"reasoning_effort": "none"}),
         # 关不掉：不发参数，身份如实记为按模型默认思考。
         (VERTEX, "google/gemini-2.5-pro", "disabled", GOOGLE_PROVIDER_DEFAULT, {}),
         (VERTEX, "google/gemini-2.5-pro", "", GOOGLE_PROVIDER_DEFAULT, {}),
@@ -89,22 +94,35 @@ def _scorer(base_url, model, calls, *, thinking_type=None):
     )
 
 
-def test_vertex_flash_requests_disable_thinking_with_reasoning_effort():
+def test_vertex_flash_requests_disable_thinking_with_a_zero_budget():
+    """Vertex 的 reasoning_effort 只收 minimal/low/medium/high/max，发 none 会 400。"""
+
     calls = []
     scorer = _scorer(VERTEX, "google/gemini-2.5-flash", calls)  # 连接没配，取全局默认 disabled
     scorer.complete_json("系统", {"units": []}, attempts_limit=1)
+    assert calls[0]["extra_body"] == {"google": {"thinking_config": {"thinking_budget": 0}}}
+    assert "reasoning_effort" not in calls[0]
+    assert "thinking" not in calls[0]
+
+
+def test_gemini_api_flash_requests_disable_thinking_with_reasoning_effort():
+    calls = []
+    scorer = _scorer(GEMINI_API, "gemini-2.5-flash", calls)
+    scorer.complete_json("系统", {"units": []}, attempts_limit=1)
     assert calls[0]["reasoning_effort"] == "none"
+    assert "extra_body" not in calls[0]
     assert "thinking" not in calls[0]
 
 
 def test_byok_connection_without_a_thinking_setting_disables_thinking_on_vertex():
     """2026-10-19 生产：BYOK 连接没配思考，工厂传空字符串，旧版本按模型默认（开启）处理，
-    48 次调用全在思考、5 次截断。现在与显式关闭一样发 reasoning_effort: none。"""
+    48 次调用全在思考、5 次截断。现在与显式关闭一样发关闭参数（Vertex 上是 thinking_budget 0）。"""
 
     calls = []
     scorer = _scorer(VERTEX, "google/gemini-2.5-flash", calls, thinking_type="")
     scorer.complete_json("系统", {"units": []}, attempts_limit=1)
-    assert calls[0]["reasoning_effort"] == "none"
+    assert calls[0]["extra_body"] == {"google": {"thinking_config": {"thinking_budget": 0}}}
+    assert "reasoning_effort" not in calls[0]
     assert "thinking" not in calls[0]
     contract = core_runtime_provider_contract(scorer, artifact_hash="sha256:" + "0" * 64)
     assert contract["thinking"] == {"enabled": False, "type": "none"}
@@ -154,7 +172,7 @@ def test_raising_the_default_output_cap_keeps_the_evidence_budget():
     assert window - output - margin == 5968
 
 
-def test_diagnose_llm_reports_the_reasoning_effort_it_sent(monkeypatch, capsys):
+def test_diagnose_llm_reports_the_thinking_control_it_sent(monkeypatch, capsys):
     # 只构造请求、用假响应，不发真实调用。
     from backend.app.core.config import settings
     from backend.app.scripts import diagnose_llm
@@ -174,6 +192,8 @@ def test_diagnose_llm_reports_the_reasoning_effort_it_sent(monkeypatch, capsys):
 
     diagnose_llm.main()
     report = json.loads(capsys.readouterr().out)
-    assert sent["reasoning_effort"] == "none" and "thinking" not in sent
-    assert report["reasoning_effort"] == "none"
+    assert sent["extra_body"] == {"google": {"thinking_config": {"thinking_budget": 0}}}
+    assert "reasoning_effort" not in sent and "thinking" not in sent
+    assert report["thinking_config"] == {"thinking_budget": 0}
+    assert report["reasoning_effort"] is None
     assert report["thinking"] is None

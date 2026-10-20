@@ -239,8 +239,9 @@ def test_openai_compatible_scores_prompt_envelope_v3_with_connection_controls(
     )
 
 
-def test_vertex_gemini_core_scoring_disables_thinking_with_reasoning_effort():
+def test_vertex_gemini_core_scoring_disables_thinking_with_a_zero_budget():
     # 2026-10-16：Vertex 不认 thinking 字段，Gemini 2.5 Flash 照常思考，撑满 1200 的输出上限被截断。
+    # 2026-10-20：Vertex 的 reasoning_effort 也不收 none（400），改发 thinking_budget 0。
     class VertexClient(_CompatibleCoreClient):
         def post(self, url, headers, json):
             assert headers["x-goog-api-key"] == "test-key"  # Vertex 不用 Bearer
@@ -259,7 +260,8 @@ def test_vertex_gemini_core_scoring_disables_thinking_with_reasoning_effort():
 
     ThesisLLMRuntime(scorer).score(envelope=envelope)
 
-    assert client.payload["reasoning_effort"] == "none"
+    assert client.payload["extra_body"] == {"google": {"thinking_config": {"thinking_budget": 0}}}
+    assert "reasoning_effort" not in client.payload
     assert "thinking" not in client.payload
     assert envelope.to_mapping()["runtime_identity"]["provider"]["thinking"] == {
         "enabled": False, "type": "none",
