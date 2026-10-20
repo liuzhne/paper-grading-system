@@ -420,6 +420,68 @@ LOG_LEVEL=DEBUG docker compose -p pgs -f compose.yml up -d --force-recreate app 
 
 调到 `DEBUG` 也不会记录模型请求原文、API Key 或论文正文：原文日志由 `LLM_DEBUG_LOG_ENABLED` 单独控制，受保护部署禁止开启；`httpx`、Supabase 客户端等第三方库固定只记 `WARNING` 以上（它们在低级别会记请求地址与存储对象路径）。
 
+看容器与数据库（在实例上 `cd /opt/pgs` 之后）：
+
+```bash
+docker compose -p pgs -f compose.yml ps                  # 三个服务的状态；app 显示 (healthy) 才算健康检查通过
+docker stats --no-stream                                 # 各容器当前的 CPU 与内存
+curl -s https://<名字>.duckdns.org/api/system/health     # database、worker 两项都是 pass 才正常
+```
+
+查数据库：实例上没有装 `psql`，app 镜像里有。容器里的 `DATABASE_URL` 是运行角色 `pgs_app` 经 Supabase **事务池（6543）** 的连接，这个角色能增删改，所以人工查询一律放在只读事务里，查完 `rollback`：
+
+```bash
+docker compose -p pgs -f compose.yml exec app sh -c 'psql "$DATABASE_URL" -X'
+```
+
+```sql
+begin read only;
+select version_num from alembic_version;
+select relname, n_live_tup from pg_stat_user_tables order by n_live_tup desc limit 10;
+rollback;
+```
+
+不进交互界面、查一次就走（`-T` 让标准输入接到 psql）：
+
+```bash
+docker compose -p pgs -f compose.yml exec -T app sh -c 'psql "$DATABASE_URL" -X' <<'SQL'
+begin read only;
+select status, count(*) from batch_scoring_items group by status;
+rollback;
+SQL
+```
+
+要用到应用自己的模型或检查函数时（例如按改分接口同一套检查判断一项能不能改），写一个 Python 只读脚本，用应用的 `SessionLocal`，**不 `commit`，最后不管结果如何都 `rollback`**，也不执行会话级 `set`。现成的例子是 `backend/app/scripts/inspect_score_item.py`：
+
+```python
+from sqlalchemy import text
+
+from backend.app.db.session import SessionLocal
+
+db = SessionLocal()
+try:
+    print(db.execute(text("select version_num from alembic_version")).scalar_one())
+    # 只读：select 或 ORM 查询；不 add、不 delete、不 commit
+finally:
+    db.rollback()
+    db.close()
+```
+
+一次性脚本不用放进镜像，在实例上经标准输入交给 app 容器里的 Python（工作目录是 `/app`，`import backend` 才找得到）：
+
+```bash
+docker compose -p pgs -f compose.yml exec -T app python - < check.py
+```
+
+这种写法靠「不提交、最后回滚」防误写，不是数据库层面的只读：脚本里真写了，事务结束时也会撤掉，但执行期间照样拿行锁，所以脚本要短、查完就走。2026-10-20 实测：返回当前 head，连接上的 `default_transaction_read_only` 仍是 `off`。
+
+下面几条规矩都是因为事务池会把连接状态留给下一个使用者，而应用和 worker 用的是同一批后端连接：
+
+- 不要执行不带 `local` 的 `set …`，也别指望 `PGOPTIONS`。前者会留在共用的后端连接上，被应用接着用到（见下面排错里的只读报错）；后者会被连接池丢弃，看起来设了、其实没生效。临时设置只在事务里用 `set local`。
+- 只读事务里的写操作会报 `cannot execute … in a read-only transaction`，这是预期的保护。要改数据不在这里手敲。
+- 查完立刻 `rollback`，别让事务一直开着：事务进行中会独占连接池里的一个后端连接，池子不大，挤占的是应用的连接。
+- 也可以在 Supabase 控制台（项目 `grading-system` 的 Table Editor、SQL Editor）看。那里以项目所有者身份执行，写入同样直接生效。
+
 改密钥：改 GitHub `production` 环境里的值，再部署一次（重跑最近一次 main 的部署任务即可），实例上的 `.env` 由部署任务重新生成。不要在实例上手改 `.env`，下一次部署会覆盖。
 
 每月挑低峰手动重启一次让内核更新生效（`sudo reboot`，服务约 1 分钟后自动恢复）；系统安全更新由 `unattended-upgrades` 自动安装、不自动重启。
@@ -431,6 +493,22 @@ LOG_LEVEL=DEBUG docker compose -p pgs -f compose.yml up -d --force-recreate app 
 - **部署任务卡在 `docker load`，报 `permission denied ... docker.sock`。** 报错指向 Docker，真正原因是部署用户不在 `docker` 组：`bootstrap.sh` 没跑，或者跑之前已经用 `deploy` 登录过（组成员要新登录才生效）。重跑 `bootstrap.sh`。
 - **冒烟请求报 TLS 错误，Caddy 日志里是 ACME 校验失败。** 报错指向证书，真正原因通常是 DuckDNS 的 A 记录没指向静态 IP，或者防火墙没开 80 端口（Let's Encrypt 的 HTTP 校验走 80）。首次部署签证书要几十秒，冒烟会重试 60 秒。
 - **`/api/system/health` 返回 503，`worker` 为 `fail`，但 `docker compose ps` 里 worker 在运行。** 报错指向 worker，真正原因常在数据库：`RUNTIME_DATABASE_URL` 不通（密码、`pgs_app.<项目 ref>` 用户名格式），worker 每次巡检都失败（日志里是 `work_sweep_failed`）。
+- **worker 或 app 突然报 `ReadOnlySqlTransaction: cannot execute UPDATE in a read-only transaction`（例如 `work_sweep_failed`），代码和配置都没改过。** 报错指向应用写库的代码，真正原因是有人在生产 `DATABASE_URL` 上执行了会话级设置：事务池（6543）把 `set default_transaction_read_only = on` 留在了共用的后端连接上，应用和 worker 的连接接着用到它。2026-10-16 调试只读查询时发生过，worker 巡检失败一次，约 1.5 分钟后恢复。先开几次新连接逐个复位、再查一遍。这只是**尽力抽样**：事务池会轮换着分配后端连接，几次都查到 `off` 不能证明每个后端都复位了，被污染的连接可能隔一阵又让应用偶发报错（2026-10-16 那次流量低，新连接多半落在同一个后端上，抽样后没有再出现）。`reset` 只是把设置恢复成默认值，多跑几次没有副作用：
+
+  ```bash
+  for i in 1 2 3 4 5 6; do docker compose -p pgs -f compose.yml exec -T app sh -c 'psql "$DATABASE_URL" -X -A -t -c "reset default_transaction_read_only; show default_transaction_read_only"'; done
+  for i in 1 2 3 4 5 6; do docker compose -p pgs -f compose.yml exec -T app sh -c 'psql "$DATABASE_URL" -X -A -t -c "show default_transaction_read_only"'; done
+  ```
+
+  抽样之后报错仍偶尔出现，或者要确定清干净：在 Supabase 控制台的 SQL Editor（项目所有者身份）结束运行角色的全部后端连接，连接池会按默认设置重新建连。这会打断此刻正在执行的请求和巡检（worker 下一轮会重试），挑空闲时做；这是 PostgreSQL 的标准做法，本项目还没在生产上执行过：
+
+  ```sql
+  select pg_terminate_backend(pid) from pg_stat_activity where usename = 'pgs_app';
+  ```
+
+  之后看 `/api/system/health` 两项都是 `pass`、worker 日志不再有 `work_sweep_failed` 即可。
+
+  预防：人工查询按上面「查数据库」的只读事务写法。
 - **新库上应用报 `permission denied for table …`，但迁移是成功的。** 报错像代码问题，真正原因是只跑了迁移、没跑 `init_database`：0023 之前那批表没有给 `pgs_app` 授权。在新库上运行 `init_database`（重跑无副作用），它最后会逐表核对。以后新增表仍然要在迁移里授权（0023 的做法），这个脚本只管新环境的初始化。
 - **运行角色复验或应用连库时报 `invalid connection option "pgbouncer"`。** 报错像驱动或连接池问题，真正原因是 `RUNTIME_DATABASE_URL` 是从 Supabase 复制的 Prisma 版连接串，末尾带 `?pgbouncer=true`，psycopg 不认这个参数。去掉它（连接串以 `:6543/postgres` 结尾）后重设密钥。2026-10-14 首次配置时遇到过；部署任务生成 `.env` 时现在会直接拦下。
 - **页面上测试连接只显示“连接测试失败”，看不出原因。** 报错指向连接配置，真正的原因要看 app 日志里的 `ai_connection_test_failed … status=… error_type=…`：Bedrock 的错误类型来自 `x-amzn-errortype` 头。`status=400 error_type=ValidationException` 多半是模型 ID 不对（要和 Bedrock 控制台一字不差，新加坡区域不少模型要用 `apac.` / `global.` 推理配置前缀）；`403 AccessDeniedException` 是 Key 无权限或模型没开通；`404` 是地址或协议不对；`status=- error_type=ConnectTimeout` 是网络或地址不通。2026-10-14 之前 web 进程没有配置日志，这一行根本不会出现。
@@ -1078,9 +1156,10 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-10-17 | Vercel 上图标被当成工作台首页 | 新增一条排错（静态文件返回工作台 HTML，真实原因是 `.vercelignore` 按扩展名排除了 `*.svg`）；`.vercelignore` 末尾 `!/public/**` 重新包含静态产物。 |
 | 2026-10-17 | 页面路由接 HEAD、补网站图标 | 新增一条排错（拨测报首页 405，真实原因是页面路由不接 HEAD）；新增页面路由要用 `page_route`。`public/` 已重建（含 `favicon.svg` 与入口页的图标声明）。 |
 | 2026-10-17 | 宣传页成为首页 | “默认入口”改为宣传页 + `/about` + `/workbench/`；补本地预览方式（`cd frontend/workbench && npm run dev`）、宣传页动效按部署区分（Vercel 少动效、Lightsail 正常）与三条排错（普通构建报宣传页缺失、e2e 点不到「探索更多」、本地与 Lightsail 看不到 `landingMotion`）。生产 Caddy 的入口缓存规则加 `/about`。新增 `.coderabbit.yaml` 排除 `public/**`（构建产物把 PR 撑过 CodeRabbit 100 个文件的上限，整次评审被跳过）。`public/` 已重建。 |
-| 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
+| 2026-10-16 | 生产容器与数据库查看 | 9.4 新增「看容器与数据库」：容器状态、资源占用、健康检查，以及在 app 容器里用 psql、包在只读事务里查库（2026-10-20 合入时补：Python 只读脚本经标准输入运行、不提交、查完回滚）；新增排错：事务池上的会话级 `set` 残留到应用连接，worker 报 `ReadOnlySqlTransaction`。 |
 | 2026-10-16 | Gemini 关闭思考与评分输出上限 | Google 主机关闭思考改发 `reasoning_effort: "none"`；默认输出上限 1200→2048、上下文窗口 8192→9040（输入预算不变），`llm_cache.PROMPT_VERSION=2026-10-16-1`；截断排错补上 Vertex/Gemini 的情况与用量账本的判断方法，Vertex 接入说明补思考一条；`diagnose_llm` 输出补 `reasoning_effort`。 |
 | 2026-10-16 | 起草 Schema 太复杂时改用精简 Schema | 厂商报“约束状态太多”时同一批自动改用精简 Schema 重发一次（日志 `rubric_ai_draft_schema_fallback`）；精简版去掉的约束在代码里补齐（扣分至少 0.01、来源必须在输入里真实存在）；请求被拒的提示不再猜“内容限制”；排错补上 T02 的真实原因，新增一条（精简格式也被拒）。 |
+| 2026-10-15 | 评分助手保存模型设置失败 | 前端 `api` 补 `put`；新增“源码用到的 api 方法都存在”测试；评分助手排错新增一条（前端报失败、后端无请求）。`public/` 已重建。 |
 | 2026-10-15 | 厂商错误说明与起草被拒提示 | 请求被拒时 `llm_call_failed` 行尾附 `provider_message`（脱敏、截断 300 字）；Google 数组错误体可解析，`provider_type` 取 `error.status`；说明里的密钥（含带引号的 `"api_key": "…"` 与 `AIza…` 形状）先遮蔽；起草的 HTTP 4xx 分“请求被拒”“连接被拒”两种提示，402 走额度提示，请求被拒引导重新起草而不是重试（重试原样重发冻结输入）；新增一条排错（某一批起草总被 400 拒绝），更新两条（Gemini 403、看厂商原文的方法）。 |
 | 2026-10-15 | 接入 Google Vertex AI | OpenAI 协议请求按主机选择认证头：Vertex 用 `x-goog-api-key`，其余仍用 Bearer；新增 Vertex 接入步骤与两条排错（Vertex 401、Gemini 403 看 reason）。 |
 | 2026-10-14 | 日志级别与测试连接诊断 | 新增 `LOG_LEVEL`（默认 INFO）；app 在启动时、worker 在入口统一配置日志格式；测试连接失败记 `ai_connection_test_failed`（状态码与错误类型）；9.4 增加看日志、临时调高级别的命令与一条排错。 |
