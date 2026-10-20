@@ -1804,7 +1804,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 ### 2026-10-16 Google 主机关闭思考改发 reasoning_effort，评分默认输出上限与上下文窗口同步调大（Accepted）
 
-背景：生产上用 Vertex AI 的 Gemini 2.5 Flash 评一份论文，48 次规则调用里 12 次 `PROVIDER_OUTPUT_TRUNCATED`，按设计整份判失败。用量账本里输入 58,330、可见输出 3,304，合计却是 98,552：约 3.7 万 token 是模型的思考，平均每次约 770，而可见输出平均只有约 70。全局配置 `OPENAI_COMPATIBLE_THINKING_TYPE=disabled`，但适配器发的是智谱写法 `thinking: {"type": "disabled"}`，Vertex 不认、静默忽略（**更正，2026-10-20**：那条是 BYOK 连接，没配置思考，工厂传空字符串，全局默认根本没作用到它，请求里也没有任何思考字段；见 2026-10-20 条）；思考 token 计入 1200 的输出上限，思考一长 JSON 就写不完。运行身份却记着“思考已关闭”，与实际不符。
+背景：生产上用 Vertex AI 的 Gemini 2.5 Flash 评一份论文，48 次规则调用里 12 次 `PROVIDER_OUTPUT_TRUNCATED`，按设计整份判失败。用量账本里输入 58,330、可见输出 3,304，合计却是 98,552：约 3.7 万 token 是模型的思考，平均每次约 770，而可见输出平均只有约 70。那是一条没配置思考的 BYOK 连接：全局配置 `OPENAI_COMPATIBLE_THINKING_TYPE=disabled` 只作用于平台模型，工厂给 BYOK 传空字符串，请求里没有任何思考字段，Gemini 按默认思考；思考 token 计入 1200 的输出上限，思考一长 JSON 就写不完。运行身份却记着 `thinking.enabled=false`（`type` 为空），与实际不符。（**更正，2026-10-20**：本条原写作「适配器发了智谱写法 `thinking: {"type": "disabled"}`、被 Vertex 静默忽略」，那是对显式配置为关闭的连接才成立的推测，这条连接并非如此；见 2026-10-20 条。下面的换算对显式关闭的连接仍然需要。）
 
 选择：
 - **按主机换算思考参数**（`services/llm/thinking_params.py`）：Google 主机（Vertex 与 Gemini API）上配置为关闭时，发 Google 文档给出的 `reasoning_effort: "none"`；只有 2.5 Flash 系列能关，2.5 Pro、Gemini 3 关不掉，就不发参数，运行身份记为 `provider-default`（思考开启）。其他主机照旧发 `thinking` 字段。

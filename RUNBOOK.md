@@ -1963,7 +1963,11 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 | API Key | Vertex AI express 模式的 API Key（`AQ.` 开头） |
 
 - Key 由系统放在 `x-goog-api-key` 头里发送，不用 Bearer；其它 OpenAI 兼容服务（包括 Gemini API 的 `generativelanguage.googleapis.com`）仍用 Bearer。
-- 思考：连接配置为关闭（`thinking_type=disabled`），或没配置（2026-10-20 起），在 Vertex 与 Gemini API 上都改发 `reasoning_effort: "none"`（只有 2.5 Flash 系列能关；2026-10-16 起）。全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE` 只作用于平台模型，BYOK 连接看自己的配置。`diagnose_llm` 的输出里 `thinking` 为 `null`、`reasoning_effort` 为 `"none"` 是正常的。
+- 思考：连接配置为关闭（`thinking_type=disabled`）或没配置（2026-10-20 起）时，按型号区分：
+  - Gemini 2.5 Flash 系列（含 Flash-Lite 与预览版）发 `reasoning_effort: "none"`，运行身份记 `none`（2026-10-16 起）；
+  - 2.5 Pro、Gemini 3 等关不掉思考的型号不发参数，运行身份记 `provider-default`（思考开启），只能靠输出上限兜底。
+
+  全局默认 `OPENAI_COMPATIBLE_THINKING_TYPE` 只作用于平台模型，BYOK 连接看自己的配置。`diagnose_llm` 按平台模型（`OPENAI_COMPATIBLE_MODEL`）拼请求：2.5 Flash 系列输出里 `thinking` 为 `null`、`reasoning_effort` 为 `"none"`；关不掉的型号两者都为 `null`。
 - 学生论文会发给 Google：项目要绑定结算账号，按付费条款处理数据。
 - 换模型会改变评分结果，正式使用前按 §15 重新锚定 QWK（需要维护者授权真实调用与预算）。
 
