@@ -1147,6 +1147,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-22 | 评分助手热修复审（CodeRabbit） | 无新命令；去掉热修发布说明里从仓库根目录跑不通的 Playwright 命令，改为指向下方的验证命令。 |
 | 2026-10-22 | 评分助手热修（Agent 化方案第一期） | 无新命令与开关；评分助手新增两条排错（开新流程时被问要不要放弃上一步；问句只得到帮助），发布说明补一条（无迁移）。 |
 | 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 无新命令与开关；Vertex 接入说明按主机区分关闭写法与 `diagnose_llm` 预期；新增一条排错（Vertex 评分全部 400，真实原因是 `reasoning_effort` 不收 `none`）。 |
 | 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无新命令与开关；Vertex 接入说明改为「没配置也按关闭」；新增一条排错（BYOK Gemini 仍在思考、仍截断，真实原因是连接没配置思考）；更正「Vertex 不报告推理 token」的说法。 |
@@ -2305,7 +2306,7 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
 发布：
 - 迁移 `0038_assistant_conversations` 新建五张表并在迁移内给 `pgs_app` 授权、建 RLS；生产按 D-025 审批工作流先迁移（`expected_head=0038_assistant_conversations`）再部署。`verify_postgres_ops` 与生产迁移工作流的运行角色检查覆盖这五张表。
 - 回滚：任一助手表有数据时 0035 拒绝降级；先删除会话与偏好再降级。
-- 2026-10-22 热修（打断保护、问句守卫、快捷按钮按键分派）：无迁移，head 仍为 `0040_provider_output_observations`；接口只加可选字段 `quick_action`，旧前端不带它照常工作。合入 `main` 后随流水线发布；验证命令同下，另跑 `npx playwright test e2e/assistant.spec.js --project=chromium`。
+- 2026-10-22 热修（打断保护、问句守卫、快捷按钮按键分派）：无迁移，head 仍为 `0040_provider_output_observations`；接口只加可选字段 `quick_action`，旧前端不带它照常工作。合入 `main` 后随流水线发布；验证命令同下（第二条已含 `e2e/assistant.spec.js`，其中新增了打断保护的浏览器用例）。
 - 安全头变化随部署生效；发布后在生产打开助手页，确认工作区能显示“评分进度”页。
 
 验证（全部离线，Mock 模型）：
