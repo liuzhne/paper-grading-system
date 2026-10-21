@@ -72,6 +72,25 @@ test.describe("评分助手", () => {
     expect(createdBatch).toBe(false);
   });
 
+  test("打断保护：导入还没完成时说“开始评分”，先问要不要放弃，选继续则导入卡片原样等着", async ({ page }) => {
+    await openAssistant(page);
+    await ask(page, "上传我的评分规则和模板");
+    const importCard = page.locator(".acard-pick_rubric_files").last();
+    await expect(importCard).toBeVisible();
+
+    // 问“怎么做”不会开始别的流程（10-15 的生产问题）。
+    await ask(page, "模板怎么上传？");
+    await expect(page.locator(".message").last()).toContainText("当前还有一步没完成：上传评分规则与模板");
+
+    await ask(page, "开始评分");
+    const switchCard = page.locator(".acard-confirm_switch_flow").last();
+    await expect(switchCard.getByRole("button", { name: "放弃并开始评分" })).toBeVisible();
+    await switchCard.getByRole("button", { name: "继续“上传评分规则与模板”" }).click();
+
+    await expect(switchCard).toContainText("已继续上一步");
+    await expect(importCard).not.toContainText("已放弃");
+  });
+
   test("规则识别不了的话：说没理解，并给出快捷按钮", async ({ page }) => {
     await openAssistant(page);
     await ask(page, "今天天气怎么样");

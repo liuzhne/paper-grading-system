@@ -82,6 +82,59 @@ describe("assistant store", () => {
     expect(store.filesForPending()).toEqual(files);
   });
 
+  it("快捷按钮带上意图键，后端按键分派", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [200, { messages: [], pending: null, conversation: conversation() }],
+    });
+
+    await store.send("整体分数情况", "query_overview");
+
+    expect(calls[0].body).toEqual({ type: "message", text: "整体分数情况", quick_action: "query_overview" });
+  });
+
+  it("附件遇到“要放弃上一步吗”：文件先暂存，不换掉上一步的文件；放弃并开始后才归到新流程", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const oldFiles = [new File(["o"], "old.docx")];
+    store.filesByThread["c1:1"] = oldFiles;
+    store.pending = { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} };
+    const switchCard = { id: "sw-1", type: "confirm_switch_flow", status: "proposed", from_label: "确认开始评分", to_label: "开始评分" };
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": (body) => body.type === "message"
+        ? [200, { messages: [message("m1", "“确认开始评分”这一步还没完成……", [switchCard])], conversation: conversation(),
+          pending: { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} } }]
+        : [200, { messages: [], conversation: conversation(),
+          pending: { kind: "confirm_start", card_id: "start-2", thread_id: "c1:2", client: {} } }],
+    });
+    const newFiles = [new File(["n"], "new.docx")];
+
+    await store.attachFiles(newFiles);
+    expect(store.filesByThread["c1:1"]).toEqual(oldFiles);
+
+    await store.switchFlow(switchCard, "switch");
+    expect(calls[1].body).toEqual({ type: "select", card_id: "sw-1", value: { action: "switch" } });
+    expect(store.filesByThread["c1:2"]).toEqual(newFiles);
+    expect(store.filesByThread["c1:1"]).toEqual(oldFiles);
+  });
+
+  it("选“继续上一步”：暂存的文件丢掉，上一步原样", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.pending = { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} };
+    const same = { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} };
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [200, { messages: [], conversation: conversation(), pending: same }],
+    });
+
+    await store.attachFiles([new File(["n"], "new.docx")]);
+    await store.switchFlow({ id: "sw-1" }, "keep");
+
+    expect(store.pending).toEqual(same);
+    expect(Object.keys(store.filesByThread)).toEqual([]);
+  });
+
   it("确认开始后流程要求上传：用同一批文件直传，再带论文编号恢复", async () => {
     const store = useAssistantStore();
     store.conversation = conversation();

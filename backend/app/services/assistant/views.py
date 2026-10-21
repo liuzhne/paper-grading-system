@@ -20,7 +20,8 @@ HELP_TEXT = "\n".join([
     "评分过程的每一步都显示在右侧的页面上。改分请在评分工作区里完成。",
 ])
 
-#: 快捷按钮：发出一句规则能识别的话，与自由输入走同一条路径。
+#: 快捷按钮。按钮发出的消息带 `quick_action` 键，运行器按键直接分派，不经规则与模型
+#: （Agent 化方案 §16）；`text` 只是显示在对话里的那句话。
 QUICK_ACTIONS = {
     "start_grading": ("开始评分", "开始评分"),
     "import_rubric": ("用我的评分规则和模板", "上传我的评分规则和模板"),
@@ -43,8 +44,32 @@ def quick_actions_card(intents: list[str] | None = None) -> dict:
     keys = intents or list(QUICK_ACTIONS)
     return {
         "type": "quick_actions",
-        "actions": [{"label": QUICK_ACTIONS[key][0], "text": QUICK_ACTIONS[key][1]} for key in keys],
+        "actions": [{"label": QUICK_ACTIONS[key][0], "text": QUICK_ACTIONS[key][1], "intent": key} for key in keys],
     }
+
+
+#: 流程停在哪一步，对老师怎么说（帮助回复与打断确认用）。
+PENDING_LABELS = {
+    "pick_files": "选择待评分的文件",
+    "confirm_start": "确认开始评分",
+    "upload_papers": "上传待评分的文件",
+    "confirm_remove": "确认是否移除解析失败的文件",
+    "create_import_session": "上传评分规则与模板",
+    "wait_publish": "在右侧核对并发布评分标准",
+    "wait_job": "等待评分结束",
+}
+
+#: 新流程的叫法（打断确认用）。
+FLOW_LABELS = {"grading": "开始评分", "import": "导入评分规则与模板"}
+
+
+def help_text(pending_kind: str | None = None) -> str:
+    """帮助回复；流程正停在某一步时，提醒老师在那张卡片里继续，而不是重新开始。"""
+
+    label = PENDING_LABELS.get(pending_kind or "")
+    if not label:
+        return HELP_TEXT
+    return HELP_TEXT + "\n当前还有一步没完成：%s，在上面那张卡片里继续即可。" % label
 
 
 def batch_name(now: datetime, count: int) -> str:

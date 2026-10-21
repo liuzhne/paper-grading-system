@@ -3393,6 +3393,8 @@ export interface components {
             attachments?: components["schemas"]["AssistantAttachments"] | null;
             /** Card Id */
             card_id?: string | null;
+            /** Quick Action */
+            quick_action?: ("start_grading" | "import_rubric" | "query_progress" | "query_paper" | "query_review" | "query_overview") | null;
             /** Text */
             text?: string | null;
             /**
