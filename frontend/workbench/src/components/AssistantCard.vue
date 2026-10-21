@@ -29,6 +29,8 @@ const disabled = computed(() => store.sending || store.uploading);
 
 const STATUS_TEXT = { running: "进行中…", done: "已完成", failed: "未完成", dismissed: "已放弃", expired: "已过期" };
 const statusText = computed(() => STATUS_TEXT[props.card.status] || "");
+// 打断确认卡片：done 是放弃了上一步，dismissed 是选了继续上一步。
+const SWITCH_STATUS_TEXT = { done: "已放弃上一步", dismissed: "已继续上一步", expired: "已过期" };
 
 function filesFrom(event) {
   const files = Array.from(event.target.files || []);
@@ -131,7 +133,7 @@ function evidenceLabel(view) {
     <!-- 快捷按钮 -->
     <div v-if="card.type === 'quick_actions'" class="chips">
       <button v-for="action in card.actions" :key="action.label" class="btn btn-sm" type="button"
-              :disabled="disabled" @click="store.send(action.text)">{{ action.label }}</button>
+              :disabled="disabled" @click="store.send(action.text, action.intent)">{{ action.label }}</button>
     </div>
 
     <!-- 深链：在右侧工作区打开 -->
@@ -301,6 +303,17 @@ function evidenceLabel(view) {
         <button class="btn btn-sm" type="button" :disabled="disabled" @click="store.select(card.id, { action: 'cancel' })">算了</button>
       </div>
       <p v-else class="faint">{{ statusText }}</p>
+    </template>
+
+    <!-- 打断保护：上一步还在等老师回应时，先问要不要放弃 -->
+    <template v-else-if="card.type === 'confirm_switch_flow'">
+      <div v-if="proposed" class="btn-row">
+        <button class="btn btn-sm btn-primary" type="button" :disabled="disabled"
+                @click="store.switchFlow(card, 'switch')">放弃并{{ card.to_label }}</button>
+        <button class="btn btn-sm" type="button" :disabled="disabled"
+                @click="store.switchFlow(card, 'keep')">继续“{{ card.from_label }}”</button>
+      </div>
+      <p v-else class="faint">{{ SWITCH_STATUS_TEXT[card.status] || statusText }}</p>
     </template>
 
     <!-- 上传评分规则与模板 -->

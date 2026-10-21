@@ -149,6 +149,10 @@ class _FakeScorer:
         ("哪些需要复核", "query_review", None),
         ("这批的平均分是多少", "query_overview", None),
         ("把失败的重试一下", "retry_failed", None),
+        ("把失败的那几份重新评一下", "retry_failed", None),
+        ("没评完的再试一次", "retry_failed", None),
+        ("上传论文", "start_grading", None),
+        ("上传这些材料", "start_grading", None),
         ("取消评分", "cancel_job", None),
         ("我要上传自己的评分规则和模板", "import_rubric", None),
         ("帮我评一下这些论文", "start_grading", None),
@@ -160,6 +164,29 @@ def test_rules_cover_the_common_phrasings_without_a_model(text, intent, ordinal)
     assert result.intent == intent
     assert result.paper_ordinal == ordinal
     assert result.source == "rules"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "模板怎么上传？",
+        "评分标准和评分模板有什么区别？",
+        "怎么取消评分",
+        "第3份在文献综述上评价不对，请重新评价这个规则并重新给分",
+        "文献综述这项评得不对",
+        "第二篇的研究方法扣分不合理，重评一下",
+        "这一项重新评一下",
+    ],
+)
+def test_questions_and_rejudge_requests_never_become_write_actions(text):
+    # Agent 化方案 §1 的几句（10-14、10-15 生产实测）与 §31.1 的收紧。
+    assert intents.interpret(text, scorer=None).intent not in intents.WRITE_INTENTS
+
+
+def test_model_write_intent_on_a_how_to_question_becomes_help():
+    scorer = _FakeScorer(result={"intent": "import_rubric", "paper_ordinal": None, "paper_name": None, "clarify": None})
+    result = intents.interpret("规则文件放在哪里", scorer=scorer)
+    assert result.intent == "help" and result.source == "model"
 
 
 def test_model_sees_only_this_sentence_recent_user_messages_and_names():
@@ -366,17 +393,125 @@ def test_queries_while_waiting_do_not_disturb_the_flow(client):
     assert "新开一个会话" in another["messages"][-1]["text"]
 
 
-def test_starting_again_abandons_an_unconfirmed_flow(client):
+def test_starting_another_flow_asks_before_abandoning_the_waiting_one(client):
     _seed_published_rubric(client)
     conversation_id = _conversation(client)
     first = _run(client, conversation_id, type="message", attachments={"count": 1, "names": ["a.docx"]})
-    old_card = first["pending"]["card_id"]
-    second = _say(client, conversation_id, "开始评分")
-    assert second["pending"]["kind"] == "pick_files"
-    dismissed = [card for message in second["messages"] for card in message["cards"] if card["id"] == old_card]
-    assert dismissed and dismissed[0]["status"] == "dismissed"
+    waiting = first["pending"]
+    assert waiting["kind"] == "confirm_start"
+
+    # 打断保护（Agent 化方案 §17）：不再悄悄放弃，先问一句；旧流程原样等着。
+    asked = _say(client, conversation_id, "上传我的评分规则和模板")
+    assert asked["pending"] == waiting
+    switch = _cards(asked, "confirm_switch_flow")[0]
+    assert switch["status"] == "proposed"
+    assert switch["from_label"] == "确认开始评分" and switch["to_label"] == "导入评分规则与模板"
+
+    kept = _run(client, conversation_id, type="select", card_id=switch["id"], value={"action": "keep"})
+    assert kept["pending"] == waiting
+    assert _cards(kept, "confirm_switch_flow")[0]["status"] == "dismissed"
+    assert "继续“确认开始评分”" in kept["messages"][-1]["text"]
+
+    asked = _say(client, conversation_id, "开始评分")
+    switch = _cards(asked, "confirm_switch_flow")[0]
+    switched = _run(client, conversation_id, type="select", card_id=switch["id"], value={"action": "switch"})
+    assert switched["pending"]["kind"] == "pick_files"
+    old_card = [card for message in switched["messages"] for card in message["cards"] if card["id"] == waiting["card_id"]]
+    assert old_card and old_card[0]["status"] == "dismissed"
     with client.session_factory() as session:
         assert session.get(models.AssistantConversation, conversation_id).flow_seq == 2
+
+    # 用过的确认卡片不能再点。
+    again = client.post(f"/api/assistant/conversations/{conversation_id}/runs",
+                        json={"type": "select", "card_id": switch["id"], "value": {"action": "switch"}})
+    assert again.status_code == 409
+
+
+def test_saying_start_again_while_picking_files_points_back_to_the_card(client):
+    _seed_published_rubric(client)
+    conversation_id = _conversation(client)
+    waiting = _say(client, conversation_id, "开始评分")["pending"]
+    assert waiting["kind"] == "pick_files"
+    again = _say(client, conversation_id, "开始评分")
+    assert again["pending"] == waiting
+    assert not _cards(again, "confirm_switch_flow")
+    assert "正在等你选择待评分的文件" in again["messages"][-1]["text"]
+
+
+def test_switch_card_expires_when_the_waiting_flow_already_ended(client):
+    _seed_published_rubric(client)
+    conversation_id = _conversation(client)
+    first = _run(client, conversation_id, type="message", attachments={"count": 1, "names": ["a.docx"]})
+    switch = _cards(_say(client, conversation_id, "开始评分"), "confirm_switch_flow")[0]
+    ended = _resume(client, conversation_id, first["pending"], {"action": "cancel"})
+    assert ended["pending"] is None
+
+    stale = _run(client, conversation_id, type="select", card_id=switch["id"], value={"action": "switch"})
+    assert stale["pending"] is None
+    assert _cards(stale, "confirm_switch_flow")[0]["status"] == "expired"
+    assert "情况已经变了" in stale["messages"][-1]["text"]
+
+
+def test_how_to_question_keeps_the_import_card_and_points_back_to_it(client):
+    _seed_published_rubric(client)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "我要上传自己的评分规则和模板")
+    waiting = body["pending"]
+    assert waiting["kind"] == "create_import_session"
+
+    # 10-15 的生产问题：这句被“上传”截走，导入卡片被悄悄放弃。
+    asked = _say(client, conversation_id, "模板怎么上传？")
+    assert asked["pending"] == waiting
+    assert asked["messages"][0]["intent"] == "help"
+    assert "当前还有一步没完成：上传评分规则与模板" in asked["messages"][-1]["text"]
+
+
+def test_quick_action_key_dispatches_without_rules_or_model(client, monkeypatch):
+    seen = []
+    original = intents.match_rules
+    monkeypatch.setattr(intents, "match_rules", lambda text: seen.append(text) or original(text))
+    conversation_id = _conversation(client)
+
+    body = _say(client, conversation_id, "整体分数情况", quick_action="query_overview")
+    assert body["messages"][0]["intent"] == "query_overview"
+    assert seen == []
+
+    helped = _say(client, conversation_id, "你能做什么")
+    actions = _cards(helped, "quick_actions")[0]["actions"]
+    assert actions[0] == {"label": "开始评分", "text": "开始评分", "intent": "start_grading"}
+
+    invalid = client.post(f"/api/assistant/conversations/{conversation_id}/runs",
+                          json={"type": "message", "text": "x", "quick_action": "delete_everything"})
+    assert invalid.status_code == 422
+
+
+def test_retry_confirmed_while_another_flow_waits_does_not_abandon_it(client):
+    _seed_published_rubric(client)
+    conversation_id, _batch_id, body = _start_until_waiting_job(client)
+    job_id = body["pending"]["client"]["job_id"]
+
+    def fail_all():
+        with client.session_factory() as session:
+            job = session.get(models.BatchScoringJob, job_id)
+            for item in job.items:
+                item.status = "failed"
+                item.error_code = "PROVIDER_RATE_LIMITED"
+            job.status = "completed_with_errors"
+            job.pending_count = job.running_count = job.succeeded_count = 0
+            job.failed_count = len(job.items)
+            session.commit()
+
+    fail_all()
+    retried = _resume(client, conversation_id, body["pending"], {"event": "job_finished"})
+    fail_all()
+    final = _resume(client, conversation_id, retried["pending"], {"event": "job_finished"})
+    diagnosis = _cards(final, "diagnosis")[0]
+
+    waiting = _say(client, conversation_id, "开始评分")["pending"]
+    assert waiting["kind"] == "pick_files"
+    watched = _run(client, conversation_id, type="select", card_id=diagnosis["id"], value={"action": "retry"})
+    assert watched["pending"] == waiting
+    assert "失败项已重新排队" in watched["messages"][-1]["text"]
 
 
 def test_waiting_for_the_user_expires_after_seven_days(client):

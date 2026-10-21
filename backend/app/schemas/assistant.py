@@ -93,10 +93,16 @@ class AssistantAttachments(BaseModel):
     names: list[str] = Field(default_factory=list, max_length=MAX_FILES)
 
 
+#: 快捷按钮的键，与 `services/assistant/views.QUICK_ACTIONS`、前端 `lib/assistant-flow.js` 的 QUICK_ACTIONS 同名。
+QuickAction = Literal["start_grading", "import_rubric", "query_progress", "query_paper", "query_review", "query_overview"]
+
+
 class AssistantRunCreate(BaseModel):
     type: Literal["message", "resume", "select"]
     text: Optional[str] = Field(default=None, max_length=500)
     attachments: Optional[AssistantAttachments] = None
+    # 快捷按钮发出的消息带这个键：运行器按键直接分派，不经规则与模型（Agent 化方案 §16）。
+    quick_action: Optional[QuickAction] = None
     card_id: Optional[str] = Field(default=None, max_length=60)
     value: Optional[dict[str, Any]] = None
 

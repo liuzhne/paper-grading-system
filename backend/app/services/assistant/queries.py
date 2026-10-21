@@ -78,10 +78,11 @@ def query_progress(state: QueryState, runtime: Runtime[RunContext]):
     ctx = _ctx(runtime)
     batch_id = state["batch_id"]
     job = tools.call(ctx, "latest_job", batch_id=batch_id)
-    ctx.show_workspace("/tasks/%s/run" % batch_id)
     if job is None:
+        # 没有作业时进度页只会显示原始报错（10-11 生产验收时发现），工作区不切过去。
         ctx.say("这个任务还没有开始评分。")
         return {"next": END}
+    ctx.show_workspace("/tasks/%s/run" % batch_id)
     finished = job["succeeded_count"] + job["skipped_count"] + job["failed_count"] + job["canceled_count"]
     if job["status"] in ACTIVE_JOB_STATUSES:
         text = "正在评分：已完成 %d/%d 份。" % (finished, job["total_items"])

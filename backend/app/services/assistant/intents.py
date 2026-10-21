@@ -11,6 +11,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from dataclasses import replace
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,14 @@ _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五":
 _ORDINAL = re.compile(r"第\s*([0-9]{1,3}|[零一二两三四五六七八九十百]{1,4})\s*(?:篇|份|个|位|名)")
 
 # 顺序即优先级：先认“取消”“重试”这类明确的动作，再认查询，最后才是宽泛的“评分”。
+#
+# 两条收紧（Agent 化方案 §31.1）：单独的“重新评”“再评一次”不再算重试——“这一项重新评一下”
+# 是要重评某个评分项，不是重试失败的材料；单独的“上传”不再算开始评分——“模板怎么上传”是在问
+# 导入，而导入卡片可能正开着。
 _RULES: tuple[tuple[str, re.Pattern], ...] = (
     ("help", re.compile(r"能做什么|怎么用|如何使用|帮助|你是谁|有什么功能")),
     ("cancel_job", re.compile(r"(取消|停止|停下|终止|别评)(了)?(评分|任务|评阅)?")),
-    ("retry_failed", re.compile(r"重试|重新评|再评一次|再试一次|失败的.*(重新|再)")),
+    ("retry_failed", re.compile(r"重试|再试一次|(失败|没评完|未评完|没有评完)的.{0,12}(重新|再)")),
     ("import_rubric", re.compile(
         r"(上传|导入|用我的|用自己的|新的|换成?).{0,6}(评分规则|评分标准|评分模板|规则文件|模板文件)"
         r"|(评分规则|评分标准|评分模板)和.{0,4}(模板|规则)"
@@ -53,8 +58,17 @@ _RULES: tuple[tuple[str, re.Pattern], ...] = (
     ("query_overview", re.compile(r"平均|分布|最高分|最低分|排名|整体|总体|汇总|概览|统计|及格率")),
     ("query_progress", re.compile(r"进度|评到|评完|评好|完成了|多久|还要多|好了吗|状态")),
     ("query_paper", re.compile(r"扣分|扣了|得分|多少分|几分|为什么|证据|哪里错|问题在")),
-    ("start_grading", re.compile(r"开始评分|开始打分|帮我评|评一下|评分|打分|批改|评阅|上传")),
+    ("start_grading", re.compile(
+        r"开始评分|开始打分|帮我评|评一下|评分|打分|批改|评阅|上传.{0,4}(论文|材料|文件|作业|报告|待评)"
+    )),
 )
+
+#: 会开始流程或改动数据的意图。问“怎么做”的句子不走这些意图，改为回答帮助（§31.1）。
+WRITE_INTENTS = frozenset({"start_grading", "import_rubric", "retry_failed", "cancel_job"})
+# “这一项重新评一下”是要重评某个评分项（A3 才有），不是开始一次新的评分。
+_REJUDGE = re.compile(r"重新评|重评|再评")
+# “怎么样”是问情况（“这批写得怎么样”），不是问做法。
+_HOW_TO = re.compile(r"怎么(?!样)|怎样|如何|在哪|哪里|哪儿|什么|区别")
 
 
 @dataclass(frozen=True)
@@ -63,7 +77,7 @@ class IntentResult:
     paper_ordinal: int | None = None
     paper_name: str | None = None
     clarify: str | None = None
-    source: str = "rules"  # rules | model | none
+    source: str = "rules"  # rules | model | quick_action | none
     model_name: str | None = None
     error_code: str | None = None
 
@@ -111,12 +125,26 @@ def extract_ordinal(text: str) -> int | None:
     return value
 
 
+def is_how_to(text: str) -> bool:
+    return bool(_HOW_TO.search(text or ""))
+
+
+def _guard(result: IntentResult, text: str) -> IntentResult:
+    """问“怎么做”的句子不开始流程、不改数据，改为回答帮助（规则与模型的结果都过这一道）。"""
+
+    if result.intent in WRITE_INTENTS and is_how_to(text):
+        return replace(result, intent="help", paper_ordinal=None, paper_name=None, clarify=None)
+    if result.intent == "start_grading" and _REJUDGE.search(text or ""):
+        return replace(result, intent="unknown", paper_ordinal=None, paper_name=None)
+    return result
+
+
 def match_rules(text: str) -> IntentResult:
     cleaned = (text or "").strip()
     ordinal = extract_ordinal(cleaned)
     for intent, pattern in _RULES:
         if pattern.search(cleaned):
-            return IntentResult(intent=intent, paper_ordinal=ordinal)
+            return _guard(IntentResult(intent=intent, paper_ordinal=ordinal), cleaned)
     if ordinal is not None:
         # “第 3 篇呢”：只有指代、没有动词时，按查询该篇处理。
         return IntentResult(intent="query_paper", paper_ordinal=ordinal)
@@ -222,11 +250,11 @@ def interpret(text: str, *, focus: dict | None = None, scorer=None, recent: list
         logger.info("assistant_intent_model_invalid")
         return IntentResult(intent="unknown", source="none", model_name=model_name,
                             error_code="ASSISTANT_MODEL_OUTPUT_INVALID")
-    return IntentResult(
+    return _guard(IntentResult(
         intent=result.intent,
         paper_ordinal=result.paper_ordinal if result.paper_ordinal is not None else ruled.paper_ordinal,
         paper_name=result.paper_name,
         clarify=result.clarify,
         source="model",
         model_name=model_name,
-    )
+    ), cleaned)

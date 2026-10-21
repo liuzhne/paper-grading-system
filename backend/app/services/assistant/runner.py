@@ -38,8 +38,11 @@ from backend.app.services.assistant.flow import USER_WAIT_KINDS
 from backend.app.services.assistant.flow import build_flow_graph
 from backend.app.services.assistant.queries import QUERY_INTENTS
 from backend.app.services.assistant.queries import build_query_graph
-from backend.app.services.assistant.views import HELP_TEXT
+from backend.app.services.assistant.views import FLOW_LABELS
 from backend.app.services.assistant.views import MAX_FILES
+from backend.app.services.assistant.views import PENDING_LABELS
+from backend.app.services.assistant.views import QUICK_ACTIONS
+from backend.app.services.assistant.views import help_text
 from backend.app.services.assistant.views import quick_actions_card
 
 LOCK_SECONDS = 120
@@ -176,12 +179,34 @@ def _after_flow(ctx: RunContext, graph, saver: SqlCheckpointSaver) -> None:
 def _start_flow(ctx: RunContext, saver: SqlCheckpointSaver, flow_input: dict) -> None:
     if ctx.conversation.thread_id:
         pending = ctx.conversation.pending or {}
-        if pending.get("kind") in {"wait_job", "upload_papers"}:
+        kind = pending.get("kind")
+        if kind in {"wait_job", "upload_papers"}:
             ctx.say("这个会话里有一批材料正在上传或评分。要同时评另一批，请新开一个会话。",
                     [quick_actions_card(["query_progress"])])
             return
-        # 还停在“等用户确认”这一类步骤：放弃旧流程，开始新的。
+        if kind == "pick_files" and flow_input.get("mode") == "grading" and not flow_input.get("file_count"):
+            # 已经在等选文件，再说一次“开始评分”就是同一件事，不必问要不要放弃。
+            ctx.say("上面那张卡片正在等你选择待评分的文件，选好就能开始。")
+            return
+        if kind in USER_WAIT_KINDS:
+            # 打断保护（Agent 化方案 §17）：旧流程还在等老师回应，先问一句，不再悄悄放弃。
+            _propose_switch(ctx, pending, flow_input)
+            return
         _abandon_flow(ctx, saver, status="dismissed")
+    _begin_flow(ctx, saver, flow_input)
+
+
+def _propose_switch(ctx: RunContext, pending: dict, flow_input: dict) -> None:
+    current = PENDING_LABELS.get(pending.get("kind"), "上一步")
+    target = FLOW_LABELS.get(flow_input.get("mode"), "新的操作")
+    ctx.say("“%s”这一步还没完成。要放弃它，改为%s吗？" % (current, target), [{
+        "type": "confirm_switch_flow", "status": "proposed",
+        "from_card_id": pending.get("card_id"), "from_label": current, "to_label": target,
+        "flow_input": flow_input,
+    }])
+
+
+def _begin_flow(ctx: RunContext, saver: SqlCheckpointSaver, flow_input: dict) -> None:
     ctx.conversation.flow_seq = int(ctx.conversation.flow_seq or 0) + 1
     ctx.conversation.thread_id = "%s:%d" % (ctx.conversation.id, ctx.conversation.flow_seq)
     graph = build_flow_graph(saver)
@@ -230,7 +255,8 @@ def _recent_user_texts(ctx: RunContext, exclude_id: str) -> list[str]:
     return [text[: intents.MAX_TEXT_CHARS] for text in reversed(rows)]
 
 
-def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attachments: dict | None) -> None:
+def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attachments: dict | None,
+                    quick_action: str | None = None) -> None:
     message = AssistantMessage(conversation_id=ctx.conversation.id, role="user", text=text, cards=[])
     ctx.db.add(message)
     ctx.db.flush()
@@ -241,6 +267,9 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
 
     if attachments:
         result = intents.IntentResult(intent="start_grading")
+    elif quick_action in QUICK_ACTIONS:
+        # 快捷按钮按键直接分派，不经规则与模型（Agent 化方案 §16）。
+        result = intents.IntentResult(intent=quick_action, source="quick_action")
     else:
         result = intents.match_rules(text)
         if result.intent == "unknown":
@@ -254,6 +283,9 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
             result = intents.interpret(
                 text, focus=focus, scorer=scorer, recent=_recent_user_texts(ctx, message.id)
             )
+    if result.intent == "unknown" and intents.is_how_to(text):
+        # 问“怎么做”而规则与模型都认不出：回答帮助（并提醒等待中的那一步），比“没理解”有用。
+        result = intents.IntentResult(intent="help", source=result.source, model_name=result.model_name)
     message.intent = result.intent
     message.model_name = result.model_name
 
@@ -267,7 +299,7 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
     elif result.intent == "import_rubric":
         _start_flow(ctx, saver, {"mode": "import"})
     elif result.intent == "help":
-        ctx.say(HELP_TEXT, [quick_actions_card()], intent="help")
+        ctx.say(help_text((ctx.conversation.pending or {}).get("kind")), [quick_actions_card()], intent="help")
     elif result.intent in QUERY_INTENTS:
         _run_query(ctx, result.intent, ordinal=result.paper_ordinal, name=result.paper_name, text=text)
     else:
@@ -317,8 +349,31 @@ def _handle_select(ctx: RunContext, saver: SqlCheckpointSaver, card_id: str, val
         if pending.get("kind") == "wait_job":
             ctx.say("失败项已重新排队，评完我会告诉你结果。")
             return
+        if pending.get("kind") in USER_WAIT_KINDS:
+            # 重试已经执行；另一个流程还在等老师回应，不为“盯进度”去打断它。
+            ctx.say("失败项已重新排队，进度可以随时问我。“%s”这一步还没完成，在上面那张卡片里继续即可。"
+                    % PENDING_LABELS.get(pending["kind"], "上一步"), [quick_actions_card(["query_progress"])])
+            return
         _start_flow(ctx, saver, {"mode": "watch", "batch_id": card["batch_id"], "job_id": card["job_id"],
                                  "auto_retry_used": True})
+        return
+    if kind == "confirm_switch_flow":
+        action = value.get("action")
+        if action not in {"switch", "keep"}:
+            raise HTTPException(status_code=422, detail="不支持的操作")
+        pending = ctx.conversation.pending or {}
+        if pending.get("card_id") != card.get("from_card_id"):
+            # 旧流程已经结束或换过了：这张卡片问的问题不存在了。
+            ctx.update_card(message.id, card_id, "expired")
+            ctx.say("情况已经变了，请再说一次要做什么。", [quick_actions_card()])
+            return
+        if action == "keep":
+            ctx.update_card(message.id, card_id, "dismissed")
+            ctx.say("好的，继续“%s”，在上面那张卡片里接着操作即可。" % card.get("from_label", "上一步"))
+            return
+        ctx.update_card(message.id, card_id, "done", {"switched": True})
+        _abandon_flow(ctx, saver, status="dismissed")
+        _begin_flow(ctx, saver, card["flow_input"])
         return
     if kind == "confirm_cancel":
         if value.get("action") == "cancel":
@@ -346,7 +401,8 @@ def run(db: Session, principal: CurrentPrincipal, conversation: AssistantConvers
         _expire_stale_pending(ctx, saver)
         kind = request["type"]
         if kind == "message":
-            _handle_message(ctx, saver, request["text"], request.get("attachments"))
+            _handle_message(ctx, saver, request["text"], request.get("attachments"),
+                            request.get("quick_action"))
         elif kind == "resume":
             _resume_flow(ctx, saver, request["card_id"], request.get("value") or {})
         else:

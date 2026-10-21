@@ -50,6 +50,11 @@ export const useAssistantStore = defineStore("assistant", () => {
   const jobs = reactive({});
   /** 本页内存里的待评文件：流程线程 → File[]。刷新后失效，卡片会请用户重新选择。 */
   const filesByThread = reactive({});
+  /**
+   * 附件触发了“要放弃上一步吗”的确认卡片时，新流程还没开始、没有线程：文件先放这里，
+   * 老师点“放弃并开始”后再归到新线程；点“继续”就丢掉。不能归到旧流程的线程，那会换掉它的文件。
+   */
+  let stagedFiles = null;
 
   const timers = new Map();
 
@@ -183,10 +188,16 @@ export const useAssistantStore = defineStore("assistant", () => {
     return result;
   }
 
-  function send(text) {
+  /**
+   * 发一句话。快捷按钮带上 `quickAction`（意图键），后端按键直接分派，不经规则与模型。
+   * @param {string} text
+   * @param {string} [quickAction]
+   */
+  function send(text, quickAction) {
     const cleaned = (text || "").trim();
     if (!cleaned) return Promise.resolve(undefined);
-    return guarded(() => run({ type: "message", text: cleaned }), "发送失败");
+    const body = quickAction ? { type: "message", text: cleaned, quick_action: quickAction } : { type: "message", text: cleaned };
+    return guarded(() => run(body), "发送失败");
   }
 
   function resume(cardId, value) {
@@ -218,12 +229,28 @@ export const useAssistantStore = defineStore("assistant", () => {
       return;
     }
     const names = accepted.map((file) => file.name);
+    const before = pending.value?.thread_id || null;
     const result = await guarded(
       () => run({ type: "message", attachments: { count: accepted.length, names } }),
       "处理文件失败",
     );
     const thread = result?.pending?.thread_id;
-    if (thread) filesByThread[thread] = accepted;
+    if (thread && thread !== before) filesByThread[thread] = accepted;
+    else if (result) stagedFiles = accepted; // 后端先问要不要放弃上一步
+  }
+
+  /**
+   * “要放弃上一步吗”的确认卡片：放弃并开始新流程，或继续原来那一步。
+   * @param {{id: string}} card
+   * @param {"switch"|"keep"} action
+   */
+  async function switchFlow(card, action) {
+    const before = pending.value?.thread_id || null;
+    const result = await select(card.id, { action });
+    const thread = result?.pending?.thread_id;
+    if (action === "switch" && stagedFiles && thread && thread !== before) filesByThread[thread] = stagedFiles;
+    stagedFiles = null;
+    return result;
   }
 
   async function pickFiles(card, fileList) {
@@ -369,7 +396,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     settings, conversations, conversation, messages, pending, sending, uploading, error, setupOpen,
     workspacePath, workspaceKey, jobs, filesByThread,
     loadSettings, saveSettings, dismissSetup, loadConversations, open, create, remove, clearConversation,
-    showWorkspace, send, resume, select, isPending, filesForPending, attachFiles, pickFiles, replaceFiles,
+    showWorkspace, send, resume, select, switchFlow, isPending, filesForPending, attachFiles, pickFiles, replaceFiles,
     importRubric, reportError, reset, stopWatchers,
   };
 });

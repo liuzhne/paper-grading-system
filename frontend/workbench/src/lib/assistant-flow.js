@@ -11,7 +11,10 @@ import { isWorkbenchType } from "./document-types.js";
 /** 单个登录用户通过助手一次最多提交的文件数（维护者决定 U2）。 */
 export const MAX_FILES = 30;
 
-/** 欢迎页的快捷按钮：发出一句后端规则能识别的话，与自由输入走同一条路径。 */
+/**
+ * 欢迎页的快捷按钮。发出的消息带 `quick_action`（这里的 intent），后端按键直接分派、不经规则与模型；
+ * 键名与后端 `services/assistant/views.QUICK_ACTIONS`、接口的 `quick_action` 取值一致。
+ */
 export const QUICK_ACTIONS = [
   { intent: "start_grading", label: "开始评分", text: "开始评分" },
   { intent: "import_rubric", label: "用我的评分规则和模板", text: "上传我的评分规则和模板" },

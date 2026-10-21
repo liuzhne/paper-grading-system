@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评分助手热修（Agent 化方案第一期） | 无新模块：`intents` 加写意图守卫（问句不开始流程、不改数据），`runner` 开新流程前对等待中的流程出确认卡片，快捷按钮带 `quick_action` 键按键分派；接口加可选字段，无迁移。 |
 | 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 无模块与数据流变化：`thinking_params.thinking_request_fields` 在 Vertex 主机上关闭 2.5 Flash 的思考改发 `extra_body.google.thinking_config.thinking_budget=0`（Vertex 的 `reasoning_effort` 不收 `none`，生产 400）；Gemini API 仍发 `reasoning_effort: "none"`；身份值不变（`none`）。`diagnose_llm` 多报 `thinking_config`。无迁移。 |
 | 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无模块与数据流变化：`thinking_params.effective_thinking_type` 在 Google 主机上把空值（BYOK 连接没配置时工厂传空字符串）与显式关闭同样换算，2.5 Flash 系列发 `reasoning_effort: "none"`、身份记 `none`；关不掉的型号仍记 `provider-default`。`llm_cache.PROMPT_VERSION=2026-10-20-1`。无迁移。 |
 | 2026-10-19 | 评分输出观测与思考一致性守卫（输出预算方案 P1） | 新增迁移 0040（`scoring_runs`、`ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`）；三个适配器的计量回调多记推理 token 与结束原因，`llm/usage` 新增 `ThinkingConsistencyGuard` 与 `metered_call`，论文与技术方案的 LLM 运行时经它发出每次 Core 调用；规则任务的尝试次数改由执行日志如实记录；批量任务遇到 `PROVIDER_THINKING_NOT_DISABLED` 取消同任务未开始的条目；运维就绪的 `batch_jobs` 下新增只观察的 `model_output`。 |
@@ -1438,3 +1439,29 @@ batch_scoring.jobs：_incomplete_scoring_error 遇到该码直接以它为根因
 `thinking_params.thinking_request_fields` 在 Google 主机上、对能关思考的 2.5 Flash 系列按主机分两种写法：Gemini API 发 `reasoning_effort: "none"`；Vertex 发 `{"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}`——原始 HTTP 请求体里就是顶层 `extra_body` 键（Vertex 文档的 curl 示例）。两种写法不混用。运行身份值（`none`）不变，`effective_thinking_type` 不变；`scripts/diagnose_llm` 的输出多一个 `thinking_config`。调用链与表结构不变。
 
 维护记录：2026-10-20 · Vertex 关闭思考改发 thinking_budget 0：接口、数据库不变，head `0040_provider_output_observations` 不变。
+
+### 2026-10-22 评分助手热修（Agent 化方案第一期）
+
+方案见 [docs/评分助手Agent化方案.md](docs/评分助手Agent化方案.md) 第 17 节与第 31.1 节。规则模式以后是 Agent 的降级路径，这些改动在 Agent 上线后仍然有效。调用链变化：
+
+```
+message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经规则与模型）
+             └否─▶ intents：规则 → 识别不了才调模型 → _guard（规则与模型的结果都过）
+                    问“怎么做”的句子不进 WRITE_INTENTS（start_grading / import_rubric / retry_failed / cancel_job），改为 help；
+                    “重新评 / 重评 / 再评”不进 start_grading；认不出的“怎么做”问句也回答 help
+开新流程（runner._start_flow）─▶ 旧流程停在等老师回应的步骤？
+             ├是 ─▶ confirm_switch_flow 卡片（旧流程原样等着）─ select：switch → 放弃旧流程 + _begin_flow；keep → 不动
+             └否 ─▶ wait_job / upload_papers 仍提示新开会话；没有等待中的流程直接开始
+确认重试（select confirm_retry / diagnosis）─▶ 另一个流程在等老师回应时，只执行重试，不开“盯进度”流程
+```
+
+- `intents.py`：`WRITE_INTENTS`、`is_how_to`、`_guard`；“重试”只认“重试 / 再试一次 / 失败（没评完）的…重新（再）”；“开始评分”不再因单独的“上传”命中。
+- `runner.py`：`_propose_switch`、`_begin_flow`；已经在等选文件时再说“开始评分”只提示在原卡片里选，不出确认卡片；`confirm_switch_flow` 的选择在执行前核对旧流程仍是卡片记下的那一张，换过了就把卡片标为过期。
+- `views.py`：快捷按钮带 `intent` 键；`PENDING_LABELS`（流程停在哪一步怎么说）、`FLOW_LABELS`、`help_text`（流程等待时提醒在那张卡片里继续）。
+- `queries.py`：查进度时没有作业，工作区不再切到进度页（之前会显示原始报错）。
+- 接口：`AssistantRunCreate.quick_action`（可选，取值与 `QUICK_ACTIONS` 同名）；OpenAPI 与前端类型已重新生成。
+- 前端：`stores/assistant.js` 的 `send(text, quickAction)`、`switchFlow(card, action)`；附件触发打断确认时文件先暂存，选“放弃并开始”后才归到新流程的线程，不换掉旧流程的文件。`AssistantCard` 渲染 `confirm_switch_flow`。
+
+无迁移，head 仍为 `0040_provider_output_observations`；`public/` 已重新组装。
+
+维护记录：2026-10-22 · 评分助手热修：打断保护、问句不进写动作、快捷按钮按键分派；接口加可选字段 `quick_action`，数据库不变。
