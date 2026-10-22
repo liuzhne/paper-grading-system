@@ -35,6 +35,7 @@ class ReplyParams(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     cards: list[str] = Field(default_factory=list, max_length=10)
     next_steps: list[str] = Field(default_factory=list, max_length=6)
+    help_refs: list[str] = Field(default_factory=list, max_length=3)
 
 
 class ReplyInvalid(Exception):
@@ -51,6 +52,7 @@ class ValidReply:
     cards: tuple[str, ...]
     next_steps: tuple[str, ...]
     dropped_sentences: int
+    help_refs: tuple[str, ...] = ()
 
 
 # 分数样式：“2 分”“3.5 points”“满分”“总分 78”“得了 80”“得分 6”“分数是 7”。“2 分钟”不算。
@@ -100,8 +102,11 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True) -> Va
         raise ReplyInvalid("参数不合格：%s" % exc.errors()[0]["msg"]) from exc
     if detect_injection(params.text):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
-    if not allow_cards and (params.cards or params.next_steps):
-        raise ReplyInvalid("这里只要文字，cards 与 next_steps 必须为空")
+    if not allow_cards and (params.cards or params.next_steps or params.help_refs):
+        raise ReplyInvalid("这里只要文字，cards、next_steps 与 help_refs 必须为空")
+    unseen = [ref for ref in params.help_refs if ref not in refs.help_seen]
+    if unseen:
+        raise ReplyInvalid("help_refs 里的“%s”不是本回合 help_lookup 返回的条目" % "、".join(unseen))
     cards = []
     for ref in params.cards:
         if refs.object_of(ref) is None:
@@ -115,7 +120,8 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True) -> Va
     if not text:
         raise ReplyInvalid("回复去掉分数、改分建议与链接后没有剩下内容；分数请用 cards 展示")
     return ValidReply(text=text, cards=tuple(cards[:MAX_CARDS]),
-                      next_steps=tuple(dict.fromkeys(params.next_steps)), dropped_sentences=dropped)
+                      next_steps=tuple(dict.fromkeys(params.next_steps)), dropped_sentences=dropped,
+                      help_refs=tuple(dict.fromkeys(params.help_refs)))
 
 
 __all__ = ["MAX_TEXT_CHARS", "NEXT_STEPS", "ReplyInvalid", "ReplyParams", "ValidReply", "parse_arguments", "validate_reply"]

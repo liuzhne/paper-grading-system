@@ -25,11 +25,12 @@ def _report_module():
     return module
 
 
-KNOWN_EXPECT = {"tools_all", "tools_none", "search", "cards_any", "outcome", "pending_unchanged"}
+KNOWN_EXPECT = {"tools_all", "tools_any", "tools_none", "search", "cards_any", "outcome", "pending_unchanged",
+                "pending_after", "help_refs"}
 
 
 class RuleOfThumbModel:
-    """看老师这句话和本回合已有的工具结果决定下一步：足够让评测的每条路径都走一遍。"""
+    """按说法里的关键词走“标准答案”的路径：让评测集的每一类都端到端走一遍（环境、工具、判定、汇总）。"""
 
     provider = "fake"
     model_name = "fake/rule-of-thumb"
@@ -37,23 +38,83 @@ class RuleOfThumbModel:
     def __init__(self):
         self.calls = 0
 
+    @staticmethod
+    def _results(messages, state):
+        return [json.loads(message["content"]) for message in messages[state + 1:] if message.get("role") == "tool"]
+
     def complete_with_tools(self, messages, tools, **options):
         self.calls += 1
         state = max(index for index, message in enumerate(messages) if "【老师这句话】" in str(message.get("content")))
-        utterance = messages[state]["content"].split("【老师这句话】", 1)[1]
-        done = [message for message in messages[state + 1:] if message.get("role") == "tool"]
-        called = "".join(message["content"] for message in done)
-        wants_rubric = "评分标准" in utterance or "评分规则" in utterance or "标准来评分" in utterance
-        wants_tasks = "任务" in utterance or "批次" in utterance
-        listed = '"rubrics":' in called  # 工具结果的键；搜索结果里的说明文字不算
-        if wants_rubric and '"tools"' not in called and not listed:
+        said = messages[state]["content"].split("【老师这句话】", 1)[1]
+        results = self._results(messages, state)
+        got = {key for result in results for key in result}
+        searched = any("tools" in result for result in results)
+
+        def pick(tasks):
+            for task in tasks:
+                for part in task["name"].replace("2026 届", "").split("·"):
+                    if part.strip() and part.strip()[:6] in said:
+                        return task
+            return None
+
+        def action(name, needs_task=False):
+            if needs_task and "tasks" not in got:
+                return step(("task_list", {"limit": 20}))
+            if not searched:
+                return step(("tool_search", {"query": "select:%s" % name}))
+            if not any("提示" in result for result in results) and len(results) < 4:
+                tasks = next((result["tasks"] for result in results if "tasks" in result), [])
+                task = pick(tasks) if needs_task else None
+                arguments = {"task_ref": task["ref"]} if task else {}
+                return step(("call_tool", {"name": name, "arguments_json": json.dumps(arguments)}))
+            return reply("现在不需要这么做。")
+
+        choices = next((result["tasks"] for result in results if "tasks" in result and "提示" in result), None)
+        if choices and "paper" not in got:
+            task = next((task for task in choices if task["name"][-6:] in said), None)
+            if task:
+                return step(("paper_result", {"task_ref": task["ref"], "ordinal": 2}))
+        if any("提示" in result for result in results) and not any(
+                key in got for key in ("paper", "task", "entries", "rubrics", "需要复核的材料")):
+            return reply("我需要你先说明是哪一个。")
+        if any(word in said.replace("怎么样", "") for word in ("怎么", "区别", "在哪", "格式", "要我做什么")):
+            if "entries" not in got:
+                return step(("help_lookup", {"topic": said.strip()}))
+            entries = next(result["entries"] for result in results if "entries" in result)
+            return reply("可以这样：", help_refs=[entries[0]["ref"]] if entries else [])
+        if "评一下" in said:
+            return action("action_start_grading")
+        if "自己的评分规则" in said:
+            return action("action_import_rubric")
+        if "重试" in said:
+            return action("action_retry_failed", needs_task=True)
+        if "别评" in said:
+            return action("action_cancel", needs_task=True)
+        if "复核" in said or "确认" in said:
+            if not searched:
+                return step(("tool_search", {"query": "需要复核"}))
+            if "需要复核的材料" not in got:
+                return step(("call_tool", {"name": "review_list", "arguments_json": "{}"}))
+            return reply("这些需要复核。")
+        if "第 2 份" in said or "学生" in said:
+            if "paper" not in got and "候选" not in got:
+                name = next((word for word in ("示例学生甲", "示例学生乙", "示例学生丙") if word in said), None)
+                return step(("paper_result", {"name": name} if name else {"ordinal": 2}))
+            paper = next((result["paper"] for result in results if "paper" in result), None)
+            return reply("这一份的情况如下。", cards=[paper["ref"]] if paper else [])
+        if any(word in said for word in ("整体", "怎么样", "丢分", "最低", "评完")):
+            if "task" not in got:
+                return step(("task_overview", {}))
+            task = next(result["task"] for result in results if "task" in result)
+            return reply("概况如下。", cards=[task["ref"]])
+        wants_rubric = "评分标准" in said or "评分规则" in said or "标准来评分" in said
+        if wants_rubric and not searched:
             return step(("tool_search", {"query": "评分标准"}))
-        if wants_rubric and not listed:
+        if wants_rubric and "rubrics" not in got:
             return step(("call_tool", {"name": "rubric_list", "arguments_json": "{}"}))
-        if wants_tasks and '"tasks":' not in called:
+        if ("任务" in said or "批次" in said) and "tasks" not in got:
             return step(("task_list", {}))
-        cards = ["t1"] if "整体" in utterance and '"tasks":' in called else []
-        return reply("好的，我看过了。", cards=cards)
+        return reply("好的，我看过了。")
 
 
 def test_eval_set_is_well_formed():
@@ -62,7 +123,8 @@ def test_eval_set_is_well_formed():
     for item in items:
         assert set(item) <= {"id", "category", "utterance", "expect", "setup"}
         assert set(item["expect"]) <= KNOWN_EXPECT, item["id"]
-        for name in item["expect"].get("tools_all", []) + item["expect"].get("tools_none", []):
+        expect = item["expect"]
+        for name in expect.get("tools_all", []) + expect.get("tools_none", []) + expect.get("tools_any", []):
             assert name in {tool.name for tool in assistant_eval.catalog.registry().values()}, item["id"]
 
 
@@ -74,10 +136,13 @@ def test_full_eval_runs_isolated_and_restores_the_process():
 
     results = {item["id"]: item for item in outcome["results"]}
     assert len(results) == len(items) and outcome["skipped"] == 0
-    assert results["task-01"]["passed"], results["task-01"]["reasons"]
-    assert results["rubric-01"]["passed"] and results["rubric-01"]["searches"] == 1
-    assert results["task-05"]["card_types"] == ["overview"]
-    assert results["wait-01"]["passed"], results["wait-01"]["reasons"]
+    # 按标准答案走的假模型：每一条都应通过，说明环境、工具与判定端到端是通的。
+    failed = {key: item["reasons"] for key, item in results.items() if not item["passed"]}
+    assert failed == {}
+    assert results["rubric-01"]["searches"] == 1 and results["task-05"]["card_types"] == ["overview"]
+    assert results["paper-01"]["card_types"] == ["paper_result"] and results["help-01"]["help_refs"]
+    assert results["act-01"]["outcome"] == "proposal"
+    assert results["act-03"]["card_types"] == ["confirm_retry"] and results["act-04"]["card_types"] == ["confirm_cancel"]
     assert all(not item["violations"] for item in outcome["results"])
 
     summary = assistant_eval.summarize(outcome["results"], skipped=0)

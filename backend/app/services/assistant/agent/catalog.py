@@ -180,6 +180,9 @@ _STOP_CHARS = frozenset("的了吗呢是我你他她它这那个一有在和与�
 FIELD_WEIGHTS = {"name": 3.0, "group": 2.0, "title": 2.0, "keywords": 2.0, "purpose": 1.0, "when": 1.0, "params": 0.5}
 K1 = 1.2
 B = 0.75
+#: 只返回得分不低于第一名这个比例的工具：“评分”“哪些”这类常见字会把不相干的工具也带出来，
+#: 多返回一个就多一段说明进上下文（§11.5）。0.75 由离线检索测试核对（评测说法命中率 ≥ 95%）。
+RELATIVE_CUTOFF = 0.75
 
 
 def tokenize(text: str) -> list[str]:
@@ -260,8 +263,12 @@ def search(query: str, role: str | None, *, limit: int = MAX_SEARCH_RESULTS) -> 
         if score > 0:
             scored.append((-score, position, name))
     scored.sort()
+    if not scored:
+        return []
+    floor = -scored[0][0] * RELATIVE_CUTOFF
+    kept = [entry for entry in scored if -entry[0] >= floor]
     tools = registry()
-    return [tools[name] for _score, _position, name in scored[: max(1, min(limit, MAX_SEARCH_RESULTS))]]
+    return [tools[name] for _score, _position, name in kept[: max(1, min(limit, MAX_SEARCH_RESULTS))]]
 
 
 def select(names: list[str], role: str | None) -> tuple[list[AgentTool], list[str]]:

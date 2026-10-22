@@ -28,7 +28,7 @@ from backend.app.services.assistant.agent.reply import NEXT_STEPS
 from backend.app.services.assistant.views import PENDING_LABELS
 from backend.app.services.assistant.views import QUICK_ACTIONS
 
-SYSTEM_VERSION = "assistant-agent@1"
+SYSTEM_VERSION = "assistant-agent@2"
 
 #: 历史里卡片的占位叫法：分数不随卡片回到上下文。
 CARD_LABELS = {
@@ -37,6 +37,17 @@ CARD_LABELS = {
     "confirm_retry": "重试确认", "confirm_cancel": "取消确认", "confirm_switch_flow": "放弃上一步确认",
     "diagnosis": "失败诊断", "pick_files": "选择文件", "pick_rubric_files": "上传评分规则与模板",
     "rubric_wait": "等待发布", "blocked_files": "解析失败的文件", "link": "页面链接",
+}
+
+#: 等待中的步骤在上面哪张卡片、卡片上有什么（§12：模型看得见等待中的步骤，才能回答“这一步怎么做”）。
+PENDING_DETAILS = {
+    "pick_files": "选择待评分文件的卡片，.docx 或 .pdf，一次最多 30 份，还没选",
+    "confirm_start": "开始评分的确认卡片：评分标准、文档类型、文件、评分模型；按钮“开始评分”“换评分标准”“重新选择文件”“不评了”",
+    "upload_papers": "正在上传与解析文件",
+    "confirm_remove": "有解析失败的文件，卡片在问是否移除后再评",
+    "create_import_session": "导入卡片：评分标准名称、文档类型（上传后不能再改）、评分规则文件、评分模板文件，还没有提交",
+    "wait_publish": "导入的评分标准已在右侧打开，等老师核对并发布",
+    "wait_job": "评分正在后台进行，评完会自动汇报",
 }
 
 _CJK = re.compile(r"[一-鿿　-〿＀-￯]")
@@ -66,6 +77,8 @@ MECHANISM_TOOLS = [
                       "description": "要展示的数据卡片：工具结果里的编号，例如 t1"},
             "next_steps": {"type": "array", "items": {"type": "string", "enum": list(NEXT_STEPS)},
                            "description": "建议老师接着做的事，渲染成按钮"},
+            "help_refs": {"type": "array", "items": {"type": "string"},
+                          "description": "回答用法问题时引用的帮助条目（help_lookup 返回的 ref），界面显示条目原文"},
         }},
     }},
     {"type": "function", "function": {
@@ -125,6 +138,10 @@ def system_prompt() -> str:
         "arguments_json 按该工具的“参数”写成 JSON 字符串；对话里有加载记录的工具可以直接 call_tool；",
         "- 任务、材料、评分标准一律用工具结果里的编号指代（例如 t1、p2），t0、p0 是当前状态里的任务与材料；",
         "- 统计、排序交给工具，不要自己算；",
+        "- 老师问“怎么……”“在哪……”“是什么”时先用 help_lookup，回答时把条目的 ref 放进 help_refs，text 只写一两句；",
+        "- 老师要做开始评分、导入、重试、取消这类事时，调用对应的 action_* 提议工具（会生成确认卡片或进入流程）；"
+        "只是问怎么做时不要调用；删除、归档、发布评分标准、改分这类事做不到，直说并指出在哪个页面做；",
+        "- 材料不唯一时把候选告诉老师，请他选；不要猜；",
         "- 每回合必须以调用 reply 结束；text 简短，用中文，不用 Markdown。",
         "",
         "可以搜索的工具分组：",
@@ -263,7 +280,8 @@ def state_message(text: str, *, focus: dict, pending: dict | None, loaded: list[
         lines.append("当前材料：p0")
     kind = (pending or {}).get("kind")
     if kind:
-        lines.append("等待中的步骤：%s（在上面的卡片里，老师还没完成）" % PENDING_LABELS.get(kind, kind))
+        detail = PENDING_DETAILS.get(kind)
+        lines.append("等待中的步骤：%s（%s）" % (PENDING_LABELS.get(kind, kind), detail or "在上面的卡片里，老师还没完成"))
     if loaded:
         lines.append("已加载的工具：%s" % "、".join(loaded))
     if len(lines) == 1:

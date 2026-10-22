@@ -589,6 +589,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评分助手 A1 复审（CodeRabbit） | 无模块变化：`paper_result` 找不到时直接返回提示与任务列表，材料名称过注入检测；评测环境多两个合成作业。 |
+| 2026-10-22 | 评分助手 A1（听懂与帮助） | `agent/business.py` 补齐查询与提议工具、`agent/help.py` 帮助条目；提议工具经一期确认卡片与 `_start_flow` 生效；无接口与数据库变化。 |
 | 2026-10-22 | 评分助手评测工具 | 新增 `eval/assistant_eval`（隔离环境、逐条判定、汇总）、`scripts/run_assistant_eval`（实例上跑）、`scripts/assistant_eval_report.py`（标准库，生成报告）与工作流 `assistant-eval.yml`；不改线上调用链。 |
 | 2026-10-22 | 评分助手 Agent 回合（A0） | 新增 `services/assistant/agent/`（目录与搜索、请求组装、回复校验、上限、压缩、回合子图）与 `llm/tool_calls`；OpenAI 兼容适配器加 `complete_with_tools`；运行器在快速通道之后、规则之前跑 Agent 回合（开关默认关）；新增迁移 0041。 |
 | 2026-10-22 | 评分助手规则补修复审（CodeRabbit） | 无模块变化：`intents` 的“给…打分”要求评分对象，`_QUESTION` 排除“这几个 / 那几份”并补不带问号的问法；方案文档的预算核对与分期说明同步。 |
@@ -1502,6 +1504,13 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 持久化：迁移 `0041_assistant_agent_state` 加两列——`assistant_messages.meta`（本轮首次加载、调用过的工具，回合模式，前缀身份，用量）与 `assistant_conversations.compaction`（压缩内容）。只加列，`pgs_app` 的表级授权与 RLS 自动覆盖；任一列有数据时拒绝降级。接口不暴露这两列，OpenAPI 不变。
 
 维护记录：2026-10-22 · 评分助手 A0：Agent 回合、工具目录与搜索、历史压缩、原生工具调用；head 升为 `0041_assistant_agent_state`；开关默认关。
+
+A1（听懂与帮助）：`agent/business.py` 补齐业务工具，`agent/help.py` 是代码维护的帮助条目。
+- 常驻 4 个：`help_lookup`、`task_list`、`task_overview`、`paper_result`（原方案的 `paper_find` 并入它）；延迟：`review_list`、`rubric_list` 与提议工具 `action_start_grading` / `action_import_rubric` / `action_retry_failed` / `action_cancel`。
+- 工具结果不含分数数字与学生原文（扣分理由疑似注入的不给）；编号带卡片（`TurnRefs.add(…, card=)`），回复 `cards` 里的编号由 `turn.cards_for` 换成卡片；`help_refs` 只能引用本回合 `help_lookup` 返回的条目，界面显示条目原文。
+- 提议工具返回 `{"proposal": …}`：确认卡片沿用一期的 `confirm_retry` / `confirm_cancel`，开始评分与导入走 `runner._start_flow`（打断保护照常）；没有可执行的对象时返回普通提示，回合继续。
+- 涉及某个任务或材料时更新焦点（换任务时清掉旧材料）与右侧工作区；没有当前任务时，按姓名在最近 8 个任务里一起找，只给序号则返回任务列表请老师先选。
+- 搜索只返回得分不低于第一名 75% 的工具；系统指令升为 `assistant-agent@2`，等待中的步骤写明是哪张卡片、上面有什么。
 
 评测（Agent 化方案 §27）：`eval/assistant_eval.py` + 评测集 `eval/assistant_eval_set.jsonl`。
 

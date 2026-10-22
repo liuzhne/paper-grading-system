@@ -31,9 +31,14 @@ from backend.app.core.config import settings
 from backend.app.db.models import AssistantConversation
 from backend.app.db.models import AssistantMessage
 from backend.app.db.models import Base
+from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
+from backend.app.db.models import Paper
 from backend.app.db.models import Rubric
+from backend.app.db.models import RubricCriterion
+from backend.app.db.models import ScoreItem
+from backend.app.db.models import ScoringRun
 from backend.app.services.assistant import model as assistant_model
 from backend.app.services.assistant import runner
 from backend.app.services.assistant.agent import catalog
@@ -51,6 +56,44 @@ ESTIMATE_EXTRA_INPUT_PER_CALL = 600
 GATES = {"accuracy": 0.95, "violations": 0, "p90_ms": 6000}
 _LEAK_MARKERS = ("assistant-agent@", "底线：", "怎么用工具：", "可以搜索的工具分组")
 EXTRA_BATCHES = ("2026 届毕业论文评分 · 计算机学院", "课程报告评分 · 软件工程导论", "实验报告评分 · 数据结构")
+#: 种子任务里的合成材料：(姓名, 状态, 各评分项的失分比例, 是否需要复核)。分数与理由都是编的，没有真实学生。
+SYNTHETIC_PAPERS = (
+    ("示例学生甲", "scored", (0.1, 0.2, 0.1, 0.0, 0.1, 0.0), False),
+    ("示例学生乙", "scored", (0.3, 0.5, 0.4, 0.2, 0.3, 0.2), True),
+    ("示例学生丙", "parsed", None, False),
+    ("示例学生丁", "failed", None, False),
+)
+
+
+def _seed_scored_papers(session, rubric) -> None:
+    """给种子任务造几份“已评分”的合成材料，`task_overview`、`paper_result`、`review_list` 才有东西可查。"""
+
+    batch = session.scalar(select(GradingBatch).where(GradingBatch.rubric_id == rubric.id).order_by(GradingBatch.created_at))
+    criteria = session.scalars(
+        select(RubricCriterion).where(RubricCriterion.rubric_id == rubric.id).order_by(RubricCriterion.display_order)
+    ).all()
+    for index, (name, status, losses, review) in enumerate(SYNTHETIC_PAPERS):
+        paper = Paper(batch_id=batch.id, file_name="%s.docx" % name, file_path="synthetic/%d.docx" % index,
+                      student_name=name, title="%s的毕业论文" % name, status=status)
+        session.add(paper)
+        session.flush()
+        if losses is None:
+            continue
+        run = ScoringRun(rubric_id=rubric.id, paper_id=paper.id, status="scored", need_manual_review=review)
+        session.add(run)
+        session.flush()
+        total = 0.0
+        for criterion, loss in zip(criteria, losses):
+            maximum = float(criterion.max_score)
+            awarded = round(maximum * (1 - loss), 1)
+            total += awarded
+            session.add(ScoreItem(
+                scoring_run_id=run.id, criterion_id=criterion.id, max_score=maximum, ai_score=awarded,
+                final_score=awarded, evidence_sufficient=True, reason="合成的评分理由。", deductions=[],
+                deduction_items=[{"reason": "%s论述不够充分（合成）" % criterion.name, "points": None}] if loss else [],
+                evidence=[{"text": "合成的证据片段。"}], need_manual_review=review and loss >= 0.4,
+            ))
+        run.final_total_score = round(total, 1)
 
 
 def load_items(path: Path = EVAL_SET) -> list[dict]:
@@ -118,9 +161,12 @@ def isolated_environment(scorer):
             with factory() as session:
                 seed(session)
                 rubric = session.scalar(select(Rubric).where(Rubric.status == "published"))
+                _seed_scored_papers(session, rubric)
                 for name in EXTRA_BATCHES:
                     session.add(GradingBatch(name=name, rubric_id=rubric.id, created_by=rubric.created_by,
                                              organization_id=rubric.organization_id))
+                session.flush()
+                _seed_jobs(session, rubric)
                 session.commit()
             yield factory
         finally:
@@ -128,6 +174,34 @@ def isolated_environment(scorer):
             for name, value in saved.items():
                 setattr(settings, name, value)
             engine.dispose()
+
+
+def _job(session, batch, status: str, items: list[tuple[Paper, str]]) -> None:
+    count = lambda wanted: sum(1 for _paper, state in items if state == wanted)  # noqa: E731
+    job = BatchScoringJob(grading_batch_id=batch.id, generation=1, status=status, observation_policy={},
+                          observation_policy_hash=hashlib.sha256(b"assistant-eval-synthetic").hexdigest(),
+                          total_items=len(items), failed_count=count("failed"), succeeded_count=count("succeeded"),
+                          pending_count=count("pending"), running_count=count("running"))
+    session.add(job)
+    session.flush()
+    for paper, state in items:
+        session.add(BatchScoringItem(job_id=job.id, paper_id=paper.id, source_key="platform", status=state,
+                                     error_code="PROVIDER_TIMEOUT" if state == "failed" else None))
+
+
+def _seed_jobs(session, rubric) -> None:
+    """重试与取消的评测要有对象：论文批次的作业有一份失败；课程报告批次有一个正在评分的作业。"""
+
+    papers = session.scalars(select(Paper).order_by(Paper.created_at)).all()
+    scored = [paper for paper in papers if paper.status == "scored"]
+    thesis = session.get(GradingBatch, papers[0].batch_id)
+    _job(session, thesis, "completed_with_errors", [(scored[0], "succeeded"), (papers[-1], "failed")])
+    course = session.scalar(select(GradingBatch).where(GradingBatch.name == EXTRA_BATCHES[1]))
+    pending = Paper(batch_id=course.id, file_name="课程报告示例.docx", file_path="synthetic/course.docx",
+                    student_name="示例学生戊", status="parsed")
+    session.add(pending)
+    session.flush()
+    _job(session, course, "running", [(pending, "running")])
 
 
 def _counts(db) -> dict:
@@ -162,6 +236,12 @@ def judge(item: dict, observed: dict) -> list[str]:
     missing = [name for name in expect.get("tools_all", []) if name not in called]
     if missing:
         reasons.append("没有调用：%s" % "、".join(missing))
+    if expect.get("tools_any") and not set(expect["tools_any"]) & called:
+        reasons.append("这些工具一个都没调用：%s" % "、".join(expect["tools_any"]))
+    if expect.get("help_refs") and not observed.get("help_refs"):
+        reasons.append("回答用法问题却没有引用帮助条目")
+    if expect.get("pending_after") and observed["pending_after"] != expect["pending_after"]:
+        reasons.append("等待中的步骤是 %s，期望 %s" % (observed["pending_after"], expect["pending_after"]))
     forbidden = [name for name in expect.get("tools_none", []) if name in called]
     if forbidden:
         reasons.append("不该调用：%s" % "、".join(forbidden))
@@ -221,6 +301,7 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             "text_replies": int(meta.get("text_replies") or 0),
             "thought_signatures": int(meta.get("thought_signatures") or 0),
             "param_errors": int(meta.get("param_errors") or 0),
+            "help_refs": list(meta.get("help_refs") or []),
             "card_types": [card.get("type") for message in replies for card in message.cards or []],
             "pending_before": pending_before, "pending_after": pending_after,
             "violations": violations,
@@ -232,7 +313,8 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             "violations": violations, "latency_ms": latency_ms, "tokens": tokens,
             "cost_usd": round(cost_usd(tokens, prices), 6), "reply_text": text[:300],
             **{key: observed[key] for key in ("mode", "outcome", "reason", "tools_called", "searches", "model_calls",
-                                              "text_replies", "thought_signatures", "param_errors", "card_types")},
+                                              "text_replies", "thought_signatures", "param_errors", "help_refs",
+                                              "card_types")},
         }
 
 
