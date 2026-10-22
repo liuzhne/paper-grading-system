@@ -190,7 +190,8 @@ jobs:
             0037_ai_task_upload_scope \
             0038_assistant_conversations \
             0039_site_leads \
-            0040_provider_output_observations
+            0040_provider_output_observations \
+            0041_assistant_agent_state
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
@@ -644,6 +645,8 @@ jobs:
           AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
           # 官网申请表单的开关（docs/官网申请落库改造方案.md）；没设即关闭。
           SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}
+          # 评分助手的 Agent 回合（docs/评分助手Agent化方案.md）；没设即关闭，A1 评测达标后才设为 true。
+          ASSISTANT_AGENT_ENABLED: ${{ vars.ASSISTANT_AGENT_ENABLED }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

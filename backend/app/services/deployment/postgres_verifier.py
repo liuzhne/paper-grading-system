@@ -43,6 +43,7 @@ MIGRATION_SEQUENCE = (
     "0038_assistant_conversations",
     "0039_site_leads",
     "0040_provider_output_observations",
+    "0041_assistant_agent_state",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"

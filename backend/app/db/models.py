@@ -3273,6 +3273,9 @@ class AssistantConversation(Base):
     pending: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     # 运行锁：同一会话同一时间只有一个请求在推进流程，第二个返回 409。
     run_locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 历史压缩（Agent 化方案 §12.4）：被移出的较早轮次的事实要点、老师的要求与仍在使用的工具，
+    # 以及覆盖到哪一条消息。渲染时直接读，不重新生成。迁移 0041。
+    compaction: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=utcnow, onupdate=utcnow
@@ -3315,6 +3318,9 @@ class AssistantMessage(Base):
     )
     intent: Mapped[str | None] = mapped_column(String(50), nullable=True)
     model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Agent 回合记下的元数据（Agent 化方案 §12.3）：本轮首次加载、调用过的工具，回合模式，
+    # 前缀身份。不含模型原始输出与学生文字。迁移 0041。
+    meta: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     conversation: Mapped["AssistantConversation"] = relationship(

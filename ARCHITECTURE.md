@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评分助手 Agent 回合（A0） | 新增 `services/assistant/agent/`（目录与搜索、请求组装、回复校验、上限、压缩、回合子图）与 `llm/tool_calls`；OpenAI 兼容适配器加 `complete_with_tools`；运行器在快速通道之后、规则之前跑 Agent 回合（开关默认关）；新增迁移 0041。 |
 | 2026-10-22 | 评分助手规则补修复审（CodeRabbit） | 无模块变化：`intents` 的“给…打分”要求评分对象，`_QUESTION` 排除“这几个 / 那几份”并补不带问号的问法；方案文档的预算核对与分期说明同步。 |
 | 2026-10-22 | 评分助手规则补修 | 无模块变化：`intents` 的“开始评分”去掉单独的“评分 / 打分 / 批改 / 评阅”，写意图的问句判断加宽（`_QUESTION`）；带“评分”二字的问句改由模型识别。无接口与数据库变化。 |
 | 2026-10-22 | 评分助手热修复审（CodeRabbit） | 无模块变化：前端暂存的附件改为按确认卡片编号保存，请求失败时保留；无接口与数据库变化。 |
@@ -1468,3 +1469,35 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 无迁移，head 仍为 `0040_provider_output_observations`；`public/` 已重新组装。
 
 维护记录：2026-10-22 · 评分助手热修：打断保护、问句不进写动作、快捷按钮按键分派；接口加可选字段 `quick_action`，数据库不变。
+
+### 2026-10-22 评分助手 Agent 回合（Agent 化方案 A0，开关默认关）
+
+方案见 [docs/评分助手Agent化方案.md](docs/评分助手Agent化方案.md) 第三部分。工作流 + 单 Agent：评分、导入仍走一期的流程图；“听懂、查询、解释、提议”交给模型。开关 `ASSISTANT_AGENT_ENABLED` 默认关闭，关闭时对外行为与之前完全一致。
+
+调用链（`runner._handle_message`）：
+
+```
+附件 → 开始评分流程；quick_action 键 → 按键分派；整句命中固定命令（intents.FAST_COMMANDS）→ 一期分派
+否则 _try_agent_turn：开关打开、助手模型可用（不是 Mock）、当天回合数未用完
+    agent.turn.run_turn
+        ├─ 取消息表 → context.build_prefix（①tools ②系统指令 ③压缩内容 ④历史）
+        ├─ compaction.maybe_compact：需要时发一次与主对话参数相同的摘要请求，写回 conversations.compaction，重建前缀
+        └─ LangGraph 子图：model 节点（complete_with_tools / JSON 动作协议）↔ tools 节点
+               reply → reply.validate_reply；tool_search → catalog.search / select；call_tool → 已加载的延迟工具；
+               常驻业务工具直接调用；业务工具经 tools.call → 共享守卫与服务层
+    结果：reply（文字 + 数据卡片 + 下一步按钮）/ 兜底回复 / 降级（这一句回到规则，且不再调用意图模型）
+```
+
+模块（`services/assistant/agent/`）：
+- `catalog.py`：工具目录（登记表）、给模型看的说明、原生定义（Gemini 能收的 schema 子集）、自写 BM25（中文单字 + 两字）、`select:`、登记表检查与指纹。
+- `business.py`：模型可调用的业务工具；A0 只登记 `task_list`（常驻）与 `rubric_list`（延迟），A1 补齐。
+- `refs.py`：引用编号（`t1`、`p1`、`r1`、`i1`，焦点里的 `t0`、`p0`），模型看不到数据库 ID。
+- `context.py`：请求组装与确定性渲染；历史每轮是用户原话、加载记录（合成的 `tool_search(select:…)` 调用与结果）与回复文字，卡片只留占位；已加载名单从历史推出；系统指令版本 `assistant-agent@1`。
+- `reply.py`：输出契约（整体作废、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
+- `compaction.py`：历史压缩（12 轮或 8,000 token，或缓存已冷），三部分：代码整理的事实要点、模型摘要的老师要求、仍在使用的工具。
+- `turn.py`：Agent 回合子图与入口。
+- `llm/tool_calls.py` + `openai_compatible_adapter.complete_with_tools`：原生工具调用一步；响应里的助手消息原样放回下一步（含 Gemini 的思考签名）。
+
+持久化：迁移 `0041_assistant_agent_state` 加两列——`assistant_messages.meta`（本轮首次加载、调用过的工具，回合模式，前缀身份，用量）与 `assistant_conversations.compaction`（压缩内容）。只加列，`pgs_app` 的表级授权与 RLS 自动覆盖；任一列有数据时拒绝降级。接口不暴露这两列，OpenAPI 不变。
+
+维护记录：2026-10-22 · 评分助手 A0：Agent 回合、工具目录与搜索、历史压缩、原生工具调用；head 升为 `0041_assistant_agent_state`；开关默认关。
