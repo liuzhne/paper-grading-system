@@ -122,8 +122,9 @@ jobs:
       - name: Render the report
         run: |
           set -euo pipefail
+          # 摘要同时打印到运行日志：未登录 GitHub 时看不到运行摘要，日志可以用 gh run view --log 读。
           python3 scripts/assistant_eval_report.py render raw.txt --previous-dir 'docs/评测报告/评分助手' \
-            --out out >> "$GITHUB_STEP_SUMMARY"
+            --out out | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload the report
         if: inputs.mode == 'run'
         uses: actions/upload-artifact@v7
