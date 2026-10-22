@@ -68,6 +68,20 @@ _RULES: tuple[tuple[str, re.Pattern], ...] = (
     )),
 )
 
+#: 快速通道（Agent 化方案 §16）：与固定命令整句完全一致才命中，不做子串匹配；命中后不调用模型。
+FAST_COMMANDS = {
+    "开始评分": "start_grading", "评分进度": "query_progress", "重试失败项": "retry_failed",
+    "取消评分": "cancel_job", "帮助": "help",
+    # 快捷按钮的文字（旧前端不带 quick_action 键时也走快速通道）
+    "上传我的评分规则和模板": "import_rubric", "查询扣分": "query_paper", "哪些需要复核": "query_review",
+    "整体分数情况": "query_overview",
+}
+
+
+def fast_command(text: str) -> str | None:
+    return FAST_COMMANDS.get((text or "").strip().rstrip("。.!！"))
+
+
 #: 会开始流程或改动数据的意图。问“怎么做”的句子不走这些意图，改为回答帮助（§31.1）。
 WRITE_INTENTS = frozenset({"start_grading", "import_rubric", "retry_failed", "cancel_job"})
 # “这一项重新评一下”是要重评某个评分项（A3 才有），不是开始一次新的评分。

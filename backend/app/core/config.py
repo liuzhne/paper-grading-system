@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     SITE_LEADS_PER_IP_HOURLY: int = 5
     SITE_LEADS_PER_IP_DAILY: int = 20
     SITE_LEADS_DAILY_LIMIT: int = 300
+    # 评分助手 Agent 回合（docs/评分助手Agent化方案.md）。默认关闭：关闭时助手的对外行为与一期
+    # 完全一致（规则识别 + 固定流程）。A1 的真实模型评测达到上线门槛后，才在生产打开。
+    ASSISTANT_AGENT_ENABLED: bool = False
+    # 每人每天的 Agent 回合上限（防止误用耗尽额度），超出后当天只用规则模式。
+    ASSISTANT_AGENT_DAILY_TURNS: int = 300
     LLM_PROVIDER: str = "mock"
     # A protected multi-user deployment must not accidentally bill/expose work
     # through the deployment-wide key.  Set this only for a reviewed migration,

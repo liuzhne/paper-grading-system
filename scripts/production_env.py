@@ -49,7 +49,8 @@ REQUIRED = (
     "SUPABASE_SECRET_KEY",
 )
 #: 可选开关：GitHub 仓库变量没设时不写进 .env，应用取默认值（关闭）。
-OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED",)
+#: ASSISTANT_AGENT_ENABLED：评分助手的 Agent 回合（docs/评分助手Agent化方案.md），A1 评测达标后才打开。
+OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED")
 # --from-environment 只取这些：部署任务的环境里还有 GITHUB_*、RUNNER_* 等无关变量。
 ENVIRONMENT_NAMES = REQUIRED + ("AUTH_USERNAME", "SUPABASE_STORAGE_BUCKET") + OPTIONAL_SWITCHES
 _SITE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")

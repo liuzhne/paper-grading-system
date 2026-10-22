@@ -1147,6 +1147,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-22 | 评分助手 Agent 回合（A0） | 新增环境变量 `ASSISTANT_AGENT_ENABLED`（默认关，生产经仓库变量同名开关打开）、`ASSISTANT_AGENT_DAILY_TURNS`；发布说明补迁移 0041 的顺序与回滚；新增三条排错（开关打开仍是规则、兜底回复、压缩）。 |
 | 2026-10-22 | 评分助手规则补修复审（CodeRabbit） | 无新命令；问句排错的关键词按复审结果更新。 |
 | 2026-10-22 | 评分助手规则补修 | 无新命令；新增一条排错（带“评分”的问句弹出选文件，真实原因是规则命中、模型没参与，附怎么看由谁识别），问句排错的关键词补全。 |
 | 2026-10-22 | 评分助手热修复审（CodeRabbit） | 无新命令；去掉热修发布说明里从仓库根目录跑不通的 Playwright 命令，改为指向下方的验证命令。 |
@@ -2298,6 +2299,14 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
 - **现象**：“选择助手使用的模型”对话框点“保存”只显示“保存失败”，后端日志里却没有任何 `PUT /api/assistant/settings` 请求。
   - 报错指向：看起来像后端拒绝或模型连接有问题。
   - 真正原因：前端 `api` 对象没有 `put` 方法，`api.put(...)` 在浏览器里直接抛 `TypeError`，请求根本没发出去；对话框把非接口错误一律显示成“保存失败”。2026-10-15 补上 `put`，并加了“源码里用到的 `api.xxx` 方法都必须存在”的测试。以后遇到“前端报失败、后端没请求”，先看浏览器控制台。
+- **现象**：打开了 `ASSISTANT_AGENT_ENABLED`，回复却和以前一样（规则识别）。
+  - 报错指向：开关没生效。
+  - 真正原因：Agent 回合还要求助手模型可用且不是 Mock、当天回合数没用完（`ASSISTANT_AGENT_DAILY_TURNS`，默认 300），而且快捷按钮与整句命中固定命令（“开始评分”“评分进度”等）本来就不走模型。看服务日志里有没有 `assistant_turn mode=agent`；用户消息的 `meta` 为 `{"mode": "degraded"}` 说明模型出错、这一句已退回规则。
+- **现象**：Agent 回复“这个问题我一时没处理好……”。
+  - 报错指向：模型坏了。
+  - 真正原因：确定性兜底，常见三种——回复两次不合格（编造了编号、只有分数）、工具调用超过 8 次、回合超过 60 秒。原因记在这条助手消息的 `meta.reason`（`reply_invalid` / `too_many_tool_calls` / `turn_timeout`），日志 `assistant_turn ... outcome=fallback`。
+- **现象**：长对话里 Agent 忘了老师早先的要求，或者一轮特别慢。
+  - 真正原因：压缩。12 轮或 8,000 token（或距上一轮超过 30 分钟）时，较早的轮次被压缩进 `assistant_conversations.compaction`；压缩那一轮多一次摘要请求。日志 `assistant_compaction mode=summary|facts_only|deferred`：`deferred` 是摘要失败、这轮先不压缩，连续两轮失败变成 `facts_only`（只有事实要点，老师的要求沿用上一份）。
 - **现象**：说了“开始评分”或“导入评分标准”，助手却回“××这一步还没完成。要放弃它，改为××吗？”（2026-10-22 起）。
   - 报错指向：助手没听懂，或者卡住了。
   - 真正原因：打断保护。同一会话里上一个流程还停在等老师回应的步骤（选文件、确认开评、确认移除、上传评分规则、等发布）。点“继续”回到原来那张卡片；点“放弃并开始”才开新流程。要同时做两件事，新开一个会话。
@@ -2313,6 +2322,7 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
 - 回滚：任一助手表有数据时 0035 拒绝降级；先删除会话与偏好再降级。
 - 2026-10-22 热修（打断保护、问句守卫、快捷按钮按键分派）：无迁移，head 仍为 `0040_provider_output_observations`；接口只加可选字段 `quick_action`，旧前端不带它照常工作。合入 `main` 后随流水线发布；验证命令同下（第二条已含 `e2e/assistant.spec.js`，其中新增了打断保护的浏览器用例）。
 - 安全头变化随部署生效；发布后在生产打开助手页，确认工作区能显示“评分进度”页。
+- 2026-10-22 A0（Agent 回合，开关默认关）：迁移 `0041_assistant_agent_state`（两个可空 JSON 列）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0041_assistant_agent_state`），再合并部署。开关不打开时对外行为不变，部署后照常核对助手页即可；回滚：两列都没有数据时才允许降级（开关一直关着就不会有数据）。生产打开开关：GitHub 仓库变量 `ASSISTANT_AGENT_ENABLED=true`（部署时由 `scripts/production_env.py` 写进实例的 `.env`，只收 true / false），A1 的真实模型评测达到上线门槛之前不要设。
 
 验证（全部离线，Mock 模型）：
 

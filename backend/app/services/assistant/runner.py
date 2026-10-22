@@ -26,12 +26,15 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from backend.app.api.deps import CurrentPrincipal
+from backend.app.core.config import settings
 from backend.app.db.models import AssistantConversation
 from backend.app.db.models import AssistantMessage
 from backend.app.db.models import utcnow
 from backend.app.services.assistant import intents
 from backend.app.services.assistant import model as assistant_model
 from backend.app.services.assistant import tools
+from backend.app.services.assistant.agent import budget as agent_budget
+from backend.app.services.assistant.agent import turn as agent_turn
 from backend.app.services.assistant.checkpointer import SqlCheckpointSaver
 from backend.app.services.assistant.context import RunContext
 from backend.app.services.assistant.flow import USER_WAIT_KINDS
@@ -270,9 +273,14 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
     elif quick_action in QUICK_ACTIONS:
         # 快捷按钮按键直接分派，不经规则与模型（Agent 化方案 §16）。
         result = intents.IntentResult(intent=quick_action, source="quick_action")
+    elif intents.fast_command(text):
+        result = intents.IntentResult(intent=intents.fast_command(text), source="fast")
     else:
+        handled, degraded = _try_agent_turn(ctx, text, message)
+        if handled:
+            return
         result = intents.match_rules(text)
-        if result.intent == "unknown":
+        if result.intent == "unknown" and not degraded:
             effective = assistant_model.effective_model(
                 ctx.db, user_id=ctx.user_id, organization_id=ctx.principal.organization_id
             )
@@ -283,6 +291,8 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
             result = intents.interpret(
                 text, focus=focus, scorer=scorer, recent=_recent_user_texts(ctx, message.id)
             )
+        elif result.intent == "unknown":
+            result = intents.IntentResult(intent="unknown", source="none", error_code="ASSISTANT_MODEL_FAILED")
     if result.intent == "unknown" and intents.is_how_to(text):
         # 问“怎么做”而规则与模型都认不出：回答帮助（并提醒等待中的那一步），比“没理解”有用。
         result = intents.IntentResult(intent="help", source=result.source, model_name=result.model_name)
@@ -307,6 +317,53 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
         if result.error_code == "ASSISTANT_MODEL_FAILED":
             reply = "助手模型暂时没有响应，我只能识别常见的说法。可以点下面的按钮继续。"
         ctx.say(reply, [quick_actions_card()], intent="unknown")
+
+
+def _agent_scorer(ctx: RunContext):
+    """开关打开、助手模型可用（不是 Mock）、当天的回合数没用完时，返回助手模型。"""
+
+    if not settings.ASSISTANT_AGENT_ENABLED:
+        return None
+    effective = assistant_model.effective_model(ctx.db, user_id=ctx.user_id, organization_id=ctx.principal.organization_id)
+    scorer = assistant_model.build_scorer(ctx.db, effective, user_id=ctx.user_id,
+                                          organization_id=ctx.principal.organization_id)
+    if scorer is None or getattr(scorer, "provider", "") == "mock":
+        return None
+    if not agent_budget.daily_budget_left(ctx.db, ctx.user_id):
+        return None
+    return scorer
+
+
+def _try_agent_turn(ctx: RunContext, text: str, message: AssistantMessage) -> tuple[bool, bool]:
+    """跑一个 Agent 回合（Agent 化方案 §10）。返回 (已处理, 已降级)。
+
+    降级（模型出错）时这一句退回规则模式，并且不再调用模型识别意图：刚失败的模型多半还会失败。
+    """
+
+    scorer = _agent_scorer(ctx)
+    if scorer is None:
+        return False, False
+    outcome = agent_turn.run_turn(ctx, scorer, text=text, user_message_id=message.id)
+    if outcome.kind == "degrade":
+        message.meta = {"mode": "degraded", "reason": outcome.reason}
+        return False, True
+    model_name = getattr(scorer, "model_name", None)
+    message.intent = agent_budget.AGENT_INTENT
+    message.model_name = model_name
+    if outcome.kind == "reply":
+        cards = agent_turn.cards_for(outcome.refs, outcome.reply)
+        if outcome.reply.next_steps:
+            cards.append(quick_actions_card(list(outcome.reply.next_steps)))
+        reply = ctx.say(outcome.reply.text, cards, intent=agent_budget.AGENT_INTENT)
+    elif outcome.kind == "proposal":
+        proposal = outcome.proposal or {}
+        reply = ctx.say(proposal.get("text") or "请确认：", [proposal["card"]] if proposal.get("card") else [],
+                        intent=agent_budget.AGENT_INTENT)
+    else:
+        reply = ctx.say(agent_turn.FALLBACK_TEXT, [quick_actions_card()], intent=agent_budget.AGENT_INTENT)
+    reply.meta = outcome.meta
+    reply.model_name = model_name
+    return True, False
 
 
 def _handle_select(ctx: RunContext, saver: SqlCheckpointSaver, card_id: str, value: dict) -> None:

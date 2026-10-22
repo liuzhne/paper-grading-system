@@ -504,6 +504,13 @@ def test_production_env_passes_the_site_leads_switch_through(tmp_path, monkeypat
     monkeypatch.setenv("SITE_LEADS_ENABLED", "true")
     assert script.main(args) == 0
     assert "SITE_LEADS_ENABLED='true'" in output.read_text(encoding="utf-8")
+    assert "ASSISTANT_AGENT_ENABLED" not in output.read_text(encoding="utf-8")
+
+    output.unlink()
+    monkeypatch.setenv("ASSISTANT_AGENT_ENABLED", "true")
+    assert script.main(args) == 0
+    assert "ASSISTANT_AGENT_ENABLED='true'" in output.read_text(encoding="utf-8")
+    monkeypatch.delenv("ASSISTANT_AGENT_ENABLED")
 
     # yes / on 应用也认，但仓库变量一眼看不出开没开：只收 true / false。
     output.unlink()

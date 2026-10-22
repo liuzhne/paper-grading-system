@@ -20,6 +20,7 @@ from backend.app.services.llm.legacy_prompts import chat_input_payload as _input
 from backend.app.services.llm.legacy_prompts import chat_instructions as _instructions
 from backend.app.services.llm.legacy_prompts import strip_json_fence as _strip_json_fence
 from backend.app.services.llm.thinking_params import effective_thinking_type
+from backend.app.services.llm.tool_calls import parse_chat_tool_response
 from backend.app.services.llm.thinking_params import thinking_request_fields
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
@@ -248,6 +249,33 @@ class OpenAICompatibleChatScorer(LLMScorer):
             response = self._post_with_retry(body, **request_options)
         response.raise_for_status()
         return _parse_chat_json_output(response.json())
+
+    def complete_with_tools(self, messages, tools, *, tool_choice="required", max_tokens=None, deadline=None,
+                            timeout_seconds=None):
+        """原生工具调用一步（评分助手 Agent 回合，方案 §13）。
+
+        请求参数在同一回合的各步之间保持不变（§12.1）：``tool_choice`` 固定，思考设置随连接，
+        不按步骤调整。只试 1 次、不原地等 429（Agent 回合自己有截止时间与降级）。
+        ``messages`` 与 ``tools`` 由调用方确定性地生成，这里不改写。
+        """
+
+        body = {
+            "model": self.model_name,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "temperature": self.temperature,
+            "max_tokens": int(max_tokens or self.max_tokens),
+        }
+        body.update(thinking_request_fields(self.base_url, self.model_name, (self.thinking_type or "").strip()))
+        if self.service_tier:
+            body["service_tier"] = self.service_tier
+        options = {"attempts_limit": 1, "deadline": deadline}
+        if timeout_seconds is not None and not self.timeout_seconds_explicit:
+            options["timeout_seconds"] = timeout_seconds
+        response = self._post_with_retry(body, **options)
+        response.raise_for_status()
+        return parse_chat_tool_response(response.json())
 
     def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None):
         return post_with_retry(
