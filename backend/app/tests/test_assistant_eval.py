@@ -50,11 +50,23 @@ class RuleOfThumbModel:
         got = {key for result in results for key in result}
         searched = any("tools" in result for result in results)
 
-        def action(name):
+        def pick(tasks):
+            for task in tasks:
+                for part in task["name"].replace("2026 届", "").split("·"):
+                    if part.strip() and part.strip()[:6] in said:
+                        return task
+            return None
+
+        def action(name, needs_task=False):
+            if needs_task and "tasks" not in got:
+                return step(("task_list", {"limit": 20}))
             if not searched:
                 return step(("tool_search", {"query": "select:%s" % name}))
-            if not any("提示" in result for result in results):
-                return step(("call_tool", {"name": name, "arguments_json": "{}"}))
+            if not any("提示" in result for result in results) and len(results) < 4:
+                tasks = next((result["tasks"] for result in results if "tasks" in result), [])
+                task = pick(tasks) if needs_task else None
+                arguments = {"task_ref": task["ref"]} if task else {}
+                return step(("call_tool", {"name": name, "arguments_json": json.dumps(arguments)}))
             return reply("现在不需要这么做。")
 
         choices = next((result["tasks"] for result in results if "tasks" in result and "提示" in result), None)
@@ -75,9 +87,9 @@ class RuleOfThumbModel:
         if "自己的评分规则" in said:
             return action("action_import_rubric")
         if "重试" in said:
-            return action("action_retry_failed")
+            return action("action_retry_failed", needs_task=True)
         if "别评" in said:
-            return action("action_cancel")
+            return action("action_cancel", needs_task=True)
         if "复核" in said or "确认" in said:
             if not searched:
                 return step(("tool_search", {"query": "需要复核"}))
@@ -130,6 +142,7 @@ def test_full_eval_runs_isolated_and_restores_the_process():
     assert results["rubric-01"]["searches"] == 1 and results["task-05"]["card_types"] == ["overview"]
     assert results["paper-01"]["card_types"] == ["paper_result"] and results["help-01"]["help_refs"]
     assert results["act-01"]["outcome"] == "proposal"
+    assert results["act-03"]["card_types"] == ["confirm_retry"] and results["act-04"]["card_types"] == ["confirm_cancel"]
     assert all(not item["violations"] for item in outcome["results"])
 
     summary = assistant_eval.summarize(outcome["results"], skipped=0)

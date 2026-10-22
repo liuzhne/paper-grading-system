@@ -94,10 +94,22 @@ def _paper_card(batch_id: str, paper: dict) -> dict:
     return {"type": "paper_result", "batch_id": batch_id, "paper_id": paper["paper_id"], "run_id": paper["latest_run_id"]}
 
 
+NAME_LIMIT = 40
+
+
+def _safe_name(paper: dict, profile: str) -> str:
+    """材料名称来自上传的文档（学生姓名、标题、文件名），学生能控制：过注入检测并截断，与扣分理由同等对待。"""
+
+    name = paper_label(paper, profile)
+    if detect_injection(name):
+        return "（名称疑似包含指令，未显示）"
+    return name[:NAME_LIMIT]
+
+
 def _paper_entry(turn: TurnContext, batch_id: str, paper: dict, ordinal: int, profile: str) -> dict:
     card = _paper_card(batch_id, paper) if paper.get("latest_run_id") else None
     return {"ref": turn.refs.add("p", paper["paper_id"], card=card), "序号": ordinal,
-            "名称": paper_label(paper, profile), "状态": _paper_status(paper)}
+            "名称": _safe_name(paper, profile), "状态": _paper_status(paper)}
 
 
 def _paper_status(paper: dict) -> str:
@@ -282,6 +294,7 @@ def _locate(turn: TurnContext, params: PaperParams):
             return batch_id, summary, papers, paper, papers
         if hits:
             return "candidates", hits
+        return "not_found", params.name
     if params.paper_ref:
         paper_id = turn.refs.resolve(params.paper_ref, "p")
         paper = turn.run.db.get(Paper, paper_id)
@@ -306,6 +319,9 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
     located = _locate(turn, params)
     if located is None:
         return {"提示": "没有当前任务：请先确定是哪个任务（task_ref），再按序号找。", "tasks": _task_choices(turn)}
+    if located[0] == "not_found":
+        return {"提示": "最近 %d 个任务里没有找到“%s”：请老师确认姓名、标题或文件名，或先指定任务。"
+                      % (SEARCH_TASKS, str(located[1])[:NAME_LIMIT]), "tasks": _task_choices(turn)}
     if located[0] == "candidates":
         return {"提示": "几个任务里都有对应的材料：请老师选一份，或用 ref 再调用。", "候选": [
             {**_paper_entry(turn, batch_id, paper, papers.index(paper) + 1, _profile(summary)), "任务": summary["batch_name"]}

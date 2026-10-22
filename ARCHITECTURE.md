@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评分助手 A1 复审（CodeRabbit） | 无模块变化：`paper_result` 找不到时直接返回提示与任务列表，材料名称过注入检测；评测环境多两个合成作业。 |
 | 2026-10-22 | 评分助手 A1（听懂与帮助） | `agent/business.py` 补齐查询与提议工具、`agent/help.py` 帮助条目；提议工具经一期确认卡片与 `_start_flow` 生效；无接口与数据库变化。 |
 | 2026-10-22 | 评分助手评测工具 | 新增 `eval/assistant_eval`（隔离环境、逐条判定、汇总）、`scripts/run_assistant_eval`（实例上跑）、`scripts/assistant_eval_report.py`（标准库，生成报告）与工作流 `assistant-eval.yml`；不改线上调用链。 |
 | 2026-10-22 | 评分助手 Agent 回合（A0） | 新增 `services/assistant/agent/`（目录与搜索、请求组装、回复校验、上限、压缩、回合子图）与 `llm/tool_calls`；OpenAI 兼容适配器加 `complete_with_tools`；运行器在快速通道之后、规则之前跑 Agent 回合（开关默认关）；新增迁移 0041。 |

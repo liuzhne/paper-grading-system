@@ -31,6 +31,7 @@ from backend.app.core.config import settings
 from backend.app.db.models import AssistantConversation
 from backend.app.db.models import AssistantMessage
 from backend.app.db.models import Base
+from backend.app.db.models import BatchScoringItem
 from backend.app.db.models import BatchScoringJob
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import Paper
@@ -164,6 +165,8 @@ def isolated_environment(scorer):
                 for name in EXTRA_BATCHES:
                     session.add(GradingBatch(name=name, rubric_id=rubric.id, created_by=rubric.created_by,
                                              organization_id=rubric.organization_id))
+                session.flush()
+                _seed_jobs(session, rubric)
                 session.commit()
             yield factory
         finally:
@@ -171,6 +174,34 @@ def isolated_environment(scorer):
             for name, value in saved.items():
                 setattr(settings, name, value)
             engine.dispose()
+
+
+def _job(session, batch, status: str, items: list[tuple[Paper, str]]) -> None:
+    count = lambda wanted: sum(1 for _paper, state in items if state == wanted)  # noqa: E731
+    job = BatchScoringJob(grading_batch_id=batch.id, generation=1, status=status, observation_policy={},
+                          observation_policy_hash=hashlib.sha256(b"assistant-eval-synthetic").hexdigest(),
+                          total_items=len(items), failed_count=count("failed"), succeeded_count=count("succeeded"),
+                          pending_count=count("pending"), running_count=count("running"))
+    session.add(job)
+    session.flush()
+    for paper, state in items:
+        session.add(BatchScoringItem(job_id=job.id, paper_id=paper.id, source_key="platform", status=state,
+                                     error_code="PROVIDER_TIMEOUT" if state == "failed" else None))
+
+
+def _seed_jobs(session, rubric) -> None:
+    """重试与取消的评测要有对象：论文批次的作业有一份失败；课程报告批次有一个正在评分的作业。"""
+
+    papers = session.scalars(select(Paper).order_by(Paper.created_at)).all()
+    scored = [paper for paper in papers if paper.status == "scored"]
+    thesis = session.get(GradingBatch, papers[0].batch_id)
+    _job(session, thesis, "completed_with_errors", [(scored[0], "succeeded"), (papers[-1], "failed")])
+    course = session.scalar(select(GradingBatch).where(GradingBatch.name == EXTRA_BATCHES[1]))
+    pending = Paper(batch_id=course.id, file_name="课程报告示例.docx", file_path="synthetic/course.docx",
+                    student_name="示例学生戊", status="parsed")
+    session.add(pending)
+    session.flush()
+    _job(session, course, "running", [(pending, "running")])
 
 
 def _counts(db) -> dict:

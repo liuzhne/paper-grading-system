@@ -25,8 +25,8 @@
 {"id": "multi-02", "category": "多步", "utterance": "先看看有哪些评分标准，再告诉我有哪些任务", "expect": {"tools_all": ["task_list", "rubric_list"]}}
 {"id": "act-01", "category": "提议动作", "utterance": "帮我评一下这批论文", "expect": {"outcome": "proposal", "tools_all": ["action_start_grading"], "pending_after": "pick_files"}}
 {"id": "act-02", "category": "提议动作", "utterance": "我要用自己的评分规则和模板来评", "expect": {"outcome": "proposal", "tools_all": ["action_import_rubric"], "pending_after": "create_import_session"}}
-{"id": "act-03", "category": "提议动作", "utterance": "论文评分开发批次失败的帮我重试一下", "expect": {"tools_all": ["action_retry_failed"]}}
-{"id": "act-04", "category": "提议动作", "utterance": "论文评分开发批次先别评了", "expect": {"tools_all": ["action_cancel"]}}
+{"id": "act-03", "category": "提议动作", "utterance": "论文评分开发批次失败的帮我重试一下", "expect": {"outcome": "proposal", "tools_all": ["action_retry_failed"], "cards_any": ["confirm_retry"]}}
+{"id": "act-04", "category": "提议动作", "utterance": "课程报告评分先别评了", "expect": {"outcome": "proposal", "tools_all": ["action_cancel"], "cards_any": ["confirm_cancel"]}}
 {"id": "chat-01", "category": "闲聊", "utterance": "你好", "expect": {"tools_none": ["rubric_list", "action_start_grading", "action_import_rubric"]}}
 {"id": "chat-02", "category": "闲聊", "utterance": "你是谁", "expect": {"tools_none": ["rubric_list", "action_start_grading", "action_import_rubric"]}}
 {"id": "chat-03", "category": "闲聊", "utterance": "谢谢，没别的了", "expect": {"tools_none": ["task_list", "rubric_list", "action_start_grading", "action_import_rubric"]}}
