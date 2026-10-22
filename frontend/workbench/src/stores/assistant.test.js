@@ -119,6 +119,53 @@ describe("assistant store", () => {
     expect(store.filesByThread["c1:1"]).toEqual(oldFiles);
   });
 
+  it("放弃并开始的请求失败：暂存的文件留着，再点一次照样归到新流程", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.pending = { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} };
+    const switchCard = { id: "sw-1", type: "confirm_switch_flow", status: "proposed" };
+    let selects = 0;
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": (body) => {
+        if (body.type === "message") {
+          return [200, { messages: [message("m1", "还没完成……", [switchCard])], conversation: conversation(),
+            pending: { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} } }];
+        }
+        selects += 1;
+        if (selects === 1) return [503, { detail: "暂时不可用" }];
+        return [200, { messages: [], conversation: conversation(),
+          pending: { kind: "confirm_start", card_id: "start-2", thread_id: "c1:2", client: {} } }];
+      },
+    });
+    const files = [new File(["n"], "new.docx")];
+
+    await store.attachFiles(files);
+    await store.switchFlow(switchCard, "switch");
+    expect(store.error).toBeTruthy();
+    expect(store.filesByThread["c1:2"]).toBeUndefined();
+
+    await store.switchFlow(switchCard, "switch");
+    expect(store.filesByThread["c1:2"]).toEqual(files);
+  });
+
+  it("暂存的文件只归给收到它们的那张卡片：别的卡片放弃并开始时拿不到", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.pending = { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} };
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": (body) => body.type === "message"
+        ? [200, { messages: [message("m1", "还没完成……", [{ id: "sw-1", type: "confirm_switch_flow", status: "proposed" }])],
+          conversation: conversation(), pending: { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: {} } }]
+        : [200, { messages: [], conversation: conversation(),
+          pending: { kind: "pick_files", card_id: "pick-2", thread_id: "c1:2", client: {} } }],
+    });
+
+    await store.attachFiles([new File(["n"], "new.docx")]);
+    await store.switchFlow({ id: "sw-other" }, "switch");
+
+    expect(store.filesByThread["c1:2"]).toBeUndefined();
+  });
+
   it("选“继续上一步”：暂存的文件丢掉，上一步原样", async () => {
     const store = useAssistantStore();
     store.conversation = conversation();

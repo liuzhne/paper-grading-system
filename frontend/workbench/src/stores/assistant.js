@@ -51,10 +51,11 @@ export const useAssistantStore = defineStore("assistant", () => {
   /** 本页内存里的待评文件：流程线程 → File[]。刷新后失效，卡片会请用户重新选择。 */
   const filesByThread = reactive({});
   /**
-   * 附件触发了“要放弃上一步吗”的确认卡片时，新流程还没开始、没有线程：文件先放这里，
-   * 老师点“放弃并开始”后再归到新线程；点“继续”就丢掉。不能归到旧流程的线程，那会换掉它的文件。
+   * 附件触发了“要放弃上一步吗”的确认卡片时，新流程还没开始、没有线程：文件按那张卡片暂存
+   * （卡片编号 → File[]），老师在这张卡片上点“放弃并开始”后再归到新线程，点“继续”就丢掉。
+   * 不能归到旧流程的线程，那会换掉它的文件；也不能共用一个槽位，否则别的会话、别的卡片会拿走它。
    */
-  let stagedFiles = null;
+  const stagedByCard = new Map();
 
   const timers = new Map();
 
@@ -235,8 +236,20 @@ export const useAssistantStore = defineStore("assistant", () => {
       "处理文件失败",
     );
     const thread = result?.pending?.thread_id;
-    if (thread && thread !== before) filesByThread[thread] = accepted;
-    else if (result) stagedFiles = accepted; // 后端先问要不要放弃上一步
+    if (thread && thread !== before) {
+      filesByThread[thread] = accepted;
+      return;
+    }
+    const card = proposedSwitchCard(result); // 后端先问要不要放弃上一步
+    if (card) stagedByCard.set(card.id, accepted);
+  }
+
+  function proposedSwitchCard(result) {
+    for (const item of result?.messages || []) {
+      const card = (item.cards || []).find((entry) => entry.type === "confirm_switch_flow" && entry.status === "proposed");
+      if (card) return card;
+    }
+    return null;
   }
 
   /**
@@ -247,9 +260,11 @@ export const useAssistantStore = defineStore("assistant", () => {
   async function switchFlow(card, action) {
     const before = pending.value?.thread_id || null;
     const result = await select(card.id, { action });
-    const thread = result?.pending?.thread_id;
-    if (action === "switch" && stagedFiles && thread && thread !== before) filesByThread[thread] = stagedFiles;
-    stagedFiles = null;
+    if (!result) return result; // 请求失败：文件留着，再点一次还在
+    const staged = stagedByCard.get(card.id);
+    stagedByCard.delete(card.id);
+    const thread = result.pending?.thread_id;
+    if (action === "switch" && staged && thread && thread !== before) filesByThread[thread] = staged;
     return result;
   }
 
@@ -385,6 +400,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     conversations.value = [];
     settings.value = null;
     for (const key of Object.keys(filesByThread)) delete filesByThread[key];
+    stagedByCard.clear();
   }
 
   // 切走会话时停止轮询，避免旧会话的轮询去恢复新会话的流程。

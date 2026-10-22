@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评分助手热修复审（CodeRabbit） | 无模块变化：前端暂存的附件改为按确认卡片编号保存，请求失败时保留；无接口与数据库变化。 |
 | 2026-10-22 | 评分助手热修（Agent 化方案第一期） | 无新模块：`intents` 加写意图守卫（问句不开始流程、不改数据），`runner` 开新流程前对等待中的流程出确认卡片，快捷按钮带 `quick_action` 键按键分派；接口加可选字段，无迁移。 |
 | 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 无模块与数据流变化：`thinking_params.thinking_request_fields` 在 Vertex 主机上关闭 2.5 Flash 的思考改发 `extra_body.google.thinking_config.thinking_budget=0`（Vertex 的 `reasoning_effort` 不收 `none`，生产 400）；Gemini API 仍发 `reasoning_effort: "none"`；身份值不变（`none`）。`diagnose_llm` 多报 `thinking_config`。无迁移。 |
 | 2026-10-20 | Google 主机上连接没配置思考按关闭处理 | 无模块与数据流变化：`thinking_params.effective_thinking_type` 在 Google 主机上把空值（BYOK 连接没配置时工厂传空字符串）与显式关闭同样换算，2.5 Flash 系列发 `reasoning_effort: "none"`、身份记 `none`；关不掉的型号仍记 `provider-default`。`llm_cache.PROMPT_VERSION=2026-10-20-1`。无迁移。 |
@@ -1460,7 +1461,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 - `views.py`：快捷按钮带 `intent` 键；`PENDING_LABELS`（流程停在哪一步怎么说）、`FLOW_LABELS`、`help_text`（流程等待时提醒在那张卡片里继续）。
 - `queries.py`：查进度时没有作业，工作区不再切到进度页（之前会显示原始报错）。
 - 接口：`AssistantRunCreate.quick_action`（可选，取值与 `QUICK_ACTIONS` 同名）；OpenAPI 与前端类型已重新生成。
-- 前端：`stores/assistant.js` 的 `send(text, quickAction)`、`switchFlow(card, action)`；附件触发打断确认时文件先暂存，选“放弃并开始”后才归到新流程的线程，不换掉旧流程的文件。`AssistantCard` 渲染 `confirm_switch_flow`。
+- 前端：`stores/assistant.js` 的 `send(text, quickAction)`、`switchFlow(card, action)`；附件触发打断确认时文件按那张确认卡片暂存（卡片编号 → 文件），在这张卡片上选“放弃并开始”且请求成功后才归到新流程的线程；不换掉旧流程的文件，别的会话、别的卡片也拿不到。`AssistantCard` 渲染 `confirm_switch_flow`。
 
 无迁移，head 仍为 `0040_provider_output_observations`；`public/` 已重新组装。
 
