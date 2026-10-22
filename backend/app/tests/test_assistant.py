@@ -155,6 +155,8 @@ class _FakeScorer:
         ("上传这些材料", "start_grading", None),
         ("评一下这批", "start_grading", None),
         ("给这几份打分", "start_grading", None),
+        ("给这几个作业打分", "start_grading", None),
+        ("给这批论文评分", "start_grading", None),
         ("取消评分", "cancel_job", None),
         ("我要上传自己的评分规则和模板", "import_rubric", None),
         ("帮我评一下这些论文", "start_grading", None),
@@ -185,6 +187,9 @@ def test_rules_cover_the_common_phrasings_without_a_model(text, intent, ordinal)
         "有几个评分任务",
         "评分标准有问题吗",
         "可以重试吗",
+        "给我看看评分结果",
+        "能不能取消评分",
+        "可不可以重试一下",
     ],
 )
 def test_questions_and_rejudge_requests_never_become_write_actions(text):
