@@ -24,16 +24,27 @@ class TurnRefs:
     _by_ref: dict[str, tuple[str, str]] = field(default_factory=dict)
     _by_object: dict[tuple[str, str], str] = field(default_factory=dict)
     _counters: dict[str, int] = field(default_factory=dict)
+    #: 编号 → 回复里引用它时显示的数据卡片（卡片只有类型与 ID，分数由界面现取）。
+    _cards: dict[str, dict] = field(default_factory=dict)
+    #: 本回合 `help_lookup` 返回过的帮助条目：回复的 help_refs 只能引用这些。
+    help_seen: set[str] = field(default_factory=set)
 
-    def add(self, kind: str, object_id: str) -> str:
+    def add(self, kind: str, object_id: str, *, card: dict | None = None) -> str:
         key = (kind, str(object_id))
         if key in self._by_object:
-            return self._by_object[key]
-        self._counters[kind] = self._counters.get(kind, 0) + 1
-        ref = "%s%d" % (kind, self._counters[kind])
-        self._by_ref[ref] = key
-        self._by_object[key] = ref
+            ref = self._by_object[key]
+        else:
+            self._counters[kind] = self._counters.get(kind, 0) + 1
+            ref = "%s%d" % (kind, self._counters[kind])
+            self._by_ref[ref] = key
+            self._by_object[key] = ref
+        if card is not None:
+            self._cards[ref] = card
         return ref
+
+    def card_of(self, ref: str) -> dict | None:
+        card = self._cards.get(str(ref or "").strip())
+        return dict(card) if card else None
 
     def pin(self, ref: str, kind: str, object_id: str) -> None:
         """焦点里的对象用固定编号（`t0`、`p0`），每回合开头登记。"""

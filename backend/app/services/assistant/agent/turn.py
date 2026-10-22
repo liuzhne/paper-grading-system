@@ -301,8 +301,8 @@ def _run(tool, arguments_json, rt: _Runtime) -> tuple[dict, dict | None]:
         return {"错误": "找不到这个对象，或当前账号无权访问。"}, None
     if tool.name not in rt.called:
         rt.called.append(tool.name)
-    if tool.kind == "proposal":
-        return {}, result
+    if tool.kind == "proposal" and isinstance(result, dict) and result.get("proposal"):
+        return {}, result["proposal"]  # 确认卡片或进入流程：本回合到此结束
     return result, None
 
 
@@ -385,6 +385,7 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
         "searches": int(final.get("searches") or 0), "tokens": dict(runtime.usage),
         "text_replies": runtime.text_replies, "thought_signatures": runtime.thought_signatures,
         "param_errors": sum(runtime.param_errors.values()),
+        "help_refs": list(raw["reply"].help_refs) if raw.get("reply") is not None else [],
     }
     if raw.get("reason"):
         meta["reason"] = raw["reason"]
@@ -400,14 +401,25 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
 
 
 def cards_for(refs, reply: ValidReply) -> list[dict]:
-    """回复里的引用编号 → 数据卡片（分数由卡片现取）。A0 只有任务的概览卡片，材料等在 A1 补上。"""
+    """回复里的引用编号 → 数据卡片（分数由卡片现取）。没有卡片的对象（评分标准、评分项）不显示。"""
 
     cards = []
     for ref in reply.cards:
-        found = refs.object_of(ref)
-        if found and found[0] == "t":
-            cards.append({"type": "overview", "batch_id": found[1]})
+        card = refs.card_of(ref)
+        if card is None:
+            found = refs.object_of(ref)
+            card = {"type": "overview", "batch_id": found[1]} if found and found[0] == "t" else None
+        if card and card not in cards:
+            cards.append(card)
     return cards
 
 
-__all__ = ["FALLBACK_TEXT", "TurnOutcome", "cards_for", "model_step", "run_turn"]
+def help_texts(reply: ValidReply) -> list[str]:
+    """回复引用的帮助条目 → 固定文案（§14：帮助以条目原文为准，模型的 text 只做引导）。"""
+
+    from backend.app.services.assistant.agent import help as help_entries
+
+    return [help_entries.BY_KEY[key].text for key in reply.help_refs if key in help_entries.BY_KEY]
+
+
+__all__ = ["FALLBACK_TEXT", "TurnOutcome", "cards_for", "help_texts", "model_step", "run_turn"]

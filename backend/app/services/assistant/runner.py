@@ -276,7 +276,7 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
     elif intents.fast_command(text):
         result = intents.IntentResult(intent=intents.fast_command(text), source="fast")
     else:
-        handled, degraded = _try_agent_turn(ctx, text, message)
+        handled, degraded = _try_agent_turn(ctx, saver, text, message)
         if handled:
             return
         result = intents.match_rules(text)
@@ -334,7 +334,7 @@ def _agent_scorer(ctx: RunContext):
     return scorer
 
 
-def _try_agent_turn(ctx: RunContext, text: str, message: AssistantMessage) -> tuple[bool, bool]:
+def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, message: AssistantMessage) -> tuple[bool, bool]:
     """跑一个 Agent 回合（Agent 化方案 §10）。返回 (已处理, 已降级)。
 
     降级（模型出错）时这一句退回规则模式，并且不再调用模型识别意图：刚失败的模型多半还会失败。
@@ -350,19 +350,25 @@ def _try_agent_turn(ctx: RunContext, text: str, message: AssistantMessage) -> tu
     model_name = getattr(scorer, "model_name", None)
     message.intent = agent_budget.AGENT_INTENT
     message.model_name = model_name
+    flow = None
     if outcome.kind == "reply":
         cards = agent_turn.cards_for(outcome.refs, outcome.reply)
         if outcome.reply.next_steps:
             cards.append(quick_actions_card(list(outcome.reply.next_steps)))
-        reply = ctx.say(outcome.reply.text, cards, intent=agent_budget.AGENT_INTENT)
+        text_out = "\n\n".join([outcome.reply.text, *agent_turn.help_texts(outcome.reply)])
+        reply = ctx.say(text_out, cards, intent=agent_budget.AGENT_INTENT)
     elif outcome.kind == "proposal":
         proposal = outcome.proposal or {}
+        flow = proposal.get("flow")
         reply = ctx.say(proposal.get("text") or "请确认：", [proposal["card"]] if proposal.get("card") else [],
                         intent=agent_budget.AGENT_INTENT)
     else:
         reply = ctx.say(agent_turn.FALLBACK_TEXT, [quick_actions_card()], intent=agent_budget.AGENT_INTENT)
     reply.meta = outcome.meta
     reply.model_name = model_name
+    if flow:
+        # 进入一期的流程（开始评分、导入）：打断保护、确认卡片都照常生效（方案 §17）。
+        _start_flow(ctx, saver, flow)
     return True, False
 
 
