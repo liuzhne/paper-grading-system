@@ -15,6 +15,8 @@ from backend.app.services.assistant import model as assistant_model
 from backend.app.tests.test_assistant_agent import reply
 from backend.app.tests.test_assistant_agent import step
 
+FLASH = assistant_eval.MODEL_PRICES["gemini-2.5-flash"]
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -131,7 +133,7 @@ def test_eval_set_is_well_formed():
 def test_full_eval_runs_isolated_and_restores_the_process():
     before = (settings.ASSISTANT_AGENT_ENABLED, settings.AUTH_ENABLED, assistant_model.build_scorer)
     items = assistant_eval.load_items()
-    outcome = assistant_eval.run_eval(RuleOfThumbModel(), items, prices=assistant_eval.DEFAULT_PRICES, round_budget=10)
+    outcome = assistant_eval.run_eval(RuleOfThumbModel(), items, prices=FLASH, round_budget=10)
     assert (settings.ASSISTANT_AGENT_ENABLED, settings.AUTH_ENABLED, assistant_model.build_scorer) == before
 
     results = {item["id"]: item for item in outcome["results"]}
@@ -163,7 +165,7 @@ def test_judge_flags_each_kind_of_miss():
 
 def test_running_stops_once_the_round_budget_is_spent():
     items = assistant_eval.load_items()[:5]
-    outcome = assistant_eval.run_eval(RuleOfThumbModel(), items, prices=assistant_eval.DEFAULT_PRICES,
+    outcome = assistant_eval.run_eval(RuleOfThumbModel(), items, prices=FLASH,
                                       round_budget=0.0000001)
     assert len(outcome["results"]) == 1 and outcome["skipped"] == 4 and outcome["stopped"]
 
@@ -238,3 +240,91 @@ def test_report_estimate_rendering_and_spent_ignores_estimates(tmp_path):
         "round_usd": 0.5, "total_usd": 3, "spent_before_usd": 0.12}, "model": {"name": "m"}, "eval_set": {"count": 24},
         "refused": "x"})
     assert "0.0800 美元" in text and "不能运行" in text
+
+
+VERTEX = "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi"
+
+
+@pytest.mark.parametrize(("model_name", "base_url", "known"), [
+    ("google/gemini-2.5-flash", VERTEX, True),
+    ("models/gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai", True),
+    ("gemini-2.5-flash-lite", VERTEX, False),
+    ("anthropic.claude-opus-5", "https://bedrock-runtime.ap-southeast-1.amazonaws.com", False),
+    # 名字像 Gemini、端点不是 Google 的：价目对不上，同样不认。
+    ("gemini-2.5-flash", "https://api.example.test/v1", False),
+])
+def test_prices_are_looked_up_per_model_and_unknown_models_have_none(model_name, base_url, known):
+    assert (assistant_eval.prices_for(model_name, base_url) is not None) == known
+
+
+class _Claude:
+    provider_type = "anthropic_messages"
+    model_name = "anthropic.claude-opus-5"
+    base_url = "https://bedrock-runtime.ap-southeast-1.amazonaws.com"
+
+
+def test_script_refuses_a_model_without_a_price_instead_of_guessing(monkeypatch, capsys):
+    _platform(monkeypatch, _Claude())
+    monkeypatch.setattr("backend.app.services.llm.factory.get_llm_scorer",
+                        lambda runtime: pytest.fail("an unpriced model must not be called"))
+    assert script.main(["--mode", "estimate", "--phase", "A1", "--spent-usd", "0"]) == script.EXIT_REFUSED
+    payload = _payload(capsys)
+    assert "价目" in payload["refused"] and "estimate" not in payload
+    assert "预计费用" not in _report_module().render_estimate(payload)
+
+
+def _gemini_connection(session_factory, *, status="active"):
+    from backend.app.db import models
+    from backend.app.services import ai_connections
+
+    with session_factory() as session:
+        suffix = models.new_id()[:8]
+        user = models.User(username="eval-%s" % suffix, email="eval-%s@example.test" % suffix,
+                           display_name="不该出现的姓名")
+        organization = models.Organization(name="不该出现的组织")
+        session.add_all([user, organization])
+        session.flush()
+        ciphertext, nonce, tag = ai_connections.encrypt_api_key(
+            "AQ.test-only", organization_id=organization.id, owner_id=user.id, key_version=1)
+        connection = models.AIConnection(
+            organization_id=organization.id, owner_id=user.id, name="不该出现的连接名", status=status,
+            provider_type="openai_compatible", base_url=VERTEX, model_name="google/gemini-2.5-flash",
+            provider_options={}, api_key_ciphertext=ciphertext, api_key_nonce=nonce, api_key_tag=tag,
+            key_last4="only", key_version=1)
+        session.add(connection)
+        session.commit()
+        return connection.id
+
+
+def test_script_uses_a_named_connection_without_printing_who_owns_it(client, monkeypatch, capsys):
+    monkeypatch.setattr("backend.app.db.session.SessionLocal", client.session_factory)
+    monkeypatch.setattr(script, "platform_runtime", lambda: pytest.fail("a named connection must not read the platform"))
+    built = []
+    monkeypatch.setattr("backend.app.services.llm.factory.get_llm_scorer",
+                        lambda runtime: built.append(runtime) or RuleOfThumbModel())
+    connection_id = _gemini_connection(client.session_factory)
+
+    assert script.main(["--mode", "run", "--phase", "A1", "--spent-usd", "0", "--confirm-usd", "0.5",
+                        "--max-items", "2", "--connection-id", connection_id.upper()]) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out.split(script.MARK_BEGIN, 1)[1].split(script.MARK_END, 1)[0])
+    assert payload["model"] == {"source": "connection", "provider_type": "openai_compatible",
+                                "name": "google/gemini-2.5-flash", "host": "aiplatform.googleapis.com"}
+    assert built[0].connection_id == connection_id and built[0].api_key == "AQ.test-only"
+    assert payload["summary"]["ran"] == 2
+    for secret in ("不该出现", "AQ.test-only", "example.test"):
+        assert secret not in out
+
+
+def test_script_refuses_a_missing_or_disabled_connection(client, monkeypatch, capsys):
+    monkeypatch.setattr("backend.app.db.session.SessionLocal", client.session_factory)
+    disabled = _gemini_connection(client.session_factory, status="disabled")
+
+    assert script.main(["--mode", "estimate", "--phase", "A1", "--spent-usd", "0",
+                        "--connection-id", disabled]) == script.EXIT_NO_MODEL
+    assert _payload(capsys)["refused"] == "这条 AI 连接没有启用"
+    assert script.main(["--mode", "estimate", "--phase", "A1", "--spent-usd", "0",
+                        "--connection-id", "00000000-0000-0000-0000-000000000000"]) == script.EXIT_NO_MODEL
+    assert _payload(capsys)["refused"] == "找不到这条 AI 连接"
+    with pytest.raises(SystemExit):
+        script.main(["--mode", "estimate", "--phase", "A1", "--spent-usd", "0", "--connection-id", "我的连接"])

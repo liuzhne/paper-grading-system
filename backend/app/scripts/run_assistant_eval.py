@@ -4,8 +4,12 @@
 
     python -m backend.app.scripts.run_assistant_eval --mode estimate --phase A0 --spent-usd 0
     python -m backend.app.scripts.run_assistant_eval --mode run --phase A0 --spent-usd 0 --confirm-usd 0.12
+    python -m backend.app.scripts.run_assistant_eval --mode estimate --phase A1 --spent-usd 0 --connection-id <UUID>
 
-- 模型用平台模型（管理员配置的那一条）：配置在一个**只读事务**里读出，读完即回滚，凭据不离开服务器；
+- 模型默认用平台模型（管理员配置的那一条）；`--connection-id` 改用一条指定的 AI 连接（维护者自己的）。
+  配置都在一个**只读事务**里读出，读完即回滚，凭据不离开服务器；输出里只有模型名、主机与来源，
+  不打印连接名称与所属的人（仓库公开，运行日志谁都能看）；
+- 价目按模型查（`assistant_eval.MODEL_PRICES`），只认 Google 端点上登记过的模型；查不到就拒绝，不估也不跑；
 - 评测在隔离的内存数据库里跑，只有合成的种子数据，不读写业务数据；
 - 两道预算：本轮预计不超过 `--round-budget-usd`；历次已花（`--spent-usd`，由工作流按仓库里的报告合计）加本轮
   预计不超过 `--total-budget-usd`。`run` 还要求 `--confirm-usd`（维护者看过估算后确认的金额）不小于本轮预计；
@@ -29,6 +33,7 @@ MARK_BEGIN = "=====ASSISTANT_EVAL_JSON_BEGIN====="
 MARK_END = "=====ASSISTANT_EVAL_JSON_END====="
 EXIT_REFUSED = 2
 EXIT_NO_MODEL = 3
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _now() -> str:
@@ -51,10 +56,37 @@ def platform_runtime():
             session.rollback()
 
 
-def model_summary(runtime) -> dict:
+def connection_runtime(connection_id: str):
+    """读一条指定的 AI 连接：同样只读事务、读完回滚。返回 (运行时, 读不到的原因)。
+
+    原因只说“找不到 / 没启用”，不带连接名称。
+    """
+
+    from backend.app.db.models import AIConnection
+    from backend.app.db.session import SessionLocal
+    from backend.app.services import ai_connections
+
+    with SessionLocal() as session:
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(text("SET TRANSACTION READ ONLY"))
+        try:
+            row = session.get(AIConnection, connection_id)
+            if row is None:
+                return None, "找不到这条 AI 连接"
+            try:
+                runtime = ai_connections.resolve_connection_runtime(
+                    session, connection_id=row.id, owner_id=row.owner_id, organization_id=row.organization_id)
+            except ValueError:
+                return None, "这条 AI 连接没有启用"
+            return runtime, None
+        finally:
+            session.rollback()
+
+
+def model_summary(runtime, source: str) -> dict:
     host = (urlsplit(str(runtime.base_url or "")).hostname or "") if runtime else ""
     return {
-        "source": "platform",
+        "source": source,
         "provider_type": getattr(runtime, "provider_type", None),
         "name": getattr(runtime, "model_name", None),
         "host": host,
@@ -81,29 +113,45 @@ def main(argv=None) -> int:
     parser.add_argument("--confirm-usd", type=float, default=None)
     parser.add_argument("--max-items", type=int, default=0)
     parser.add_argument("--commit", default="")
+    parser.add_argument("--connection-id", default="")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,20}", args.phase):
         parser.error("phase 只能是字母、数字、点、下划线、短横线")
+    connection_id = args.connection_id.strip().lower()
+    if connection_id and not _UUID.fullmatch(connection_id):
+        parser.error("connection-id 必须是连接编号（UUID）")
 
     items = assistant_eval.load_items()
     if args.max_items > 0:
         items = items[: args.max_items]
-    prices = dict(assistant_eval.DEFAULT_PRICES)
-    estimated = assistant_eval.estimate(items, prices)
     payload = {
         "schema": 1, "mode": args.mode, "phase": args.phase, "started_at": _now(), "commit": args.commit,
         "eval_set": {"version": assistant_eval.eval_set_version(), "count": len(items)},
-        "prices_usd_per_million": prices, "estimate": estimated,
         "budget": {"round_usd": args.round_budget_usd, "total_usd": args.total_budget_usd,
                    "spent_before_usd": args.spent_usd, "confirmed_usd": args.confirm_usd},
     }
 
-    runtime = platform_runtime()
-    payload["model"] = model_summary(runtime)
+    if connection_id:
+        runtime, missing = connection_runtime(connection_id)
+        payload["model"] = model_summary(runtime, "connection")
+    else:
+        runtime = platform_runtime()
+        missing = None if runtime is not None else "生产上没有生效的平台模型"
+        payload["model"] = model_summary(runtime, "platform")
     if runtime is None:
-        payload["refused"] = "生产上没有生效的平台模型"
+        payload["refused"] = missing
         emit(payload)
         return EXIT_NO_MODEL
+    prices = assistant_eval.prices_for(runtime.model_name, runtime.base_url)
+    if prices is None:
+        payload["refused"] = "没有登记这个模型的价目（只认 Google 端点上的 %s），不估也不跑" % "、".join(
+            sorted(assistant_eval.MODEL_PRICES))
+        payload["finished_at"] = _now()
+        emit(payload)
+        return EXIT_REFUSED
+    estimated = assistant_eval.estimate(items, prices)
+    payload["prices_usd_per_million"] = prices
+    payload["estimate"] = estimated
     refused = assistant_eval.check_budget(estimated["usd"], round_budget=args.round_budget_usd,
                                           total_budget=args.total_budget_usd, spent=args.spent_usd)
     if refused is None and args.mode == "run" and (args.confirm_usd is None or args.confirm_usd < estimated["usd"]):

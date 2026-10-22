@@ -45,10 +45,12 @@ from backend.app.services.assistant.agent import catalog
 from backend.app.services.assistant.agent.context import estimate_tokens
 from backend.app.services.assistant.agent.context import system_prompt
 from backend.app.services.assistant.agent.context import tools_array
+from backend.app.services.llm.thinking_params import is_google_openai_host
 
 EVAL_SET = Path(__file__).with_name("assistant_eval_set.jsonl")
-#: 每百万 token 的美元价（Vertex 上的 Gemini 2.5 Flash；隐式缓存命中按输入价的一成）。
-DEFAULT_PRICES = {"input": 0.30, "cached": 0.03, "output": 2.50}
+#: 每百万 token 的美元价，按模型查（Google 的端点：Vertex 或 Gemini API；隐式缓存命中按输入价的一成）。
+#: 查不到就拒绝估算与运行，不拿别的模型的价格凑数——A1 第一次估算就把平台上的 Claude 按 Gemini 价算了。
+MODEL_PRICES = {"gemini-2.5-flash": {"input": 0.30, "cached": 0.03, "output": 2.50}}
 #: 估算用：每条说法平均几次模型调用、每次输出多少 token、工具结果与状态多少 token。
 ESTIMATE_CALLS_PER_ITEM = 3.0
 ESTIMATE_OUTPUT_PER_CALL = 150
@@ -106,6 +108,15 @@ def load_items(path: Path = EVAL_SET) -> list[dict]:
 
 def eval_set_version(path: Path = EVAL_SET) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+
+def prices_for(model_name, base_url) -> dict | None:
+    """这条连接的价目；不是 Google 的端点、或模型没登记，返回 None。"""
+
+    if not is_google_openai_host(base_url):
+        return None
+    prices = MODEL_PRICES.get(str(model_name or "").strip().casefold().rsplit("/", 1)[-1])
+    return dict(prices) if prices else None
 
 
 def cost_usd(tokens: dict, prices: dict) -> float:
@@ -389,5 +400,5 @@ def run_eval(scorer, items: list[dict], *, prices: dict, round_budget: float) ->
     return {"results": results, "skipped": 0, "stopped": None}
 
 
-__all__ = ["DEFAULT_PRICES", "EVAL_SET", "check_budget", "cost_usd", "estimate", "eval_set_version", "judge",
-           "load_items", "run_eval", "summarize"]
+__all__ = ["EVAL_SET", "MODEL_PRICES", "check_budget", "cost_usd", "estimate", "eval_set_version", "judge",
+           "load_items", "prices_for", "run_eval", "summarize"]

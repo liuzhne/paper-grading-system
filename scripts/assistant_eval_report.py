@@ -66,9 +66,16 @@ def render_estimate(data: dict) -> str:
         "| 模型 | %s（%s，%s） |" % ((data.get("model") or {}).get("name"), (data.get("model") or {}).get("host"),
                                    (data.get("model") or {}).get("source")),
         "| 评测集 | %s 条（版本 %s） |" % ((data.get("eval_set") or {}).get("count"), (data.get("eval_set") or {}).get("version")),
-        "| 预计模型调用 | %s 次 |" % estimate.get("model_calls"),
-        "| 预计 token | 输入 %s，输出 %s（不计缓存折扣，偏高） |" % (estimate.get("prompt_tokens"), estimate.get("completion_tokens")),
-        "| **预计费用** | **%.4f 美元** |" % float(estimate.get("usd") or 0),
+    ]
+    # 价目查不到的模型不估算：这时没有 estimate，只说为什么不能运行。
+    if estimate:
+        lines += [
+            "| 预计模型调用 | %s 次 |" % estimate.get("model_calls"),
+            "| 预计 token | 输入 %s，输出 %s（不计缓存折扣，偏高） |" % (estimate.get("prompt_tokens"),
+                                                                 estimate.get("completion_tokens")),
+            "| **预计费用** | **%.4f 美元** |" % float(estimate.get("usd") or 0),
+        ]
+    lines += [
         "| 本轮预算 | %.2f 美元 |" % float(budget.get("round_usd") or 0),
         "| 已花 / 总预算 | %.4f / %.2f 美元 |" % (float(budget.get("spent_before_usd") or 0), float(budget.get("total_usd") or 0)),
     ]
