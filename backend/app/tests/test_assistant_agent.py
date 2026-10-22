@@ -284,6 +284,24 @@ def test_call_tool_refuses_tools_that_were_not_loaded(client, agent):
     assert "还没有加载" in error["错误"]
 
 
+def test_non_object_arguments_get_a_correctable_error_instead_of_a_500(client, agent):
+    model = agent(
+        ToolResponse(content="", tool_calls=(ToolCall(id="c0", name="tool_search", arguments="null"),
+                                             ToolCall(id="c1", name="call_tool", arguments="[1]"),
+                                             ToolCall(id="c2", name="task_list", arguments="7")),
+                     message={"role": "assistant", "tool_calls": [
+                         {"id": "c%d" % index, "type": "function", "function": {"name": name, "arguments": raw}}
+                         for index, (name, raw) in enumerate((("tool_search", "null"), ("call_tool", "[1]"), ("task_list", "7")))
+                     ]}, finish_reason="tool_calls", usage={}),
+        reply("好的。"),
+    )
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "随便")
+    assert _texts(body)[-1] == "好的。"
+    errors = [json.loads(message["content"])["错误"] for message in model.requests[1]["messages"] if message["role"] == "tool"]
+    assert len(errors) == 3 and "JSON 对象" in errors[0] and "JSON 对象" in errors[1] and "参数不合格" in errors[2]
+
+
 def test_bad_parameters_get_a_correctable_error(client, agent):
     model = agent(step(("task_list", {"limit": 99})), reply("好的。"))
     conversation_id = _conversation(client)

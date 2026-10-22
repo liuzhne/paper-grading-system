@@ -185,6 +185,17 @@ def _model_node(state: _State, runtime: Runtime[_Runtime]):
     return {"steps": [*state.get("steps", []), response.message], "pending": calls, "synthetic": synthetic}
 
 
+def _arguments(raw) -> dict | None:
+    """模型给的参数：必须是 JSON 对象。合法 JSON 但不是对象（null、数组、数字）也按不合格处理，
+    不能让 `.get` 在图里抛异常、变成老师看到的 500。"""
+
+    try:
+        value = json.loads(raw or "{}") if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _tool_message(call: ToolCall, content) -> dict:
     return {"role": "tool", "tool_call_id": call.id, "content": catalog.render(content)}
 
@@ -223,11 +234,10 @@ def _tools_node(state: _State, runtime: Runtime[_Runtime]):
 
 
 def _search(call: ToolCall, rt: _Runtime) -> dict:
-    try:
-        arguments = json.loads(call.arguments or "{}")
-    except ValueError:
-        arguments = {}
-    query = str((arguments or {}).get("query") or "").strip()
+    arguments = _arguments(call.arguments)
+    if arguments is None:
+        return {"错误": "tool_search 的参数必须是 JSON 对象，例如 {\"query\": \"评分标准\"}"}
+    query = str(arguments.get("query") or "").strip()
     limit = arguments.get("limit") if isinstance(arguments.get("limit"), int) else catalog.MAX_SEARCH_RESULTS
     result: dict[str, Any] = {}
     if query.lower().startswith("select:"):
@@ -257,14 +267,13 @@ def _search(call: ToolCall, rt: _Runtime) -> dict:
 def _call(call: ToolCall, rt: _Runtime) -> tuple[dict, dict | None]:
     tools = {tool.name: tool for tool in catalog.visible(rt.turn.role)}
     if call.name == "call_tool":
-        try:
-            arguments = json.loads(call.arguments or "{}")
-        except ValueError:
-            return {"错误": "call_tool 的参数不是合法的 JSON"}, None
-        name = str((arguments or {}).get("name") or "").strip()
+        arguments = _arguments(call.arguments)
+        if arguments is None:
+            return {"错误": "call_tool 的参数必须是 JSON 对象：{\"name\": 工具名, \"arguments_json\": 参数}"}, None
+        name = str(arguments.get("name") or "").strip()
         if name not in rt.loaded or name not in tools:
             return {"错误": "工具“%s”还没有加载：先用 tool_search 搜索，或用 select:名称 加载。" % name}, None
-        return _run(tools[name], (arguments or {}).get("arguments_json") or "{}", rt)
+        return _run(tools[name], arguments.get("arguments_json") or "{}", rt)
     tool = tools.get(call.name)
     if tool is None or not tool.resident:
         return {"错误": "没有工具“%s”：常驻工具直接调用，其它工具经 call_tool 调用。" % call.name}, None
