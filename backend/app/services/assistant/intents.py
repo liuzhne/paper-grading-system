@@ -43,9 +43,13 @@ _ORDINAL = re.compile(r"第\s*([0-9]{1,3}|[零一二两三四五六七八九十�
 
 # 顺序即优先级：先认“取消”“重试”这类明确的动作，再认查询，最后才是宽泛的“评分”。
 #
-# 两条收紧（Agent 化方案 §31.1）：单独的“重新评”“再评一次”不再算重试——“这一项重新评一下”
+# 收紧（Agent 化方案 §31.1）：单独的“重新评”“再评一次”不再算重试——“这一项重新评一下”
 # 是要重评某个评分项，不是重试失败的材料；单独的“上传”不再算开始评分——“模板怎么上传”是在问
 # 导入，而导入卡片可能正开着。
+#
+# 补修（10-22 生产实测）：单独的“评分”“打分”“批改”“评阅”也不再算开始评分。“现在有哪些评分任务”
+# “这批评分结果怎么样”“评分标准有问题吗”里都有“评分”，却都不是要开始评分；开始评分必须是
+# “开始评分 / 帮我评 / 评一下 / 上传论文”这类明确的说法。
 _RULES: tuple[tuple[str, re.Pattern], ...] = (
     ("help", re.compile(r"能做什么|怎么用|如何使用|帮助|你是谁|有什么功能")),
     ("cancel_job", re.compile(r"(取消|停止|停下|终止|别评)(了)?(评分|任务|评阅)?")),
@@ -59,7 +63,8 @@ _RULES: tuple[tuple[str, re.Pattern], ...] = (
     ("query_progress", re.compile(r"进度|评到|评完|评好|完成了|多久|还要多|好了吗|状态")),
     ("query_paper", re.compile(r"扣分|扣了|得分|多少分|几分|为什么|证据|哪里错|问题在")),
     ("start_grading", re.compile(
-        r"开始评分|开始打分|帮我评|评一下|评分|打分|批改|评阅|上传.{0,4}(论文|材料|文件|作业|报告|待评)"
+        r"开始(评分|打分|批改|评阅)|帮我(评|打分|批改|评阅)|评一下|批改一下|打个分"
+        r"|给.{0,8}(评分|打分)|上传.{0,4}(论文|材料|文件|作业|报告|待评)"
     )),
 )
 
@@ -69,6 +74,9 @@ WRITE_INTENTS = frozenset({"start_grading", "import_rubric", "retry_failed", "ca
 _REJUDGE = re.compile(r"重新评|重评|再评")
 # “怎么样”是问情况（“这批写得怎么样”），不是问做法。
 _HOW_TO = re.compile(r"怎么(?!样)|怎样|如何|在哪|哪里|哪儿|什么|区别")
+# 问句：写意图遇到问句一律不执行（“有哪些评分任务？”“可以重试吗”）。比 _HOW_TO 宽，
+# 只用来拦写动作；认不出的句子要不要回答帮助仍按 _HOW_TO。
+_QUESTION = re.compile(r"怎么(?!样)|怎样|如何|在哪|哪里|哪儿|什么|区别|哪些|哪个|哪份|哪篇|哪几|几个|多少|吗|[？?]")
 
 
 @dataclass(frozen=True)
@@ -129,10 +137,14 @@ def is_how_to(text: str) -> bool:
     return bool(_HOW_TO.search(text or ""))
 
 
-def _guard(result: IntentResult, text: str) -> IntentResult:
-    """问“怎么做”的句子不开始流程、不改数据，改为回答帮助（规则与模型的结果都过这一道）。"""
+def is_question(text: str) -> bool:
+    return bool(_QUESTION.search(text or ""))
 
-    if result.intent in WRITE_INTENTS and is_how_to(text):
+
+def _guard(result: IntentResult, text: str) -> IntentResult:
+    """问句不开始流程、不改数据，改为回答帮助（规则与模型的结果都过这一道）。"""
+
+    if result.intent in WRITE_INTENTS and is_question(text):
         return replace(result, intent="help", paper_ordinal=None, paper_name=None, clarify=None)
     if result.intent == "start_grading" and _REJUDGE.search(text or ""):
         return replace(result, intent="unknown", paper_ordinal=None, paper_name=None)
