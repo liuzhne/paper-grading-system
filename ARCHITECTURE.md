@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评分助手评测工具 | 新增 `eval/assistant_eval`（隔离环境、逐条判定、汇总）、`scripts/run_assistant_eval`（实例上跑）、`scripts/assistant_eval_report.py`（标准库，生成报告）与工作流 `assistant-eval.yml`；不改线上调用链。 |
 | 2026-10-22 | 评分助手 Agent 回合（A0） | 新增 `services/assistant/agent/`（目录与搜索、请求组装、回复校验、上限、压缩、回合子图）与 `llm/tool_calls`；OpenAI 兼容适配器加 `complete_with_tools`；运行器在快速通道之后、规则之前跑 Agent 回合（开关默认关）；新增迁移 0041。 |
 | 2026-10-22 | 评分助手规则补修复审（CodeRabbit） | 无模块变化：`intents` 的“给…打分”要求评分对象，`_QUESTION` 排除“这几个 / 那几份”并补不带问号的问法；方案文档的预算核对与分期说明同步。 |
 | 2026-10-22 | 评分助手规则补修 | 无模块变化：`intents` 的“开始评分”去掉单独的“评分 / 打分 / 批改 / 评阅”，写意图的问句判断加宽（`_QUESTION`）；带“评分”二字的问句改由模型识别。无接口与数据库变化。 |
@@ -1501,3 +1502,15 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 持久化：迁移 `0041_assistant_agent_state` 加两列——`assistant_messages.meta`（本轮首次加载、调用过的工具，回合模式，前缀身份，用量）与 `assistant_conversations.compaction`（压缩内容）。只加列，`pgs_app` 的表级授权与 RLS 自动覆盖；任一列有数据时拒绝降级。接口不暴露这两列，OpenAPI 不变。
 
 维护记录：2026-10-22 · 评分助手 A0：Agent 回合、工具目录与搜索、历史压缩、原生工具调用；head 升为 `0041_assistant_agent_state`；开关默认关。
+
+评测（Agent 化方案 §27）：`eval/assistant_eval.py` + 评测集 `eval/assistant_eval_set.jsonl`。
+
+```
+GitHub 工作流 pgs-assistant-eval（production 环境，手动）
+  └─ 按 docs/评测报告/评分助手/*.json 合计已花费用（scripts/assistant_eval_report.py spent）
+  └─ SSH → 实例：docker compose run --rm --no-deps app python -m backend.app.scripts.run_assistant_eval
+        平台模型配置：生产库只读事务读出即回滚 → get_llm_scorer
+        assistant_eval.run_eval：内存 SQLite + 合成种子数据；进程内打开开关、关闭鉴权、换入平台模型
+        → 逐条走 runner.run（与线上同一条调用链）→ 判定 → 汇总；结果只打印到标准输出
+  └─ scripts/assistant_eval_report.py render：生成 Markdown + JSON，作为附件上传
+```
