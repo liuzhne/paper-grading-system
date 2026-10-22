@@ -1,0 +1,138 @@
+name: pgs-assistant-eval
+
+# 评分助手 Agent 的真实模型评测（docs/评分助手Agent化方案.md §27、Q8）。手动触发 + production 环境。
+#
+# 在生产实例的一次性容器里跑：用平台模型，凭据不离开服务器；评测本身用隔离的内存数据库与合成的种子
+# 数据，不读写业务数据。维护者授权：每轮不超过 0.5 美元，合计不超过 3 美元，每次跑之前先报预计花费。
+#
+# 用法：先用 mode=estimate 看预计花费；维护者同意后，用 mode=run 并把 confirm_usd 填成看过的估算值。
+# 正式运行的报告（Markdown + JSON）作为附件上传，下载后提交到 docs/评测报告/评分助手/。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "estimate 只估算；run 正式运行（会调用真实模型、产生费用）"
+        required: true
+        default: estimate
+        type: choice
+        options: [estimate, run]
+      phase:
+        description: "哪一期的评测，例如 A0、A1"
+        required: true
+        default: A0
+        type: string
+      round_budget_usd:
+        description: "本轮预算（美元），不能超过 0.5"
+        required: true
+        default: "0.5"
+        type: string
+      confirm_usd:
+        description: "run 时必填：看过的估算金额（美元）；估算超过它就不跑"
+        required: false
+        default: ""
+        type: string
+      max_items:
+        description: "只跑前几条（0 为全部）"
+        required: false
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: assistant-eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate inputs
+        env:
+          PHASE: ${{ inputs.phase }}
+          ROUND: ${{ inputs.round_budget_usd }}
+          CONFIRM: ${{ inputs.confirm_usd }}
+          MAX_ITEMS: ${{ inputs.max_items }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          [[ "$PHASE" =~ ^[A-Za-z0-9._-]{1,20}$ ]] || { echo "::error::phase 不合法"; exit 1; }
+          [[ "$ROUND" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::round_budget_usd 不是数字"; exit 1; }
+          python3 -c "import sys; sys.exit(0 if float('$ROUND') <= 0.5 else 1)" \
+            || { echo "::error::本轮预算不能超过 0.5 美元（维护者授权的上限）"; exit 1; }
+          [[ "$MAX_ITEMS" =~ ^[0-9]{1,4}$ ]] || { echo "::error::max_items 不是整数"; exit 1; }
+          if [[ "$MODE" == "run" ]]; then
+            [[ "$CONFIRM" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::run 需要填 confirm_usd（看过的估算金额）"; exit 1; }
+          fi
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Sum what earlier rounds spent
+        id: spent
+        run: |
+          set -euo pipefail
+          echo "usd=$(python3 scripts/assistant_eval_report.py spent 'docs/评测报告/评分助手')" >> "$GITHUB_OUTPUT"
+      - name: Configure SSH
+        env:
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$PRODUCTION_SSH_KEY" > ~/.ssh/pgs_deploy
+          chmod 0600 ~/.ssh/pgs_deploy
+          printf '%s\n' "$PRODUCTION_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<CONFIG
+          Host pgs
+            HostName ${PRODUCTION_SSH_HOST}
+            User deploy
+            IdentityFile ~/.ssh/pgs_deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          CONFIG
+      # 一次性容器：同一个镜像与 .env，跑完即删；不影响正在服务的 app 与 worker。
+      - name: Run on the instance
+        id: run
+        env:
+          MODE: ${{ inputs.mode }}
+          PHASE: ${{ inputs.phase }}
+          ROUND: ${{ inputs.round_budget_usd }}
+          CONFIRM: ${{ inputs.confirm_usd }}
+          MAX_ITEMS: ${{ inputs.max_items }}
+          SPENT: ${{ steps.spent.outputs.usd }}
+        run: |
+          set -euo pipefail
+          confirm=""
+          if [[ -n "$CONFIRM" ]]; then confirm="--confirm-usd $CONFIRM"; fi
+          status=0
+          ssh pgs "cd /opt/pgs && docker compose --project-name pgs --file compose.yml run --rm --no-deps -T app \
+            python -m backend.app.scripts.run_assistant_eval --mode $MODE --phase $PHASE \
+            --round-budget-usd $ROUND --total-budget-usd 3 --spent-usd $SPENT $confirm \
+            --max-items $MAX_ITEMS --commit \$(cat RELEASE 2>/dev/null || echo unknown)" > raw.txt || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Render the report
+        run: |
+          set -euo pipefail
+          python3 scripts/assistant_eval_report.py render raw.txt --previous-dir 'docs/评测报告/评分助手' \
+            --out out >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report
+        if: inputs.mode == 'run'
+        uses: actions/upload-artifact@v7
+        with:
+          name: assistant-eval-${{ inputs.phase }}-${{ github.run_id }}
+          path: out/
+          if-no-files-found: ignore
+      - name: Fail when the instance refused or errored
+        if: steps.run.outputs.status != '0'
+        run: |
+          echo "::error::实例返回 ${{ steps.run.outputs.status }}（2 = 预算拒绝，3 = 没有平台模型）；详见运行摘要"
+          exit 1

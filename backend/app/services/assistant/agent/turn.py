@@ -384,6 +384,7 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
         "prefix_identity": prefix.identity, "model_calls": runtime.model_calls,
         "searches": int(final.get("searches") or 0), "tokens": dict(runtime.usage),
         "text_replies": runtime.text_replies, "thought_signatures": runtime.thought_signatures,
+        "param_errors": sum(runtime.param_errors.values()),
     }
     if raw.get("reason"):
         meta["reason"] = raw["reason"]
