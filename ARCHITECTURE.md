@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评测指定连接与按模型查价 | 无线上模块变化：`run_assistant_eval` 可按连接编号读一条 AI 连接（只读事务），`assistant_eval.prices_for` 按模型查价目。 |
 | 2026-10-22 | 评分助手 A1 复审（CodeRabbit） | 无模块变化：`paper_result` 找不到时直接返回提示与任务列表，材料名称过注入检测；评测环境多两个合成作业。 |
 | 2026-10-22 | 评分助手 A1（听懂与帮助） | `agent/business.py` 补齐查询与提议工具、`agent/help.py` 帮助条目；提议工具经一期确认卡片与 `_start_flow` 生效；无接口与数据库变化。 |
 | 2026-10-22 | 评分助手评测工具 | 新增 `eval/assistant_eval`（隔离环境、逐条判定、汇总）、`scripts/run_assistant_eval`（实例上跑）、`scripts/assistant_eval_report.py`（标准库，生成报告）与工作流 `assistant-eval.yml`；不改线上调用链。 |
@@ -1518,8 +1519,10 @@ A1（听懂与帮助）：`agent/business.py` 补齐业务工具，`agent/help.p
 GitHub 工作流 pgs-assistant-eval（production 环境，手动）
   └─ 按 docs/评测报告/评分助手/*.json 合计已花费用（scripts/assistant_eval_report.py spent）
   └─ SSH → 实例：docker compose run --rm --no-deps app python -m backend.app.scripts.run_assistant_eval
-        平台模型配置：生产库只读事务读出即回滚 → get_llm_scorer
-        assistant_eval.run_eval：内存 SQLite + 合成种子数据；进程内打开开关、关闭鉴权、换入平台模型
+        模型配置：平台模型，或 --connection-id 指定的一条 AI 连接；生产库只读事务读出即回滚
+        价目：assistant_eval.prices_for（只认 Google 端点上登记过的模型，查不到就拒绝）→ 估算 → 两道预算
+        → get_llm_scorer
+        assistant_eval.run_eval：内存 SQLite + 合成种子数据；进程内打开开关、关闭鉴权、换入这个模型
         → 逐条走 runner.run（与线上同一条调用链）→ 判定 → 汇总；结果只打印到标准输出
   └─ scripts/assistant_eval_report.py render：生成 Markdown + JSON，作为附件上传
 ```
