@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-22 | 评分助手规则补修 | 无模块变化：`intents` 的“开始评分”去掉单独的“评分 / 打分 / 批改 / 评阅”，写意图的问句判断加宽（`_QUESTION`）；带“评分”二字的问句改由模型识别。无接口与数据库变化。 |
 | 2026-10-22 | 评分助手热修复审（CodeRabbit） | 无模块变化：前端暂存的附件改为按确认卡片编号保存，请求失败时保留；无接口与数据库变化。 |
 | 2026-10-22 | 评分助手热修（Agent 化方案第一期） | 无新模块：`intents` 加写意图守卫（问句不开始流程、不改数据），`runner` 开新流程前对等待中的流程出确认卡片，快捷按钮带 `quick_action` 键按键分派；接口加可选字段，无迁移。 |
 | 2026-10-20 | Vertex 关闭思考改发 thinking_budget 0 | 无模块与数据流变化：`thinking_params.thinking_request_fields` 在 Vertex 主机上关闭 2.5 Flash 的思考改发 `extra_body.google.thinking_config.thinking_budget=0`（Vertex 的 `reasoning_effort` 不收 `none`，生产 400）；Gemini API 仍发 `reasoning_effort: "none"`；身份值不变（`none`）。`diagnose_llm` 多报 `thinking_config`。无迁移。 |
@@ -1456,7 +1457,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 确认重试（select confirm_retry / diagnosis）─▶ 另一个流程在等老师回应时，只执行重试，不开“盯进度”流程
 ```
 
-- `intents.py`：`WRITE_INTENTS`、`is_how_to`、`_guard`；“重试”只认“重试 / 再试一次 / 失败（没评完）的…重新（再）”；“开始评分”不再因单独的“上传”命中。
+- `intents.py`：`WRITE_INTENTS`、`is_how_to`、`is_question`、`_guard`；“重试”只认“重试 / 再试一次 / 失败（没评完）的…重新（再）”；“开始评分”只认“开始评分 / 帮我评 / 评一下 / 给…打分 / 上传论文”这类明确说法，单独的“评分、打分、批改、评阅、上传”都不算（补修）。写意图遇到问句（含“哪些、几个、吗、？”等，`_QUESTION`）一律改为帮助；认不出的句子要不要回答帮助仍按较窄的 `_HOW_TO`。
 - `runner.py`：`_propose_switch`、`_begin_flow`；已经在等选文件时再说“开始评分”只提示在原卡片里选，不出确认卡片；`confirm_switch_flow` 的选择在执行前核对旧流程仍是卡片记下的那一张，换过了就把卡片标为过期。
 - `views.py`：快捷按钮带 `intent` 键；`PENDING_LABELS`（流程停在哪一步怎么说）、`FLOW_LABELS`、`help_text`（流程等待时提醒在那张卡片里继续）。
 - `queries.py`：查进度时没有作业，工作区不再切到进度页（之前会显示原始报错）。

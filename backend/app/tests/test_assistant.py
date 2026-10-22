@@ -153,6 +153,8 @@ class _FakeScorer:
         ("没评完的再试一次", "retry_failed", None),
         ("上传论文", "start_grading", None),
         ("上传这些材料", "start_grading", None),
+        ("评一下这批", "start_grading", None),
+        ("给这几份打分", "start_grading", None),
         ("取消评分", "cancel_job", None),
         ("我要上传自己的评分规则和模板", "import_rubric", None),
         ("帮我评一下这些论文", "start_grading", None),
@@ -176,6 +178,13 @@ def test_rules_cover_the_common_phrasings_without_a_model(text, intent, ordinal)
         "文献综述这项评得不对",
         "第二篇的研究方法扣分不合理，重评一下",
         "这一项重新评一下",
+        # 10-22 生产实测：带“评分”二字的问句被当成开始评分。
+        "现在的评分任务有哪些问题?",
+        "现在有哪些评分任务?",
+        "这批评分结果怎么样",
+        "有几个评分任务",
+        "评分标准有问题吗",
+        "可以重试吗",
     ],
 )
 def test_questions_and_rejudge_requests_never_become_write_actions(text):
