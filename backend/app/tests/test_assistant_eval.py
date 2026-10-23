@@ -486,3 +486,40 @@ def test_the_committed_a1_first_round_is_marked_obsolete():
         "> **⚠️ 本轮作废")
     assert report.spent(directory) >= first["summary"]["cost_usd"]
     assert report.baseline(directory) is None or not report.baseline(directory).get("obsolete")
+
+
+def _wait_item():
+    # 评测集里的准备消息（“上传我的评分规则和模板”“开始评分”）走快速通道、不调用模型；
+    # 这里用一句会走 Agent 的准备消息，覆盖“准备步骤也计费、也会被限流”的情形。
+    return [{"id": "setup-agent", "category": "等待中的步骤", "setup": ["现在有哪些评分任务？"],
+             "utterance": "有几个评分任务", "expect": {"tools_any": ["task_list", "task_overview"]}}]
+
+
+def test_setup_turns_are_billed_with_the_item():
+    model = RuleOfThumbModel()
+    outcome = assistant_eval.run_eval(model, _wait_item(), prices=FLASH, round_budget=10)
+    (result,) = outcome["results"]
+    assert result["passed"] and model.calls > result["model_calls"], "准备步骤也调用了模型"
+    # 每一步 100 输入（60 命中缓存）、10 输出：准备步骤与被测的这句都要算进来。
+    assert result["tokens"] == {"prompt_tokens": 100 * model.calls, "completion_tokens": 10 * model.calls,
+                                "cached_tokens": 60 * model.calls}
+
+
+def test_a_rate_limited_setup_retries_the_whole_item():
+    slept = []
+    model = _Failing(rate_limited_error, {1})
+    outcome = assistant_eval.run_eval(model, _wait_item(), prices=FLASH, round_budget=10, rate_limit_retries=2,
+                                      rate_limit_wait_seconds=35, max_rate_limit_wait_seconds=480,
+                                      sleep=slept.append)
+    (result,) = outcome["results"]
+    assert result["passed"] and result["rate_limit_retries"] == 1 and slept == [35]
+    assert result["tokens"]["prompt_tokens"] == 100 * (model.calls - 1)  # 被限流的那次没有用量
+
+
+def test_a_setup_still_blocked_is_unmeasured_and_the_utterance_is_not_sent():
+    model = _Failing(rate_limited_error, range(1, 99))
+    outcome = assistant_eval.run_eval(model, _wait_item(), prices=FLASH, round_budget=10)
+    (result,) = outcome["results"]
+    assert result["reason"] == "setup" and result["error_code"] == "rate_limited" and model.calls == 1
+    assert "准备步骤被挡住" in result["reasons"][0]
+    assert assistant_eval.summarize(outcome["results"], skipped=0)["rate_limit"]["unmeasured"] == ["setup-agent"]

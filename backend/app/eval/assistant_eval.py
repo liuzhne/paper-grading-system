@@ -276,14 +276,59 @@ def judge(item: dict, observed: dict) -> list[str]:
     return reasons
 
 
+_TOKEN_KEYS = ("prompt_tokens", "completion_tokens", "cached_tokens")
+
+
+def _usage_of(result: dict) -> dict:
+    """一句话花掉的 token：Agent 回复上的用量；降级的回合没有 Agent 回复，用量记在老师那条消息上。"""
+
+    messages = list(result.get("messages") or [])
+    user = next((message for message in messages if message.role == "user"), None)
+    final = next((message for message in reversed(messages)
+                  if message.role == "assistant" and (message.meta or {}).get("mode") == "agent"), None)
+    usage = ((final.meta if final is not None else None) or {}).get("tokens") \
+        or ((user.meta if user is not None else None) or {}).get("tokens") or {}
+    return {key: int(usage.get(key) or 0) for key in _TOKEN_KEYS}
+
+
+def _blocked_code(result: dict) -> str | None:
+    """这一句被限流、熔断或额度用完挡住时的错误码。"""
+
+    user = next((message for message in result.get("messages") or [] if message.role == "user"), None)
+    meta = (user.meta if user is not None else None) or {}
+    code = meta.get("error_code")
+    return code if meta.get("mode") == "degraded" and code in RATE_LIMIT_CODES | QUOTA_CODES else None
+
+
+def _setup_blocked(item: dict, code: str, tokens: dict, prices: dict) -> dict:
+    """准备步骤（setup）被挡住：后面那句缺了前提，不再发，整条记为没测到（限流时由 run_eval 重跑）。"""
+
+    return {
+        "id": item["id"], "category": item["category"], "utterance": item["utterance"],
+        "expect": item.get("expect") or {}, "passed": False,
+        "reasons": ["准备步骤被挡住（%s），这一条没测到" % code], "violations": [], "latency_ms": 0,
+        "tokens": dict(tokens), "cost_usd": round(cost_usd(tokens, prices), 6), "reply_text": "",
+        "mode": "degraded", "outcome": "degrade", "reason": "setup", "error_code": code, "tools_called": [],
+        "searches": 0, "model_calls": 0, "text_replies": 0, "thought_signatures": 0, "param_errors": 0,
+        "help_refs": [], "card_types": [],
+    }
+
+
 def run_item(factory, item: dict, prices: dict) -> dict:
     with factory() as db:
         conversation = AssistantConversation(owner_id=settings.DEFAULT_DEV_USER_ID, organization_id=None,
                                              title="评测 %s" % item["id"], focus={})
         db.add(conversation)
         db.commit()
+        # 准备步骤同样走 Agent、同样计费；被挡住就不再往下测。
+        setup_tokens = dict.fromkeys(_TOKEN_KEYS, 0)
         for text in item.get("setup", []):
-            _send(db, conversation, text)
+            prepared = _send(db, conversation, text)
+            for key, value in _usage_of(prepared).items():
+                setup_tokens[key] += value
+            blocked = _blocked_code(prepared)
+            if blocked is not None:
+                return _setup_blocked(item, blocked, setup_tokens, prices)
         db.refresh(conversation)
         before, pending_before = _counts(db), (conversation.pending or {}).get("kind")
         started = time.monotonic()
@@ -309,9 +354,9 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             violations.append("回复泄露了系统指令")
         if error:
             violations.append("运行出错：%s" % error)
-        # 降级的回合没有 Agent 回复，用量记在老师那条消息上（前几步已经计了费）。
-        usage = meta.get("tokens") or user_meta.get("tokens") or {}
-        tokens = {key: int(usage.get(key) or 0) for key in ("prompt_tokens", "completion_tokens", "cached_tokens")}
+        # 这一条的费用 = 准备步骤 + 被测的这句（降级的回合，用量记在老师那条消息上）。
+        measured = _usage_of(result)
+        tokens = {key: measured[key] + setup_tokens[key] for key in _TOKEN_KEYS}
         observed = {
             "mode": meta.get("mode") or user_meta.get("mode") or "rules",
             "outcome": meta.get("outcome") or ("degrade" if user_meta.get("mode") == "degraded" else "none"),
