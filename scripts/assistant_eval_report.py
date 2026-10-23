@@ -18,6 +18,8 @@ from pathlib import Path
 
 MARK_BEGIN = "=====ASSISTANT_EVAL_JSON_BEGIN====="
 MARK_END = "=====ASSISTANT_EVAL_JSON_END====="
+#: 与 backend/app/eval/assistant_eval.py 的 ALL_MEASURED_GATE 相同（这个脚本只用标准库，不能导入它）。
+ALL_MEASURED_GATE = "每条都测到（没跳过，也没有被限流挡住）"
 
 
 def extract(raw: str) -> dict:
@@ -40,7 +42,19 @@ def reports(directory: Path) -> list[dict]:
 
 
 def spent(directory: Path) -> float:
+    """历次正式评测的费用合计；作废的轮次也算——钱已经花了。"""
+
     return round(sum(float((item.get("summary") or {}).get("cost_usd") or 0) for item in reports(directory)), 6)
+
+
+def baseline(directory: Path) -> dict | None:
+    """“与上一轮对比”用的那一轮：最近一轮没有标 ``obsolete`` 的正式评测。
+
+    作废的轮次（例如 A1 第一轮被限流挡住）测到的不是 Agent，拿它当基线，下一轮的“进步”就是假的。
+    """
+
+    usable = [item for item in reports(directory) if not item.get("obsolete")]
+    return usable[-1] if usable else None
 
 
 def slug(model_name: str | None) -> str:
@@ -130,9 +144,10 @@ def render_run(data: dict, previous: dict | None) -> str:
             _yes((summary.get("gates") or {}).get("P90 延迟 ≤ 6 秒")), latency.get("p50"), latency.get("p90"), latency.get("max")),
     ]
     # 旧报告没有这一道门槛与限流统计（2026-10-23 加），没有就不写。
-    if "每条都测到（没有被限流挡住）" in gates:
-        lines.append("| 每条都测到（没有被限流挡住） | %s | 没测到 %s 条 |" % (
-            _yes(gates["每条都测到（没有被限流挡住）"]), len((rate_limit or {}).get("unmeasured") or [])))
+    if ALL_MEASURED_GATE in gates:
+        lines.append("| %s | %s | 没测到 %s 条，跳过 %s 条 |" % (
+            ALL_MEASURED_GATE, _yes(gates[ALL_MEASURED_GATE]), len((rate_limit or {}).get("unmeasured") or []),
+            summary.get("skipped") or 0))
     lines += [
         "",
         "## 各类别", "",
@@ -150,7 +165,7 @@ def render_run(data: dict, previous: dict | None) -> str:
             _yes(checks.get("schema_accepted")), checks.get("degraded"), "、".join(checks.get("degraded_reasons") or []) or "无"),
         "| 工具调用上的思考签名 | %s 个 |" % checks.get("thought_signatures"),
         *([
-            "| 限流（429 / 熔断） | 条目间隔 %s 秒；重跑 %s 条共 %s 次；没测到 %s |" % (
+            "| 限流（429 / 熔断 / 额度用完） | 条目间隔 %s 秒；重跑 %s 条共 %s 次；没测到 %s |" % (
                 pacing.get("pace_seconds", "—"), rate_limit.get("retried_items"), rate_limit.get("retries"),
                 "、".join(rate_limit.get("unmeasured") or []) or "无"),
         ] if rate_limit is not None else []),
@@ -209,8 +224,7 @@ def main(argv=None) -> int:
     if data.get("mode") != "run" or data.get("refused") or not data.get("summary"):
         print(render_estimate(data))
         return 0
-    history = reports(args.previous_dir)
-    markdown = render_run(data, history[-1] if history else None)
+    markdown = render_run(data, baseline(args.previous_dir))
     name = "%s-%s-%s" % (str(data.get("started_at") or "")[:10], data.get("phase"), slug((data.get("model") or {}).get("name")))
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / ("%s.json" % name)).write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")

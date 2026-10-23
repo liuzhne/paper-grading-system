@@ -6,17 +6,24 @@ import importlib.util
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from backend.app.core.config import settings
 from backend.app.eval import assistant_eval
 from backend.app.scripts import run_assistant_eval as script
 from backend.app.services.assistant import model as assistant_model
+from backend.app.services.llm.errors import ProviderCallError
+from backend.app.services.llm.errors import project_provider_error
 from backend.app.tests.test_assistant_agent import rate_limited_error
 from backend.app.tests.test_assistant_agent import reply
 from backend.app.tests.test_assistant_agent import step
 
 FLASH = assistant_eval.MODEL_PRICES["gemini-2.5-flash"]
+
+
+def project_provider_error_code(exc: ProviderCallError) -> str:
+    return str(getattr(exc.error.code, "value", exc.error.code))
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -153,7 +160,7 @@ def test_full_eval_runs_isolated_and_restores_the_process():
     assert summary["provider_checks"]["tool_choice_required_honored"] is True
     assert summary["provider_checks"]["cached_tokens_reported"] is True
     assert summary["cost_usd"] > 0 and set(summary["gates"]) == {"动作准确率 ≥ 95%", "违规 0 次", "P90 延迟 ≤ 6 秒",
-                                                                 "每条都测到（没有被限流挡住）"}
+                                                                 assistant_eval.ALL_MEASURED_GATE}
     assert summary["rate_limit"] == {"retried_items": 0, "retries": 0, "unmeasured": []}
 
 
@@ -360,7 +367,7 @@ def test_a_rate_limited_item_waits_and_runs_again_instead_of_counting_as_a_miss(
     assert slept == [35, 3]
     summary = assistant_eval.summarize(outcome["results"], skipped=0)
     assert summary["rate_limit"] == {"retried_items": 1, "retries": 1, "unmeasured": []}
-    assert summary["gates"]["每条都测到（没有被限流挡住）"] is True
+    assert summary["gates"][assistant_eval.ALL_MEASURED_GATE] is True
 
 
 def test_an_item_still_rate_limited_after_retries_is_reported_as_unmeasured():
@@ -372,7 +379,7 @@ def test_an_item_still_rate_limited_after_retries_is_reported_as_unmeasured():
     assert result["error_code"] == "rate_limited" and result["rate_limit_retries"] == 2 and not result["passed"]
     summary = assistant_eval.summarize(outcome["results"], skipped=0)
     assert summary["rate_limit"]["unmeasured"] == ["task-02"]
-    assert summary["gates"]["每条都测到（没有被限流挡住）"] is False
+    assert summary["gates"][assistant_eval.ALL_MEASURED_GATE] is False
     assert summary["provider_checks"]["schema_accepted"] is True
     report = _report_module().render_run({"summary": summary, "items": outcome["results"], "pacing": {"pace_seconds": 3}},
                                          None)
@@ -387,3 +394,95 @@ def test_rate_limit_waits_stop_the_run_before_the_workflow_times_out():
     # 第一条重跑两次（等 70 秒）；第二条再等 35 秒就超过 100 秒的上限：记下第二条，停下，第三条跳过。
     assert [item["rate_limit_retries"] for item in outcome["results"]] == [2, 0]
     assert outcome["skipped"] == 1 and outcome["stopped"] == "限流一直没有缓解"
+
+
+def _quota_exhausted_error():
+    request = httpx.Request("POST", "https://api.example.test/v1/chat/completions")
+    response = httpx.Response(429, request=request, json={"error": {"type": "insufficient_quota", "message": "no credit"}})
+    return ProviderCallError("openai_compatible", project_provider_error(
+        httpx.HTTPStatusError("429", request=request, response=response)))
+
+
+class _Failing(RuleOfThumbModel):
+    """按调用序号失败：``fail_on`` 里的那几次调用抛 ``error()``，其它照标准答案走。"""
+
+    def __init__(self, error, fail_on):
+        super().__init__()
+        self.error, self.fail_on = error, set(fail_on)
+
+    def complete_with_tools(self, messages, tools, **options):
+        if self.calls + 1 in self.fail_on:
+            self.calls += 1
+            raise self.error()
+        return super().complete_with_tools(messages, tools, **options)
+
+
+def test_exhausted_quota_is_unmeasured_but_not_retried():
+    assert project_provider_error_code(_quota_exhausted_error()) == "quota_exhausted"
+    items = [item for item in assistant_eval.load_items() if item["id"] == "task-02"]
+    slept = []
+    outcome = assistant_eval.run_eval(_Failing(_quota_exhausted_error, range(1, 99)), items, prices=FLASH,
+                                      round_budget=10, rate_limit_retries=2, rate_limit_wait_seconds=35,
+                                      max_rate_limit_wait_seconds=480, sleep=slept.append)
+    (result,) = outcome["results"]
+    assert result["error_code"] == "quota_exhausted" and result["rate_limit_retries"] == 0 and slept == []
+    summary = assistant_eval.summarize(outcome["results"], skipped=0)
+    assert summary["rate_limit"]["unmeasured"] == ["task-02"]
+    assert summary["gates"][assistant_eval.ALL_MEASURED_GATE] is False
+
+
+def test_skipped_items_fail_the_all_measured_gate():
+    items = assistant_eval.load_items()[:3]
+    outcome = assistant_eval.run_eval(RuleOfThumbModel(), items, prices=FLASH, round_budget=0.0000001)
+    assert outcome["skipped"] == 2 and not any(assistant_eval.not_measured(item) for item in outcome["results"])
+    summary = assistant_eval.summarize(outcome["results"], skipped=outcome["skipped"])
+    assert summary["gates"][assistant_eval.ALL_MEASURED_GATE] is False
+    report = _report_module().render_run({"summary": summary, "items": outcome["results"]}, None)
+    assert "没测到 0 条，跳过 2 条" in report
+
+
+def test_every_billed_attempt_is_counted_including_the_steps_before_a_rate_limit():
+    # task-02 要两步（task_list → reply）。第一次：第 1 步成功、第 2 步被限流 → 降级；重跑：两步都成功。
+    items = [item for item in assistant_eval.load_items() if item["id"] == "task-02"]
+    outcome = assistant_eval.run_eval(_Failing(rate_limited_error, {2}), items, prices=FLASH, round_budget=10,
+                                      rate_limit_retries=2, rate_limit_wait_seconds=35,
+                                      max_rate_limit_wait_seconds=480, sleep=lambda seconds: None)
+    (result,) = outcome["results"]
+    assert result["passed"] and result["rate_limit_retries"] == 1
+    # 成功的三步，每步 100 输入（60 命中缓存）、10 输出。
+    assert result["tokens"] == {"prompt_tokens": 300, "completion_tokens": 30, "cached_tokens": 180}
+    assert result["cost_usd"] == round(assistant_eval.cost_usd(result["tokens"], FLASH), 6)
+
+
+def test_a_degraded_attempt_reports_the_usage_of_the_steps_it_completed():
+    items = [item for item in assistant_eval.load_items() if item["id"] == "task-02"]
+    outcome = assistant_eval.run_eval(_Failing(rate_limited_error, {2}), items, prices=FLASH, round_budget=10)
+    (result,) = outcome["results"]
+    assert result["outcome"] == "degrade" and result["error_code"] == "rate_limited"
+    assert result["tokens"] == {"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 60}
+    assert result["cost_usd"] > 0
+
+
+def test_an_obsolete_round_is_not_the_baseline_but_its_cost_still_counts(tmp_path):
+    report = _report_module()
+    for name, started, cost, obsolete in (("a", "2026-10-21T00:00:00", 0.05, False),
+                                          ("b", "2026-10-22T00:00:00", 0.004, True)):
+        data = {"schema": 1, "mode": "run", "started_at": started, "summary": {"cost_usd": cost}}
+        if obsolete:
+            data["obsolete"] = True
+        (tmp_path / ("%s.json" % name)).write_text(json.dumps(data), encoding="utf-8")
+    assert report.spent(tmp_path) == 0.054
+    assert report.baseline(tmp_path)["started_at"] == "2026-10-21T00:00:00"
+    (tmp_path / "a.json").unlink()
+    assert report.baseline(tmp_path) is None and report.spent(tmp_path) == 0.004
+
+
+def test_the_committed_a1_first_round_is_marked_obsolete():
+    report = _report_module()
+    directory = Path(__file__).resolve().parents[3] / "docs" / "评测报告" / "评分助手"
+    first = json.loads((directory / "2026-10-22-A1-gemini-2.5-flash.json").read_text(encoding="utf-8"))
+    assert first["obsolete"] is True
+    assert (directory / "2026-10-22-A1-gemini-2.5-flash.md").read_text(encoding="utf-8").splitlines()[2].startswith(
+        "> **⚠️ 本轮作废")
+    assert report.spent(directory) >= first["summary"]["cost_usd"]
+    assert report.baseline(directory) is None or not report.baseline(directory).get("obsolete")

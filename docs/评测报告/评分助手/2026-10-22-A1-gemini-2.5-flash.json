@@ -1,6 +1,8 @@
 {
  "schema": 1,
  "mode": "run",
+ "obsolete": true,
+ "obsolete_reason": "Vertex 在约 10 秒、11 次调用后返回 429，熔断后 41 条中 37 条退回规则模式；测到的是额度而不是 Agent，不作为对比基线。费用照计。",
  "phase": "A1",
  "started_at": "2026-10-22T23:55:52+00:00",
  "commit": "f0bb5b5c918a0b4382595856c8412b948a662462",

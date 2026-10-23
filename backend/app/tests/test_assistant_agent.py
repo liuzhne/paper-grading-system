@@ -219,6 +219,16 @@ def test_degrade_records_the_error_code_so_rate_limits_are_told_apart(client, ag
     assert user.meta == {"mode": "degraded", "reason": reason, "error_code": code}
 
 
+def test_a_turn_that_fails_after_a_step_keeps_the_usage_already_billed(client, agent):
+    _seed_published_rubric(client)
+    agent(step(("task_list", {"limit": 20})), rate_limited_error())
+    conversation_id = _conversation(client)
+    _say(client, conversation_id, "这批写得怎么样")
+    user = _agent_messages(client, conversation_id)[0]
+    assert user.meta == {"mode": "degraded", "reason": "ProviderCallError", "error_code": "rate_limited",
+                         "tokens": {"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 60}}
+
+
 def test_daily_turn_budget_falls_back_to_rules(client, agent, monkeypatch):
     monkeypatch.setattr(settings, "ASSISTANT_AGENT_DAILY_TURNS", 1)
     model = agent(reply("好的。"))

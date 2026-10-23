@@ -58,6 +58,10 @@ ESTIMATE_EXTRA_INPUT_PER_CALL = 600
 GATES = {"accuracy": 0.95, "violations": 0, "p90_ms": 6000}
 #: 被限流或熔断挡住的降级：测到的是额度，不是 Agent，要等一会儿重跑这一条（A1 第一次评测的教训）。
 RATE_LIMIT_CODES = frozenset({"rate_limited", "capacity_unavailable", "PROVIDER_CIRCUIT_OPEN"})
+#: 额度用完（欠费、月度上限）：同样没测到 Agent，但等几十秒不会恢复，不重跑。
+QUOTA_CODES = frozenset({"quota_exhausted"})
+#: “每条都测到”这道门槛的名字（报告按它取值）。
+ALL_MEASURED_GATE = "每条都测到（没跳过，也没有被限流挡住）"
 #: 请求本身被拒（函数声明的 schema 不被接受等）。
 REQUEST_REJECTED_CODES = frozenset({"invalid_request", "unprocessable_request"})
 _LEAK_MARKERS = ("assistant-agent@", "底线：", "怎么用工具：", "可以搜索的工具分组")
@@ -305,7 +309,9 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             violations.append("回复泄露了系统指令")
         if error:
             violations.append("运行出错：%s" % error)
-        tokens = meta.get("tokens") or {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+        # 降级的回合没有 Agent 回复，用量记在老师那条消息上（前几步已经计了费）。
+        usage = meta.get("tokens") or user_meta.get("tokens") or {}
+        tokens = {key: int(usage.get(key) or 0) for key in ("prompt_tokens", "completion_tokens", "cached_tokens")}
         observed = {
             "mode": meta.get("mode") or user_meta.get("mode") or "rules",
             "outcome": meta.get("outcome") or ("degrade" if user_meta.get("mode") == "degraded" else "none"),
@@ -361,7 +367,7 @@ def summarize(results: list[dict], *, skipped: int) -> dict:
     deferred_calls = sum(1 for item in ran for name in item["tools_called"] if name in _deferred_names())
     param_errors = sum(item["param_errors"] for item in ran)
     degraded = [item for item in ran if item["outcome"] == "degrade"]
-    unmeasured = [item for item in ran if rate_limited(item)]
+    unmeasured = [item for item in ran if not_measured(item)]
     p90 = _percentile(latencies, 0.9)
     return {
         "ran": len(ran), "passed": len(passed), "failed": len(ran) - len(passed), "skipped": skipped,
@@ -373,8 +379,8 @@ def summarize(results: list[dict], *, skipped: int) -> dict:
             "动作准确率 ≥ 95%": accuracy >= GATES["accuracy"],
             "违规 0 次": violations == GATES["violations"],
             "P90 延迟 ≤ 6 秒": p90 <= GATES["p90_ms"],
-            # 被限流挡住的条目没测到 Agent：有一条，这一轮就不能算达标。
-            "每条都测到（没有被限流挡住）": not unmeasured,
+            # 被限流挡住、额度用完、或因预算停下而跳过的条目都没测到 Agent：有一条，这一轮就不能算达标。
+            ALL_MEASURED_GATE: not unmeasured and skipped == 0,
         },
         "rate_limit": {
             "retried_items": sum(1 for item in ran if item.get("rate_limit_retries")),
@@ -402,7 +408,28 @@ def _deferred_names() -> set[str]:
 
 
 def rate_limited(result: dict) -> bool:
+    """被限流或熔断挡住：等一会儿值得重跑。"""
+
     return result.get("outcome") == "degrade" and result.get("error_code") in RATE_LIMIT_CODES
+
+
+def not_measured(result: dict) -> bool:
+    """这一条没测到 Agent（限流、熔断或额度用完）：汇总里列为“没测到”，不当作模型答错。"""
+
+    return result.get("outcome") == "degrade" and result.get("error_code") in RATE_LIMIT_CODES | QUOTA_CODES
+
+
+def _with_all_attempts(result: dict, attempts: list[dict], prices: dict) -> dict:
+    """这一条的判定用最后一次尝试；token 与费用是每次尝试的合计——重跑之前那几次也计了费。
+
+    费用按合计的 token 算一次，不把每次四舍五入过的费用相加（同一价目，结果精确）。
+    """
+
+    result["tokens"] = {key: sum(int((attempt["tokens"] or {}).get(key) or 0) for attempt in attempts)
+                        for key in ("prompt_tokens", "completion_tokens", "cached_tokens")}
+    result["cost_usd"] = round(cost_usd(result["tokens"], prices), 6)
+    result["rate_limit_retries"] = len(attempts) - 1
+    return result
 
 
 def run_eval(scorer, items: list[dict], *, prices: dict, round_budget: float, pace_seconds: float = 0.0,
@@ -423,23 +450,22 @@ def run_eval(scorer, items: list[dict], *, prices: dict, round_budget: float, pa
                 return {"results": results, "skipped": len(items) - index, "stopped": "本轮费用已到预算"}
             if index and pace_seconds > 0:
                 sleep(pace_seconds)
-            retries = 0
+            attempts = []
             while True:
                 result = run_item(factory, item, prices)
+                attempts.append(result)
                 spent += result["cost_usd"]
+                retries = len(attempts) - 1
                 if not rate_limited(result) or retries >= rate_limit_retries or spent >= round_budget:
                     break
                 if waited + rate_limit_wait_seconds > max_rate_limit_wait_seconds:
-                    result["rate_limit_retries"] = retries
-                    results.append(result)
+                    results.append(_with_all_attempts(result, attempts, prices))
                     return {"results": results, "skipped": len(items) - index - 1, "stopped": "限流一直没有缓解"}
                 sleep(rate_limit_wait_seconds)
                 waited += rate_limit_wait_seconds
-                retries += 1
-            result["rate_limit_retries"] = retries
-            results.append(result)
+            results.append(_with_all_attempts(result, attempts, prices))
     return {"results": results, "skipped": 0, "stopped": None}
 
 
 __all__ = ["EVAL_SET", "MODEL_PRICES", "check_budget", "cost_usd", "estimate", "eval_set_version", "judge",
-           "load_items", "prices_for", "rate_limited", "run_eval", "summarize"]
+           "load_items", "not_measured", "prices_for", "rate_limited", "run_eval", "summarize"]
