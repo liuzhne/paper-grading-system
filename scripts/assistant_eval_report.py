@@ -18,6 +18,8 @@ from pathlib import Path
 
 MARK_BEGIN = "=====ASSISTANT_EVAL_JSON_BEGIN====="
 MARK_END = "=====ASSISTANT_EVAL_JSON_END====="
+#: 与 backend/app/eval/assistant_eval.py 的 ALL_MEASURED_GATE 相同（这个脚本只用标准库，不能导入它）。
+ALL_MEASURED_GATE = "每条都测到（没跳过，也没有被限流挡住）"
 
 
 def extract(raw: str) -> dict:
@@ -40,7 +42,19 @@ def reports(directory: Path) -> list[dict]:
 
 
 def spent(directory: Path) -> float:
+    """历次正式评测的费用合计；作废的轮次也算——钱已经花了。"""
+
     return round(sum(float((item.get("summary") or {}).get("cost_usd") or 0) for item in reports(directory)), 6)
+
+
+def baseline(directory: Path) -> dict | None:
+    """“与上一轮对比”用的那一轮：最近一轮没有标 ``obsolete`` 的正式评测。
+
+    作废的轮次（例如 A1 第一轮被限流挡住）测到的不是 Agent，拿它当基线，下一轮的“进步”就是假的。
+    """
+
+    usable = [item for item in reports(directory) if not item.get("obsolete")]
+    return usable[-1] if usable else None
 
 
 def slug(model_name: str | None) -> str:
@@ -93,6 +107,9 @@ def render_run(data: dict, previous: dict | None) -> str:
     search = summary.get("search") or {}
     call_tool = summary.get("call_tool") or {}
     latency = summary.get("latency_ms") or {}
+    gates = summary.get("gates") or {}
+    rate_limit = summary.get("rate_limit")
+    pacing = data.get("pacing") or {}
     lines = [
         "# 评分助手评测报告 · %s · %s" % (data.get("phase"), model.get("name")),
         "",
@@ -125,6 +142,13 @@ def render_run(data: dict, previous: dict | None) -> str:
         "| 违规 0 次 | %s | %s 次 |" % (_yes((summary.get("gates") or {}).get("违规 0 次")), summary.get("violations")),
         "| P90 延迟 ≤ 6 秒 | %s | P50 %s ms，P90 %s ms，最长 %s ms |" % (
             _yes((summary.get("gates") or {}).get("P90 延迟 ≤ 6 秒")), latency.get("p50"), latency.get("p90"), latency.get("max")),
+    ]
+    # 旧报告没有这一道门槛与限流统计（2026-10-23 加），没有就不写。
+    if ALL_MEASURED_GATE in gates:
+        lines.append("| %s | %s | 没测到 %s 条，跳过 %s 条 |" % (
+            ALL_MEASURED_GATE, _yes(gates[ALL_MEASURED_GATE]), len((rate_limit or {}).get("unmeasured") or []),
+            summary.get("skipped") or 0))
+    lines += [
         "",
         "## 各类别", "",
         "| 类别 | 通过 / 条数 |", "|---|---|",
@@ -140,6 +164,11 @@ def render_run(data: dict, previous: dict | None) -> str:
         "| 函数声明的 schema 被接受（没有 400 降级） | %s（降级 %s 次：%s） |" % (
             _yes(checks.get("schema_accepted")), checks.get("degraded"), "、".join(checks.get("degraded_reasons") or []) or "无"),
         "| 工具调用上的思考签名 | %s 个 |" % checks.get("thought_signatures"),
+        *([
+            "| 限流（429 / 熔断 / 额度用完） | 条目间隔 %s 秒；重跑 %s 条共 %s 次；没测到 %s |" % (
+                pacing.get("pace_seconds", "—"), rate_limit.get("retried_items"), rate_limit.get("retries"),
+                "、".join(rate_limit.get("unmeasured") or []) or "无"),
+        ] if rate_limit is not None else []),
         "| 缓存命中量有报告 | %s（命中占输入 %s） |" % (_yes(checks.get("cached_tokens_reported")),
                                               _pct(checks.get("cache_read_ratio"))),
         "",
@@ -159,7 +188,8 @@ def render_run(data: dict, previous: dict | None) -> str:
         for item in failed:
             lines.append("| %s | %s | %s | %s / %s | %s |" % (
                 item.get("id"), item.get("utterance"), "；".join(item.get("reasons") or []),
-                "、".join(item.get("tools_called") or []) or "无", item.get("outcome"),
+                "、".join(item.get("tools_called") or []) or "无",
+                "%s（%s）" % (item.get("outcome"), item["error_code"]) if item.get("error_code") else item.get("outcome"),
                 str(item.get("reply_text") or "").replace("\n", " ").replace("|", "／")[:80]))
     lines += ["", "## 与上一轮对比", ""]
     if previous is None:
@@ -194,8 +224,7 @@ def main(argv=None) -> int:
     if data.get("mode") != "run" or data.get("refused") or not data.get("summary"):
         print(render_estimate(data))
         return 0
-    history = reports(args.previous_dir)
-    markdown = render_run(data, history[-1] if history else None)
+    markdown = render_run(data, baseline(args.previous_dir))
     name = "%s-%s-%s" % (str(data.get("started_at") or "")[:10], data.get("phase"), slug((data.get("model") or {}).get("name")))
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / ("%s.json" % name)).write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
