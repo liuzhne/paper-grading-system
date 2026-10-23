@@ -346,6 +346,8 @@ def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, messa
     outcome = agent_turn.run_turn(ctx, scorer, text=text, user_message_id=message.id)
     if outcome.kind == "degrade":
         message.meta = {"mode": "degraded", "reason": outcome.reason}
+        if (outcome.meta or {}).get("error_code"):
+            message.meta["error_code"] = outcome.meta["error_code"]
         return False, True
     model_name = getattr(scorer, "model_name", None)
     message.intent = agent_budget.AGENT_INTENT

@@ -1147,6 +1147,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-23 | 评测限流 | 评测节奏（间隔 3 秒、限流重跑 2 次、等待上限 8 分钟）；新增排错：一大片 degraded 实为服务商限流，线上 `meta.error_code`。 |
 | 2026-10-22 | 评测指定连接与按模型查价 | 工作流 `pgs-assistant-eval` 新增输入 `connection_id`；“返回 2 / 3”的排错补上“模型没有登记价目”“连接找不到或没启用”。 |
 | 2026-10-22 | 评分助手 A1 复审（CodeRabbit） | 无新命令；评测集的重试、取消两条改为要求出确认卡片（评测环境有对应的合成作业）。 |
 | 2026-10-22 | 评分助手 A1（听懂与帮助） | 无新命令与开关；新增两条排错（找到好几份请选、不说分数只给卡片）。评测集扩到 41 条。 |
@@ -2337,6 +2338,9 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   3. 跑完下载附件 `assistant-eval-<期>-<运行号>`，把里面的 `.md` 与 `.json` 提交到 `docs/评测报告/评分助手/`，随这一期的 PR 提交。下一轮的“已花费用”按这个目录里的报告合计，**不提交报告，总预算就算不准**。
   - 评测在实例的一次性容器里跑（`docker compose run --rm --no-deps app`），默认用平台模型、填了 `connection_id` 就用那条连接；配置都在只读事务里读出；评测本身是内存数据库与合成种子数据，不读写业务数据。
   - 价目按模型查（`backend/app/eval/assistant_eval.py` 的 `MODEL_PRICES`），只认 Google 端点上登记过的模型。换模型跑评测，先核实价目、加一行再跑。
+  - 节奏：条与条之间隔 3 秒（`--pace-seconds`）；一条被限流或熔断挡住，等熔断冷却加 5 秒（默认 35 秒）重跑这一条，最多 2 次（`--rate-limit-retries`）；限流的等待累计到 8 分钟就停，剩下的记为跳过。重跑后仍被挡住的条目在报告里列为“没测到”，有一条“每条都测到”这道门槛就不过。
+  - 排错：报告里一大片“没有走 Agent 回合（degraded）”、原因 `ProviderCallError` / `CircuitOpenError`——**报错指向模型出错，真正的原因多半是服务商限流**。看失败条目的结束方式是不是 `degrade（rate_limited）` 或 `degrade（PROVIDER_CIRCUIT_OPEN）`，或者在运行日志里找 `llm_call_failed … status=429 provider_type=RESOURCE_EXHAUSTED`。A1 第一轮就是这样：连发 11 次后 Vertex 返回 429，连续 5 次失败后熔断（`PROVIDER_CIRCUIT_FAILURE_THRESHOLD`），其后整轮都被熔断挡住。限流挡住的一轮不能当作 Agent 的成绩，报告照样提交（它是已花费用的账本），在 `docs/评测报告/评分助手/README.md` 的“各轮说明”里注明作废。
+  - 线上同样的现象：助手回复“助手模型暂时没有响应”，用户消息的 `meta.error_code` 是 `rate_limited` 或 `PROVIDER_CIRCUIT_OPEN`（实例日志 `assistant_agent_model_failed … code=rate_limited`）。Agent 回合每一步只试 1 次、不原地等 429，这一句退回规则模式，属于预期行为。
   - 排错：工作流以“实例返回 2”失败 = 预算拒绝，**或模型没有登记价目**（摘要写“没有登记这个模型的价目”；报错指向预算，真正的原因是平台模型不是 Gemini——A1 第一次估算时平台模型是 Bedrock 上的 Claude，旧脚本照样按 Gemini 价报了个数）；“返回 3” = 生产上没有生效的平台模型，或指定的连接找不到、没启用；“没有评测结果的标记” = SSH 或容器没起来，看上一步的输出。评测脚本跟随镜像：改了评测集或脚本，要先合并部署，实例上才是新版本。
 - 2026-10-22 A0（Agent 回合，开关默认关）：迁移 `0041_assistant_agent_state`（两个可空 JSON 列）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0041_assistant_agent_state`），再合并部署。开关不打开时对外行为不变，部署后照常核对助手页即可；回滚：两列都没有数据时才允许降级（开关一直关着就不会有数据）。生产打开开关：GitHub 仓库变量 `ASSISTANT_AGENT_ENABLED=true`（部署时由 `scripts/production_env.py` 写进实例的 `.env`，只收 true / false），A1 的真实模型评测达到上线门槛之前不要设。
 

@@ -12,6 +12,7 @@ from backend.app.core.config import settings
 from backend.app.eval import assistant_eval
 from backend.app.scripts import run_assistant_eval as script
 from backend.app.services.assistant import model as assistant_model
+from backend.app.tests.test_assistant_agent import rate_limited_error
 from backend.app.tests.test_assistant_agent import reply
 from backend.app.tests.test_assistant_agent import step
 
@@ -151,7 +152,9 @@ def test_full_eval_runs_isolated_and_restores_the_process():
     assert summary["ran"] == len(items) and summary["violations"] == 0
     assert summary["provider_checks"]["tool_choice_required_honored"] is True
     assert summary["provider_checks"]["cached_tokens_reported"] is True
-    assert summary["cost_usd"] > 0 and set(summary["gates"]) == {"动作准确率 ≥ 95%", "违规 0 次", "P90 延迟 ≤ 6 秒"}
+    assert summary["cost_usd"] > 0 and set(summary["gates"]) == {"动作准确率 ≥ 95%", "违规 0 次", "P90 延迟 ≤ 6 秒",
+                                                                 "每条都测到（没有被限流挡住）"}
+    assert summary["rate_limit"] == {"retried_items": 0, "retries": 0, "unmeasured": []}
 
 
 def test_judge_flags_each_kind_of_miss():
@@ -213,7 +216,7 @@ def test_script_run_prints_results_and_the_report_renders(monkeypatch, capsys, t
     _platform(monkeypatch, _Runtime())
     monkeypatch.setattr("backend.app.services.llm.factory.get_llm_scorer", lambda runtime: RuleOfThumbModel())
     assert script.main(["--mode", "run", "--phase", "A0", "--spent-usd", "0", "--confirm-usd", "0.5",
-                        "--max-items", "4", "--commit", "abc123"]) == 0
+                        "--max-items", "4", "--commit", "abc123", "--pace-seconds", "0"]) == 0
     raw = capsys.readouterr().out
     raw_path = tmp_path / "raw.txt"
     raw_path.write_text("noise before\n" + raw, encoding="utf-8")
@@ -305,13 +308,15 @@ def test_script_uses_a_named_connection_without_printing_who_owns_it(client, mon
     connection_id = _gemini_connection(client.session_factory)
 
     assert script.main(["--mode", "run", "--phase", "A1", "--spent-usd", "0", "--confirm-usd", "0.5",
-                        "--max-items", "2", "--connection-id", connection_id.upper()]) == 0
+                        "--max-items", "2", "--connection-id", connection_id.upper(), "--pace-seconds", "0"]) == 0
     out = capsys.readouterr().out
     payload = json.loads(out.split(script.MARK_BEGIN, 1)[1].split(script.MARK_END, 1)[0])
     assert payload["model"] == {"source": "connection", "provider_type": "openai_compatible",
                                 "name": "google/gemini-2.5-flash", "host": "aiplatform.googleapis.com"}
     assert built[0].connection_id == connection_id and built[0].api_key == "AQ.test-only"
     assert payload["summary"]["ran"] == 2
+    assert payload["pacing"] == {"pace_seconds": 0.0, "rate_limit_retries": 2, "rate_limit_wait_seconds": 35.0,
+                                 "max_rate_limit_wait_seconds": 480.0}
     for secret in ("不该出现", "AQ.test-only", "example.test"):
         assert secret not in out
 
@@ -328,3 +333,57 @@ def test_script_refuses_a_missing_or_disabled_connection(client, monkeypatch, ca
     assert _payload(capsys)["refused"] == "找不到这条 AI 连接"
     with pytest.raises(SystemExit):
         script.main(["--mode", "estimate", "--phase", "A1", "--spent-usd", "0", "--connection-id", "我的连接"])
+
+
+class _RateLimitedFirst(RuleOfThumbModel):
+    """前 ``failures`` 次调用都被限流，之后照标准答案走。"""
+
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+
+    def complete_with_tools(self, messages, tools, **options):
+        if self.failures > 0:
+            self.failures -= 1
+            raise rate_limited_error()
+        return super().complete_with_tools(messages, tools, **options)
+
+
+def test_a_rate_limited_item_waits_and_runs_again_instead_of_counting_as_a_miss():
+    items = [item for item in assistant_eval.load_items() if item["id"] in {"task-02", "task-03"}]
+    slept = []
+    outcome = assistant_eval.run_eval(_RateLimitedFirst(1), items, prices=FLASH, round_budget=10, pace_seconds=3,
+                                      rate_limit_retries=2, rate_limit_wait_seconds=35,
+                                      max_rate_limit_wait_seconds=480, sleep=slept.append)
+    first, second = outcome["results"]
+    assert first["passed"] and first["rate_limit_retries"] == 1 and second["rate_limit_retries"] == 0
+    assert slept == [35, 3]
+    summary = assistant_eval.summarize(outcome["results"], skipped=0)
+    assert summary["rate_limit"] == {"retried_items": 1, "retries": 1, "unmeasured": []}
+    assert summary["gates"]["每条都测到（没有被限流挡住）"] is True
+
+
+def test_an_item_still_rate_limited_after_retries_is_reported_as_unmeasured():
+    items = [item for item in assistant_eval.load_items() if item["id"] == "task-02"]
+    outcome = assistant_eval.run_eval(_RateLimitedFirst(99), items, prices=FLASH, round_budget=10,
+                                      rate_limit_retries=2, rate_limit_wait_seconds=35,
+                                      max_rate_limit_wait_seconds=480, sleep=lambda seconds: None)
+    (result,) = outcome["results"]
+    assert result["error_code"] == "rate_limited" and result["rate_limit_retries"] == 2 and not result["passed"]
+    summary = assistant_eval.summarize(outcome["results"], skipped=0)
+    assert summary["rate_limit"]["unmeasured"] == ["task-02"]
+    assert summary["gates"]["每条都测到（没有被限流挡住）"] is False
+    assert summary["provider_checks"]["schema_accepted"] is True
+    report = _report_module().render_run({"summary": summary, "items": outcome["results"], "pacing": {"pace_seconds": 3}},
+                                         None)
+    assert "没测到 task-02" in report and "degrade（rate_limited）" in report
+
+
+def test_rate_limit_waits_stop_the_run_before_the_workflow_times_out():
+    items = [item for item in assistant_eval.load_items() if item["id"] in {"task-02", "task-03", "task-04"}]
+    outcome = assistant_eval.run_eval(_RateLimitedFirst(99), items, prices=FLASH, round_budget=10,
+                                      rate_limit_retries=2, rate_limit_wait_seconds=35,
+                                      max_rate_limit_wait_seconds=100, sleep=lambda seconds: None)
+    # 第一条重跑两次（等 70 秒）；第二条再等 35 秒就超过 100 秒的上限：记下第二条，停下，第三条跳过。
+    assert [item["rate_limit_retries"] for item in outcome["results"]] == [2, 0]
+    assert outcome["skipped"] == 1 and outcome["stopped"] == "限流一直没有缓解"

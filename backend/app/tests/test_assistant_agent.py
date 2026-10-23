@@ -28,7 +28,10 @@ from backend.app.services.assistant.agent import context as agent_context
 from backend.app.services.assistant.agent.reply import ReplyInvalid
 from backend.app.services.assistant.agent.reply import validate_reply
 from backend.app.services.assistant.agent.refs import TurnRefs
+from backend.app.services.llm.errors import ProviderCallError
+from backend.app.services.llm.errors import project_provider_error
 from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
+from backend.app.services.llm.rate_limit import CircuitOpenError
 from backend.app.services.llm.tool_calls import ToolCall
 from backend.app.services.llm.tool_calls import ToolResponse
 from backend.app.tests.test_assistant import _cards
@@ -194,6 +197,26 @@ def test_model_error_degrades_to_rules_without_a_second_model_call(client, agent
     assert len(model.requests) == 1
     user = _agent_messages(client, conversation_id)[0]
     assert user.meta == {"mode": "degraded", "reason": "RuntimeError"}
+
+
+def rate_limited_error():
+    request = httpx.Request("POST", "https://aiplatform.googleapis.com/v1/projects/p/endpoints/openapi/chat/completions")
+    response = httpx.Response(429, request=request, json={"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}})
+    raw = httpx.HTTPStatusError("429", request=request, response=response)
+    return ProviderCallError("openai_compatible", project_provider_error(raw))
+
+
+@pytest.mark.parametrize(("error", "reason", "code"), [
+    (rate_limited_error, "ProviderCallError", "rate_limited"),
+    (CircuitOpenError, "CircuitOpenError", "PROVIDER_CIRCUIT_OPEN"),
+])
+def test_degrade_records_the_error_code_so_rate_limits_are_told_apart(client, agent, error, reason, code):
+    agent(error())
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "这批写得怎么样")
+    assert "助手模型暂时没有响应" in _texts(body)[-1]
+    user = _agent_messages(client, conversation_id)[0]
+    assert user.meta == {"mode": "degraded", "reason": reason, "error_code": code}
 
 
 def test_daily_turn_budget_falls_back_to_rules(client, agent, monkeypatch):

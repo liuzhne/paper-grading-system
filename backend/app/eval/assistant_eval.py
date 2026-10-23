@@ -56,6 +56,10 @@ ESTIMATE_CALLS_PER_ITEM = 3.0
 ESTIMATE_OUTPUT_PER_CALL = 150
 ESTIMATE_EXTRA_INPUT_PER_CALL = 600
 GATES = {"accuracy": 0.95, "violations": 0, "p90_ms": 6000}
+#: 被限流或熔断挡住的降级：测到的是额度，不是 Agent，要等一会儿重跑这一条（A1 第一次评测的教训）。
+RATE_LIMIT_CODES = frozenset({"rate_limited", "capacity_unavailable", "PROVIDER_CIRCUIT_OPEN"})
+#: 请求本身被拒（函数声明的 schema 不被接受等）。
+REQUEST_REJECTED_CODES = frozenset({"invalid_request", "unprocessable_request"})
 _LEAK_MARKERS = ("assistant-agent@", "底线：", "怎么用工具：", "可以搜索的工具分组")
 EXTRA_BATCHES = ("2026 届毕业论文评分 · 计算机学院", "课程报告评分 · 软件工程导论", "实验报告评分 · 数据结构")
 #: 种子任务里的合成材料：(姓名, 状态, 各评分项的失分比例, 是否需要复核)。分数与理由都是编的，没有真实学生。
@@ -306,6 +310,7 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             "mode": meta.get("mode") or user_meta.get("mode") or "rules",
             "outcome": meta.get("outcome") or ("degrade" if user_meta.get("mode") == "degraded" else "none"),
             "reason": meta.get("reason") or user_meta.get("reason"),
+            "error_code": meta.get("error_code") or user_meta.get("error_code"),
             "tools_called": list(meta.get("tools_called") or []),
             "searches": int(meta.get("searches") or 0),
             "model_calls": int(meta.get("model_calls") or 0),
@@ -323,7 +328,8 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             "expect": item.get("expect") or {}, "passed": not reasons, "reasons": reasons,
             "violations": violations, "latency_ms": latency_ms, "tokens": tokens,
             "cost_usd": round(cost_usd(tokens, prices), 6), "reply_text": text[:300],
-            **{key: observed[key] for key in ("mode", "outcome", "reason", "tools_called", "searches", "model_calls",
+            **{key: observed[key] for key in ("mode", "outcome", "reason", "error_code", "tools_called", "searches",
+                                              "model_calls",
                                               "text_replies", "thought_signatures", "param_errors", "help_refs",
                                               "card_types")},
         }
@@ -355,6 +361,7 @@ def summarize(results: list[dict], *, skipped: int) -> dict:
     deferred_calls = sum(1 for item in ran for name in item["tools_called"] if name in _deferred_names())
     param_errors = sum(item["param_errors"] for item in ran)
     degraded = [item for item in ran if item["outcome"] == "degrade"]
+    unmeasured = [item for item in ran if rate_limited(item)]
     p90 = _percentile(latencies, 0.9)
     return {
         "ran": len(ran), "passed": len(passed), "failed": len(ran) - len(passed), "skipped": skipped,
@@ -366,13 +373,21 @@ def summarize(results: list[dict], *, skipped: int) -> dict:
             "动作准确率 ≥ 95%": accuracy >= GATES["accuracy"],
             "违规 0 次": violations == GATES["violations"],
             "P90 延迟 ≤ 6 秒": p90 <= GATES["p90_ms"],
+            # 被限流挡住的条目没测到 Agent：有一条，这一轮就不能算达标。
+            "每条都测到（没有被限流挡住）": not unmeasured,
+        },
+        "rate_limit": {
+            "retried_items": sum(1 for item in ran if item.get("rate_limit_retries")),
+            "retries": sum(int(item.get("rate_limit_retries") or 0) for item in ran),
+            "unmeasured": [item["id"] for item in unmeasured],
         },
         "search": {"needed": len(needed), "found_right": found_right, "unneeded": unneeded},
         "call_tool": {"deferred_calls": deferred_calls, "param_errors": param_errors},
         "provider_checks": {
             "tool_choice_required_honored": all(item["text_replies"] == 0 for item in ran),
             "text_replies": sum(item["text_replies"] for item in ran),
-            "schema_accepted": not any(item.get("reason") == "HTTPStatusError" for item in degraded),
+            "schema_accepted": not any(item.get("reason") == "HTTPStatusError"
+                                       or item.get("error_code") in REQUEST_REJECTED_CODES for item in degraded),
             "degraded": len(degraded),
             "degraded_reasons": sorted({str(item.get("reason")) for item in degraded}),
             "thought_signatures": sum(item["thought_signatures"] for item in ran),
@@ -386,19 +401,45 @@ def _deferred_names() -> set[str]:
     return {tool.name for tool in catalog.registry().values() if not tool.resident}
 
 
-def run_eval(scorer, items: list[dict], *, prices: dict, round_budget: float) -> dict:
-    """逐条跑；累计费用超过本轮预算就停，剩下的记为跳过。"""
+def rate_limited(result: dict) -> bool:
+    return result.get("outcome") == "degrade" and result.get("error_code") in RATE_LIMIT_CODES
 
-    results, spent = [], 0.0
+
+def run_eval(scorer, items: list[dict], *, prices: dict, round_budget: float, pace_seconds: float = 0.0,
+             rate_limit_retries: int = 0, rate_limit_wait_seconds: float = 0.0,
+             max_rate_limit_wait_seconds: float = 0.0, sleep=time.sleep) -> dict:
+    """逐条跑；累计费用超过本轮预算就停，剩下的记为跳过。
+
+    - 条与条之间隔 ``pace_seconds``：评测是连发，老师不会这样用；连发会撞上服务商的限流。
+    - 一条被限流或熔断挡住，等 ``rate_limit_wait_seconds``（比熔断冷却长）再重跑这一条，最多
+      ``rate_limit_retries`` 次；重跑仍被挡住就照实记下（汇总里列为“没测到”）。
+    - 限流的等待累计超过 ``max_rate_limit_wait_seconds`` 就停，剩下的记为跳过，免得工作流超时。
+    """
+
+    results, spent, waited = [], 0.0, 0.0
     with isolated_environment(scorer) as factory:
         for index, item in enumerate(items):
             if spent >= round_budget:
                 return {"results": results, "skipped": len(items) - index, "stopped": "本轮费用已到预算"}
-            result = run_item(factory, item, prices)
-            spent += result["cost_usd"]
+            if index and pace_seconds > 0:
+                sleep(pace_seconds)
+            retries = 0
+            while True:
+                result = run_item(factory, item, prices)
+                spent += result["cost_usd"]
+                if not rate_limited(result) or retries >= rate_limit_retries or spent >= round_budget:
+                    break
+                if waited + rate_limit_wait_seconds > max_rate_limit_wait_seconds:
+                    result["rate_limit_retries"] = retries
+                    results.append(result)
+                    return {"results": results, "skipped": len(items) - index - 1, "stopped": "限流一直没有缓解"}
+                sleep(rate_limit_wait_seconds)
+                waited += rate_limit_wait_seconds
+                retries += 1
+            result["rate_limit_retries"] = retries
             results.append(result)
     return {"results": results, "skipped": 0, "stopped": None}
 
 
 __all__ = ["EVAL_SET", "MODEL_PRICES", "check_budget", "cost_usd", "estimate", "eval_set_version", "judge",
-           "load_items", "prices_for", "run_eval", "summarize"]
+           "load_items", "prices_for", "rate_limited", "run_eval", "summarize"]

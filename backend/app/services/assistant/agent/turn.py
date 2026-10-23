@@ -167,8 +167,9 @@ def _model_node(state: _State, runtime: Runtime[_Runtime]):
     try:
         response = rt.step(messages, rt.prefix.tools, deadline)
     except Exception as exc:  # 超时、限流、熔断、无法解析：本回合退回规则模式
-        logger.warning("assistant_agent_model_failed error=%s", type(exc).__name__)
-        return {"outcome": {"kind": "degrade", "reason": type(exc).__name__}}
+        code = _error_code(exc)
+        logger.warning("assistant_agent_model_failed error=%s code=%s", type(exc).__name__, code or "-")
+        return {"outcome": {"kind": "degrade", "reason": type(exc).__name__, "error_code": code}}
     rt.model_calls += 1
     _add_usage(rt.usage, response.usage)
     rt.thought_signatures += sum(
@@ -183,6 +184,19 @@ def _model_node(state: _State, runtime: Runtime[_Runtime]):
         synthetic = True
         rt.text_replies += 1
     return {"steps": [*state.get("steps", []), response.message], "pending": calls, "synthetic": synthetic}
+
+
+def _error_code(exc) -> str | None:
+    """模型调用失败的错误码（`rate_limited`、`PROVIDER_CIRCUIT_OPEN` 等），只记码不记正文。
+
+    异常类名分不出“被限流”和“请求本身不合格”：A1 第一次评测 37 条都记成 ProviderCallError，
+    要翻实例日志才知道是 Vertex 的 429。
+    """
+
+    error = getattr(exc, "error", None)
+    code = getattr(error, "code", None) if error is not None else getattr(exc, "code", None)
+    code = getattr(code, "value", code)
+    return str(code) if isinstance(code, str) and code else None
 
 
 def _arguments(raw) -> dict | None:
@@ -389,6 +403,8 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
     }
     if raw.get("reason"):
         meta["reason"] = raw["reason"]
+    if raw.get("error_code"):
+        meta["error_code"] = raw["error_code"]
     logger.info(
         "assistant_turn mode=agent protocol=%s outcome=%s steps=%d tools=%s searches=%d loaded=%s "
         "tokens_in=%d tokens_cache_read=%d tokens_out=%d latency_ms=%d",

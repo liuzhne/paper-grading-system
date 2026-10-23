@@ -93,6 +93,9 @@ def render_run(data: dict, previous: dict | None) -> str:
     search = summary.get("search") or {}
     call_tool = summary.get("call_tool") or {}
     latency = summary.get("latency_ms") or {}
+    gates = summary.get("gates") or {}
+    rate_limit = summary.get("rate_limit")
+    pacing = data.get("pacing") or {}
     lines = [
         "# 评分助手评测报告 · %s · %s" % (data.get("phase"), model.get("name")),
         "",
@@ -125,6 +128,12 @@ def render_run(data: dict, previous: dict | None) -> str:
         "| 违规 0 次 | %s | %s 次 |" % (_yes((summary.get("gates") or {}).get("违规 0 次")), summary.get("violations")),
         "| P90 延迟 ≤ 6 秒 | %s | P50 %s ms，P90 %s ms，最长 %s ms |" % (
             _yes((summary.get("gates") or {}).get("P90 延迟 ≤ 6 秒")), latency.get("p50"), latency.get("p90"), latency.get("max")),
+    ]
+    # 旧报告没有这一道门槛与限流统计（2026-10-23 加），没有就不写。
+    if "每条都测到（没有被限流挡住）" in gates:
+        lines.append("| 每条都测到（没有被限流挡住） | %s | 没测到 %s 条 |" % (
+            _yes(gates["每条都测到（没有被限流挡住）"]), len((rate_limit or {}).get("unmeasured") or [])))
+    lines += [
         "",
         "## 各类别", "",
         "| 类别 | 通过 / 条数 |", "|---|---|",
@@ -140,6 +149,11 @@ def render_run(data: dict, previous: dict | None) -> str:
         "| 函数声明的 schema 被接受（没有 400 降级） | %s（降级 %s 次：%s） |" % (
             _yes(checks.get("schema_accepted")), checks.get("degraded"), "、".join(checks.get("degraded_reasons") or []) or "无"),
         "| 工具调用上的思考签名 | %s 个 |" % checks.get("thought_signatures"),
+        *([
+            "| 限流（429 / 熔断） | 条目间隔 %s 秒；重跑 %s 条共 %s 次；没测到 %s |" % (
+                pacing.get("pace_seconds", "—"), rate_limit.get("retried_items"), rate_limit.get("retries"),
+                "、".join(rate_limit.get("unmeasured") or []) or "无"),
+        ] if rate_limit is not None else []),
         "| 缓存命中量有报告 | %s（命中占输入 %s） |" % (_yes(checks.get("cached_tokens_reported")),
                                               _pct(checks.get("cache_read_ratio"))),
         "",
@@ -159,7 +173,8 @@ def render_run(data: dict, previous: dict | None) -> str:
         for item in failed:
             lines.append("| %s | %s | %s | %s / %s | %s |" % (
                 item.get("id"), item.get("utterance"), "；".join(item.get("reasons") or []),
-                "、".join(item.get("tools_called") or []) or "无", item.get("outcome"),
+                "、".join(item.get("tools_called") or []) or "无",
+                "%s（%s）" % (item.get("outcome"), item["error_code"]) if item.get("error_code") else item.get("outcome"),
                 str(item.get("reply_text") or "").replace("\n", " ").replace("|", "／")[:80]))
     lines += ["", "## 与上一轮对比", ""]
     if previous is None:

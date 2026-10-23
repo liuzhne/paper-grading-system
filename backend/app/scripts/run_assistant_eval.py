@@ -14,6 +14,9 @@
 - 两道预算：本轮预计不超过 `--round-budget-usd`；历次已花（`--spent-usd`，由工作流按仓库里的报告合计）加本轮
   预计不超过 `--total-budget-usd`。`run` 还要求 `--confirm-usd`（维护者看过估算后确认的金额）不小于本轮预计；
 - 跑的过程中累计费用到了本轮预算就停，剩下的记为跳过；
+- 条与条之间隔 `--pace-seconds`（默认 3 秒）；一条被限流或熔断挡住，等熔断冷却过去再重跑这一条
+  （`--rate-limit-retries`，默认 2 次），限流的等待累计不超过 8 分钟。A1 第一次评测是连发，Vertex 在
+  约 10 秒、11 次调用后返回 429，熔断之后 37 条都退回了规则模式，测到的是额度而不是 Agent；
 - 结果只打印到标准输出（两行标记之间的 JSON），不落盘；报告由工作流在 GitHub 上生成。
 """
 
@@ -33,6 +36,8 @@ MARK_BEGIN = "=====ASSISTANT_EVAL_JSON_BEGIN====="
 MARK_END = "=====ASSISTANT_EVAL_JSON_END====="
 EXIT_REFUSED = 2
 EXIT_NO_MODEL = 3
+#: 限流的等待累计上限：工作流 30 分钟超时，正常跑完约 5 分钟。
+MAX_RATE_LIMIT_WAIT_SECONDS = 480
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -114,6 +119,8 @@ def main(argv=None) -> int:
     parser.add_argument("--max-items", type=int, default=0)
     parser.add_argument("--commit", default="")
     parser.add_argument("--connection-id", default="")
+    parser.add_argument("--pace-seconds", type=float, default=3.0)
+    parser.add_argument("--rate-limit-retries", type=int, default=2)
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,20}", args.phase):
         parser.error("phase 只能是字母、数字、点、下划线、短横线")
@@ -163,9 +170,16 @@ def main(argv=None) -> int:
         emit(payload)
         return EXIT_REFUSED if refused else 0
 
+    from backend.app.core.config import settings
+
+    # 比熔断冷却多等 5 秒：冷却过后熔断器放行一次试探，试探成功才恢复。
+    pacing = {"pace_seconds": max(0.0, args.pace_seconds), "rate_limit_retries": max(0, args.rate_limit_retries),
+              "rate_limit_wait_seconds": float(settings.PROVIDER_CIRCUIT_COOLDOWN_SECONDS + 5),
+              "max_rate_limit_wait_seconds": float(MAX_RATE_LIMIT_WAIT_SECONDS)}
+    payload["pacing"] = pacing
     scorer = get_llm_scorer(runtime)
     try:
-        outcome = assistant_eval.run_eval(scorer, items, prices=prices, round_budget=args.round_budget_usd)
+        outcome = assistant_eval.run_eval(scorer, items, prices=prices, round_budget=args.round_budget_usd, **pacing)
     finally:
         close = getattr(scorer, "close", None)
         if callable(close):
