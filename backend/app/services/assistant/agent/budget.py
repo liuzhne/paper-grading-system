@@ -1,7 +1,7 @@
 """Agent 回合的上限（Agent 化方案 §10、§15）。
 
-每回合：工具调用最多 8 次（其中搜索最多 2 次）、60 秒；每次模型调用截止 20 秒、只试 1 次、
-不原地等 429。每人每天最多 `ASSISTANT_AGENT_DAILY_TURNS` 个 Agent 回合，超出后当天只用规则模式。
+每回合：工具调用最多 8 次（其中搜索最多 2 次）、60 秒；每次模型调用截止 20 秒、只试 1 次
+（429 例外：等 1.5 秒再试 1 次，§13.2）。每人每天最多 `ASSISTANT_AGENT_DAILY_TURNS` 个 Agent 回合，超出后当天只用规则模式。
 """
 
 from __future__ import annotations
@@ -27,6 +27,9 @@ STEP_MAX_TOKENS = 1200
 #: 等 1.5 秒，不超过这一步的截止时间；再失败才退回规则模式。超时与 5xx 不重试。
 RATE_LIMIT_RETRIES = 1
 RATE_LIMIT_RETRY_SECONDS = 1.5
+#: 等完之后离这一步的截止时间至少还要剩这么久才重试。传输层默认 30 秒（评分调用），比一步的 20 秒还长，
+#: 照默认值这次重试永远不会发生（A1 第三轮评测：10 次 429 全是 retry=no）。一步通常 1～3 秒。
+RATE_LIMIT_MIN_CALL_SECONDS = 5.0
 #: Agent 回合写在助手消息上的意图，按它统计每日回合数。
 AGENT_INTENT = "agent"
 
@@ -55,6 +58,6 @@ def daily_budget_left(db: Session, user_id: str) -> bool:
     return turns_today(db, user_id) < max(0, int(settings.ASSISTANT_AGENT_DAILY_TURNS))
 
 
-__all__ = ["AGENT_INTENT", "MAX_SEARCHES", "MAX_TOOL_CALLS", "RATE_LIMIT_RETRIES", "RATE_LIMIT_RETRY_SECONDS",
-           "STEP_MAX_TOKENS", "STEP_SECONDS", "TURN_SECONDS",
+__all__ = ["AGENT_INTENT", "MAX_SEARCHES", "MAX_TOOL_CALLS", "RATE_LIMIT_MIN_CALL_SECONDS", "RATE_LIMIT_RETRIES",
+           "RATE_LIMIT_RETRY_SECONDS", "STEP_MAX_TOKENS", "STEP_SECONDS", "TURN_SECONDS",
            "daily_budget_left", "turns_today"]

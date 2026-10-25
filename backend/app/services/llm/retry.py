@@ -26,12 +26,17 @@ def deadline_timeout(deadline, timeout_seconds):
     return (remaining if timeout_seconds is None else min(float(timeout_seconds), remaining)), False
 
 
-def retry_fits_before_deadline(deadline, delay_seconds) -> bool:
-    """等待 delay 秒之后，剩余时间还够不够再做一次有意义的调用。"""
+def retry_fits_before_deadline(deadline, delay_seconds, min_call_seconds=None) -> bool:
+    """等待 delay 秒之后，剩余时间还够不够再做一次有意义的调用。
+
+    ``min_call_seconds`` 默认 30 秒（评分调用）；评分助手的一步截止时间只有 20 秒，传更小的值，
+    否则它的 429 短重试永远不会发生（A1 第三轮评测：10 次 429 全是 attempt=1/2 retry=no）。
+    """
 
     if deadline is None:
         return True
-    return deadline - time.monotonic() - float(delay_seconds) >= MIN_SECONDS_FOR_RETRY_CALL
+    needed = MIN_SECONDS_FOR_RETRY_CALL if min_call_seconds is None else float(min_call_seconds)
+    return deadline - time.monotonic() - float(delay_seconds) >= needed
 
 
 def is_retryable_http_error(exc):

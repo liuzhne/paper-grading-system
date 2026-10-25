@@ -87,6 +87,7 @@ def model_step(scorer) -> tuple[ModelStep | None, str | None]:
                 messages, tools, tool_choice="required", max_tokens=budget.STEP_MAX_TOKENS,
                 deadline=deadline, timeout_seconds=budget.STEP_SECONDS,
                 rate_limit_retries=budget.RATE_LIMIT_RETRIES, rate_limit_delay_seconds=budget.RATE_LIMIT_RETRY_SECONDS,
+                rate_limit_min_call_seconds=budget.RATE_LIMIT_MIN_CALL_SECONDS,
             )
         return native, "native"
     if callable(getattr(scorer, "complete_json", None)):
