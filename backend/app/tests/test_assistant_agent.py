@@ -521,6 +521,7 @@ def test_0041_refuses_a_lossy_downgrade(monkeypatch, tmp_path):
 #: context.SYSTEM_VERSION，并在这里**新增**一行；不要改已有行的指纹——那一行对应的评测报告还在用它。
 PROMPT_FINGERPRINTS = {
     "assistant-agent@3": "b3214e16711c1dd5",
+    "assistant-agent@4": "73d487a9aecd82e2",
 }
 
 
@@ -540,9 +541,10 @@ def test_prefix_identity_includes_the_prompt_fingerprint(monkeypatch):
 
 def test_the_prompt_names_only_tools_that_exist_and_says_how_to_load_deferred_ones():
     assert agent_context.prompt_problems(agent_context.system_prompt()) == []
-    # @2 的那一句：让模型“调用 action_*”，却没说它们不在 tools 里。
-    old = "- 老师要做开始评分、导入、重试、取消这类事时，调用对应的 action_* 提议工具（会生成确认卡片或进入流程）；"
-    assert "没写加载方式" in agent_context.prompt_problems(old)[0]
+    # @2 那样的写法：让模型“调用”延迟工具，却没说它们不在 tools 里（@2 写的是 action_*，@4 起它们常驻）。
+    assert "没写加载方式" in agent_context.prompt_problems("- 老师问复核时，调用对应的 review_* 工具；")[0]
+    assert "没写加载方式" in agent_context.prompt_problems("- 老师问有哪些评分标准时调用 rubric_list；")[0]
+    assert agent_context.prompt_problems("- 老师要取消时，调用 action_cancel；") == []  # 常驻
     assert "不存在的工具" in agent_context.prompt_problems("- 先调用 action_cancle")[0]
     assert agent_context.prompt_problems("- 先 tool_search(\"select:review_list\") 再调用 review_list") == []
 

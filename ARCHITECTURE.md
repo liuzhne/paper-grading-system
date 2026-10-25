@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-25 | 评分助手提示词 @4 | 常驻工具 4 → 8（提议工具改为常驻）；重试与取消多 `task_name` 参数；`call_tool` 接受常驻工具。 |
 | 2026-10-25 | A1 第三轮评测与 429 重试修复 | 无模块变化：`post_with_retry` 多一个 `rate_limit_min_call_seconds`；评测报告文件名带开始时分。 |
 | 2026-10-25 | 评分助手 A1 调优复审（CodeRabbit） | 无模块变化：`TurnRefs` 的状态依据带对象，另登记名称与所属任务；评测报告的 `eval_set` 多记全部条数。 |
 | 2026-10-25 | 评分助手 A1 调优 | 新增 `agent/claims.py`（回复里的说法核对）与 `scripts/assistant_eval_gate.py`（开关门槛）；前缀标识算进提示词指纹；部署流水线在开关打开时多一步门槛检查。 |
@@ -1515,7 +1516,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 维护记录：2026-10-22 · 评分助手 A0：Agent 回合、工具目录与搜索、历史压缩、原生工具调用；head 升为 `0041_assistant_agent_state`；开关默认关。
 
 A1（听懂与帮助）：`agent/business.py` 补齐业务工具，`agent/help.py` 是代码维护的帮助条目。
-- 常驻 4 个：`help_lookup`、`task_list`、`task_overview`、`paper_result`（原方案的 `paper_find` 并入它）；延迟：`review_list`、`rubric_list` 与提议工具 `action_start_grading` / `action_import_rubric` / `action_retry_failed` / `action_cancel`。
+- 常驻 8 个：查询的 `help_lookup`、`task_list`、`task_overview`、`paper_result`（原方案的 `paper_find` 并入它），与 10-25 起常驻的提议工具 `action_start_grading` / `action_import_rubric` / `action_retry_failed` / `action_cancel`（提示词 @4；重试与取消可按 `task_name` 找任务）；延迟：`review_list`、`rubric_list`。常驻工具经 `call_tool` 调用也照常执行（兼容旧对话的加载记录）。
 - 工具结果不含分数数字与学生原文（扣分理由疑似注入的不给）；编号带卡片（`TurnRefs.add(…, card=)`），回复 `cards` 里的编号由 `turn.cards_for` 换成卡片；`help_refs` 只能引用本回合 `help_lookup` 返回的条目，界面显示条目原文。
 - 提议工具返回 `{"proposal": …}`：确认卡片沿用一期的 `confirm_retry` / `confirm_cancel`，开始评分与导入走 `runner._start_flow`（打断保护照常）；没有可执行的对象时返回普通提示，回合继续。
 - 涉及某个任务或材料时更新焦点（换任务时清掉旧材料）与右侧工作区；没有当前任务时，按姓名在最近 8 个任务里一起找，只给序号则返回任务列表请老师先选。

@@ -1147,6 +1147,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-25 | 评分助手提示词 @4 | 提示词升到 @4，开关打开前要在 @4 上重跑评测；无新命令。 |
 | 2026-10-25 | A1 第三轮评测与 429 重试修复 | 新增排错：429 日志 `attempt=1/2 retry=no` 实为截止时间不够；报告文件名带时分。 |
 | 2026-10-25 | 评分助手 A1 调优复审（CodeRabbit） | 429 排错改为“重试 1 次，失败才退回规则”；门槛失败的原因补上改评测集与只跑几条。 |
 | 2026-10-25 | 评分助手 A1 调优 | 改提示词的步骤（bump 版本、新增指纹、重跑评测）；部署门槛失败与回复被作废两条排错。 |
@@ -2349,7 +2350,7 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   - 排错：日志里 429 写着 `attempt=1/2 retry=no`——**看上去是判定“不该重试”，真正的原因是截止时间**：传输层要求等完之后离截止时间还剩 `MIN_SECONDS_FOR_RETRY_CALL`（30 秒），而 Agent 一步只有 20 秒，所以 A1 第三轮评测里 10 次 429 一次都没重试。Agent 这一步改传 `rate_limit_min_call_seconds=5`（`budget.RATE_LIMIT_MIN_CALL_SECONDS`）。以后给短截止时间的调用加重试，同样要传这个值，并用带截止时间的测试验证（不带截止时间的测试永远会重试）。一大片 `PROVIDER_CIRCUIT_OPEN` 说明同一连接连续失败了 5 次（`PROVIDER_CIRCUIT_FAILURE_THRESHOLD`），要等冷却（`PROVIDER_CIRCUIT_COOLDOWN_SECONDS`）。
   - 排错：工作流以“实例返回 2”失败 = 预算拒绝，**或模型没有登记价目**（摘要写“没有登记这个模型的价目”；报错指向预算，真正的原因是平台模型不是 Gemini——A1 第一次估算时平台模型是 Bedrock 上的 Claude，旧脚本照样按 Gemini 价报了个数）；“返回 3” = 生产上没有生效的平台模型，或指定的连接找不到、没启用；“没有评测结果的标记” = SSH 或容器没起来，看上一步的输出。评测脚本跟随镜像：改了评测集或脚本，要先合并部署，实例上才是新版本。
 - 2026-10-22 A0（Agent 回合，开关默认关）：迁移 `0041_assistant_agent_state`（两个可空 JSON 列）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0041_assistant_agent_state`），再合并部署。开关不打开时对外行为不变，部署后照常核对助手页即可；回滚：两列都没有数据时才允许降级（开关一直关着就不会有数据）。生产打开开关：GitHub 仓库变量 `ASSISTANT_AGENT_ENABLED=true`（部署时由 `scripts/production_env.py` 写进实例的 `.env`，只收 true / false），A1 的真实模型评测达到上线门槛之前不要设。
-- 2026-10-25 A1 调优（提示词 `assistant-agent@3`，无迁移）：**改评分助手的提示词正文、tools 或任何工具的说明（purpose、when、参数说明）时**：bump `backend/app/services/assistant/agent/context.py` 的 `SYSTEM_VERSION`，在 `backend/app/tests/test_assistant_agent.py` 的 `PROMPT_FINGERPRINTS` 里新增一行（测试失败信息里给出新指纹），不要改已有行；合并部署后在新版本上重跑一轮评测并提交报告，才能打开开关。
+- 2026-10-25 A1 调优（提示词 `assistant-agent@3`，同日升到 `@4`：提议工具改为常驻；无迁移）：**改评分助手的提示词正文、tools 或任何工具的说明（purpose、when、参数说明）时**：bump `backend/app/services/assistant/agent/context.py` 的 `SYSTEM_VERSION`，在 `backend/app/tests/test_assistant_agent.py` 的 `PROMPT_FINGERPRINTS` 里新增一行（测试失败信息里给出新指纹），不要改已有行；合并部署后在新版本上重跑一轮评测并提交报告，才能打开开关。
   - 排错：部署流水线停在 “Check the assistant eval gate”，日志写“还没有达标的评测”——**报错指向部署，真正的原因是仓库变量 `ASSISTANT_AGENT_ENABLED=true`，而镜像里这一版提示词还没有达标的评测**（改了提示词或工具说明、或者改了评测集，就会这样；只跑了几条 `max_items` 的一轮也不算）。在新版本上跑评测、提交达标的报告，或者把变量改回 `false` 再部署。
   - 排错：助手回复变成兜底说法，消息 `meta.reason` 是 `reply_invalid`——多半是回复校验作废了模型的说法（说自己做了写动作、说出了确认卡片却没有、说出工具没返回过的状态，`agent/claims.py`）。模型有一次修正机会，修正提示写在下一次请求的最后一条工具消息里。
 

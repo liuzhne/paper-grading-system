@@ -40,7 +40,8 @@ GROUPS: dict[str, str] = {
 KINDS = ("read", "proposal")
 RISKS = ("low", "medium", "high")
 DEFAULT_ROLES = frozenset({"org_admin", "teacher"})
-MAX_RESIDENT_BUSINESS = 4
+#: 4 个提议工具 10-25 起常驻（维护者定），加上 4 个查询工具共 8 个；机制工具 3 个，合计 11 个（Google 建议 10–20 个）。
+MAX_RESIDENT_BUSINESS = 8
 MAX_SEARCH_RESULTS = 5
 #: 说明文本的长度上限（字符）。一般约 200 token，复杂的不超过 400 token（§11.4）。
 MAX_DEFINITION_CHARS = 900

@@ -68,15 +68,13 @@ class RuleOfThumbModel:
             return None
 
         def action(name, needs_task=False):
+            # 提议工具 10-25 起常驻：直接调用，不先搜索。
             if needs_task and "tasks" not in got:
                 return step(("task_list", {"limit": 20}))
-            if not searched:
-                return step(("tool_search", {"query": "select:%s" % name}))
-            if not any("提示" in result for result in results) and len(results) < 4:
+            if not any("提示" in result for result in results) and len(results) < 3:
                 tasks = next((result["tasks"] for result in results if "tasks" in result), [])
                 task = pick(tasks) if needs_task else None
-                arguments = {"task_ref": task["ref"]} if task else {}
-                return step(("call_tool", {"name": name, "arguments_json": json.dumps(arguments)}))
+                return step((name, {"task_ref": task["ref"]} if task else {}))
             return reply("现在不需要这么做。")
 
         choices = next((result["tasks"] for result in results if "tasks" in result and "提示" in result), None)

@@ -290,3 +290,49 @@ def test_review_list_without_a_task_looks_across_recent_tasks(client, agent):  #
                   reply("最近的任务里没有需要复核的。"))
     _say(client, _conversation(client), "哪些材料需要人工复核")
     assert "没有需要人工复核" in _last_tool_result(model)["提示"]
+
+
+def _rename(client, batch_id, name):
+    with client.session_factory() as session:
+        session.get(models.GradingBatch, batch_id).name = name
+        session.commit()
+
+
+def test_action_tools_are_resident_from_prompt_version_4():
+    from backend.app.services.assistant.agent import context as agent_context
+
+    names = [tool["function"]["name"] for tool in agent_context.tools_array()]
+    assert {"action_start_grading", "action_import_rubric", "action_retry_failed", "action_cancel"} <= set(names)
+
+
+def test_cancel_finds_the_task_by_the_name_the_teacher_said(client, agent):  # noqa: F811
+    _seed_published_rubric(client)
+    _conversation_id, batch_id, _body = _start_until_waiting_job(client)
+    _rename(client, batch_id, "课程报告评分 · 软件工程导论")
+    agent(step(("action_cancel", {"task_name": "课程报告评分"})))
+    result = _say(client, _conversation(client), "课程报告评分先别评了")  # 新对话：没有当前任务
+    card = _cards(result, "confirm_cancel")[0]
+    assert card["batch_id"] == batch_id and card["status"] == "proposed"
+
+    # 旧对话里沿用“call_tool 调用”的写法：工具常驻了也照常执行。
+    agent(step(("call_tool", {"name": "action_cancel", "arguments_json": json.dumps({"task_name": "软件工程导论"},
+                                                                                    ensure_ascii=False)})))
+    result = _say(client, _conversation(client), "软件工程导论那个先别评了")
+    assert _cards(result, "confirm_cancel")[0]["batch_id"] == batch_id
+
+
+def test_a_task_name_matching_several_or_none_comes_back_as_choices(client, agent):  # noqa: F811
+    _seed_published_rubric(client)
+    _first, first_id, _body = _start_until_waiting_job(client)
+    _second, second_id, _body = _start_until_waiting_job(client)
+    _rename(client, first_id, "课程报告评分 · 软件工程导论")
+    _rename(client, second_id, "课程报告评分 · 数据结构")
+    model = agent(step(("action_cancel", {"task_name": "课程报告评分"})), reply("两个课程报告评分，要取消哪一个？"))
+    body = _say(client, _conversation(client), "课程报告评分先别评了")
+    result = _last_tool_result(model)
+    assert len(result["候选"]) == 2 and "不止一个" in result["提示"] and not _cards(body, "confirm_cancel")
+
+    model = agent(step(("action_retry_failed", {"task_name": "实验报告"})), reply("没有找到实验报告的任务，是哪一个？"))
+    _say(client, _conversation(client), "实验报告失败的重试一下")
+    result = _last_tool_result(model)
+    assert "需要先确定任务" in result and "没有名称里有“实验报告”的" in result["提示"] and result["tasks"]

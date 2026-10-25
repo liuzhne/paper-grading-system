@@ -41,8 +41,9 @@ ACTIVE_JOB_STATUSES = {"queued", "running", "cancel_requested"}
 RETRYABLE_ITEM_STATUSES = {"failed", "canceled", "running"}
 TASK_REF_NOTE = "任务编号（来自 task_list 等工具的结果，或当前状态里的 t0）；不填就用当前任务，没有当前任务时用最近的一个"
 #: 提议工具不替老师挑任务：重试、取消错了任务的代价比查询大（A1 第二轮评测：不填时用了最近的任务，答“没有可以重试的”）。
-ACTION_TASK_REF_NOTE = ("任务编号（来自 task_list 等工具的结果，或当前状态里的 t0）；不填就用当前任务；"
-                        "没有当前任务时不会替你挑，会返回最近的任务让你问老师")
+ACTION_TASK_REF_NOTE = ("任务编号（来自 task_list 等工具的结果，或当前状态里的 t0）；不填就用 task_name 或当前任务；"
+                        "都没有时不会替你挑，会返回最近的任务让你问老师")
+ACTION_TASK_NAME_NOTE = "老师说的任务名（或其中一段，例如“课程报告评分”）；不知道编号时填它，会在最近的任务里按名称找"
 REVIEW_TASK_REF_NOTE = ("任务编号（来自 task_list 等工具的结果，或当前状态里的 t0）；不填就用当前任务；"
                         "没有当前任务时在最近的任务里一起找")
 
@@ -515,7 +516,7 @@ register(AgentTool(
     when="老师明确要开始评分、要上传待评分的文件时用；只是问怎么评分时用 help_lookup",
     params=StartGradingParams, param_notes={"rubric_ref": "老师指定的评分标准编号（来自 rubric_list）；不填用最新发布的"},
     returns="进入流程，本回合结束",
-    kind="proposal", risk="medium", resident=False,
+    kind="proposal", risk="medium", resident=True,
     keywords=("开始评分", "评一下", "上传论文", "批改", "打分"),
     eval_phrases=("帮我评一下这批论文", "开始评分吧", "我要上传待评分的文件"),
     run=_action_start_grading,
@@ -535,23 +536,55 @@ register(AgentTool(
     purpose="进入导入评分规则和模板的流程：出现导入卡片，老师填好提交后在右侧核对并发布",
     when="老师明确要用自己的评分规则、上传评分模板时用；只是问怎么导入时用 help_lookup",
     params=NoParams, returns="进入流程，本回合结束",
-    kind="proposal", risk="medium", resident=False,
+    kind="proposal", risk="medium", resident=True,
     keywords=("导入", "评分规则", "评分模板", "上传模板", "自己的标准"),
     eval_phrases=("我要上传自己的评分规则和模板", "导入一份新的评分标准", "用我的评分模板"),
     run=_action_import_rubric,
 ))
 
 
+class ActionTaskParams(BaseModel):
+    task_ref: str | None = Field(default=None, max_length=10)
+    task_name: str | None = Field(default=None, max_length=50)
+
+
 def _needs_task(turn: TurnContext) -> dict:
-    return {"需要先确定任务": "老师没有说是哪个任务，也没有当前任务：先问老师是哪一个（下面是最近的任务），"
-                          "确定后带上 task_ref 再调用。",
+    return {"需要先确定任务": "老师没有说是哪个任务，也没有当前任务。老师的话里点了下面某个任务的名字，就带上它的 ref "
+                          "（或 task_name）直接再调用，不要再问；真的看不出是哪个，再问老师。",
             "tasks": _task_choices(turn)}
 
 
-def _action_retry_failed(turn: TurnContext, params: TaskParams) -> dict:
-    if not _has_task(turn, params.task_ref):
-        return _needs_task(turn)
-    batch_id, _summary = _task(turn, params.task_ref)
+def _action_task(turn: TurnContext, params: ActionTaskParams) -> str | dict:
+    """提议工具的任务：编号 → 名称（在最近的任务里找）→ 当前任务；都没有就返回让模型去问的结果。"""
+
+    if params.task_ref:
+        return params.task_ref
+    needle = (params.task_name or "").strip()
+    if needle:
+        hits = [batch for batch in tools.call(turn.run, "list_recent_batches", limit=SEARCH_TASKS)
+                if needle in batch["name"] or batch["name"] in needle]
+        if len(hits) == 1:
+            turn.refs.name("t", hits[0]["id"], hits[0]["name"])
+            return turn.refs.add("t", hits[0]["id"], card=_overview_card(hits[0]["id"]))
+        if hits:
+            for batch in hits:
+                turn.refs.name("t", batch["id"], batch["name"])
+            return {"提示": "名称里有“%s”的任务不止一个：请老师选一个，或用候选里的 ref 再调用。" % needle[:20],
+                    "候选": [{"ref": turn.refs.add("t", batch["id"], card=_overview_card(batch["id"])),
+                            "name": batch["name"]} for batch in hits]}
+        result = _needs_task(turn)
+        result["提示"] = "最近的任务里没有名称里有“%s”的。" % needle[:20]
+        return result
+    if _has_task(turn, None):
+        return None
+    return _needs_task(turn)
+
+
+def _action_retry_failed(turn: TurnContext, params: ActionTaskParams) -> dict:
+    task_ref = _action_task(turn, params)
+    if isinstance(task_ref, dict):
+        return task_ref
+    batch_id, _summary = _task(turn, task_ref)
     job = _job(turn, batch_id)
     if job is not None:
         turn.refs.saw_status(job["status"], "t", batch_id)
@@ -570,19 +603,20 @@ register(AgentTool(
     name="action_retry_failed", group="action", title="重试失败项（提议）",
     purpose="提议重试一个任务里失败、取消或中断的材料；生成确认卡片，老师确认后才执行，已成功的结果保留",
     when="老师要重试失败的、没评完的材料时用；要重评某一个评分项时不用它",
-    params=TaskParams, param_notes={"task_ref": ACTION_TASK_REF_NOTE},
+    params=ActionTaskParams, param_notes={"task_ref": ACTION_TASK_REF_NOTE, "task_name": ACTION_TASK_NAME_NOTE},
     returns="确认卡片并结束本回合；没有可重试的项时返回提示",
-    kind="proposal", risk="medium", resident=False,
+    kind="proposal", risk="medium", resident=True,
     keywords=("重试", "失败", "没评完", "再试一次", "重新评失败的"),
     eval_phrases=("把失败的重试一下", "没评完的再试一次", "重试失败项"),
     run=_action_retry_failed,
 ))
 
 
-def _action_cancel(turn: TurnContext, params: TaskParams) -> dict:
-    if not _has_task(turn, params.task_ref):
-        return _needs_task(turn)
-    batch_id, _summary = _task(turn, params.task_ref)
+def _action_cancel(turn: TurnContext, params: ActionTaskParams) -> dict:
+    task_ref = _action_task(turn, params)
+    if isinstance(task_ref, dict):
+        return task_ref
+    batch_id, _summary = _task(turn, task_ref)
     job = _job(turn, batch_id)
     if job is not None:
         turn.refs.saw_status(job["status"], "t", batch_id)
@@ -598,9 +632,9 @@ register(AgentTool(
     name="action_cancel", group="action", title="取消评分（提议）",
     purpose="提议取消一个任务剩余的评分；生成确认卡片，老师确认后才执行，已完成的结果保留",
     when="老师要停止、取消正在进行的评分时用",
-    params=TaskParams, param_notes={"task_ref": ACTION_TASK_REF_NOTE},
+    params=ActionTaskParams, param_notes={"task_ref": ACTION_TASK_REF_NOTE, "task_name": ACTION_TASK_NAME_NOTE},
     returns="确认卡片并结束本回合；没有进行中的评分时返回提示",
-    kind="proposal", risk="medium", resident=False,
+    kind="proposal", risk="medium", resident=True,
     keywords=("取消", "停止", "别评了", "终止", "停下"),
     eval_phrases=("把正在评的停掉", "取消评分", "别评了"),
     run=_action_cancel,
