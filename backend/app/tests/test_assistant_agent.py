@@ -522,6 +522,7 @@ def test_0041_refuses_a_lossy_downgrade(monkeypatch, tmp_path):
 PROMPT_FINGERPRINTS = {
     "assistant-agent@3": "b3214e16711c1dd5",
     "assistant-agent@4": "73d487a9aecd82e2",
+    "assistant-agent@5": "395a83d8d2f1856e",
 }
 
 
@@ -728,3 +729,76 @@ def test_an_unusable_model_answer_records_why(client, agent):
     _say(client, conversation_id, "这批写得怎么样")
     user = _agent_messages(client, conversation_id)[0]
     assert user.meta["error_code"] == "output_empty_content"
+
+
+# --- 该出卡片却用文字反问（§14.1，10-25 第三轮评测之后） --------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "好的，您是想导入自己的评分规则和模板是吗？",
+    "好的，请问是哪个任务的失败批次需要重试？是“2026 届论文评分开发批次”吗？",
+    "请问您要取消哪个任务的评分？",
+    "你是想开始评分吗？",
+])
+def test_asking_in_words_instead_of_proposing_is_sent_back(text):
+    found = claims.problem(text, TurnRefs())
+    assert found is not None and "不要用文字向老师反问确认" in found
+
+
+@pytest.mark.parametrize("text", [
+    "请问您想看哪一份的评分结果？",  # 查询，不是写动作
+    "我可以帮你重试失败的材料，要我出确认卡片吗？",  # 提议，不是反问确认
+    "这批里哪个评分项丢分最多？下面是概况。",
+])
+def test_questions_that_are_not_confirmations_pass(text):
+    assert claims.problem(text, TurnRefs()) is None
+
+
+def test_asking_which_task_is_fine_when_a_tool_offered_choices():
+    refs = TurnRefs()
+    refs.seen_text.append(json.dumps({"提示": "有好几个任务正在评分：请老师选一个", "候选": []}, ensure_ascii=False))
+    assert claims.problem("请问您要取消哪个任务的评分？", refs) is None
+
+
+def test_a_verbal_confirmation_turns_into_the_proposal_in_the_same_turn(client, agent):
+    model = agent(reply("好的，您是想导入自己的评分规则和模板是吗？"), step(("action_import_rubric", {})))
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "我要用自己的评分规则和模板来评")
+    assert body["pending"]["kind"] == "create_import_session"
+    fix = json.loads(model.requests[-1]["messages"][-1]["content"])
+    assert "不要用文字向老师反问确认" in fix["错误"]
+
+
+def test_the_waiting_step_tells_the_model_not_to_reopen_the_flow():
+    message = agent_context.state_message("模板怎么上传？", focus={}, pending={"kind": "create_import_session"}, loaded=[])
+    assert "用 help_lookup 回答，不要重复调用 action_* 重开流程" in message["content"]
+    assert "不要重复调用" not in agent_context.state_message("你好", focus={}, pending=None, loaded=[])["content"]
+
+
+def test_the_short_rate_limit_wait_never_undercuts_retry_after(monkeypatch):
+    from backend.app.services.llm import transport
+
+    def scorer(model_name, retry_after):
+        responses = [
+            httpx.Response(429, headers={"retry-after": retry_after}, json={"error": {"code": 429}}),
+            httpx.Response(200, json={"choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "tool_calls": [{"id": "c1", "type": "function",
+                                                     "function": {"name": "reply", "arguments": "{\"text\": \"好\"}"}}]}}]}),
+        ]
+        return OpenAICompatibleChatScorer(
+            api_key="test-key", base_url="https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi",
+            model_name=model_name, thinking_type="disabled",
+            client=httpx.Client(transport=httpx.MockTransport(lambda request: responses.pop(0))))
+
+    slept = []
+    monkeypatch.setattr(transport.time, "sleep", slept.append)
+    options = {"rate_limit_retries": 1, "rate_limit_delay_seconds": 1.5, "rate_limit_min_call_seconds": 5}
+    # 服务商要求等 10 秒：等 10 秒（10 + 5 在 20 秒的截止时间以内），不是 1.5 秒。
+    scorer("google/gemini-retry-after-10", "10").complete_with_tools(
+        [{"role": "user", "content": "hi"}], agent_context.tools_array(), deadline=time.monotonic() + 20, **options)
+    assert slept == [10.0]
+    # 要求等 30 秒：等不进这一步，不重试。
+    slept.clear()
+    with pytest.raises(ProviderCallError):
+        scorer("google/gemini-retry-after-30", "30").complete_with_tools(
+            [{"role": "user", "content": "hi"}], agent_context.tools_array(), deadline=time.monotonic() + 20, **options)
+    assert slept == []

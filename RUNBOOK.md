@@ -1147,6 +1147,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-25 | 评分助手提示词 @5 与复审 | 验证命令补上 Agent 与评测的测试文件；`reply_invalid` 排错补“文字反问”；报告文件名带时分秒。 |
 | 2026-10-25 | 评分助手提示词 @4 | 提示词升到 @4，开关打开前要在 @4 上重跑评测；无新命令。 |
 | 2026-10-25 | A1 第三轮评测与 429 重试修复 | 新增排错：429 日志 `attempt=1/2 retry=no` 实为截止时间不够；报告文件名带时分。 |
 | 2026-10-25 | 评分助手 A1 调优复审（CodeRabbit） | 429 排错改为“重试 1 次，失败才退回规则”；门槛失败的原因补上改评测集与只跑几条。 |
@@ -2352,12 +2353,12 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
 - 2026-10-22 A0（Agent 回合，开关默认关）：迁移 `0041_assistant_agent_state`（两个可空 JSON 列）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0041_assistant_agent_state`），再合并部署。开关不打开时对外行为不变，部署后照常核对助手页即可；回滚：两列都没有数据时才允许降级（开关一直关着就不会有数据）。生产打开开关：GitHub 仓库变量 `ASSISTANT_AGENT_ENABLED=true`（部署时由 `scripts/production_env.py` 写进实例的 `.env`，只收 true / false），A1 的真实模型评测达到上线门槛之前不要设。
 - 2026-10-25 A1 调优（提示词 `assistant-agent@3`，同日升到 `@4`：提议工具改为常驻；无迁移）：**改评分助手的提示词正文、tools 或任何工具的说明（purpose、when、参数说明）时**：bump `backend/app/services/assistant/agent/context.py` 的 `SYSTEM_VERSION`，在 `backend/app/tests/test_assistant_agent.py` 的 `PROMPT_FINGERPRINTS` 里新增一行（测试失败信息里给出新指纹），不要改已有行；合并部署后在新版本上重跑一轮评测并提交报告，才能打开开关。
   - 排错：部署流水线停在 “Check the assistant eval gate”，日志写“还没有达标的评测”——**报错指向部署，真正的原因是仓库变量 `ASSISTANT_AGENT_ENABLED=true`，而镜像里这一版提示词还没有达标的评测**（改了提示词或工具说明、或者改了评测集，就会这样；只跑了几条 `max_items` 的一轮也不算）。在新版本上跑评测、提交达标的报告，或者把变量改回 `false` 再部署。
-  - 排错：助手回复变成兜底说法，消息 `meta.reason` 是 `reply_invalid`——多半是回复校验作废了模型的说法（说自己做了写动作、说出了确认卡片却没有、说出工具没返回过的状态，`agent/claims.py`）。模型有一次修正机会，修正提示写在下一次请求的最后一条工具消息里。
+  - 排错：助手回复变成兜底说法，消息 `meta.reason` 是 `reply_invalid`——多半是回复校验作废了模型的说法（说自己做了写动作、说出了确认卡片却没有、说出工具没返回过的状态、该出卡片却用文字反问“是吗”，`agent/claims.py`）。模型有一次修正机会，修正提示写在下一次请求的最后一条工具消息里。
 
-验证（全部离线，Mock 模型）：
+验证（全部离线，Mock 模型）。`test_assistant_agent.py` 里有带截止时间的 429 重试与端到端回合测试，`test_assistant_eval.py` 里有评测与开关门槛的测试，改 Agent 或评测后都要跑：
 
 ```bash
-.venv/bin/python -m pytest -q backend/app/tests/test_assistant.py backend/app/tests/test_paper_direct_upload.py backend/app/tests/test_migrations.py
+.venv/bin/python -m pytest -q backend/app/tests/test_assistant.py backend/app/tests/test_assistant_agent.py backend/app/tests/test_assistant_agent_tools.py backend/app/tests/test_assistant_eval.py backend/app/tests/test_paper_direct_upload.py backend/app/tests/test_migrations.py
 ```
 
 ```bash

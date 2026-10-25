@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -230,6 +231,8 @@ def test_script_run_prints_results_and_the_report_renders(monkeypatch, capsys, t
     assert report.main(["render", str(raw_path), "--previous-dir", str(tmp_path / "none"), "--out", str(out)]) == 0
     files = sorted(path.name for path in out.iterdir())
     assert len(files) == 2 and all("-A0-gemini-2.5-flash." in name for name in files)
+    # 文件名带开始的时分秒：同一分钟里跑两轮也不会互相覆盖（被覆盖的一轮就不计入已花费用）。
+    assert all(re.match(r"\d{4}-\d{2}-\d{2}-\d{6}-A0-", name) for name in files)
     markdown = next(path for path in out.iterdir() if path.suffix == ".md").read_text(encoding="utf-8")
     assert "# 评分助手评测报告 · A0" in markdown and "这是第一轮" in markdown and "`abc123`" in markdown
     assert report.spent(out) > 0

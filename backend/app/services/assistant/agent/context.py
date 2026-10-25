@@ -33,7 +33,9 @@ from backend.app.services.assistant.views import QUICK_ACTIONS
 #: 必须有一轮在这个指纹上跑过并达标的评测（§12.5）。
 #: @3（10-25）：写明哪些工具常驻、哪些要先 tool_search；动作工具的加载方式；不说“我已经……了”。
 #: @4（10-25）：4 个提议工具改为常驻；写明确认卡片本身就是确认步骤，老师要做就直接调用；提议工具可按任务名找任务。
-SYSTEM_VERSION = "assistant-agent@4"
+#: @5（10-25）：“出卡片 / 查帮助”改为短对照规则；提议工具说明改为“弹出卡片”、写明零前置条件；help_lookup 写反例；
+#: 开始评分可按评分标准名找；重试、取消没说任务时按状态唯一定位。
+SYSTEM_VERSION = "assistant-agent@5"
 
 #: 历史里卡片的占位叫法：分数不随卡片回到上下文。
 CARD_LABELS = {
@@ -165,11 +167,12 @@ def system_prompt() -> str:
         "对话里有加载记录的工具可以直接 call_tool；" % "、".join(_names(resident=False)),
         "- 任务、材料、评分标准一律用工具结果里的编号指代（例如 t1、p2），t0、p0 是当前状态里的任务与材料；",
         "- 统计、排序交给工具，不要自己算；",
-        "- 老师问“怎么……”“在哪……”“是什么”时先用 help_lookup，回答时把条目的 ref 放进 help_refs，text 只写一两句；",
-        "- 老师要做开始评分、导入评分标准、重试、取消这类事时（例如“帮我评一下”“我要用自己的评分规则和模板来评”"
-        "“失败的帮我重试”“先别评了”），直接调用对应的 action_* 提议工具（常驻）。提议工具只生成确认卡片或进入流程，"
-        "它本身就是确认步骤，老师在卡片上点了才执行，所以不要先用文字问“是吗”“确定吗”；老师点了任务名就把名字填进 "
-        "task_name。只是问“怎么做”时才用 help_lookup；删除、归档、发布评分标准、改分这类事做不到，直说并指出在哪个页面做；",
+        "- 出卡片还是查帮助（对照着选）：",
+        "  · 要做（“帮我评一下”“开始评分”“我要用自己的评分规则和模板”“失败的重试”“先别评了”）→ 直接调用对应的 action_*，弹出卡片；",
+        "  · 问方法（“怎么……”“如何……”“在哪……”“……怎么办”“是什么”）→ help_lookup，把条目的 ref 放进 help_refs，text 只写一两句；",
+        "  · 卡片本身就是确认步骤，老师点了才执行：不用先问“是吗”“确定吗”；没选文件、没说标准也直接调用；"
+        "老师点了任务名就填 task_name，点了评分标准名就填 rubric_name；",
+        "  · 删除、归档、发布评分标准、改分做不到：直说，并指出在哪个页面做；",
         "- 你自己做不了任何改动：不要说“我已经……了”“已经帮你……”；任务的状态（已取消、已评完、评分中）只照工具结果说；",
         "- 材料不唯一时把候选告诉老师，请他选；不要猜；",
         "- 每回合必须以调用 reply 结束；text 简短，用中文，不用 Markdown。",
@@ -311,7 +314,8 @@ def state_message(text: str, *, focus: dict, pending: dict | None, loaded: list[
     kind = (pending or {}).get("kind")
     if kind:
         detail = PENDING_DETAILS.get(kind)
-        lines.append("等待中的步骤：%s（%s）" % (PENDING_LABELS.get(kind, kind), detail or "在上面的卡片里，老师还没完成"))
+        lines.append("等待中的步骤：%s（%s）（老师若是在问这一步怎么操作，用 help_lookup 回答，不要重复调用 action_* 重开流程）"
+                     % (PENDING_LABELS.get(kind, kind), detail or "在上面的卡片里，老师还没完成"))
     if loaded:
         lines.append("已加载的工具：%s" % "、".join(loaded))
     if len(lines) == 1:

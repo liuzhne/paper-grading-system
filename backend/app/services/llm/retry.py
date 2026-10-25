@@ -69,6 +69,13 @@ def retry_reason(exc):
     return exc.__class__.__name__
 
 
+def retry_after_seconds(exc) -> float | None:
+    """响应头 Retry-After 要求的等待（秒）；没有或解析不了返回 None。"""
+
+    response = getattr(exc, "response", None)
+    return _retry_after_seconds(getattr(response, "headers", {}).get("retry-after"))
+
+
 def _retry_after_seconds(value):
     if not value:
         return None

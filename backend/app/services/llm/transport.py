@@ -23,6 +23,7 @@ from backend.app.services.llm.rate_limit import provider_circuit_key
 from backend.app.services.llm.rate_limit import provider_request_slot
 from backend.app.services.llm.retry import deadline_timeout
 from backend.app.services.llm.retry import exponential_delay_seconds
+from backend.app.services.llm.retry import retry_after_seconds
 from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_fits_before_deadline
 from backend.app.services.llm.retry import retry_reason
@@ -170,7 +171,9 @@ def post_with_retry(
                 if not will_retry:
                     delay_seconds = 0.0
                 elif projected.code == "rate_limited" and rate_limit_delay_seconds is not None:
-                    delay_seconds = float(rate_limit_delay_seconds)
+                    # 短等不能盖过服务商的 Retry-After：要求等 10 秒就等 10 秒（等不进截止时间就不重试），
+                    # 提前重试只会再吃一次 429。
+                    delay_seconds = max(float(rate_limit_delay_seconds), retry_after_seconds(exc) or 0.0)
                 else:
                     delay_seconds = retry_delay_seconds(exc, attempt)
                 min_call = rate_limit_min_call_seconds if projected.code == "rate_limited" else None
