@@ -131,9 +131,14 @@ def main(argv=None) -> int:
     items = assistant_eval.load_items()
     if args.max_items > 0:
         items = items[: args.max_items]
+    from backend.app.services.assistant.agent.context import SYSTEM_VERSION
+    from backend.app.services.assistant.agent.context import prompt_fingerprint
+
     payload = {
         "schema": 1, "mode": args.mode, "phase": args.phase, "started_at": _now(), "commit": args.commit,
         "eval_set": {"version": assistant_eval.eval_set_version(), "count": len(items)},
+        # 上线门槛按指纹认（§12.5）：这一轮测的是哪一版提示词。
+        "prompt": {"version": SYSTEM_VERSION, "fingerprint": prompt_fingerprint()},
         "budget": {"round_usd": args.round_budget_usd, "total_usd": args.total_budget_usd,
                    "spent_before_usd": args.spent_usd, "confirmed_usd": args.confirm_usd},
     }

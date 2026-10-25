@@ -28,6 +28,19 @@ class TurnRefs:
     _cards: dict[str, dict] = field(default_factory=dict)
     #: 本回合 `help_lookup` 返回过的帮助条目：回复的 help_refs 只能引用这些。
     help_seen: set[str] = field(default_factory=set)
+    #: 本回合工具返回过的状态类别（`claims.STATUS_OF_CODE`）：回复里的状态说法只能是这些。
+    statuses: set[str] = field(default_factory=set)
+    #: 本回合出过的确认卡片类型（提议工具）。
+    proposed: set[str] = field(default_factory=set)
+    #: 本回合工具结果的原文：回复里的说法原样出现在这里，也算工具返回过。
+    seen_text: list[str] = field(default_factory=list)
+
+    def saw_status(self, status: str | None) -> None:
+        from backend.app.services.assistant.agent.claims import category_of
+
+        category = category_of(status)
+        if category:
+            self.statuses.add(category)
 
     def add(self, kind: str, object_id: str, *, card: dict | None = None) -> str:
         key = (kind, str(object_id))

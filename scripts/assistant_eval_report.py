@@ -66,6 +66,15 @@ def _yes(value) -> str:
     return "✅ 是" if value else "❌ 否"
 
 
+def _prompt(data: dict) -> str:
+    """提示词版本与指纹：上线门槛只认在当前指纹上达标的一轮（§12.5）。旧报告没有这一项。"""
+
+    prompt = data.get("prompt") or {}
+    if not prompt:
+        return "未记录（2026-10-25 之前的报告）"
+    return "%s（指纹 `%s`）" % (prompt.get("version"), prompt.get("fingerprint"))
+
+
 def _pct(value) -> str:
     return "%.1f%%" % (float(value or 0) * 100)
 
@@ -80,6 +89,7 @@ def render_estimate(data: dict) -> str:
         "| 模型 | %s（%s，%s） |" % ((data.get("model") or {}).get("name"), (data.get("model") or {}).get("host"),
                                    (data.get("model") or {}).get("source")),
         "| 评测集 | %s 条（版本 %s） |" % ((data.get("eval_set") or {}).get("count"), (data.get("eval_set") or {}).get("version")),
+        "| 提示词 | %s |" % _prompt(data),
     ]
     # 价目查不到的模型不估算：这时没有 estimate，只说为什么不能运行。
     if estimate:
@@ -117,6 +127,7 @@ def render_run(data: dict, previous: dict | None) -> str:
         "| 项 | 值 |", "|---|---|",
         "| 开始 / 结束（UTC） | %s / %s |" % (data.get("started_at"), data.get("finished_at")),
         "| 代码提交 | `%s` |" % (data.get("commit") or "未知"),
+        "| 提示词 | %s |" % _prompt(data),
         "| 模型 | %s（%s，连接类型 %s，来源 %s；不含密钥） |" % (model.get("name"), model.get("host"),
                                                         model.get("provider_type"), model.get("source")),
         "| 评测集 | %s 条，版本 `%s`；运行 %s 条，跳过 %s 条%s |" % (

@@ -626,6 +626,13 @@ jobs:
           CONFIG
       - name: Build the application image
         run: docker build --pull --tag "$IMAGE" .
+      # 打开评分助手 Agent 的门槛（docs/评分助手Agent化方案.md §12.5）：按这个镜像里的提示词指纹，
+      # 在仓库的评测报告里找一轮门槛全过、没有作废的；没有就不部署。开关关着时不检查。不调用模型。
+      - name: Check the assistant eval gate
+        if: vars.ASSISTANT_AGENT_ENABLED == 'true'
+        run: |
+          docker run --rm --network none --volume "$PWD/docs/评测报告/评分助手:/reports:ro" "$IMAGE" \
+            python -m backend.app.scripts.assistant_eval_gate /reports
       - name: Ship the image and deployment files
         run: |
           set -euo pipefail

@@ -23,6 +23,10 @@ MAX_SEARCHES = 2
 TURN_SECONDS = 60
 STEP_SECONDS = 20
 STEP_MAX_TOKENS = 1200
+#: 每一步遇到 429 原地短重试 1 次（维护者 10-25 定）：A1 第二轮评测加了间隔，仍有约五分之一的回合碰到 429。
+#: 等 1.5 秒，不超过这一步的截止时间；再失败才退回规则模式。超时与 5xx 不重试。
+RATE_LIMIT_RETRIES = 1
+RATE_LIMIT_RETRY_SECONDS = 1.5
 #: Agent 回合写在助手消息上的意图，按它统计每日回合数。
 AGENT_INTENT = "agent"
 
@@ -51,5 +55,6 @@ def daily_budget_left(db: Session, user_id: str) -> bool:
     return turns_today(db, user_id) < max(0, int(settings.ASSISTANT_AGENT_DAILY_TURNS))
 
 
-__all__ = ["AGENT_INTENT", "MAX_SEARCHES", "MAX_TOOL_CALLS", "STEP_MAX_TOKENS", "STEP_SECONDS", "TURN_SECONDS",
+__all__ = ["AGENT_INTENT", "MAX_SEARCHES", "MAX_TOOL_CALLS", "RATE_LIMIT_RETRIES", "RATE_LIMIT_RETRY_SECONDS",
+           "STEP_MAX_TOKENS", "STEP_SECONDS", "TURN_SECONDS",
            "daily_budget_left", "turns_today"]

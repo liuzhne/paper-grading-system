@@ -47,6 +47,7 @@ from backend.app.services.assistant.agent.reply import ReplyInvalid
 from backend.app.services.assistant.agent.reply import ValidReply
 from backend.app.services.assistant.agent.reply import validate_reply
 from backend.app.services.assistant.context import RunContext
+from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.tool_calls import ToolCall
 from backend.app.services.llm.tool_calls import ToolResponse
 from backend.app.services.llm.tool_calls import ToolResponseError
@@ -85,6 +86,7 @@ def model_step(scorer) -> tuple[ModelStep | None, str | None]:
             return scorer.complete_with_tools(
                 messages, tools, tool_choice="required", max_tokens=budget.STEP_MAX_TOKENS,
                 deadline=deadline, timeout_seconds=budget.STEP_SECONDS,
+                rate_limit_retries=budget.RATE_LIMIT_RETRIES, rate_limit_delay_seconds=budget.RATE_LIMIT_RETRY_SECONDS,
             )
         return native, "native"
     if callable(getattr(scorer, "complete_json", None)):
@@ -196,6 +198,9 @@ def _error_code(exc) -> str | None:
     error = getattr(exc, "error", None)
     code = getattr(error, "code", None) if error is not None else getattr(exc, "code", None)
     code = getattr(code, "value", code)
+    if not code and isinstance(exc, ProviderJSONOutputError):
+        # 模型答了但不能用（空响应、截断、工具调用格式不对）：A1 第二轮有一条只记成 ToolResponseError。
+        code = "output_%s" % exc.reason
     return str(code) if isinstance(code, str) and code else None
 
 
@@ -316,7 +321,12 @@ def _run(tool, arguments_json, rt: _Runtime) -> tuple[dict, dict | None]:
     if tool.name not in rt.called:
         rt.called.append(tool.name)
     if tool.kind == "proposal" and isinstance(result, dict) and result.get("proposal"):
+        card_type = (result["proposal"].get("card") or {}).get("type")
+        if card_type:
+            rt.turn.refs.proposed.add(card_type)
         return {}, result["proposal"]  # 确认卡片或进入流程：本回合到此结束
+    # 回复里的状态与卡片说法原样出现在工具结果里，也算工具返回过（claims）。
+    rt.turn.refs.seen_text.append(catalog.render(result))
     return result, None
 
 

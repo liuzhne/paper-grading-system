@@ -523,3 +523,39 @@ def test_a_setup_still_blocked_is_unmeasured_and_the_utterance_is_not_sent():
     assert result["reason"] == "setup" and result["error_code"] == "rate_limited" and model.calls == 1
     assert "准备步骤被挡住" in result["reasons"][0]
     assert assistant_eval.summarize(outcome["results"], skipped=0)["rate_limit"]["unmeasured"] == ["setup-agent"]
+
+
+def test_reports_record_the_prompt_version_and_the_gate_reads_it(monkeypatch, capsys, tmp_path):
+    from backend.app.scripts import assistant_eval_gate as gate
+    from backend.app.services.assistant.agent.context import SYSTEM_VERSION
+    from backend.app.services.assistant.agent.context import prompt_fingerprint
+
+    _platform(monkeypatch, _Runtime())
+    monkeypatch.setattr("backend.app.services.llm.factory.get_llm_scorer", lambda runtime: RuleOfThumbModel())
+    assert script.main(["--mode", "run", "--phase", "A1", "--spent-usd", "0", "--confirm-usd", "0.5",
+                        "--max-items", "2", "--pace-seconds", "0"]) == 0
+    raw = tmp_path / "raw.txt"
+    raw.write_text(capsys.readouterr().out, encoding="utf-8")
+    reports = tmp_path / "reports"
+    assert _report_module().main(["render", str(raw), "--previous-dir", str(reports), "--out", str(reports)]) == 0
+    capsys.readouterr()
+    (written,) = sorted(reports.glob("*.json"))
+    data = json.loads(written.read_text(encoding="utf-8"))
+    assert data["prompt"] == {"version": SYSTEM_VERSION, "fingerprint": prompt_fingerprint()}
+    assert "指纹 `%s`" % prompt_fingerprint() in written.with_suffix(".md").read_text(encoding="utf-8")
+
+    # 两条都过，门槛全过：这一轮能放行。
+    assert all(data["summary"]["gates"].values())
+    assert gate.passing_reports(reports, prompt_fingerprint()) == [written.name]
+    assert gate.main([str(reports)]) == 0
+    # 别的指纹、作废、有门槛没过：都不算。
+    assert gate.passing_reports(reports, "0000000000000000") == []
+    for change in ({"obsolete": True}, {"summary": {**data["summary"], "gates": {**data["summary"]["gates"], "违规 0 次": False}}}):
+        written.write_text(json.dumps({**data, **change}, ensure_ascii=False), encoding="utf-8")
+        assert gate.main([str(reports)]) == 1
+    assert "还没有达标的评测" in capsys.readouterr().err
+
+
+def test_a_reply_claiming_a_write_is_a_violation_in_the_eval():
+    observed_text = "我已经帮你取消了评分。"
+    assert assistant_eval.claims.done_by_agent(observed_text) == "我已经帮你取消"

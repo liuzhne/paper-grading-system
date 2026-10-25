@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-25 | 评分助手 A1 调优 | 新增 `agent/claims.py`（回复里的说法核对）与 `scripts/assistant_eval_gate.py`（开关门槛）；前缀标识算进提示词指纹；部署流水线在开关打开时多一步门槛检查。 |
 | 2026-10-23 | 评测限流第二轮复审（CodeRabbit） | 无模块变化：`run_item` 计入准备步骤的用量，准备步骤被挡住时不再发被测的那句。 |
 | 2026-10-23 | 评测限流复审（CodeRabbit） | 无模块变化：降级回合的用户消息 meta 另留已计费用量；报告脚本新增 `baseline`（跳过作废轮次）。 |
 | 2026-10-23 | 评测限流 | 无模块变化：Agent 回合降级时在用户消息 meta 记错误码；`assistant_eval.run_eval` 加条目间隔与限流重跑。 |
@@ -1489,9 +1490,10 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
     agent.turn.run_turn
         ├─ 取消息表 → context.build_prefix（①tools ②系统指令 ③压缩内容 ④历史）
         ├─ compaction.maybe_compact：需要时发一次与主对话参数相同的摘要请求，写回 conversations.compaction，重建前缀
-        └─ LangGraph 子图：model 节点（complete_with_tools / JSON 动作协议）↔ tools 节点
-               reply → reply.validate_reply；tool_search → catalog.search / select；call_tool → 已加载的延迟工具；
-               常驻业务工具直接调用；业务工具经 tools.call → 共享守卫与服务层
+        └─ LangGraph 子图：model 节点（complete_with_tools，429 等 1.5 秒重试 1 次 / JSON 动作协议）↔ tools 节点
+               reply → reply.validate_reply（含 claims：“我做了”、确认卡片、任务状态的说法核对）；
+               tool_search → catalog.search / select；call_tool → 已加载的延迟工具；
+               常驻业务工具直接调用；业务工具经 tools.call → 共享守卫与服务层，并把返回的状态登记到 TurnRefs
     结果：reply（文字 + 数据卡片 + 下一步按钮）/ 兜底回复 / 降级（这一句回到规则，且不再调用意图模型）
     降级时用户消息的 meta 记下失败原因与错误码（`rate_limited`、`PROVIDER_CIRCUIT_OPEN` 等，只记码不记正文）
 ```
@@ -1529,5 +1531,9 @@ GitHub 工作流 pgs-assistant-eval（production 环境，手动）
         assistant_eval.run_eval：内存 SQLite + 合成种子数据；进程内打开开关、关闭鉴权、换入这个模型
         → 逐条走 runner.run（与线上同一条调用链；条与条之间隔几秒，被限流挡住的条目等熔断冷却后重跑）
         → 判定 → 汇总（限流挡住、没测到的条目单独列出）；结果只打印到标准输出
-  └─ scripts/assistant_eval_report.py render：生成 Markdown + JSON，作为附件上传
+  └─ scripts/assistant_eval_report.py render：生成 Markdown + JSON（含提示词版本与指纹），作为附件上传
 ```
+
+开关门槛（§12.5）：仓库变量 `ASSISTANT_AGENT_ENABLED=true` 时，部署流水线在构建镜像之后、送到实例之前，用这个镜像跑
+`python -m backend.app.scripts.assistant_eval_gate`（挂载 `docs/评测报告/评分助手/`，不联网）：按镜像里的 `context.prompt_fingerprint()`
+找一轮门槛全过、没有作废的评测报告，找不到就不部署。提示词指纹同时算进前缀标识（`context.prefix_identity`）。

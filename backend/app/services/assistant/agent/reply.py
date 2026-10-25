@@ -3,7 +3,8 @@
 模型以调用 `reply` 结束一个回合。代码校验之后才显示，三种处理：
 
 - **整体作废**（重试一次，仍不合格就给确定性兜底）：参数不合 schema；出现本回合工具结果里没有的
-  引用编号或不在清单里的下一步（视为编造）；命中注入检测；
+  引用编号或不在清单里的下一步（视为编造）；命中注入检测；说自己做了写动作、说出了确认卡片却没有、
+  说出工具没返回过的任务状态（`claims`，§14.1）；
 - **单句丢弃**：含分数样式的数字、改分建议、链接、邮箱或标记语言的句子去掉；
 - **超长截断**：`text` 最多 300 字。
 
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import ValidationError
 
+from backend.app.services.assistant.agent import claims
 from backend.app.services.assistant.agent.refs import TurnRefs
 from backend.app.services.assistant.views import QUICK_ACTIONS
 from backend.app.services.scoring.core.evidence import detect_injection
@@ -93,8 +95,11 @@ def parse_arguments(arguments) -> dict:
     return value
 
 
-def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True) -> ValidReply:
-    """校验一次 `reply` 调用。整体作废时抛 `ReplyInvalid`。"""
+def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check_claims: bool = True) -> ValidReply:
+    """校验一次 `reply` 调用。整体作废时抛 `ReplyInvalid`。
+
+    ``check_claims=False`` 只给压缩摘要用：摘要转述的是过去的对话（“老师取消了任务”），不是本回合的说法。
+    """
 
     try:
         params = ReplyParams.model_validate(parse_arguments(arguments))
@@ -102,6 +107,11 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True) -> Va
         raise ReplyInvalid("参数不合格：%s" % exc.errors()[0]["msg"]) from exc
     if detect_injection(params.text):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
+    if check_claims:
+        problem = claims.problem(params.text, statuses=refs.statuses, proposed=refs.proposed,
+                                 seen_text="\n".join(refs.seen_text))
+        if problem:
+            raise ReplyInvalid(problem)
     if not allow_cards and (params.cards or params.next_steps or params.help_refs):
         raise ReplyInvalid("这里只要文字，cards、next_steps 与 help_refs 必须为空")
     unseen = [ref for ref in params.help_refs if ref not in refs.help_seen]
