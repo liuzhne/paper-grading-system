@@ -23,6 +23,7 @@ from backend.app.services.llm.rate_limit import provider_circuit_key
 from backend.app.services.llm.rate_limit import provider_request_slot
 from backend.app.services.llm.retry import deadline_timeout
 from backend.app.services.llm.retry import exponential_delay_seconds
+from backend.app.services.llm.retry import retry_after_seconds
 from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_fits_before_deadline
 from backend.app.services.llm.retry import retry_reason
@@ -59,11 +60,14 @@ def post_with_retry(
     rate_limit_retries=None,
     deadline=None,
     rate_limit_delay_seconds=None,
+    rate_limit_min_call_seconds=None,
 ):
     """Send one provider request with the shared retry/deadline/circuit policy.
 
     ``rate_limit_delay_seconds`` overrides the 429 wait (default: Retry-After or
-    ``LLM_429_RETRY_DELAY_SECONDS``); the assistant's agent step uses a short one.
+    ``LLM_429_RETRY_DELAY_SECONDS``) and ``rate_limit_min_call_seconds`` the time
+    that must remain for the retried call (default 30 s); the assistant's agent
+    step, whose deadline is 20 s, passes short values for both.
 
     ``scorer`` supplies ``client``, ``model_name``, ``base_url``,
     ``timeout_seconds``, ``usage_meter`` and the optional connection snapshot.
@@ -167,10 +171,13 @@ def post_with_retry(
                 if not will_retry:
                     delay_seconds = 0.0
                 elif projected.code == "rate_limited" and rate_limit_delay_seconds is not None:
-                    delay_seconds = float(rate_limit_delay_seconds)
+                    # 短等不能盖过服务商的 Retry-After：要求等 10 秒就等 10 秒（等不进截止时间就不重试），
+                    # 提前重试只会再吃一次 429。
+                    delay_seconds = max(float(rate_limit_delay_seconds), retry_after_seconds(exc) or 0.0)
                 else:
                     delay_seconds = retry_delay_seconds(exc, attempt)
-                will_retry = will_retry and retry_fits_before_deadline(deadline, delay_seconds)
+                min_call = rate_limit_min_call_seconds if projected.code == "rate_limited" else None
+                will_retry = will_retry and retry_fits_before_deadline(deadline, delay_seconds, min_call)
                 log_call_failed(
                     provider_label, scorer.model_name, projected,
                     attempt=attempt, attempts=attempts, will_retry=will_retry,

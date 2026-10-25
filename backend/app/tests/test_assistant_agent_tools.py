@@ -252,16 +252,33 @@ def test_paper_names_from_uploaded_documents_go_through_the_injection_filter(cli
     assert _last_tool_result(model)["paper"]["名称"] == "（名称疑似包含指令，未显示）"
 
 
-def test_actions_do_not_pick_a_task_for_the_teacher(client, agent):  # noqa: F811
+def test_without_a_task_actions_look_for_the_one_task_in_that_state(client, agent):  # noqa: F811
+    # 只有一个评完、没有失败项的任务：重试与取消都直说没有，不再问老师是哪个任务。
     _scored_task(client)
-    for name in ("action_retry_failed", "action_cancel"):
-        model = agent(step(("tool_search", {"query": "select:%s" % name})),
-                      step(("call_tool", {"name": name, "arguments_json": "{}"})),
-                      reply("是哪个任务？"))
-        body = _say(client, _conversation(client), "失败的帮我重试一下")  # 新对话：没有当前任务
-        result = _last_tool_result(model)
-        assert "需要先确定任务" in result and result["tasks"], name
-        assert _texts(body)[-1] == "是哪个任务？" and not _cards(body, "confirm_retry") and not _cards(body, "confirm_cancel")
+    for name, words in (("action_retry_failed", "没有可以重试的失败项"), ("action_cancel", "没有正在进行的评分")):
+        model = agent(step((name, {})), reply("最近没有需要处理的。"))
+        body = _say(client, _conversation(client), "处理一下")  # 新对话：没有当前任务
+        assert words in _last_tool_result(model)["提示"], name
+        assert not _cards(body, "confirm_retry") and not _cards(body, "confirm_cancel")
+
+
+def test_cancel_without_a_task_finds_the_only_running_one(client, agent):  # noqa: F811
+    _seed_published_rubric(client)
+    _conversation_id, batch_id, _body = _start_until_waiting_job(client)
+    _rename(client, batch_id, "课程报告评分 · 软件工程导论")
+    agent(step(("action_cancel", {})))
+    result = _say(client, _conversation(client), "先别评了")
+    card = _cards(result, "confirm_cancel")[0]
+    assert card["batch_id"] == batch_id
+    assert "《课程报告评分 · 软件工程导论》正在评分" in _texts(result)[-1]  # 卡片上写明是哪个任务
+
+    _second, second_id, _body = _start_until_waiting_job(client)
+    model = agent(step(("action_cancel", {})), reply("两个任务都在评分，要取消哪一个？"))
+    body = _say(client, _conversation(client), "先别评了")
+    result = _last_tool_result(model)
+    assert "有好几个任务正在评分" in result["提示"] and len(result["候选"]) == 2
+    assert {entry["name"] for entry in result["候选"]} >= {"课程报告评分 · 软件工程导论"}
+    assert not _cards(body, "confirm_cancel")
 
 
 def test_review_list_without_a_task_looks_across_recent_tasks(client, agent):  # noqa: F811
@@ -290,3 +307,83 @@ def test_review_list_without_a_task_looks_across_recent_tasks(client, agent):  #
                   reply("最近的任务里没有需要复核的。"))
     _say(client, _conversation(client), "哪些材料需要人工复核")
     assert "没有需要人工复核" in _last_tool_result(model)["提示"]
+
+
+def _rename(client, batch_id, name):
+    with client.session_factory() as session:
+        session.get(models.GradingBatch, batch_id).name = name
+        session.commit()
+
+
+def test_action_tools_are_resident_from_prompt_version_4():
+    from backend.app.services.assistant.agent import context as agent_context
+
+    names = [tool["function"]["name"] for tool in agent_context.tools_array()]
+    assert {"action_start_grading", "action_import_rubric", "action_retry_failed", "action_cancel"} <= set(names)
+
+
+def test_cancel_finds_the_task_by_the_name_the_teacher_said(client, agent):  # noqa: F811
+    _seed_published_rubric(client)
+    _conversation_id, batch_id, _body = _start_until_waiting_job(client)
+    _rename(client, batch_id, "课程报告评分 · 软件工程导论")
+    agent(step(("action_cancel", {"task_name": "课程报告评分"})))
+    result = _say(client, _conversation(client), "课程报告评分先别评了")  # 新对话：没有当前任务
+    card = _cards(result, "confirm_cancel")[0]
+    assert card["batch_id"] == batch_id and card["status"] == "proposed"
+
+    # 旧对话里沿用“call_tool 调用”的写法：工具常驻了也照常执行。
+    agent(step(("call_tool", {"name": "action_cancel", "arguments_json": json.dumps({"task_name": "软件工程导论"},
+                                                                                    ensure_ascii=False)})))
+    result = _say(client, _conversation(client), "软件工程导论那个先别评了")
+    assert _cards(result, "confirm_cancel")[0]["batch_id"] == batch_id
+
+
+def test_a_task_name_matching_several_or_none_comes_back_as_choices(client, agent):  # noqa: F811
+    _seed_published_rubric(client)
+    _first, first_id, _body = _start_until_waiting_job(client)
+    _second, second_id, _body = _start_until_waiting_job(client)
+    _rename(client, first_id, "课程报告评分 · 软件工程导论")
+    _rename(client, second_id, "课程报告评分 · 数据结构")
+    model = agent(step(("action_cancel", {"task_name": "课程报告评分"})), reply("两个课程报告评分，要取消哪一个？"))
+    body = _say(client, _conversation(client), "课程报告评分先别评了")
+    result = _last_tool_result(model)
+    assert len(result["候选"]) == 2 and "不止一个" in result["提示"] and not _cards(body, "confirm_cancel")
+
+    model = agent(step(("action_retry_failed", {"task_name": "实验报告"})), reply("没有找到实验报告的任务，是哪一个？"))
+    _say(client, _conversation(client), "实验报告失败的重试一下")
+    result = _last_tool_result(model)
+    assert "需要先确定任务" in result and "没有名称里有“实验报告”的" in result["提示"] and result["tasks"]
+
+
+def test_start_grading_finds_the_rubric_by_name_or_document_type(client, agent):  # noqa: F811
+    from backend.app.services.assistant.views import document_type_label
+    from backend.app.tests.test_assistant import _resume
+
+    rubric_id, rubric_name = _seed_published_rubric(client)
+    with client.session_factory() as session:
+        kind = document_type_label(session.get(models.Rubric, rubric_id).business_profile_key)
+    for said in (rubric_name[:4], kind):
+        agent(step(("action_start_grading", {"rubric_name": said})))
+        conversation_id = _conversation(client)
+        body = _say(client, conversation_id, "用%s帮我评一下" % said)
+        assert body["pending"]["kind"] == "pick_files", said
+        body = _resume(client, conversation_id, body["pending"], {"count": 1, "names": ["张三.docx"]})
+        card = _cards(body, "confirm_start")[0]
+        assert card["rubric_id"] == rubric_id and "可以换" not in _texts(body)[-1]  # 是老师点名的标准，不是默认的
+
+    model = agent(step(("action_start_grading", {"rubric_name": "不存在的标准"})), reply("没有这份标准，用哪一份？"))
+    body = _say(client, _conversation(client), "用不存在的标准帮我评一下")
+    result = _last_tool_result(model)
+    assert "没有“不存在的标准”" in result["提示"] and result["rubrics"][0]["name"] == rubric_name
+    assert not body.get("pending")
+
+
+def test_a_task_name_only_matches_inside_task_names(client, agent):  # noqa: F811
+    # 老师说“实验报告 A”，最近只有“实验报告”：不能反过来把任务名当成老师那句话的一部分去匹配。
+    _seed_published_rubric(client)
+    _conversation_id, batch_id, _body = _start_until_waiting_job(client)
+    _rename(client, batch_id, "实验报告")
+    model = agent(step(("action_cancel", {"task_name": "实验报告 A"})), reply("没有找到实验报告 A，是哪一个？"))
+    body = _say(client, _conversation(client), "实验报告 A 先别评了")
+    result = _last_tool_result(model)
+    assert "没有名称里有“实验报告 A”的" in result["提示"] and not _cards(body, "confirm_cancel")

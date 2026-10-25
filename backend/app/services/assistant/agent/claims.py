@@ -5,7 +5,9 @@ Agent 永远不自己执行写动作，所以回复校验按三类处理（不�
 
 - **“我已经做了 X”**（暂停、取消、开始评分、重试、导入、发布、删除、改分……）：一律不成立，整体作废；
 - **“已经为你准备好确认卡片”“在卡片上点确认”**：只有本回合确实出了确认卡片才放行；
-- **“任务已取消 / 已评完 / 正在评分”这类状态**：只有本回合某个工具返回过这个状态才放行，否则当作编造。
+- **“任务已取消 / 已评完 / 正在评分”这类状态**：只有本回合某个工具返回过这个状态才放行，否则当作编造；
+- **该出卡片却用文字反问**（“您是想导入……吗”“请问要取消哪个任务的评分？”）：本回合没出卡片、工具也没给候选时
+  作废，让模型直接调用对应的 action_*（A1 第三轮评测：提议动作 0/4，多半是先问“是吗”）。
 
 工具结果里的状态由业务工具按状态码登记到具体对象上（`TurnRefs.saw_status`，不在正文里猜）。状态说法要对得上
 它说的那个对象：一句话里点了名（编号或工具结果里的任务名、材料名），就看那个对象（材料还可以看它所属的任务）；
@@ -37,6 +39,16 @@ _CARD = re.compile(
     # “请点确认”“请您点击“确认””（“请确认是哪一份”不算：那是请老师选）
     + r"|请您?(?:在卡片上|在下面|点击?|点一下)\s*[“\"「]?确认"
 )
+#: 写动作的说法（反问确认里出现的）。不含单独的“评分”：“请问您想看哪一份的评分结果？”是查询，不是写动作。
+_ACT = r"(?:导入|上传|开始评分|开始评|评一下|重试|重新评|取消|停止|停掉|别评)"
+_ASKS_TO_CONFIRM = re.compile(
+    # “您是想导入自己的评分规则和模板是吗？”
+    r"是想要?" + _IN_CLAUSE + r"{0,4}?" + _ACT + r"[^。！!\n]{0,30}?吗"
+    # “请问是哪个任务的失败批次需要重试？”“请问您要取消哪个任务的评分？”（“请问您要查哪个任务？”不算：不是写动作）
+    + r"|请问[^。！!\n]{0,30}?" + _ACT + r"[^。！!\n]{0,30}?(?:吗|？|\?)"
+)
+#: 工具给了候选、让老师选：这时问“是哪一个”是对的，不拦。
+_CHOICE_MARKERS = ("候选", "需要先确定任务", "有需要复核的任务")
 #: 一句话（判断状态说的是谁，按整句找点名）。
 _SENTENCE = re.compile(r"[^。！？!?；;\n]+")
 _REF_TOKEN = re.compile(r"(?<![A-Za-z0-9])[tp]\d+(?![A-Za-z0-9])")
@@ -84,6 +96,13 @@ def status_claims(text: str) -> dict[str, str]:
     return claims
 
 
+def asks_to_confirm(text: str) -> str | None:
+    """该出卡片却用文字反问确认的说法；没有返回 None。"""
+
+    found = _ASKS_TO_CONFIRM.search(text or "")
+    return found.group(0) if found else None
+
+
 def category_of(status: str | None) -> str | None:
     return STATUS_OF_CODE.get(str(status or ""))
 
@@ -122,6 +141,11 @@ def problem(text: str, refs) -> str | None:
     claim = card_claim(text)
     if claim and not refs.proposed and claim not in seen_text:
         return ("本回合没有出确认卡片，不能说“%s”。要出卡片，先加载并调用对应的 action_* 工具。" % claim)
+    claim = asks_to_confirm(text)
+    if claim and not refs.proposed and not any(marker in seen_text for marker in _CHOICE_MARKERS):
+        return ("不要用文字向老师反问确认（“%s”）：直接调用对应的 action_* 提议工具（action_start_grading / "
+                "action_import_rubric / action_retry_failed / action_cancel）生成确认卡片，老师在卡片上确认；"
+                "老师点了任务名就填 task_name。" % claim)
     for sentence in _SENTENCE.findall(text or ""):
         for category, claim in status_claims(sentence).items():
             if claim in seen_text or _backed(category, sentence, refs):
@@ -132,4 +156,4 @@ def problem(text: str, refs) -> str | None:
     return None
 
 
-__all__ = ["STATUS_OF_CODE", "card_claim", "category_of", "done_by_agent", "problem", "status_claims"]
+__all__ = ["STATUS_OF_CODE", "asks_to_confirm", "card_claim", "category_of", "done_by_agent", "problem", "status_claims"]

@@ -236,7 +236,11 @@ def main(argv=None) -> int:
         print(render_estimate(data))
         return 0
     markdown = render_run(data, baseline(args.previous_dir))
-    name = "%s-%s-%s" % (str(data.get("started_at") or "")[:10], data.get("phase"), slug((data.get("model") or {}).get("name")))
+    # 文件名带开始的时分秒：同一天同一期可能跑好几轮（10-25 跑了两轮 A1），只带日期或时分会互相覆盖，
+    # 被覆盖的那一轮就不再计入已花费用。
+    started = str(data.get("started_at") or "")
+    name = "%s-%s-%s-%s" % (started[:10], started[11:19].replace(":", ""), data.get("phase"),
+                            slug((data.get("model") or {}).get("name")))
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / ("%s.json" % name)).write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     (args.out / ("%s.md" % name)).write_text(markdown, encoding="utf-8")

@@ -87,6 +87,7 @@ def model_step(scorer) -> tuple[ModelStep | None, str | None]:
                 messages, tools, tool_choice="required", max_tokens=budget.STEP_MAX_TOKENS,
                 deadline=deadline, timeout_seconds=budget.STEP_SECONDS,
                 rate_limit_retries=budget.RATE_LIMIT_RETRIES, rate_limit_delay_seconds=budget.RATE_LIMIT_RETRY_SECONDS,
+                rate_limit_min_call_seconds=budget.RATE_LIMIT_MIN_CALL_SECONDS,
             )
         return native, "native"
     if callable(getattr(scorer, "complete_json", None)):
@@ -290,7 +291,8 @@ def _call(call: ToolCall, rt: _Runtime) -> tuple[dict, dict | None]:
         if arguments is None:
             return {"错误": "call_tool 的参数必须是 JSON 对象：{\"name\": 工具名, \"arguments_json\": 参数}"}, None
         name = str(arguments.get("name") or "").strip()
-        if name not in rt.loaded or name not in tools:
+        # 常驻工具经 call_tool 调用也照常执行：工具改为常驻之前的对话历史里，加载记录与调用方式还是延迟工具的。
+        if name not in tools or not (tools[name].resident or name in rt.loaded):
             return {"错误": "工具“%s”还没有加载：先用 tool_search 搜索，或用 select:名称 加载。" % name}, None
         return _run(tools[name], arguments.get("arguments_json") or "{}", rt)
     tool = tools.get(call.name)

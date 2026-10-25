@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -68,15 +69,13 @@ class RuleOfThumbModel:
             return None
 
         def action(name, needs_task=False):
+            # 提议工具 10-25 起常驻：直接调用，不先搜索。
             if needs_task and "tasks" not in got:
                 return step(("task_list", {"limit": 20}))
-            if not searched:
-                return step(("tool_search", {"query": "select:%s" % name}))
-            if not any("提示" in result for result in results) and len(results) < 4:
+            if not any("提示" in result for result in results) and len(results) < 3:
                 tasks = next((result["tasks"] for result in results if "tasks" in result), [])
                 task = pick(tasks) if needs_task else None
-                arguments = {"task_ref": task["ref"]} if task else {}
-                return step(("call_tool", {"name": name, "arguments_json": json.dumps(arguments)}))
+                return step((name, {"task_ref": task["ref"]} if task else {}))
             return reply("现在不需要这么做。")
 
         choices = next((result["tasks"] for result in results if "tasks" in result and "提示" in result), None)
@@ -232,6 +231,8 @@ def test_script_run_prints_results_and_the_report_renders(monkeypatch, capsys, t
     assert report.main(["render", str(raw_path), "--previous-dir", str(tmp_path / "none"), "--out", str(out)]) == 0
     files = sorted(path.name for path in out.iterdir())
     assert len(files) == 2 and all("-A0-gemini-2.5-flash." in name for name in files)
+    # 文件名带开始的时分秒：同一分钟里跑两轮也不会互相覆盖（被覆盖的一轮就不计入已花费用）。
+    assert all(re.match(r"\d{4}-\d{2}-\d{2}-\d{6}-A0-", name) for name in files)
     markdown = next(path for path in out.iterdir() if path.suffix == ".md").read_text(encoding="utf-8")
     assert "# 评分助手评测报告 · A0" in markdown and "这是第一轮" in markdown and "`abc123`" in markdown
     assert report.spent(out) > 0
