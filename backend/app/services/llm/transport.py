@@ -58,8 +58,12 @@ def post_with_retry(
     timeout_seconds=None,
     rate_limit_retries=None,
     deadline=None,
+    rate_limit_delay_seconds=None,
 ):
     """Send one provider request with the shared retry/deadline/circuit policy.
+
+    ``rate_limit_delay_seconds`` overrides the 429 wait (default: Retry-After or
+    ``LLM_429_RETRY_DELAY_SECONDS``); the assistant's agent step uses a short one.
 
     ``scorer`` supplies ``client``, ``model_name``, ``base_url``,
     ``timeout_seconds``, ``usage_meter`` and the optional connection snapshot.
@@ -160,7 +164,12 @@ def post_with_retry(
                     will_retry = projected.retryable and attempt < attempts - 1
                 else:
                     will_retry = projected.retryable and attempt < base_attempts - 1
-                delay_seconds = retry_delay_seconds(exc, attempt) if will_retry else 0.0
+                if not will_retry:
+                    delay_seconds = 0.0
+                elif projected.code == "rate_limited" and rate_limit_delay_seconds is not None:
+                    delay_seconds = float(rate_limit_delay_seconds)
+                else:
+                    delay_seconds = retry_delay_seconds(exc, attempt)
                 will_retry = will_retry and retry_fits_before_deadline(deadline, delay_seconds)
                 log_call_failed(
                     provider_label, scorer.model_name, projected,

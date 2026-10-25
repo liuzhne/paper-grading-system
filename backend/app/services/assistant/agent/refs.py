@@ -28,6 +28,32 @@ class TurnRefs:
     _cards: dict[str, dict] = field(default_factory=dict)
     #: 本回合 `help_lookup` 返回过的帮助条目：回复的 help_refs 只能引用这些。
     help_seen: set[str] = field(default_factory=set)
+    #: 本回合工具返回过的状态：(种类, 对象 ID, 类别)。回复里的状态说法要对得上它说的那个对象（claims）。
+    evidence: set[tuple[str, str, str]] = field(default_factory=set)
+    #: 工具结果里出现过的名称（任务名、材料名）→ 对象：判断回复里的状态说的是谁。
+    names: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: 材料 → 所属任务：任务评完了，其中每一份也就评完了。
+    parents: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
+    #: 本回合出过的确认卡片类型（提议工具）。
+    proposed: set[str] = field(default_factory=set)
+    #: 本回合工具结果的原文：回复里的说法原样出现在这里，也算工具返回过。
+    seen_text: list[str] = field(default_factory=list)
+
+    def name(self, kind: str, object_id: str, name: str | None, *, parent: tuple[str, str] | None = None) -> None:
+        """登记工具结果里给出的名称（不分配编号）。"""
+
+        key = (kind, str(object_id))
+        if name:
+            self.names[str(name)] = key
+        if parent is not None:
+            self.parents[key] = (parent[0], str(parent[1]))
+
+    def saw_status(self, status: str | None, kind: str, object_id: str) -> None:
+        from backend.app.services.assistant.agent.claims import category_of
+
+        category = category_of(status)
+        if category:
+            self.evidence.add((kind, str(object_id), category))
 
     def add(self, kind: str, object_id: str, *, card: dict | None = None) -> str:
         key = (kind, str(object_id))

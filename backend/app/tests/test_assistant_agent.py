@@ -23,6 +23,7 @@ from backend.app.core.config import settings
 from backend.app.db import models
 from backend.app.services.assistant import model as assistant_model
 from backend.app.services.assistant.agent import catalog
+from backend.app.services.assistant.agent import claims
 from backend.app.services.assistant.agent import compaction
 from backend.app.services.assistant.agent import context as agent_context
 from backend.app.services.assistant.agent.reply import ReplyInvalid
@@ -34,6 +35,7 @@ from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleC
 from backend.app.services.llm.rate_limit import CircuitOpenError
 from backend.app.services.llm.tool_calls import ToolCall
 from backend.app.services.llm.tool_calls import ToolResponse
+from backend.app.services.llm.tool_calls import ToolResponseError
 from backend.app.tests.test_assistant import _cards
 from backend.app.tests.test_assistant import _conversation
 from backend.app.tests.test_assistant import _say
@@ -510,3 +512,179 @@ def test_0041_refuses_a_lossy_downgrade(monkeypatch, tmp_path):
         connection.execute(text("UPDATE assistant_conversations SET compaction = NULL"))
     command.downgrade(config, "0040_provider_output_observations")
     engine.dispose()
+
+
+# --- 提示词版本的三道门（§12.5，维护者 10-25 定；都不调用模型） ------------------------------------
+
+#: 版本 → 提示词指纹（系统提示正文、tools 数组、所有工具的说明）。改了其中任何一处：bump
+#: context.SYSTEM_VERSION，并在这里**新增**一行；不要改已有行的指纹——那一行对应的评测报告还在用它。
+PROMPT_FINGERPRINTS = {
+    "assistant-agent@3": "b3214e16711c1dd5",
+}
+
+
+def test_prompt_version_is_bound_to_its_fingerprint():
+    version, fingerprint = agent_context.SYSTEM_VERSION, agent_context.prompt_fingerprint()
+    assert version in PROMPT_FINGERPRINTS, "bump 了 SYSTEM_VERSION：在 PROMPT_FINGERPRINTS 里新增一行 %r" % fingerprint
+    assert PROMPT_FINGERPRINTS[version] == fingerprint, (
+        "提示词、tools 或工具说明变了（指纹 %s），却没有 bump SYSTEM_VERSION" % fingerprint)
+    assert len(set(PROMPT_FINGERPRINTS.values())) == len(PROMPT_FINGERPRINTS), "两个版本不能是同一个指纹"
+
+
+def test_prefix_identity_includes_the_prompt_fingerprint(monkeypatch):
+    before = agent_context.prefix_identity("google/gemini-2.5-flash")
+    monkeypatch.setattr(agent_context, "prompt_fingerprint", lambda: "0000000000000000")
+    assert agent_context.prefix_identity("google/gemini-2.5-flash") != before
+
+
+def test_the_prompt_names_only_tools_that_exist_and_says_how_to_load_deferred_ones():
+    assert agent_context.prompt_problems(agent_context.system_prompt()) == []
+    # @2 的那一句：让模型“调用 action_*”，却没说它们不在 tools 里。
+    old = "- 老师要做开始评分、导入、重试、取消这类事时，调用对应的 action_* 提议工具（会生成确认卡片或进入流程）；"
+    assert "没写加载方式" in agent_context.prompt_problems(old)[0]
+    assert "不存在的工具" in agent_context.prompt_problems("- 先调用 action_cancle")[0]
+    assert agent_context.prompt_problems("- 先 tool_search(\"select:review_list\") 再调用 review_list") == []
+
+
+# --- 回复里关于“做了什么”“是什么状态”的说法（§14.1） ------------------------------------------------
+
+@pytest.mark.parametrize(("text", "kind"), [
+    ("我已经帮你取消了评分。", "done"),
+    ("已为你重试失败的材料。", "done"),
+    ("已为您取消了评分。", "done"),
+    ("我帮您把它停掉了。", "done"),
+    ("我帮你把它停掉了。", "done"),
+    ("好的，课程报告评分任务已经暂停。", "status"),
+    ("这批已经评完了。", "status"),
+    ("已经为你准备好确认卡片，请确认。", "card"),
+    ("请点“确认”就会开始。", "card"),
+    ("请您点击“确认”。", "card"),
+])
+def test_claims_that_cannot_hold_are_rejected(text, kind):
+    found = claims.problem(text, TurnRefs())
+    assert found is not None
+    assert {"done": "不能自己执行改动", "status": "没有工具返回它说的那个", "card": "没有出确认卡片"}[kind] in found
+
+
+@pytest.mark.parametrize("text", [
+    "我可以帮你重试失败的材料，要我出确认卡片吗？",
+    "找到两份叫张三的，请确认是哪一份。",
+    "我已经找到了 3 个任务。",
+    "要开始评分，说“开始评分”或点附件按钮。",
+])
+def test_offers_questions_and_plain_answers_are_not_claims(text):
+    assert claims.problem(text, TurnRefs()) is None
+
+
+def _refs_with(*evidence, names=None, parents=None):
+    refs = TurnRefs()
+    for kind, object_id, status in evidence:
+        refs.saw_status(status, kind, object_id)
+    for name, key in (names or {}).items():
+        refs.name(*key, name, parent=(parents or {}).get(key))
+    return refs
+
+
+def test_status_claims_hold_when_a_tool_returned_that_status():
+    finished = _refs_with(("t", "b1", "completed"))
+    assert claims.problem("这批已经评完了。", finished) is None
+    assert claims.problem("这个任务已取消。", finished) is not None
+    # 原样出现在工具结果里，也算工具返回过。
+    refs = TurnRefs()
+    refs.seen_text.append("提议重试一个任务里失败、已取消或中断的材料")
+    assert claims.problem("失败、已取消或中断的材料可以重试。", refs) is None
+    assert claims.category_of("completed_with_errors") == "finished"
+
+
+def test_a_requested_cancellation_is_not_a_completed_one():
+    assert claims.category_of("cancel_requested") == "canceling"
+    assert claims.problem("这个任务已取消。", _refs_with(("t", "b1", "cancel_requested"))) is not None
+    assert claims.problem("这个任务已取消。", _refs_with(("t", "b1", "canceled"))) is None
+
+
+def test_a_status_must_belong_to_the_object_the_reply_talks_about():
+    # 查过某一份“已评分”：不能据此说整批评完了（没点名就当作说的是任务）。
+    paper_only = _refs_with(("p", "p-1", "已评分"), names={"示例学生甲": ("p", "p-1")}, parents={("p", "p-1"): ("t", "b1")})
+    assert claims.problem("这批已经评完了。", paper_only) is not None
+    assert claims.problem("示例学生甲已经评完了。", paper_only) is None
+    # 点了名：看那个任务自己的状态，别的任务评完了不算。
+    two_tasks = _refs_with(("t", "b1", "completed"), names={"论文评分开发批次": ("t", "b1"), "课程报告评分": ("t", "b2")})
+    assert claims.problem("论文评分开发批次已经评完了。", two_tasks) is None
+    assert claims.problem("课程报告评分已经评完了。", two_tasks) is not None
+    # 材料可以借它所属任务的状态：任务评完了，其中每一份也评完了。
+    task_done = _refs_with(("t", "b1", "completed"), names={"示例学生乙": ("p", "p-2")}, parents={("p", "p-2"): ("t", "b1")})
+    assert claims.problem("示例学生乙已经评完了。", task_done) is None
+
+
+def test_a_fabricated_status_is_sent_back_for_one_fix(client, agent):
+    _seed_published_rubric(client)
+    model = agent(step(("task_list", {"limit": 5})), reply("好的，课程报告评分任务已经暂停。"),
+                  reply("我不能直接停下评分；要取消的话我可以提议，由你确认。"))
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "课程报告评分先别评了")
+    assert _texts(body)[-1] == "我不能直接停下评分；要取消的话我可以提议，由你确认。"
+    fix = json.loads(model.requests[-1]["messages"][-1]["content"])
+    assert "没有工具返回它说的那个" in fix["错误"]
+
+
+def test_claiming_to_have_done_a_write_twice_falls_back(client, agent):
+    agent(reply("我已经帮你取消了。"), reply("已为你取消评分。"))
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "课程报告评分先别评了")
+    assert "取消" not in _texts(body)[-1]
+    meta = _agent_messages(client, conversation_id)[-1].meta
+    assert meta["outcome"] == "fallback" and meta["reason"] == "reply_invalid"
+
+
+def test_the_compaction_summary_is_not_checked_for_claims():
+    summary = json.dumps({"text": "老师取消了课程报告评分，之后要求重试失败的材料。"}, ensure_ascii=False)
+    assert validate_reply(summary, TurnRefs(), allow_cards=False, check_claims=False).text
+    with pytest.raises(ReplyInvalid):
+        validate_reply(json.dumps({"text": "课程报告评分已经取消了。"}, ensure_ascii=False), TurnRefs())
+
+
+# --- 429 原地短重试（§13.2） --------------------------------------------------------------------
+
+def test_agent_steps_ask_for_one_short_rate_limit_retry(client, agent):
+    model = agent(reply("你好，我可以帮你查评分任务。"))
+    _say(client, _conversation(client), "你好")
+    options = model.requests[0]["options"]
+    assert options["rate_limit_retries"] == 1 and options["rate_limit_delay_seconds"] == 1.5
+
+
+def test_openai_compatible_tool_call_retries_a_429_once_after_a_short_wait(monkeypatch):
+    from backend.app.services.llm import transport
+
+    calls, slept = [], []
+    monkeypatch.setattr(transport.time, "sleep", slept.append)
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}})
+        return httpx.Response(200, json={"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "tool_calls": [{"id": "c1", "type": "function",
+                                                 "function": {"name": "reply", "arguments": "{\"text\": \"好\"}"}}]}}]})
+
+    def scorer(model_name):
+        return OpenAICompatibleChatScorer(
+            api_key="test-key", base_url="https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi",
+            model_name=model_name, client=httpx.Client(transport=httpx.MockTransport(handler)), thinking_type="disabled")
+
+    response = scorer("google/gemini-retry-test").complete_with_tools(
+        [{"role": "user", "content": "hi"}], agent_context.tools_array(), rate_limit_retries=1, rate_limit_delay_seconds=1.5)
+    assert response.tool_calls[0].name == "reply" and len(calls) == 2 and slept == [1.5]
+
+    calls.clear()
+    with pytest.raises(ProviderCallError):
+        scorer("google/gemini-no-retry-test").complete_with_tools([{"role": "user", "content": "hi"}],
+                                                                  agent_context.tools_array())
+    assert len(calls) == 1
+
+
+def test_an_unusable_model_answer_records_why(client, agent):
+    agent(ToolResponseError("empty_content"))
+    conversation_id = _conversation(client)
+    _say(client, conversation_id, "这批写得怎么样")
+    user = _agent_messages(client, conversation_id)[0]
+    assert user.meta["error_code"] == "output_empty_content"

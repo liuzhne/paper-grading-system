@@ -250,3 +250,43 @@ def test_paper_names_from_uploaded_documents_go_through_the_injection_filter(cli
     model = agent(step(("paper_result", {"ordinal": 1})), reply("好的。"))
     _say(client, conversation_id, "第一份")
     assert _last_tool_result(model)["paper"]["名称"] == "（名称疑似包含指令，未显示）"
+
+
+def test_actions_do_not_pick_a_task_for_the_teacher(client, agent):  # noqa: F811
+    _scored_task(client)
+    for name in ("action_retry_failed", "action_cancel"):
+        model = agent(step(("tool_search", {"query": "select:%s" % name})),
+                      step(("call_tool", {"name": name, "arguments_json": "{}"})),
+                      reply("是哪个任务？"))
+        body = _say(client, _conversation(client), "失败的帮我重试一下")  # 新对话：没有当前任务
+        result = _last_tool_result(model)
+        assert "需要先确定任务" in result and result["tasks"], name
+        assert _texts(body)[-1] == "是哪个任务？" and not _cards(body, "confirm_retry") and not _cards(body, "confirm_cancel")
+
+
+def test_review_list_without_a_task_looks_across_recent_tasks(client, agent):  # noqa: F811
+    _scored_task(client)  # Mock 评分：每份都需要复核
+    model = agent(step(("tool_search", {"query": "select:review_list"})),
+                  step(("call_tool", {"name": "review_list", "arguments_json": "{}"})),
+                  reply("有两份需要复核。", cards=["t1"]))
+    _say(client, _conversation(client), "哪些材料需要人工复核")
+    result = _last_tool_result(model)
+    assert len(result["需要复核的材料"]) == 2 and result["task"]["ref"] == "t1"
+
+    _scored_task(client)
+    model = agent(step(("tool_search", {"query": "select:review_list"})),
+                  step(("call_tool", {"name": "review_list", "arguments_json": "{}"})),
+                  reply("两个任务都有需要复核的，看哪一个？"))
+    _say(client, _conversation(client), "哪些材料需要人工复核")
+    listed = _last_tool_result(model)["有需要复核的任务"]
+    assert len(listed) == 2 and all(entry["需要复核的材料数"] == 2 for entry in listed)
+
+    with client.session_factory() as session:
+        for run in session.scalars(select(models.ScoringRun)):
+            run.need_manual_review = False
+        session.commit()
+    model = agent(step(("tool_search", {"query": "select:review_list"})),
+                  step(("call_tool", {"name": "review_list", "arguments_json": "{}"})),
+                  reply("最近的任务里没有需要复核的。"))
+    _say(client, _conversation(client), "哪些材料需要人工复核")
+    assert "没有需要人工复核" in _last_tool_result(model)["提示"]

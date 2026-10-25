@@ -1147,6 +1147,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-25 | 评分助手 A1 调优复审（CodeRabbit） | 429 排错改为“重试 1 次，失败才退回规则”；门槛失败的原因补上改评测集与只跑几条。 |
+| 2026-10-25 | 评分助手 A1 调优 | 改提示词的步骤（bump 版本、新增指纹、重跑评测）；部署门槛失败与回复被作废两条排错。 |
 | 2026-10-23 | 评测限流第二轮复审（CodeRabbit） | 评测说明补：费用含准备步骤，准备步骤被挡住时的处理。 |
 | 2026-10-23 | 评测限流复审（CodeRabbit） | 门槛改名并同时看跳过；作废轮次的标记方法（`obsolete`）与不标的后果。 |
 | 2026-10-23 | 评测限流 | 评测节奏（间隔 3 秒、限流重跑 2 次、等待上限 8 分钟）；新增排错：一大片 degraded 实为服务商限流，线上 `meta.error_code`。 |
@@ -2342,9 +2344,12 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   - 价目按模型查（`backend/app/eval/assistant_eval.py` 的 `MODEL_PRICES`），只认 Google 端点上登记过的模型。换模型跑评测，先核实价目、加一行再跑。
   - 节奏：条与条之间隔 3 秒（`--pace-seconds`）；一条被限流或熔断挡住，等熔断冷却加 5 秒（默认 35 秒）重跑这一条，最多 2 次（`--rate-limit-retries`）；限流的等待累计到 8 分钟就停，剩下的记为跳过。重跑后仍被挡住的条目在报告里列为“没测到”；额度用完（`quota_exhausted`）不重跑，同样列为没测到。有一条没测到、或者有因预算停下而跳过的条目，“每条都测到（没跳过，也没有被限流挡住）”这道门槛就不过。重跑的条目在报告里的 token 与费用是每次尝试的合计，也包括准备步骤（`setup`）；准备步骤被挡住时整条重跑，仍被挡住就记为没测到、原因“准备步骤被挡住”。
   - 排错：报告里一大片“没有走 Agent 回合（degraded）”、原因 `ProviderCallError` / `CircuitOpenError`——**报错指向模型出错，真正的原因多半是服务商限流**。看失败条目的结束方式是不是 `degrade（rate_limited）` 或 `degrade（PROVIDER_CIRCUIT_OPEN）`，或者在运行日志里找 `llm_call_failed … status=429 provider_type=RESOURCE_EXHAUSTED`。A1 第一轮就是这样：连发 11 次后 Vertex 返回 429，连续 5 次失败后熔断（`PROVIDER_CIRCUIT_FAILURE_THRESHOLD`），其后整轮都被熔断挡住。限流挡住的一轮不能当作 Agent 的成绩，报告照样提交（它是已花费用的账本），并标为作废：JSON 顶层加 `"obsolete": true` 与 `"obsolete_reason"`，Markdown 标题下加一段 `> **⚠️ 本轮作废…**` 引用块，`docs/评测报告/评分助手/README.md` 的“各轮说明”里写一行。报告脚本挑上一轮对比基线时跳过作废的轮次（`baseline`），合计已花费用时照算（`spent`）——**不标作废，下一轮的“与上一轮对比”就会拿这一轮当基线，看起来像进步了一大截**。
-  - 线上同样的现象：助手回复“助手模型暂时没有响应”，用户消息的 `meta.error_code` 是 `rate_limited` 或 `PROVIDER_CIRCUIT_OPEN`（实例日志 `assistant_agent_model_failed … code=rate_limited`）。Agent 回合每一步只试 1 次、不原地等 429，这一句退回规则模式，属于预期行为。
+  - 线上同样的现象：助手回复“助手模型暂时没有响应”，用户消息的 `meta.error_code` 是 `rate_limited` 或 `PROVIDER_CIRCUIT_OPEN`（实例日志 `assistant_agent_model_failed … code=rate_limited`）。Agent 回合每一步（原生工具调用）遇到 429 会等 1.5 秒重试 1 次（2026-10-25 起，`budget.RATE_LIMIT_RETRY_SECONDS`），不超过这一步的截止时间：重试成功，老师只是这一句慢约 1.5 秒，日志里先有一条 `llm_call_failed … status=429 … retry=yes`，随后是成功的调用；**重试也被 429 挡住、剩下的时间不够等、熔断器已打开（`PROVIDER_CIRCUIT_OPEN`）、或者是额度用完（`quota_exhausted`，不重试），这一句才退回规则模式**，属于预期行为。超时与 5xx 不重试。一大片 `PROVIDER_CIRCUIT_OPEN` 说明同一连接连续失败了 5 次（`PROVIDER_CIRCUIT_FAILURE_THRESHOLD`），要等冷却（`PROVIDER_CIRCUIT_COOLDOWN_SECONDS`）。
   - 排错：工作流以“实例返回 2”失败 = 预算拒绝，**或模型没有登记价目**（摘要写“没有登记这个模型的价目”；报错指向预算，真正的原因是平台模型不是 Gemini——A1 第一次估算时平台模型是 Bedrock 上的 Claude，旧脚本照样按 Gemini 价报了个数）；“返回 3” = 生产上没有生效的平台模型，或指定的连接找不到、没启用；“没有评测结果的标记” = SSH 或容器没起来，看上一步的输出。评测脚本跟随镜像：改了评测集或脚本，要先合并部署，实例上才是新版本。
 - 2026-10-22 A0（Agent 回合，开关默认关）：迁移 `0041_assistant_agent_state`（两个可空 JSON 列）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0041_assistant_agent_state`），再合并部署。开关不打开时对外行为不变，部署后照常核对助手页即可；回滚：两列都没有数据时才允许降级（开关一直关着就不会有数据）。生产打开开关：GitHub 仓库变量 `ASSISTANT_AGENT_ENABLED=true`（部署时由 `scripts/production_env.py` 写进实例的 `.env`，只收 true / false），A1 的真实模型评测达到上线门槛之前不要设。
+- 2026-10-25 A1 调优（提示词 `assistant-agent@3`，无迁移）：**改评分助手的提示词正文、tools 或任何工具的说明（purpose、when、参数说明）时**：bump `backend/app/services/assistant/agent/context.py` 的 `SYSTEM_VERSION`，在 `backend/app/tests/test_assistant_agent.py` 的 `PROMPT_FINGERPRINTS` 里新增一行（测试失败信息里给出新指纹），不要改已有行；合并部署后在新版本上重跑一轮评测并提交报告，才能打开开关。
+  - 排错：部署流水线停在 “Check the assistant eval gate”，日志写“还没有达标的评测”——**报错指向部署，真正的原因是仓库变量 `ASSISTANT_AGENT_ENABLED=true`，而镜像里这一版提示词还没有达标的评测**（改了提示词或工具说明、或者改了评测集，就会这样；只跑了几条 `max_items` 的一轮也不算）。在新版本上跑评测、提交达标的报告，或者把变量改回 `false` 再部署。
+  - 排错：助手回复变成兜底说法，消息 `meta.reason` 是 `reply_invalid`——多半是回复校验作废了模型的说法（说自己做了写动作、说出了确认卡片却没有、说出工具没返回过的状态，`agent/claims.py`）。模型有一次修正机会，修正提示写在下一次请求的最后一条工具消息里。
 
 验证（全部离线，Mock 模型）：
 

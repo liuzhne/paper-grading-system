@@ -128,12 +128,17 @@ def main(argv=None) -> int:
     if connection_id and not _UUID.fullmatch(connection_id):
         parser.error("connection-id 必须是连接编号（UUID）")
 
-    items = assistant_eval.load_items()
-    if args.max_items > 0:
-        items = items[: args.max_items]
+    all_items = assistant_eval.load_items()
+    items = all_items[: args.max_items] if args.max_items > 0 else all_items
+    from backend.app.services.assistant.agent.context import SYSTEM_VERSION
+    from backend.app.services.assistant.agent.context import prompt_fingerprint
+
     payload = {
         "schema": 1, "mode": args.mode, "phase": args.phase, "started_at": _now(), "commit": args.commit,
-        "eval_set": {"version": assistant_eval.eval_set_version(), "count": len(items)},
+        # count 是这一轮跑的条数，total 是评测集的全部条数：只跑了一部分的一轮不能当上线依据（§12.5）。
+        "eval_set": {"version": assistant_eval.eval_set_version(), "count": len(items), "total": len(all_items)},
+        # 上线门槛按指纹认（§12.5）：这一轮测的是哪一版提示词。
+        "prompt": {"version": SYSTEM_VERSION, "fingerprint": prompt_fingerprint()},
         "budget": {"round_usd": args.round_budget_usd, "total_usd": args.total_budget_usd,
                    "spent_before_usd": args.spent_usd, "confirmed_usd": args.confirm_usd},
     }

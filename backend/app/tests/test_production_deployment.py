@@ -525,3 +525,15 @@ def test_lightsail_deploy_job_renders_the_site_leads_switch():
     lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
 
     assert "SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}" in lightsail
+
+
+def test_lightsail_deploy_checks_the_assistant_eval_gate_only_when_the_agent_is_on():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
+    build = lightsail.index("- name: Build the application image")
+    gate = lightsail.index("- name: Check the assistant eval gate")
+    ship = lightsail.index("- name: Ship the image and deployment files")
+    assert build < gate < ship  # 用刚构建的镜像算指纹；不过就不往实例上送
+    step = lightsail[gate:ship]
+    assert "if: vars.ASSISTANT_AGENT_ENABLED == 'true'" in step
+    assert "python -m backend.app.scripts.assistant_eval_gate /reports" in step and "--network none" in step

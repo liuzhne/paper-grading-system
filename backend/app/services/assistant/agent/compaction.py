@@ -220,7 +220,7 @@ def _summarize(summarize, prefix_messages: list[dict]) -> str | None:
     if len(calls) != 1 or calls[0].name != "reply":
         return None
     try:
-        reply = validate_reply(calls[0].arguments, TurnRefs(), allow_cards=False)
+        reply = validate_reply(calls[0].arguments, TurnRefs(), allow_cards=False, check_claims=False)
     except ReplyInvalid:
         return None
     text = reply.text.strip()
