@@ -108,8 +108,7 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     if detect_injection(params.text):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
     if check_claims:
-        problem = claims.problem(params.text, statuses=refs.statuses, proposed=refs.proposed,
-                                 seen_text="\n".join(refs.seen_text))
+        problem = claims.problem(params.text, refs)
         if problem:
             raise ReplyInvalid(problem)
     if not allow_cards and (params.cards or params.next_steps or params.help_refs):

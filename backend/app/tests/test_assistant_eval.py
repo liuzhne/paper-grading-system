@@ -525,35 +525,55 @@ def test_a_setup_still_blocked_is_unmeasured_and_the_utterance_is_not_sent():
     assert assistant_eval.summarize(outcome["results"], skipped=0)["rate_limit"]["unmeasured"] == ["setup-agent"]
 
 
-def test_reports_record_the_prompt_version_and_the_gate_reads_it(monkeypatch, capsys, tmp_path):
-    from backend.app.scripts import assistant_eval_gate as gate
-    from backend.app.services.assistant.agent.context import SYSTEM_VERSION
-    from backend.app.services.assistant.agent.context import prompt_fingerprint
-
+def _rendered_run(monkeypatch, capsys, tmp_path, *extra):
     _platform(monkeypatch, _Runtime())
     monkeypatch.setattr("backend.app.services.llm.factory.get_llm_scorer", lambda runtime: RuleOfThumbModel())
     assert script.main(["--mode", "run", "--phase", "A1", "--spent-usd", "0", "--confirm-usd", "0.5",
-                        "--max-items", "2", "--pace-seconds", "0"]) == 0
+                        "--pace-seconds", "0", *extra]) == 0
     raw = tmp_path / "raw.txt"
     raw.write_text(capsys.readouterr().out, encoding="utf-8")
     reports = tmp_path / "reports"
     assert _report_module().main(["render", str(raw), "--previous-dir", str(reports), "--out", str(reports)]) == 0
     capsys.readouterr()
     (written,) = sorted(reports.glob("*.json"))
-    data = json.loads(written.read_text(encoding="utf-8"))
+    return reports, written, json.loads(written.read_text(encoding="utf-8"))
+
+
+def test_reports_record_the_prompt_version_and_the_gate_reads_it(monkeypatch, capsys, tmp_path):
+    from backend.app.scripts import assistant_eval_gate as gate
+    from backend.app.services.assistant.agent.context import SYSTEM_VERSION
+    from backend.app.services.assistant.agent.context import prompt_fingerprint
+
+    reports, written, data = _rendered_run(monkeypatch, capsys, tmp_path)
+    total = len(assistant_eval.load_items())
     assert data["prompt"] == {"version": SYSTEM_VERSION, "fingerprint": prompt_fingerprint()}
+    assert data["eval_set"] == {"version": assistant_eval.eval_set_version(), "count": total, "total": total}
     assert "指纹 `%s`" % prompt_fingerprint() in written.with_suffix(".md").read_text(encoding="utf-8")
 
-    # 两条都过，门槛全过：这一轮能放行。
+    # 跑满评测集、门槛全过：这一轮能放行。
     assert all(data["summary"]["gates"].values())
-    assert gate.passing_reports(reports, prompt_fingerprint()) == [written.name]
+    current = {"eval_version": assistant_eval.eval_set_version(), "eval_count": total}
+    assert gate.passing_reports(reports, prompt_fingerprint(), **current) == [written.name]
     assert gate.main([str(reports)]) == 0
-    # 别的指纹、作废、有门槛没过：都不算。
-    assert gate.passing_reports(reports, "0000000000000000") == []
-    for change in ({"obsolete": True}, {"summary": {**data["summary"], "gates": {**data["summary"]["gates"], "违规 0 次": False}}}):
+    # 别的指纹、别的评测集版本：都不算。
+    assert gate.passing_reports(reports, "0000000000000000", **current) == []
+    assert gate.passing_reports(reports, prompt_fingerprint(), eval_version="000000000000", eval_count=total) == []
+    # 作废、有门槛没过、有跳过：都不算。
+    summary = data["summary"]
+    for change in ({"obsolete": True}, {"summary": {**summary, "gates": {**summary["gates"], "违规 0 次": False}}},
+                   {"summary": {**summary, "skipped": 1}}):
         written.write_text(json.dumps({**data, **change}, ensure_ascii=False), encoding="utf-8")
         assert gate.main([str(reports)]) == 1
     assert "还没有达标的评测" in capsys.readouterr().err
+
+
+def test_a_partial_run_does_not_open_the_gate_even_when_its_gates_pass(monkeypatch, capsys, tmp_path):
+    from backend.app.scripts import assistant_eval_gate as gate
+
+    reports, _written, data = _rendered_run(monkeypatch, capsys, tmp_path, "--max-items", "2")
+    assert data["eval_set"]["count"] == 2 and data["eval_set"]["total"] == len(assistant_eval.load_items())
+    assert all(data["summary"]["gates"].values())  # 两条都过、没跳过、没被限流挡住……
+    assert gate.main([str(reports)]) == 1  # ……但只测了两条，不能当上线依据
 
 
 def test_a_reply_claiming_a_write_is_a_violation_in_the_eval():

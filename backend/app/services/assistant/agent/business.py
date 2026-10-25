@@ -76,6 +76,8 @@ def _has_task(turn: TurnContext, task_ref: str | None) -> bool:
 
 def _task_choices(turn: TurnContext) -> list[dict]:
     batches = tools.call(turn.run, "list_recent_batches", limit=SEARCH_TASKS)
+    for batch in batches:
+        turn.refs.name("t", batch["id"], batch["name"])
     return [{"ref": turn.refs.add("t", batch["id"], card=_overview_card(batch["id"])), "name": batch["name"]}
             for batch in batches]
 
@@ -83,6 +85,7 @@ def _task_choices(turn: TurnContext) -> list[dict]:
 def _task(turn: TurnContext, task_ref: str | None) -> tuple[str, dict]:
     batch_id = _task_id(turn, task_ref)
     summary = tools.call(turn.run, "batch_summary", batch_id=batch_id)
+    turn.refs.name("t", batch_id, summary["batch_name"])
     if (turn.run.conversation.focus or {}).get("batch_id") != batch_id:
         # 换了任务：旧任务里的材料不再是“当前材料”。
         turn.run.set_focus(batch_id=batch_id, batch_name=summary["batch_name"], paper_id=None, job_id=None)
@@ -113,8 +116,10 @@ def _safe_name(paper: dict, profile: str) -> str:
 
 def _paper_entry(turn: TurnContext, batch_id: str, paper: dict, ordinal: int, profile: str) -> dict:
     card = _paper_card(batch_id, paper) if paper.get("latest_run_id") else None
+    name = _safe_name(paper, profile)
+    turn.refs.name("p", paper["paper_id"], name, parent=("t", batch_id))
     return {"ref": turn.refs.add("p", paper["paper_id"], card=card), "序号": ordinal,
-            "名称": _safe_name(paper, profile), "状态": _paper_status(paper)}
+            "名称": name, "状态": _paper_status(paper)}
 
 
 def _paper_status(paper: dict) -> str:
@@ -191,6 +196,8 @@ class TaskListParams(BaseModel):
 
 def _task_list(turn: TurnContext, params: TaskListParams) -> dict:
     batches = tools.call(turn.run, "list_recent_batches", limit=params.limit)
+    for batch in batches:
+        turn.refs.name("t", batch["id"], batch["name"])
     return {
         "tasks": [{"ref": turn.refs.add("t", batch["id"], card=_overview_card(batch["id"])), "name": batch["name"]}
                   for batch in batches],
@@ -232,7 +239,7 @@ def _task_overview(turn: TurnContext, params: TaskParams) -> dict:
     else:
         result["评分"] = {"状态": job["status"], "已完成": _finished(job), "总数": job["total_items"],
                         "失败": job["failed_count"]}
-        turn.refs.saw_status(job["status"])
+        turn.refs.saw_status(job["status"], "t", batch_id)
     rates: dict[str, list[float]] = defaultdict(list)
     order: dict[str, int] = {}
     for item, name, display_order in _items(turn.run.db, [paper["latest_run_id"] for paper in scored]):
@@ -346,7 +353,7 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
         return result
     ordinal = papers.index(match) + 1
     entry = _paper_entry(turn, batch_id, match, ordinal, profile)
-    turn.refs.saw_status(entry["状态"])  # 只登记这一份：列表里别的材料的状态不代表任务的状态
+    turn.refs.saw_status(entry["状态"], "p", match["paper_id"])  # 这一份的状态，不代表整个任务
     turn.run.set_focus(paper_id=match["paper_id"])
     turn.run.show_workspace("/batches/%s/grade?paper=%s" % (batch_id, match["paper_id"]))
     if not match.get("latest_run_id"):
@@ -392,6 +399,7 @@ def _review_across_tasks(turn: TurnContext) -> dict | str:
     found = []
     for batch in tools.call(turn.run, "list_recent_batches", limit=SEARCH_TASKS):
         summary = tools.call(turn.run, "batch_summary", batch_id=batch["id"])
+        turn.refs.name("t", batch["id"], summary["batch_name"])
         count = sum(1 for paper in summary["papers"] if paper.get("latest_need_manual_review"))
         if count:
             found.append((batch["id"], summary["batch_name"], count))
@@ -546,7 +554,7 @@ def _action_retry_failed(turn: TurnContext, params: TaskParams) -> dict:
     batch_id, _summary = _task(turn, params.task_ref)
     job = _job(turn, batch_id)
     if job is not None:
-        turn.refs.saw_status(job["status"])
+        turn.refs.saw_status(job["status"], "t", batch_id)
     retryable = job is not None and job["status"] in {"completed_with_errors", "failed", "canceled"} and any(
         item["status"] in RETRYABLE_ITEM_STATUSES for item in job["items"])
     if not retryable:
@@ -577,7 +585,7 @@ def _action_cancel(turn: TurnContext, params: TaskParams) -> dict:
     batch_id, _summary = _task(turn, params.task_ref)
     job = _job(turn, batch_id)
     if job is not None:
-        turn.refs.saw_status(job["status"])
+        turn.refs.saw_status(job["status"], "t", batch_id)
     if job is None or job["status"] not in ACTIVE_JOB_STATUSES:
         return {"提示": "这个任务当前没有进行中的评分。"}
     return {"proposal": {

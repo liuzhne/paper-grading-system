@@ -551,16 +551,19 @@ def test_the_prompt_names_only_tools_that_exist_and_says_how_to_load_deferred_on
 @pytest.mark.parametrize(("text", "kind"), [
     ("我已经帮你取消了评分。", "done"),
     ("已为你重试失败的材料。", "done"),
+    ("已为您取消了评分。", "done"),
+    ("我帮您把它停掉了。", "done"),
     ("我帮你把它停掉了。", "done"),
     ("好的，课程报告评分任务已经暂停。", "status"),
     ("这批已经评完了。", "status"),
     ("已经为你准备好确认卡片，请确认。", "card"),
     ("请点“确认”就会开始。", "card"),
+    ("请您点击“确认”。", "card"),
 ])
 def test_claims_that_cannot_hold_are_rejected(text, kind):
-    found = claims.problem(text, statuses=set(), proposed=set())
+    found = claims.problem(text, TurnRefs())
     assert found is not None
-    assert {"done": "不能自己执行改动", "status": "没有工具返回这个状态", "card": "没有出确认卡片"}[kind] in found
+    assert {"done": "不能自己执行改动", "status": "没有工具返回它说的那个", "card": "没有出确认卡片"}[kind] in found
 
 
 @pytest.mark.parametrize("text", [
@@ -570,16 +573,47 @@ def test_claims_that_cannot_hold_are_rejected(text, kind):
     "要开始评分，说“开始评分”或点附件按钮。",
 ])
 def test_offers_questions_and_plain_answers_are_not_claims(text):
-    assert claims.problem(text, statuses=set(), proposed=set()) is None
+    assert claims.problem(text, TurnRefs()) is None
+
+
+def _refs_with(*evidence, names=None, parents=None):
+    refs = TurnRefs()
+    for kind, object_id, status in evidence:
+        refs.saw_status(status, kind, object_id)
+    for name, key in (names or {}).items():
+        refs.name(*key, name, parent=(parents or {}).get(key))
+    return refs
 
 
 def test_status_claims_hold_when_a_tool_returned_that_status():
-    assert claims.problem("这批已经评完了。", statuses={"finished"}, proposed=set()) is None
-    assert claims.problem("这个任务已取消。", statuses={"finished"}, proposed=set()) is not None
+    finished = _refs_with(("t", "b1", "completed"))
+    assert claims.problem("这批已经评完了。", finished) is None
+    assert claims.problem("这个任务已取消。", finished) is not None
     # 原样出现在工具结果里，也算工具返回过。
-    assert claims.problem("失败、已取消或中断的材料可以重试。", statuses=set(), proposed=set(),
-                          seen_text="提议重试一个任务里失败、已取消或中断的材料") is None
-    assert claims.category_of("cancel_requested") == "canceled" and claims.category_of("completed_with_errors") == "finished"
+    refs = TurnRefs()
+    refs.seen_text.append("提议重试一个任务里失败、已取消或中断的材料")
+    assert claims.problem("失败、已取消或中断的材料可以重试。", refs) is None
+    assert claims.category_of("completed_with_errors") == "finished"
+
+
+def test_a_requested_cancellation_is_not_a_completed_one():
+    assert claims.category_of("cancel_requested") == "canceling"
+    assert claims.problem("这个任务已取消。", _refs_with(("t", "b1", "cancel_requested"))) is not None
+    assert claims.problem("这个任务已取消。", _refs_with(("t", "b1", "canceled"))) is None
+
+
+def test_a_status_must_belong_to_the_object_the_reply_talks_about():
+    # 查过某一份“已评分”：不能据此说整批评完了（没点名就当作说的是任务）。
+    paper_only = _refs_with(("p", "p-1", "已评分"), names={"示例学生甲": ("p", "p-1")}, parents={("p", "p-1"): ("t", "b1")})
+    assert claims.problem("这批已经评完了。", paper_only) is not None
+    assert claims.problem("示例学生甲已经评完了。", paper_only) is None
+    # 点了名：看那个任务自己的状态，别的任务评完了不算。
+    two_tasks = _refs_with(("t", "b1", "completed"), names={"论文评分开发批次": ("t", "b1"), "课程报告评分": ("t", "b2")})
+    assert claims.problem("论文评分开发批次已经评完了。", two_tasks) is None
+    assert claims.problem("课程报告评分已经评完了。", two_tasks) is not None
+    # 材料可以借它所属任务的状态：任务评完了，其中每一份也评完了。
+    task_done = _refs_with(("t", "b1", "completed"), names={"示例学生乙": ("p", "p-2")}, parents={("p", "p-2"): ("t", "b1")})
+    assert claims.problem("示例学生乙已经评完了。", task_done) is None
 
 
 def test_a_fabricated_status_is_sent_back_for_one_fix(client, agent):
@@ -590,7 +624,7 @@ def test_a_fabricated_status_is_sent_back_for_one_fix(client, agent):
     body = _say(client, conversation_id, "课程报告评分先别评了")
     assert _texts(body)[-1] == "我不能直接停下评分；要取消的话我可以提议，由你确认。"
     fix = json.loads(model.requests[-1]["messages"][-1]["content"])
-    assert "没有工具返回这个状态" in fix["错误"]
+    assert "没有工具返回它说的那个" in fix["错误"]
 
 
 def test_claiming_to_have_done_a_write_twice_falls_back(client, agent):
