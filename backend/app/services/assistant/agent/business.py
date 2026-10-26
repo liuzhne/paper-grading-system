@@ -34,9 +34,10 @@ from backend.app.services.assistant.views import document_type_label
 from backend.app.services.assistant.views import paper_label
 from backend.app.services.assistant.views import papers_in_upload_order
 from backend.app.services.assistant.views import resolve_paper
-from backend.app.services.assistant.agent.reply import without_scores
 from backend.app.services.scoring.core.evidence import detect_injection
+from backend.app.services.scoring.suggestions import INJECTION_PLACEHOLDER
 from backend.app.services.scoring.suggestions import revision_suggestion
+from backend.app.services.scoring.suggestions import without_scores
 
 LIST_LIMIT = 10
 ACTIVE_JOB_STATUSES = {"queued", "running", "cancel_requested"}
@@ -154,27 +155,37 @@ REASON_LIMIT = 80
 ADVICE_LIMIT = 120
 
 
-def _safe_text(text, limit: int) -> str:
-    """评分侧写的文字：源自学生文档，过注入检测；去掉分数句；截断。"""
-
-    text = without_scores(str(text or "").strip())
-    if not text:
-        return ""
-    if detect_injection(text):
-        return "（该条疑似包含指令，未显示）"
+def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _safe_text(text, limit: int) -> str:
+    """评分侧写的文字：源自学生文档，过注入检测；去掉分数句；截断。"""
+
+    text = str(text or "").strip()
+    if detect_injection(text):
+        return INJECTION_PLACEHOLDER
+    return _clip(without_scores(text), limit)
+
+
+#: 没有评出有效结果的评分项（与评分页“不能直接改分”的判断一致）：不是“失了分”，不能据此说怎么改。
+UNRESOLVED_STATUSES = {"invalid", "blocked"}
+
+
+def _unresolved(item: ScoreItem) -> bool:
+    return item.auto_score_status in UNRESOLVED_STATUSES or (item.final_score is None and item.ai_score is None)
+
+
 def _improvement(item: ScoreItem) -> dict:
-    """失了分的评分项：评分理由，与评分模型写过的修改建议（系统说明不算，§31.3）。"""
+    """失了分的评分项：评分理由，与评分模型写过的修改建议（系统说明、分数句、注入已由共用判断处理，§31.3）。"""
 
     found = {}
     reason = _safe_text(item.reason, REASON_LIMIT)
     if reason:
         found["评分理由"] = reason
-    advice = _safe_text(revision_suggestion(item.suggestion, item.auto_score_status), ADVICE_LIMIT)
+    advice = revision_suggestion(item.suggestion, item.auto_score_status)
     if advice:
-        found["修改建议"] = advice
+        found["修改建议"] = _clip(advice, ADVICE_LIMIT)
     return found
 
 
@@ -292,6 +303,8 @@ def _task_overview(turn: TurnContext, params: TaskParams) -> dict:
     rates: dict[str, list[float]] = defaultdict(list)
     order: dict[str, int] = {}
     for item, name, display_order in _items(turn.run.db, [paper["latest_run_id"] for paper in scored]):
+        if _unresolved(item):
+            continue  # 没评出结果不算失分，不进“失分从多到少”的排名（#60 复审）
         rates[name].append(_loss_rate(item))
         order[name] = display_order or 0
     if rates:
@@ -408,7 +421,9 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
     turn.run.show_workspace("/batches/%s/grade?paper=%s" % (batch_id, match["paper_id"]))
     if not match.get("latest_run_id"):
         return {"paper": entry}
-    rows = sorted(_items(turn.run.db, [match["latest_run_id"]]), key=lambda row: (-_loss_rate(row[0]), row[2] or 0))
+    # 没评出结果的项排在最后：它们不是“失分最多”的。
+    rows = sorted(_items(turn.run.db, [match["latest_run_id"]]),
+                  key=lambda row: (_unresolved(row[0]), -_loss_rate(row[0]), row[2] or 0))
     items = []
     for item, name, _order in rows:
         reasons = []
@@ -416,6 +431,14 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
             reason = str((deduction or {}).get("reason") or "").strip()[:80] if isinstance(deduction, dict) else ""
             if reason:
                 reasons.append("（该条疑似包含指令，未显示）" if detect_injection(reason) else reason)
+        if _unresolved(item):
+            # 没评出结果：不是失了分（#60 复审），不给评分理由与修改建议，说明状态，让老师去重试。
+            items.append({
+                "ref": turn.refs.add("i", item.id), "评分项": name, "满分": False,
+                "评分状态": "没有评出有效结果，不能据此说怎么改；可到评分进度页重试失败项",
+                "需要复核": bool(item.need_manual_review), "扣分理由": [], "证据条数": len(item.evidence or []),
+            })
+            continue
         lost = _loss_rate(item) > 0
         items.append({
             "ref": turn.refs.add("i", item.id), "评分项": name, "满分": not lost,
@@ -424,7 +447,8 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
         })
     return {"paper": entry, "评分项": items,
             "说明": "按失分从多到少排列，不给分数数字；要展示分数与证据，把 paper.ref 放进 reply 的 cards。"
-                    "老师问怎么改时，按评分项把扣分理由、评分理由（有修改建议就一并用）转成怎么改，不编造理由里没有的内容。"}
+                    "老师问怎么改时，按评分项把扣分理由、评分理由（有修改建议就一并用）转成怎么改，不编造理由里没有的内容；"
+                    "带“评分状态”的项没有评出结果，不给修改建议。"}
 
 
 register(AgentTool(

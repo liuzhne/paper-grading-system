@@ -251,8 +251,23 @@ def _send(db, conversation, text: str) -> dict:
 
 # --- 逐条判定 -----------------------------------------------------------------------
 
-#: 回复里有数量：数字，或“两份”“三篇”这样的中文数词。
-_NUMBER = re.compile(r"\d|[一二两三四五六七八九十]\s*[份篇个项]")
+#: “怎么改”的动作词：一句话里既点到评分项、又有动作，才算给了修改建议（只说“研究方法失分了”不算，#60 复审）。
+#: 不收“规范”“论证”：它们是评分项名（写作规范、论证与分析）的一部分。
+_ADVICE_VERBS = re.compile(r"补充|增加|完善|加强|说明|明确|调整|修改|梳理|精简|删去|删除|提供|充实|改写|重写|细化|突出|阐述|核对|统一")
+_CLAUSE = re.compile(r"[^。！？!?；;\n*]+")
+_CHINESE_DIGITS = {0: "零", 1: "一", 2: "两|二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十"}
+
+
+def _gives_advice(text: str, names: list[str]) -> bool:
+    return any(any(name in clause for name in names) and _ADVICE_VERBS.search(clause) for clause in _CLAUSE.findall(text))
+
+
+def _says_count(text: str, value: int, units: list[str]) -> bool:
+    """回复里说了这个数量：阿拉伯数字或中文数词后面跟单位；“第 3 篇”这样的序数不算。"""
+
+    number = str(value) if value not in _CHINESE_DIGITS else "%d|%s" % (value, _CHINESE_DIGITS[value])
+    pattern = r"(?<![第\d.])(?<!第\s)(?:%s)\s*(?:%s)" % (number, "|".join(re.escape(unit) for unit in units))
+    return re.search(pattern, text) is not None
 #: 反问老师“是哪个”“是这个吗”（A1.1：只有一个候选、或问的是数量时不该反问）。
 _ASKS_BACK = re.compile(r"是想问|您是想|你是想|是这个.{0,8}吗|哪个任务|哪一个任务|哪一份|哪个批次")
 
@@ -294,8 +309,11 @@ def judge(item: dict, observed: dict) -> list[str]:
     text = observed.get("reply_text") or ""
     if expect.get("reply_mentions_any") and not any(word in text for word in expect["reply_mentions_any"]):
         reasons.append("回复没有点到这些里的任何一个：%s" % "、".join(expect["reply_mentions_any"]))
-    if expect.get("reply_has_number") and not _NUMBER.search(text):
-        reasons.append("回复里没有给出数量")
+    if expect.get("reply_advises_on") and not _gives_advice(text, expect["reply_advises_on"]):
+        reasons.append("回复没有针对评分项说怎么改（要在同一句里点到评分项并给出动作）")
+    count = expect.get("reply_count")
+    if count and not _says_count(text, int(count["value"]), list(count["units"])):
+        reasons.append("回复里没有给出正确的数量（%s %s）" % (count["value"], "/".join(count["units"])))
     if expect.get("reply_not_asks") and _ASKS_BACK.search(text):
         reasons.append("该直接回答，却反问了老师")
     reasons.extend(observed["violations"])

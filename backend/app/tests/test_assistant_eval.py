@@ -37,8 +37,8 @@ def _report_module():
 
 
 KNOWN_EXPECT = {"tools_all", "tools_any", "tools_none", "search", "cards_any", "outcome", "pending_unchanged",
-                "pending_after", "help_refs", "help_refs_none", "reply_mentions_any", "reply_has_number",
-                "reply_not_asks"}
+                "pending_after", "help_refs", "help_refs_none", "reply_mentions_any", "reply_advises_on",
+                "reply_count", "reply_not_asks"}
 
 
 class RuleOfThumbModel:
@@ -86,7 +86,7 @@ class RuleOfThumbModel:
                 current = "当前材料：p0" in messages[state]["content"]
                 return step(("paper_result", {"name": name} if name else {"paper_ref": "p0"} if current else {"ordinal": 2}))
             lost = [entry for result in results for entry in result.get("评分项", []) if not entry["满分"]]
-            return reply("可以先改%s：%s" % (lost[0]["评分项"], lost[0].get("修改建议") or "把论述写充分。") if lost
+            return reply("可以先改%s：%s" % (lost[0]["评分项"], lost[0].get("修改建议") or "补充论述与依据。") if lost
                          else "这一份没有失分的评分项。")
         if any(word in said for word in ("几篇", "多少份")):  # 不认“几份”：“能传几份”“哪几份”是别的问题
             if "tasks" not in got:
@@ -626,10 +626,12 @@ def test_the_gate_needs_a_passing_report_for_every_evaluated_model(monkeypatch, 
 def test_judge_flags_the_a1_1_misses():
     observed = {"mode": "agent", "outcome": "reply", "tools_called": ["help_lookup"], "searches": 0, "card_types": [],
                 "pending_before": None, "pending_after": None, "violations": [], "help_refs": ["score.edit"],
-                "reply_text": "您是想问哪个任务的评分进度？"}
-    reasons = assistant_eval.judge({"expect": {"help_refs_none": ["score.edit"], "reply_mentions_any": ["文献综述"],
-                                               "reply_has_number": True, "reply_not_asks": True}}, observed)
-    assert len(reasons) == 4
-    good = {**observed, "help_refs": [], "reply_text": "一共 2 份，文献综述两份都要补充。"}
-    assert assistant_eval.judge({"expect": {"help_refs_none": ["score.edit"], "reply_mentions_any": ["文献综述"],
-                                            "reply_has_number": True, "reply_not_asks": True}}, good) == []
+                "reply_text": "您是想问哪个任务的评分进度？研究方法失分了。第 2 篇还没评。"}
+    expect = {"help_refs_none": ["score.edit"], "reply_advises_on": ["研究方法", "文献综述"],
+              "reply_count": {"value": 2, "units": ["篇", "份"]}, "reply_not_asks": True}
+    # 只说“研究方法失分了”不算修改建议；“第 2 篇”是序数，不是数量。
+    assert len(assistant_eval.judge({"expect": expect}, observed)) == 4
+    good = {**observed, "help_refs": [], "reply_text": "一共评了两篇。研究方法：补充研究步骤与依据。"}
+    assert assistant_eval.judge({"expect": expect}, good) == []
+    assert assistant_eval.judge({"expect": {"reply_count": {"value": 1, "units": ["份"]}}},
+                                {**good, "reply_text": "一共有 1 份需要复核。"}) == []

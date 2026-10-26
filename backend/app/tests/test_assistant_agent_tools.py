@@ -465,3 +465,34 @@ def test_overview_without_a_task_does_not_hint_at_other_tasks_when_there_is_only
     model = agent(step(("task_overview", {})), reply("评完了。"))
     _say(client, _conversation(client), "评得怎么样")
     assert "不对的话先用 task_list" in _last_tool_result(model)["说明"]
+
+
+
+def test_an_item_without_a_valid_result_gets_no_revision_advice(client, agent):  # noqa: F811
+    # 无效、阻断的项 ai_score 为空，不能当成“失了全分”：不给评分理由与修改建议，也不进失分排名（#60 复审）。
+    conversation_id, batch_id = _scored_task(client)
+    ids = _second_paper_items(client, batch_id)
+    with client.session_factory() as session:
+        run_ids = {session.get(models.ScoreItem, ids[0]).scoring_run_id}
+        for item in session.scalars(select(models.ScoreItem).join(models.ScoringRun)
+                                    .join(models.Paper).where(models.Paper.batch_id == batch_id)):
+            item.auto_score_status, item.ai_score, item.final_score = "calculated", float(item.max_score), float(item.max_score)
+        broken, halved = session.get(models.ScoreItem, ids[0]), session.get(models.ScoreItem, ids[1])
+        broken.auto_score_status, broken.ai_score, broken.final_score = "invalid", None, None
+        broken.reason, broken.suggestion = "模型输出不合格。", "补充研究方法的说明。"
+        halved.final_score = float(halved.max_score) / 2
+        session.commit()
+        broken_name = session.get(models.RubricCriterion, broken.criterion_id).name
+        halved_name = session.get(models.RubricCriterion, halved.criterion_id).name
+        assert run_ids == {halved.scoring_run_id}
+    model = agent(step(("paper_result", {"ordinal": 2})), reply("有一项没有评出结果。"))
+    _say(client, conversation_id, "第二份怎么改")
+    entries = _last_tool_result(model)["评分项"]
+    (unresolved,) = [entry for entry in entries if "评分状态" in entry]
+    assert unresolved["评分项"] == broken_name and "评分理由" not in unresolved and "修改建议" not in unresolved
+    assert entries[0]["评分项"] == halved_name and entries[-1]["评分项"] == broken_name  # 真失分的在前，没评出的在最后
+
+    model = agent(step(("task_overview", {})), reply("概况如下。"))
+    _say(client, conversation_id, "整体怎么样")
+    # 修复前，没评出结果的项按“失了全分”排第一；现在排第一的是真失了分的那一项。
+    assert _last_tool_result(model)["失分从多到少的评分项"][0] == halved_name

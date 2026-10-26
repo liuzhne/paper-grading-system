@@ -7,6 +7,19 @@
 
 from __future__ import annotations
 
+import re
+
+from backend.app.services.scoring.core.evidence import detect_injection
+
+#: 分数样式：“2 分”“3.5 points”“满分”“总分 78”“得了 80”“得分 6”“分数是 7”。“2 分钟”不算。
+#: 评分助手的回复校验也用这一份（agent/reply.py），两处对“带分数”的判断一致。
+SCORE_PATTERN = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:分(?!钟)|points?\b|pts?\b)|满分|总分\s*\d|得了\s*\d|得分\s*\d|分数(?:是|为)\s*\d",
+    re.IGNORECASE,
+)
+SENTENCE_PATTERN = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?|\n")
+INJECTION_PLACEHOLDER = "（该条疑似包含指令，未显示）"
+
 #: 系统写进 suggestion 的固定说明（与 scoring/engine.py、checkers/findings_checker.py 里的文案对应）。
 SYSTEM_SUGGESTION_MARKERS = (
     "请人工重点复核，并检查 LLM API",  # 真实模型调用失败、降级为 Mock：前面那段也是 Mock 写的
@@ -19,15 +32,29 @@ SYSTEM_SUGGESTION_MARKERS = (
 _SCORED = {None, "", "calculated"}
 
 
+def without_scores(text) -> str:
+    """去掉含分数样式的句子。"""
+
+    return "".join(piece for piece in SENTENCE_PATTERN.findall(str(text or ""))
+                   if piece == "\n" or not SCORE_PATTERN.search(piece)).strip()
+
+
 def revision_suggestion(suggestion, auto_score_status=None) -> str | None:
-    """评分模型针对内容写的修改建议；系统说明、没评出结果的项返回 None。"""
+    """评分模型针对内容写的修改建议；系统说明、没评出结果的项返回 None。
 
-    text = str(suggestion or "").strip()
-    if not text or auto_score_status not in _SCORED:
+    评分页、运行导出与评分助手看到的是同一份：带分数的句子去掉（修改建议不谈分数），疑似注入的整条
+    换成占位说明（源自学生文档）。长度不在这里截：评分页显示全文，助手自己限长（§31.3）。
+    """
+
+    raw = str(suggestion or "").strip()
+    if not raw or auto_score_status not in _SCORED:
         return None
-    if any(marker in text for marker in SYSTEM_SUGGESTION_MARKERS):
+    if any(marker in raw for marker in SYSTEM_SUGGESTION_MARKERS):
         return None
-    return text
+    if detect_injection(raw):
+        return INJECTION_PLACEHOLDER
+    return without_scores(raw) or None
 
 
-__all__ = ["SYSTEM_SUGGESTION_MARKERS", "revision_suggestion"]
+__all__ = ["INJECTION_PLACEHOLDER", "SCORE_PATTERN", "SENTENCE_PATTERN", "SYSTEM_SUGGESTION_MARKERS",
+           "revision_suggestion", "without_scores"]
