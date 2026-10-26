@@ -531,6 +531,7 @@ PROMPT_FINGERPRINTS = {
     "assistant-agent@3": "b3214e16711c1dd5",
     "assistant-agent@4": "73d487a9aecd82e2",
     "assistant-agent@5": "395a83d8d2f1856e",
+    "assistant-agent@6": "0a800263cf46a736",
 }
 
 
@@ -841,3 +842,42 @@ def test_a_model_without_a_passing_eval_stays_in_rules_mode(client, monkeypatch)
     body = _say(client, conversation_id, "开始评分")
     assert model.requests == [] and body["pending"]["kind"] == "pick_files"  # 规则模式照常
     assert not any((message.meta or {}).get("mode") == "agent" for message in _agent_messages(client, conversation_id))
+
+
+# --- A1.1：帮助条目相关度、回复校验收窄（§31.3） -----------------------------------------------------
+
+def test_revision_advice_is_not_matched_to_the_score_edit_help():
+    from backend.app.services.assistant.agent import help as help_entries
+
+    assert [entry.key for entry in help_entries.lookup("修改建议")][:1] == ["paper.suggestion"]
+    assert "score.edit" not in [entry.key for entry in help_entries.lookup("修改建议")]
+    assert help_entries.lookup("修")  == []  # 只有单个字重合不算命中
+    assert help_entries.lookup("在哪改分")[0].key == "score.edit"
+    assert help_entries.lookup("模板怎么上传")[0].key == "rubric.import"
+
+
+@pytest.mark.parametrize(("text", "kept"), [
+    ("建议把研究方法一节改为分步骤说明。", True),
+    ("建议补充近五年的文献。", True),
+    ("文献综述改为 8 分。", False),
+    ("建议给 3 分。", False),
+    ("可以加 2 分。", False),
+])
+def test_revision_advice_survives_but_score_suggestions_are_dropped(text, kept):
+    found = validate_reply(json.dumps({"text": "这一份可以这样改。" + text}, ensure_ascii=False), TurnRefs())
+    assert (text in found.text) is kept
+
+
+def test_the_score_item_api_exposes_only_real_revision_suggestions():
+    import datetime
+
+    from backend.app.schemas.scoring import ScoreItemRead
+    from backend.app.services.scoring.suggestions import SYSTEM_SUGGESTION_MARKERS
+
+    base = dict(id="1", scoring_run_id="r", criterion_id="c", max_score=10, evidence_sufficient=True, reason="x",
+                deductions=[], evidence=[], need_manual_review=False, created_at=datetime.datetime.now())
+    assert ScoreItemRead(**base, suggestion="补充研究方法的说明").revision_suggestion == "补充研究方法的说明"
+    for marker in SYSTEM_SUGGESTION_MARKERS:
+        assert ScoreItemRead(**base, suggestion="前面的话。%s……" % marker).revision_suggestion is None
+    assert ScoreItemRead(**base, suggestion="补充", auto_score_status="invalid").revision_suggestion is None
+    assert ScoreItemRead(**base, suggestion="  ").revision_suggestion is None

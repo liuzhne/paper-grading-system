@@ -37,7 +37,8 @@ def _report_module():
 
 
 KNOWN_EXPECT = {"tools_all", "tools_any", "tools_none", "search", "cards_any", "outcome", "pending_unchanged",
-                "pending_after", "help_refs"}
+                "pending_after", "help_refs", "help_refs_none", "reply_mentions_any", "reply_has_number",
+                "reply_not_asks"}
 
 
 class RuleOfThumbModel:
@@ -78,6 +79,20 @@ class RuleOfThumbModel:
                 return step((name, {"task_ref": task["ref"]} if task else {}))
             return reply("现在不需要这么做。")
 
+        # A1.1：问怎么改 → paper_result，按评分项把扣分理由转成怎么改；问数量 → task_list 的合计。
+        if any(word in said for word in ("怎么改", "修改建议", "修改论文")):
+            if "paper" not in got:
+                name = next((word for word in ("示例学生甲", "示例学生乙", "示例学生丙") if word in said), None)
+                current = "当前材料：p0" in messages[state]["content"]
+                return step(("paper_result", {"name": name} if name else {"paper_ref": "p0"} if current else {"ordinal": 2}))
+            lost = [entry for result in results for entry in result.get("评分项", []) if not entry["满分"]]
+            return reply("可以先改%s：%s" % (lost[0]["评分项"], lost[0].get("修改建议") or "把论述写充分。") if lost
+                         else "这一份没有失分的评分项。")
+        if any(word in said for word in ("几篇", "多少份")):  # 不认“几份”：“能传几份”“哪几份”是别的问题
+            if "tasks" not in got:
+                return step(("task_list", {}))
+            total = next(result["合计"] for result in results if "合计" in result)
+            return reply("一共 %d 份，已评 %d 份，%d 份需要复核。" % (total["材料"], total["已评分"], total["需要复核"]))
         choices = next((result["tasks"] for result in results if "tasks" in result and "提示" in result), None)
         if choices and "paper" not in got:
             task = next((task for task in choices if task["name"][-6:] in said), None)
@@ -606,3 +621,15 @@ def test_the_gate_needs_a_passing_report_for_every_evaluated_model(monkeypatch, 
     assert gate.main([str(reports)]) == 1
     monkeypatch.setattr(agent_evaluated, "EVALUATED_MODELS", frozenset())
     assert gate.main([str(reports)]) == 1
+
+
+def test_judge_flags_the_a1_1_misses():
+    observed = {"mode": "agent", "outcome": "reply", "tools_called": ["help_lookup"], "searches": 0, "card_types": [],
+                "pending_before": None, "pending_after": None, "violations": [], "help_refs": ["score.edit"],
+                "reply_text": "您是想问哪个任务的评分进度？"}
+    reasons = assistant_eval.judge({"expect": {"help_refs_none": ["score.edit"], "reply_mentions_any": ["文献综述"],
+                                               "reply_has_number": True, "reply_not_asks": True}}, observed)
+    assert len(reasons) == 4
+    good = {**observed, "help_refs": [], "reply_text": "一共 2 份，文献综述两份都要补充。"}
+    assert assistant_eval.judge({"expect": {"help_refs_none": ["score.edit"], "reply_mentions_any": ["文献综述"],
+                                            "reply_has_number": True, "reply_not_asks": True}}, good) == []

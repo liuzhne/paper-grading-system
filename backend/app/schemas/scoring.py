@@ -5,7 +5,9 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
+from pydantic import model_validator
 
+from backend.app.services.scoring.suggestions import revision_suggestion
 from backend.app.services.scoring.validator import coerce_evidence_list
 from backend.app.services.scoring.validator import coerce_string_list
 
@@ -29,6 +31,9 @@ class ScoreItemRead(BaseModel):
     band_selection: Optional[dict] = None
     sub_results: Optional[list] = None
     suggestion: Optional[str] = None
+    #: 评分模型针对内容写的修改建议（去掉系统写的固定说明）；评分页与评分助手只用它。
+    #: 没有时不输出（与 aggregation 同样的做法）；运行导出与接口同口径，导出里有修改建议的项也会带上它。
+    revision_suggestion: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
     confidence: Optional[float] = None
     need_manual_review: bool
     aggregation: Optional[dict] = Field(default=None, exclude_if=lambda value: value is None)
@@ -43,6 +48,11 @@ class ScoreItemRead(BaseModel):
     @classmethod
     def normalize_deductions(cls, value):
         return coerce_string_list(value)
+
+    @model_validator(mode="after")
+    def derive_revision_suggestion(self):
+        self.revision_suggestion = revision_suggestion(self.suggestion, self.auto_score_status)
+        return self
 
     @field_validator("deduction_items", mode="before")
     @classmethod

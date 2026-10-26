@@ -1147,6 +1147,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-26 | 评分助手 A1.1 | 开关打开后改提示词的发布顺序（候选镜像上评测 → 报告进 PR → 合并）；评测工作流输入 `candidate`；排错：改了提示词的 PR 合并后部署卡在门槛。 |
 | 2026-10-26 | Agent 只对评测过的模型开 | 打开开关的步骤；排错：开关开了仍是规则模式（模型不在名单）；平台模型配置的现状。 |
 | 2026-10-25 | 评分助手提示词 @5 与复审 | 验证命令补上 Agent 与评测的测试文件；`reply_invalid` 排错补“文字反问”；报告文件名带时分秒。 |
 | 2026-10-25 | 评分助手提示词 @4 | 提示词升到 @4，开关打开前要在 @4 上重跑评测；无新命令。 |
@@ -2354,6 +2355,10 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
 - 2026-10-22 A0（Agent 回合，开关默认关）：迁移 `0041_assistant_agent_state`（两个可空 JSON 列）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0041_assistant_agent_state`），再合并部署。开关不打开时对外行为不变，部署后照常核对助手页即可；回滚：两列都没有数据时才允许降级（开关一直关着就不会有数据）。生产打开开关：GitHub 仓库变量 `ASSISTANT_AGENT_ENABLED=true`（部署时由 `scripts/production_env.py` 写进实例的 `.env`，只收 true / false），A1 的真实模型评测达到上线门槛之前不要设。
 - 2026-10-25 A1 调优（提示词 `assistant-agent@3`，同日升到 `@4`：提议工具改为常驻；无迁移）：**改评分助手的提示词正文、tools 或任何工具的说明（purpose、when、参数说明）时**：bump `backend/app/services/assistant/agent/context.py` 的 `SYSTEM_VERSION`，在 `backend/app/tests/test_assistant_agent.py` 的 `PROMPT_FINGERPRINTS` 里新增一行（测试失败信息里给出新指纹），不要改已有行；合并部署后在新版本上重跑一轮评测并提交报告，才能打开开关。
   - 排错：部署流水线停在 “Check the assistant eval gate”，日志写“还没有达标的评测”——**报错指向部署，真正的原因是仓库变量 `ASSISTANT_AGENT_ENABLED=true`，而镜像里这一版提示词还没有达标的评测**（改了提示词或工具说明、或者改了评测集，就会这样；只跑了几条 `max_items` 的一轮也不算）。在新版本上跑评测、提交达标的报告，或者把变量改回 `false` 再部署。
+  - M0 基线（`backend/app/tests/golden/m0/`）：有意改变评分项接口或运行导出时，`UPDATE_M0_GOLDENS=1 .venv/bin/python -m pytest -q backend/app/tests/test_m0_characterization.py` 重新生成，核对差异只有预期的字段后提交，并在 DECISIONS 写明为什么变（A1.1 加 `revision_suggestion` 时这样更新过）。
+  - **开关打开后改提示词**（10-26 起，A1.1）：改了提示词正文、tools 或工具说明的 PR，**先在候选镜像上评测再合并**：`gh workflow run assistant-eval.yml --ref <PR 分支> -f candidate=true -f mode=estimate …`（其余输入同上）看估算，维护者同意后 `mode=run`；工作流用这个分支构建镜像、送到实例、只在一次性容器里评测（覆盖文件 `candidate-eval-<提交>.yml` 只改 app 的镜像），跑完删掉候选镜像，不动线上。把达标的报告提交进同一个 PR，再合并；部署门槛按镜像里的指纹读到这份报告才放行。
+  - 排错：改提示词的 PR 合并后，部署停在 “Check the assistant eval gate”——**报错指向部署，真正的原因是合并前没在候选镜像上评测**（开关打开时，部署只认当前指纹上达标的报告）。补跑候选镜像评测、提交报告后再推一次；急着发别的修复，可以把仓库变量临时改回 `false`。
+  - 排错：候选镜像评测的工作流在 “Build and ship the candidate image” 很慢或失败——镜像与部署任务同样大，载入要几分钟；实例磁盘不够时先 `docker image prune` 再重跑（候选镜像跑完会自动删）。
   - **打开 Agent 开关**（10-26 起只对评测过的模型生效）：确认 `docs/评测报告/评分助手/` 里有当前提示词指纹上、`agent/evaluated.py` 名单里每个模型都达标的报告（本地可先跑 `.venv/bin/python -m backend.app.scripts.assistant_eval_gate docs/评测报告/评分助手`），再把仓库变量 `ASSISTANT_AGENT_ENABLED` 设为 `true`，然后部署一次（合并到 main，或重跑 main 上最近一次 `pgs-production-gates`）。关掉：变量改回 `false` 再部署。
   - 排错：开关打开了，某位老师仍是规则模式、实例日志有 `assistant_agent_model_not_evaluated model=…`——**看上去像 Agent 没生效，真正的原因是这位老师用的模型不在评测过的名单里**（比如没配连接、回落到平台模型）。要给这个模型开，先用它跑一轮评测（工作流填它的 `connection_id`）、提交达标报告，再把它加进 `agent/evaluated.py`。
   - 注意：生产的平台模型配置是 Bedrock 上的 `anthropic.claude-opus-5`（10-14 初始化时写入），10-26 核对时用量账本里没有它的任何调用记录，维护者的 Bedrock 账号也没有开放它的权限。没配连接的老师，评分同样会落到它上面；改平台模型在运维页操作。

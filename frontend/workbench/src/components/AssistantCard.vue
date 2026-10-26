@@ -11,6 +11,7 @@ import { api, StaleContextError } from "@/api/client.js";
 import { MAX_FILES, papersInUploadOrder, publishedRubrics, scoreOverview } from "@/lib/assistant-flow.js";
 import { DOCUMENT_TYPES, documentTypeLabel, rememberedDocumentType } from "@/lib/document-types.js";
 import { finishedCount, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
+import { deductionReasons } from "@/lib/score-items.js";
 import { useAssistantStore } from "@/stores/assistant.js";
 import { useUploadStore } from "@/stores/upload.js";
 
@@ -277,10 +278,13 @@ function evidenceLabel(view) {
             <span class="mono">{{ item.final_score ?? item.ai_score ?? "—" }}<span class="faint"> / {{ item.max_score }}</span></span>
           </div>
           <span v-if="item.need_manual_review" class="chip chip-warn">需复核</span>
-          <ul v-if="item.deductions?.length" class="deductions">
-            <li v-for="(line, index) in item.deductions" :key="index">{{ line }}</li>
+          <ul v-if="deductionReasons(item).length" class="deductions">
+            <li v-for="(line, index) in deductionReasons(item)" :key="index">{{ line }}</li>
           </ul>
           <p v-else class="faint small">{{ item.reason }}</p>
+          <p v-if="item.revision_suggestion" class="small suggestion" data-test="card-suggestion">
+            <span class="faint">修改建议：</span>{{ item.revision_suggestion }}
+          </p>
           <details v-if="item.evidence_view?.length" class="evidence">
             <summary class="faint small">证据 {{ item.evidence_view.length }} 条</summary>
             <blockquote v-for="(view, index) in item.evidence_view" :key="index">
@@ -385,6 +389,7 @@ function evidenceLabel(view) {
 .item-name { font-weight: 600; }
 .deductions { margin: 6px 0 0; padding-left: 16px; list-style: disc; }
 .deductions li { margin: 2px 0; color: var(--danger-ink); }
+.suggestion { margin: 4px 0 0; }
 .evidence { margin-top: 6px; }
 .evidence blockquote { display: grid; gap: 2px; margin: 6px 0 0; padding: 6px 10px; border-left: 3px solid var(--accent-border); background: var(--surface); }
 .rubric-form { display: grid; gap: 10px; }

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { materialIdentity } from "@/lib/document-types.js";
+import { deductionReasons } from "@/lib/score-items.js";
 import { useGradingStore } from "@/stores/grading.js";
 
 const store = useGradingStore();
@@ -383,6 +384,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
           <p v-if="item.review_reason" class="faint item-reason">{{ item.review_reason }}</p>
 
+          <!-- 扣分理由与修改建议：评分助手按这些说“怎么改”，老师在这里核对依据（方案 §31.3）。 -->
+          <ul v-if="deductionReasons(item).length" class="item-deductions" data-test="item-deductions">
+            <li v-for="(line, index) in deductionReasons(item)" :key="index">{{ line }}</li>
+          </ul>
+          <p v-if="item.revision_suggestion" class="item-suggestion" data-test="item-suggestion">
+            <span class="faint">修改建议：</span>{{ item.revision_suggestion }}
+          </p>
+
           <p v-if="unresolved(item)" class="notice notice-warn item-unresolved" data-test="item-unresolved">
             AI 没有评出这一项的有效结果，不能直接改分。
             <RouterLink :to="{ name: 'task-run', params: { batchId: route.params.batchId } }">到评分进度页「重试失败项」</RouterLink>
@@ -756,6 +765,20 @@ mark {
   font-size: 12px;
   line-height: 1.6;
   margin: 0 0 8px;
+}
+
+.item-deductions {
+  margin: 0 0 8px;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger-ink);
+}
+
+.item-suggestion {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .evidence {

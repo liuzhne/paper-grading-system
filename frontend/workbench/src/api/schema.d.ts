@@ -5619,6 +5619,8 @@ export interface components {
             need_manual_review: boolean;
             /** Reason */
             reason: string;
+            /** Revision Suggestion */
+            revision_suggestion?: string | null;
             /** Scoring Run Id */
             scoring_run_id: string;
             /** Sub Results */

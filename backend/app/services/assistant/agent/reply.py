@@ -62,9 +62,21 @@ _SCORE = re.compile(
     r"\d+(?:\.\d+)?\s*(?:分(?!钟)|points?\b|pts?\b)|满分|总分\s*\d|得了\s*\d|得分\s*\d|分数(?:是|为)\s*\d",
     re.IGNORECASE,
 )
-_SUGGESTION = re.compile(r"建议给|应得|应该得|应该给|改为|改成|可以加分|加\s*\d|减\s*\d|调高|调低到")
+# 与分数有关的建议才拦：“改为 8 分”“建议给 3 分”“加 2 分”“应得 6 分”“调高到 7”。A1.1 起论文的修改建议
+#（“建议把研究方法一节改为分步骤说明”）要能说出来，不再因为“改为”“改成”整句删除（§31.3）。
+_NUM = r"\s*\d+(?:\.\d+)?"
+_SUGGESTION = re.compile(
+    r"(?:建议给|应得|应该得|应该给|改为|改成|调高到|调低到|调到|提高到|降到)" + _NUM
+    + r"|(?:加|减|扣|多给|少给)" + _NUM + r"\s*分|可以加分|调高分数|调低分数"
+)
 _LINK = re.compile(r"https?://|www\.|[\w.+-]+@[\w-]+\.[\w.]+|<[a-zA-Z/][^>]*>|\*\*|__|`|^#+\s", re.MULTILINE)
 _SENTENCE = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?|\n")
+
+
+def without_scores(text: str) -> str:
+    """去掉含分数样式的句子（工具给模型的文字同样不带分数数字，§14）。"""
+
+    return "".join(piece for piece in _SENTENCE.findall(text or "") if piece == "\n" or not _SCORE.search(piece)).strip()
 
 
 def _clean_text(text: str) -> tuple[str, int]:
@@ -133,4 +145,4 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
                       help_refs=tuple(dict.fromkeys(params.help_refs)))
 
 
-__all__ = ["MAX_TEXT_CHARS", "NEXT_STEPS", "ReplyInvalid", "ReplyParams", "ValidReply", "parse_arguments", "validate_reply"]
+__all__ = ["MAX_TEXT_CHARS", "NEXT_STEPS", "ReplyInvalid", "ReplyParams", "ValidReply", "parse_arguments", "validate_reply", "without_scores"]

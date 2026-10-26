@@ -70,6 +70,7 @@
       "max_score": 20.0,
       "need_manual_review": false,
       "reason": "研究方法 按扣分制核算：满分 20.00，扣分合计 3.20，得 16.80/20.00。",
+      "revision_suggestion": "建议围绕研究方法补充更明确的论证、数据或引用依据。",
       "scoring_run_id": "<UUID>",
       "sub_results": null,
       "suggestion": "建议围绕研究方法补充更明确的论证、数据或引用依据。"
@@ -124,6 +125,7 @@
       "max_score": 20.0,
       "need_manual_review": false,
       "reason": "创新性 按分档制核算：选档「良好」=15.00/20.00。",
+      "revision_suggestion": "建议围绕创新性补充更明确的论证、数据或引用依据。",
       "scoring_run_id": "<UUID>",
       "sub_results": null,
       "suggestion": "建议围绕创新性补充更明确的论证、数据或引用依据。"

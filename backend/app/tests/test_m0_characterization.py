@@ -8,6 +8,7 @@ while scores, evidence, deductions, review state, report content, and the
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -416,6 +417,9 @@ def _assert_json_golden(name, payload):
 def _assert_text_golden(name, actual):
     path = GOLDEN_DIR / name
     actual = actual.strip() + "\n"
+    if os.environ.get("UPDATE_M0_GOLDENS") == "1":
+        # 有意改变接口或导出时重新生成（同 UPDATE_RUBRIC_PARSE_SNAPSHOTS）；先在 DECISIONS 写明为什么变。
+        path.write_text(actual, encoding="utf-8")
     assert path.is_file(), "missing M0 golden %s; generated content:\n%s" % (path, actual)
     expected = path.read_text(encoding="utf-8").strip() + "\n"
     assert actual == expected

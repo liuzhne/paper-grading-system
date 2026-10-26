@@ -537,3 +537,14 @@ def test_lightsail_deploy_checks_the_assistant_eval_gate_only_when_the_agent_is_
     step = lightsail[gate:ship]
     assert "if: vars.ASSISTANT_AGENT_ENABLED == 'true'" in step
     assert "python -m backend.app.scripts.assistant_eval_gate /reports" in step and "--network none" in step
+
+
+def test_the_assistant_eval_can_run_on_a_candidate_image_without_deploying_it():
+    workflow = (ROOT / ".github" / "workflows" / "assistant-eval.yml").read_text(encoding="utf-8")
+    build = workflow[workflow.index("- name: Build and ship the candidate image"):workflow.index("- name: Run on the instance")]
+    assert "if: inputs.candidate" in build and "paper-grading-system:candidate-${{ github.sha }}" in build
+    assert "docker tag" not in build and "deploy.sh" not in build  # 不切 current，不部署
+    run = workflow[workflow.index("- name: Run on the instance"):workflow.index("- name: Remove the candidate image")]
+    assert "--file compose.yml --file $override" in run and 'commit="$GITHUB_SHA"' in run
+    cleanup = workflow[workflow.index("- name: Remove the candidate image"):workflow.index("- name: Render the report")]
+    assert "if: always() && inputs.candidate" in cleanup and "docker image rm" in cleanup

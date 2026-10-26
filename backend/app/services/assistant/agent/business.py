@@ -34,7 +34,9 @@ from backend.app.services.assistant.views import document_type_label
 from backend.app.services.assistant.views import paper_label
 from backend.app.services.assistant.views import papers_in_upload_order
 from backend.app.services.assistant.views import resolve_paper
+from backend.app.services.assistant.agent.reply import without_scores
 from backend.app.services.scoring.core.evidence import detect_injection
+from backend.app.services.scoring.suggestions import revision_suggestion
 
 LIST_LIMIT = 10
 ACTIVE_JOB_STATUSES = {"queued", "running", "cancel_requested"}
@@ -147,6 +149,35 @@ def _loss_rate(item: ScoreItem) -> float:
     return max(0.0, (maximum - float(awarded or 0)) / maximum)
 
 
+#: 评分理由、修改建议给模型的长度上限（§31.3）。
+REASON_LIMIT = 80
+ADVICE_LIMIT = 120
+
+
+def _safe_text(text, limit: int) -> str:
+    """评分侧写的文字：源自学生文档，过注入检测；去掉分数句；截断。"""
+
+    text = without_scores(str(text or "").strip())
+    if not text:
+        return ""
+    if detect_injection(text):
+        return "（该条疑似包含指令，未显示）"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _improvement(item: ScoreItem) -> dict:
+    """失了分的评分项：评分理由，与评分模型写过的修改建议（系统说明不算，§31.3）。"""
+
+    found = {}
+    reason = _safe_text(item.reason, REASON_LIMIT)
+    if reason:
+        found["评分理由"] = reason
+    advice = _safe_text(revision_suggestion(item.suggestion, item.auto_score_status), ADVICE_LIMIT)
+    if advice:
+        found["修改建议"] = advice
+    return found
+
+
 def _job(turn: TurnContext, batch_id: str) -> dict | None:
     return tools.call(turn.run, "latest_job", batch_id=batch_id)
 
@@ -179,8 +210,9 @@ def _help_lookup(turn: TurnContext, params: HelpParams) -> dict:
 register(AgentTool(
     name="help_lookup", group="help", title="帮助条目",
     purpose="查系统的用法：怎么开始评分、怎么导入评分标准、在哪复核和改分、失败了怎么办等",
-    when="老师问“怎么……”“在哪……”“是什么”“有什么区别”“……怎么办”时先查；不用于查询具体任务或材料的数据。"
-         "老师表达要做什么（如“帮我评一下”“我要用自己的模板”“失败的重试”“别评了”）时不要调本工具，直接调对应的 action_*",
+    when="老师问系统“怎么用”“在哪……”“是什么”“有什么区别”“……怎么办”时先查；不用于查询具体任务或材料的数据。"
+         "老师表达要做什么（如“帮我评一下”“我要用自己的模板”“失败的重试”“别评了”）时不要调本工具，直接调对应的 action_*；"
+         "问某一份论文怎么改（修改建议）用 paper_result",
     params=HelpParams, param_notes={"topic": "老师问的是什么，用他的说法，例如“模板怎么上传”"},
     returns="entries：[{ref, 标题, 内容}]，最多 3 条",
     kind="read", risk="low", resident=True,
@@ -197,22 +229,37 @@ class TaskListParams(BaseModel):
 
 
 def _task_list(turn: TurnContext, params: TaskListParams) -> dict:
+    """任务名与数量：“现在评了几篇”一步就能答，跨任务也能合计（§31.3）。数量由代码统计，不含分数。"""
+
     batches = tools.call(turn.run, "list_recent_batches", limit=params.limit)
+    tasks, total = [], defaultdict(int)
     for batch in batches:
         turn.refs.name("t", batch["id"], batch["name"])
+        papers = tools.call(turn.run, "batch_summary", batch_id=batch["id"])["papers"]
+        job = _job(turn, batch["id"])
+        if job is not None:
+            turn.refs.saw_status(job["status"], "t", batch["id"])
+        counts = {"材料": len(papers), "已评分": sum(1 for paper in papers if paper.get("latest_run_id")),
+                  "需要复核": sum(1 for paper in papers if paper.get("latest_need_manual_review"))}
+        for key, value in counts.items():
+            total[key] += value
+        tasks.append({"ref": turn.refs.add("t", batch["id"], card=_overview_card(batch["id"])), "name": batch["name"],
+                      **counts, "评分状态": job["status"] if job is not None else "还没有开始评分"})
     return {
-        "tasks": [{"ref": turn.refs.add("t", batch["id"], card=_overview_card(batch["id"])), "name": batch["name"]}
-                  for batch in batches],
-        "说明": "按创建时间倒序；没有任务时为空列表。要看某个任务的情况，用 task_overview。",
+        "tasks": tasks,
+        "合计": {"任务": len(tasks), **total} if tasks else {"任务": 0},
+        "说明": "按创建时间倒序；没有任务时为空列表。只有一个任务时直接用它，不必问老师是不是这个；"
+                "要看失分最多的评分项、最差的几份，用 task_overview。",
     }
 
 
 register(AgentTool(
     name="task_list", group="task", title="评分任务列表",
-    purpose="列出当前组织最近的评分任务（名称与编号）",
-    when="老师问有哪些任务、要在几个任务里选一个时用；问某个任务的进度或分数时，先用它拿到任务编号",
+    purpose="列出当前组织最近的评分任务：名称、编号，以及每个任务的材料数、已评分、需要复核、评分状态与合计",
+    when="老师问有哪些任务、一共评了几篇、有几份要复核、要在几个任务里选一个时用；问某个任务的细节（失分最多的项、"
+         "最差的几份）用 task_overview",
     params=TaskListParams, param_notes={"limit": "最多返回几个任务，默认 8，最多 20"},
-    returns="tasks：[{ref, name}]，最多 limit 个",
+    returns="tasks：[{ref, name, 材料, 已评分, 需要复核, 评分状态}]，最多 limit 个；合计",
     kind="read", risk="low", resident=True,
     keywords=("任务", "评分任务", "批次", "有哪些", "列表", "最近"),
     eval_phrases=("现在有哪些评分任务", "我最近建了哪些任务", "列一下评分批次"),
@@ -255,7 +302,8 @@ def _task_overview(turn: TurnContext, params: TaskParams) -> dict:
     if lowest:
         result["总分最低的材料"] = [_paper_entry(turn, batch_id, paper, papers.index(paper) + 1, profile) for paper in lowest]
     result["说明"] = "这里不给分数数字；要展示分数，把 task.ref 或材料的 ref 放进 reply 的 cards。"
-    if chose_latest:
+    # 只有一个任务时不必提醒“不对的话先找任务”：没有别的可选，提醒只会让模型反问（§31.3）。
+    if chose_latest and len(tools.call(turn.run, "list_recent_batches", limit=2)) > 1:
         result["说明"] += "老师没有指定任务，用的是最近的一个；不对的话先用 task_list 找到任务再调用。"
     turn.run.show_workspace(("/tasks/%s/run" if job and job["status"] in ACTIVE_JOB_STATUSES else "/batches/%s/grade") % batch_id)
     return result
@@ -368,24 +416,28 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
             reason = str((deduction or {}).get("reason") or "").strip()[:80] if isinstance(deduction, dict) else ""
             if reason:
                 reasons.append("（该条疑似包含指令，未显示）" if detect_injection(reason) else reason)
+        lost = _loss_rate(item) > 0
         items.append({
-            "ref": turn.refs.add("i", item.id), "评分项": name, "满分": _loss_rate(item) == 0,
+            "ref": turn.refs.add("i", item.id), "评分项": name, "满分": not lost,
             "需要复核": bool(item.need_manual_review), "扣分理由": reasons, "证据条数": len(item.evidence or []),
+            **(_improvement(item) if lost else {}),
         })
     return {"paper": entry, "评分项": items,
-            "说明": "按失分从多到少排列，不给分数数字；要展示分数与证据，把 paper.ref 放进 reply 的 cards。"}
+            "说明": "按失分从多到少排列，不给分数数字；要展示分数与证据，把 paper.ref 放进 reply 的 cards。"
+                    "老师问怎么改时，按评分项把扣分理由、评分理由（有修改建议就一并用）转成怎么改，不编造理由里没有的内容。"}
 
 
 register(AgentTool(
     name="paper_result", group="paper", title="某一份的评分结果",
-    purpose="定位一份材料（编号、序号或姓名、标题、文件名），给出各评分项是否满分、需不需要复核、扣分理由与证据条数",
-    when="老师问第几份、某个学生、某个文件的得分情况、为什么扣分时用；按姓名找人不用先选任务（不填 task_ref 会在最近的"
-         "任务里一起找）；不唯一时返回候选让老师选；分数本身由卡片显示",
+    purpose="定位一份材料（编号、序号或姓名、标题、文件名），给出各评分项是否满分、需不需要复核、扣分理由与证据条数；"
+            "失分的项另有评分理由与修改建议，用来回答“怎么改”",
+    when="老师问第几份、某个学生、某个文件的得分情况、为什么扣分、怎么改（修改建议、怎么改进、怎么提高）时用；"
+         "按姓名找人不用先选任务（不填 task_ref 会在最近的任务里一起找）；不唯一时返回候选让老师选；分数本身由卡片显示",
     params=PaperParams,
     param_notes={"task_ref": "任务编号（来自工具结果，或当前状态里的 t0）；按姓名找人时可以不填，会在最近的任务里一起找",
                  "paper_ref": "材料编号（来自工具结果，或当前状态里的 p0）",
                  "ordinal": "第几份（按上传顺序，从 1 开始；要配合任务）", "name": "老师说的姓名、标题或文件名片段"},
-    returns="paper{ref, 序号, 名称, 状态} 与评分项[{ref, 评分项, 满分, 需要复核, 扣分理由≤3, 证据条数}]；或候选列表",
+    returns="paper{ref, 序号, 名称, 状态} 与评分项[{ref, 评分项, 满分, 需要复核, 扣分理由≤3, 证据条数, 失分项另有评分理由与修改建议}]；或候选列表",
     kind="read", risk="low", resident=True,
     keywords=("第几份", "得分", "扣分", "为什么", "某一份", "学生", "结果"),
     eval_phrases=("第 2 份为什么扣分", "看看第一份的结果", "示例学生乙扣了哪些分"),

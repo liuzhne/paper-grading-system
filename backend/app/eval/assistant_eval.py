@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import statistics
 import tempfile
 import time
@@ -95,7 +96,7 @@ def _seed_scored_papers(session, rubric) -> None:
         session.add(run)
         session.flush()
         total = 0.0
-        for criterion, loss in zip(criteria, losses):
+        for position, (criterion, loss) in enumerate(zip(criteria, losses)):
             maximum = float(criterion.max_score)
             awarded = round(maximum * (1 - loss), 1)
             total += awarded
@@ -103,6 +104,8 @@ def _seed_scored_papers(session, rubric) -> None:
                 scoring_run_id=run.id, criterion_id=criterion.id, max_score=maximum, ai_score=awarded,
                 final_score=awarded, evidence_sufficient=True, reason="合成的评分理由。", deductions=[],
                 deduction_items=[{"reason": "%s论述不够充分（合成）" % criterion.name, "points": None}] if loss else [],
+                # 旧评分路径写的修改建议（合成）；Core 路径没有这一项，助手要能只凭扣分理由回答“怎么改”。
+                suggestion=("补充%s的论证与引用（合成）。" % criterion.name) if loss and position % 2 == 0 else None,
                 evidence=[{"text": "合成的证据片段。"}], need_manual_review=review and loss >= 0.4,
             ))
         run.final_total_score = round(total, 1)
@@ -248,6 +251,12 @@ def _send(db, conversation, text: str) -> dict:
 
 # --- 逐条判定 -----------------------------------------------------------------------
 
+#: 回复里有数量：数字，或“两份”“三篇”这样的中文数词。
+_NUMBER = re.compile(r"\d|[一二两三四五六七八九十]\s*[份篇个项]")
+#: 反问老师“是哪个”“是这个吗”（A1.1：只有一个候选、或问的是数量时不该反问）。
+_ASKS_BACK = re.compile(r"是想问|您是想|你是想|是这个.{0,8}吗|哪个任务|哪一个任务|哪一份|哪个批次")
+
+
 def judge(item: dict, observed: dict) -> list[str]:
     """返回不通过的原因；空列表即通过。"""
 
@@ -278,6 +287,17 @@ def judge(item: dict, observed: dict) -> list[str]:
         reasons.append("没有出现卡片：%s" % "、".join(expect["cards_any"]))
     if expect.get("pending_unchanged") and observed["pending_before"] != observed["pending_after"]:
         reasons.append("等待中的步骤被改变了")
+    cited = set(observed.get("help_refs") or [])
+    wrong = [ref for ref in expect.get("help_refs_none", []) if ref in cited]
+    if wrong:
+        reasons.append("引用了不该引用的帮助条目：%s" % "、".join(wrong))
+    text = observed.get("reply_text") or ""
+    if expect.get("reply_mentions_any") and not any(word in text for word in expect["reply_mentions_any"]):
+        reasons.append("回复没有点到这些里的任何一个：%s" % "、".join(expect["reply_mentions_any"]))
+    if expect.get("reply_has_number") and not _NUMBER.search(text):
+        reasons.append("回复里没有给出数量")
+    if expect.get("reply_not_asks") and _ASKS_BACK.search(text):
+        reasons.append("该直接回答，却反问了老师")
     reasons.extend(observed["violations"])
     return reasons
 
@@ -381,7 +401,7 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             "help_refs": list(meta.get("help_refs") or []),
             "card_types": [card.get("type") for message in replies for card in message.cards or []],
             "pending_before": pending_before, "pending_after": pending_after,
-            "violations": violations,
+            "violations": violations, "reply_text": text,
         }
         reasons = judge(item, observed)
         return {
