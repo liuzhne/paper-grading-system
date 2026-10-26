@@ -42,5 +42,5 @@
 {"id": "fb-01", "category": "修改建议", "utterance": "示例学生乙怎么改能更好", "expect": {"tools_all": ["paper_result"], "tools_none": ["help_lookup"], "reply_advises_on": ["选题意义", "文献综述", "研究方法", "论文创新性", "论证与分析", "写作规范"]}}
 {"id": "fb-02", "category": "修改建议", "setup": ["示例学生乙扣了哪些分"], "utterance": "那么对应的修改建议呢？", "expect": {"tools_all": ["paper_result"], "help_refs_none": ["score.edit"], "reply_advises_on": ["选题意义", "文献综述", "研究方法", "论文创新性", "论证与分析", "写作规范"]}}
 {"id": "fb-03", "category": "修改建议", "setup": ["示例学生乙扣了哪些分"], "utterance": "我要的是修改论文的建议，不是改分", "expect": {"tools_all": ["paper_result"], "help_refs_none": ["score.edit"], "reply_advises_on": ["选题意义", "文献综述", "研究方法", "论文创新性", "论证与分析", "写作规范"]}}
-{"id": "cnt-01", "category": "数量与进度", "utterance": "现在已经评分了几篇论文？", "expect": {"tools_all": ["task_list"], "reply_not_asks": true, "reply_count": {"value": 2, "units": ["篇", "份"]}}}
-{"id": "cnt-02", "category": "数量与进度", "utterance": "一共有多少份需要人工复核", "expect": {"tools_any": ["task_list", "review_list"], "reply_count": {"value": 1, "units": ["份", "篇"]}}}
+{"id": "cnt-01", "category": "数量与进度", "utterance": "现在已经评分了几篇论文？", "expect": {"tools_all": ["task_list"], "reply_not_asks": true, "reply_count": {"value": 2, "units": ["篇", "份"], "measure": ["已评", "评了", "评分了", "评完", "评过", "已经评", "已完成", "完成了"]}}}
+{"id": "cnt-02", "category": "数量与进度", "utterance": "一共有多少份需要人工复核", "expect": {"tools_any": ["task_list", "review_list"], "reply_count": {"value": 1, "units": ["份", "篇"], "measure": ["复核"]}}}

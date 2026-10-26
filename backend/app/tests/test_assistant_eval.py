@@ -635,3 +635,20 @@ def test_judge_flags_the_a1_1_misses():
     assert assistant_eval.judge({"expect": expect}, good) == []
     assert assistant_eval.judge({"expect": {"reply_count": {"value": 1, "units": ["份"]}}},
                                 {**good, "reply_text": "一共有 1 份需要复核。"}) == []
+
+
+@pytest.mark.parametrize(("expect", "text", "passes"), [
+    # 谈分数的句子不算修改建议（#60 第二轮复审）。
+    ({"reply_advises_on": ["研究方法"]}, "研究方法失分了，建议修改评分项分数。", False),
+    ({"reply_advises_on": ["研究方法"]}, "按扣分理由，研究方法要补充研究步骤。", True),
+    # 数量要和问的量在同一分句里；“十二篇”里的“二”不是两篇。
+    ({"reply_count": {"value": 2, "units": ["份", "篇"], "measure": ["已评"]}}, "共 2 份，已评 1 份。", False),
+    ({"reply_count": {"value": 2, "units": ["份", "篇"], "measure": ["已评"]}}, "共 4 份，已评 2 份。", True),
+    ({"reply_count": {"value": 2, "units": ["篇"]}}, "一共评了十二篇。", False),
+    ({"reply_count": {"value": 2, "units": ["篇"]}}, "一共评了两篇。", True),
+    ({"reply_count": {"value": 1, "units": ["份"], "measure": ["复核"]}}, "评了 2 篇，其中 1 份需要人工复核。", True),
+])
+def test_judge_reads_advice_and_counts_strictly(expect, text, passes):
+    observed = {"mode": "agent", "outcome": "reply", "tools_called": [], "searches": 0, "card_types": [],
+                "pending_before": None, "pending_after": None, "violations": [], "help_refs": [], "reply_text": text}
+    assert (assistant_eval.judge({"expect": expect}, observed) == []) is passes

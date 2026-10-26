@@ -255,19 +255,31 @@ def _send(db, conversation, text: str) -> dict:
 #: 不收“规范”“论证”：它们是评分项名（写作规范、论证与分析）的一部分。
 _ADVICE_VERBS = re.compile(r"补充|增加|完善|加强|说明|明确|调整|修改|梳理|精简|删去|删除|提供|充实|改写|重写|细化|突出|阐述|核对|统一")
 _CLAUSE = re.compile(r"[^。！？!?；;\n*]+")
+#: 谈分数的句子不算修改建议：“建议修改评分项分数”是改分，不是改论文（#60 复审）。不收“扣分”：“按扣分理由补充……”是建议。
+_ABOUT_SCORE = re.compile(r"分数|得分|改分|调分|加分|总分|满分|评分项的?分")
+#: 数量所在的分句（“共 2 份，已评 1 份”里 2 与“已评”不在同一分句）。
+_COUNT_CLAUSE = re.compile(r"[^，,。！？!?；;\n]+")
+#: 中文数词：“十二篇”里的“二”不是“两篇”（#60 复审）。
+_CHINESE_NUMERALS = "零一二两三四五六七八九十百千"
 _CHINESE_DIGITS = {0: "零", 1: "一", 2: "两|二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十"}
 
 
 def _gives_advice(text: str, names: list[str]) -> bool:
-    return any(any(name in clause for name in names) and _ADVICE_VERBS.search(clause) for clause in _CLAUSE.findall(text))
+    return any(any(name in clause for name in names) and _ADVICE_VERBS.search(clause) and not _ABOUT_SCORE.search(clause)
+               for clause in _CLAUSE.findall(text))
 
 
-def _says_count(text: str, value: int, units: list[str]) -> bool:
-    """回复里说了这个数量：阿拉伯数字或中文数词后面跟单位；“第 3 篇”这样的序数不算。"""
+def _says_count(text: str, value: int, units: list[str], measure: list[str] | None = None) -> bool:
+    """回复里说了这个数量：阿拉伯数字或中文数词后面跟单位；“第 3 篇”这样的序数、“十二篇”里的“二”不算。
+
+    给了 ``measure``（如“已评”“复核”）时，数量要和它在同一个分句里：“共 2 份，已评 1 份”不算“已评 2 份”。
+    """
 
     number = str(value) if value not in _CHINESE_DIGITS else "%d|%s" % (value, _CHINESE_DIGITS[value])
-    pattern = r"(?<![第\d.])(?<!第\s)(?:%s)\s*(?:%s)" % (number, "|".join(re.escape(unit) for unit in units))
-    return re.search(pattern, text) is not None
+    pattern = re.compile(r"(?<![第\d.%s])(?<!第\s)(?:%s)(?![\d.%s])\s*(?:%s)" % (
+        _CHINESE_NUMERALS, number, _CHINESE_NUMERALS, "|".join(re.escape(unit) for unit in units)))
+    clauses = _COUNT_CLAUSE.findall(text) if measure else [text]
+    return any(pattern.search(clause) and (not measure or any(word in clause for word in measure)) for clause in clauses)
 #: 反问老师“是哪个”“是这个吗”（A1.1：只有一个候选、或问的是数量时不该反问）。
 _ASKS_BACK = re.compile(r"是想问|您是想|你是想|是这个.{0,8}吗|哪个任务|哪一个任务|哪一份|哪个批次")
 
@@ -312,8 +324,9 @@ def judge(item: dict, observed: dict) -> list[str]:
     if expect.get("reply_advises_on") and not _gives_advice(text, expect["reply_advises_on"]):
         reasons.append("回复没有针对评分项说怎么改（要在同一句里点到评分项并给出动作）")
     count = expect.get("reply_count")
-    if count and not _says_count(text, int(count["value"]), list(count["units"])):
-        reasons.append("回复里没有给出正确的数量（%s %s）" % (count["value"], "/".join(count["units"])))
+    if count and not _says_count(text, int(count["value"]), list(count["units"]), count.get("measure")):
+        reasons.append("回复里没有给出正确的数量（%s %s%s）" % (
+            count["value"], "/".join(count["units"]), "，与“%s”同一分句" % "/".join(count["measure"]) if count.get("measure") else ""))
     if expect.get("reply_not_asks") and _ASKS_BACK.search(text):
         reasons.append("该直接回答，却反问了老师")
     reasons.extend(observed["violations"])

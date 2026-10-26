@@ -11,10 +11,10 @@ import re
 
 from backend.app.services.scoring.core.evidence import detect_injection
 
-#: 分数样式：“2 分”“3.5 points”“满分”“总分 78”“得了 80”“得分 6”“分数是 7”。“2 分钟”不算。
+#: 分数样式：“2 分”“3.5 points”“满分”“总分 78”“得了 80”“得分 6”“得分为 8”“分数是 7”。“2 分钟”不算。
 #: 评分助手的回复校验也用这一份（agent/reply.py），两处对“带分数”的判断一致。
 SCORE_PATTERN = re.compile(
-    r"\d+(?:\.\d+)?\s*(?:分(?!钟)|points?\b|pts?\b)|满分|总分\s*\d|得了\s*\d|得分\s*\d|分数(?:是|为)\s*\d",
+    r"\d+(?:\.\d+)?\s*(?:分(?!钟)|points?\b|pts?\b)|满分|(?:总分|得分|分数)(?:是|为)?\s*\d|得了\s*\d",
     re.IGNORECASE,
 )
 SENTENCE_PATTERN = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?|\n")

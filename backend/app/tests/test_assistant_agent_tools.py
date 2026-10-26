@@ -490,6 +490,7 @@ def test_an_item_without_a_valid_result_gets_no_revision_advice(client, agent): 
     entries = _last_tool_result(model)["评分项"]
     (unresolved,) = [entry for entry in entries if "评分状态" in entry]
     assert unresolved["评分项"] == broken_name and "评分理由" not in unresolved and "修改建议" not in unresolved
+    assert unresolved["扣分理由"] == []  # 没评出结果，也没有扣分理由可言
     assert entries[0]["评分项"] == halved_name and entries[-1]["评分项"] == broken_name  # 真失分的在前，没评出的在最后
 
     model = agent(step(("task_overview", {})), reply("概况如下。"))
