@@ -25,6 +25,7 @@ from backend.app.services.assistant.agent import claims
 from backend.app.services.assistant.agent.refs import TurnRefs
 from backend.app.services.assistant.views import QUICK_ACTIONS
 from backend.app.services.scoring.core.evidence import detect_injection
+from backend.app.services.scoring.suggestions import SCORE_CHANGE_PATTERN
 from backend.app.services.scoring.suggestions import SCORE_PATTERN
 from backend.app.services.scoring.suggestions import SENTENCE_PATTERN
 
@@ -61,16 +62,9 @@ class ValidReply:
 
 # 分数样式与分句：与评分侧的修改建议过滤同一份（scoring/suggestions.py）。
 _SCORE = SCORE_PATTERN
-# 与分数有关的建议才拦：“改为 8 分”“建议给 3 分”“加 2 分”“应得 6 分”“调高到 7”。A1.1 起论文的修改建议
-#（“建议把研究方法一节改为分步骤说明”）要能说出来，不再因为“改为”“改成”整句删除（§31.3）。
-_NUM = r"\s*\d+(?:\.\d+)?"
-_SUGGESTION = re.compile(
-    # 带数字的说法后面要跟“分”：“建议把引用数量改为 8 条”是修改建议，不拦（#60 复审）。
-    r"(?:建议给|应得|应该得|应该给|改为|改成|调高到|调低到|调到|提高到|降到)" + _NUM + r"\s*分(?!钟)"
-    # 句子说的是分数时，数字后面不带“分”也拦：“这一项得分调到 7”“分数改为 8”“将总分改为 8”。
-    + r"|(?:分数|得分|总分|成绩|分值)[^。！？!?；;\n]{0,8}?(?:改为|改成|调高到|调低到|调到|提高到|降到|给)" + _NUM
-    + r"|(?:加|减|扣|多给|少给)" + _NUM + r"\s*分|可以加分|调高分数|调低分数"
-)
+# 与分数有关的建议才拦：“改为 8 分”“建议给 3 分”“加 2 分”“应得 6 分”“得分调到 7”“将总分改为 8”。A1.1 起论文的
+# 修改建议（“建议把研究方法一节改为分步骤说明”“把引用数量改为 8 条”）要能说出来（§31.3）。与评分侧共用一份。
+_SUGGESTION = SCORE_CHANGE_PATTERN
 _LINK = re.compile(r"https?://|www\.|[\w.+-]+@[\w-]+\.[\w.]+|<[a-zA-Z/][^>]*>|\*\*|__|`|^#+\s", re.MULTILINE)
 _SENTENCE = SENTENCE_PATTERN
 

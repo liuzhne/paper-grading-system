@@ -189,6 +189,18 @@ def _improvement(item: ScoreItem) -> dict:
     return found
 
 
+#: 评分作业状态给模型看的说法。原样给状态码时，模型把 completed_with_errors 说成“已完成”，而 4 份里只评出 2 份
+#（#60 复审）：作业结束不等于评完了，评完没有看“还没有评分结果”是否为 0。
+JOB_STATUS_LABELS = {
+    "queued": "排队中", "running": "评分中", "cancel_requested": "正在取消", "canceled": "已取消",
+    "completed": "评分作业已结束", "completed_with_errors": "评分作业已结束，有评分失败的", "failed": "评分作业失败",
+}
+
+
+def _job_label(job: dict | None) -> str:
+    return "还没有开始评分" if job is None else JOB_STATUS_LABELS.get(job["status"], job["status"])
+
+
 def _job(turn: TurnContext, batch_id: str) -> dict | None:
     return tools.call(turn.run, "latest_job", batch_id=batch_id)
 
@@ -250,17 +262,18 @@ def _task_list(turn: TurnContext, params: TaskListParams) -> dict:
         job = _job(turn, batch["id"])
         if job is not None:
             turn.refs.saw_status(job["status"], "t", batch["id"])
-        counts = {"材料": len(papers), "已评分": sum(1 for paper in papers if paper.get("latest_run_id")),
+        scored = sum(1 for paper in papers if paper.get("latest_run_id"))
+        counts = {"材料": len(papers), "已评分": scored, "还没有评分结果": len(papers) - scored,
                   "需要复核": sum(1 for paper in papers if paper.get("latest_need_manual_review"))}
         for key, value in counts.items():
             total[key] += value
         tasks.append({"ref": turn.refs.add("t", batch["id"], card=_overview_card(batch["id"])), "name": batch["name"],
-                      **counts, "评分状态": job["status"] if job is not None else "还没有开始评分"})
+                      **counts, "评分状态": _job_label(job)})
     return {
         "tasks": tasks,
         "合计": {"任务": len(tasks), **total} if tasks else {"任务": 0},
         "说明": "按创建时间倒序；没有任务时为空列表。只有一个任务时直接用它，不必问老师是不是这个；"
-                "要看失分最多的评分项、最差的几份，用 task_overview。",
+                "评分状态说的是评分作业，评完没有看“还没有评分结果”是不是 0；要看失分最多的评分项、最差的几份，用 task_overview。",
     }
 
 
@@ -297,7 +310,7 @@ def _task_overview(turn: TurnContext, params: TaskParams) -> dict:
     if job is None:
         result["评分"] = "还没有开始评分"
     else:
-        result["评分"] = {"状态": job["status"], "已完成": _finished(job), "总数": job["total_items"],
+        result["评分"] = {"状态": _job_label(job), "已完成": _finished(job), "总数": job["total_items"],
                         "失败": job["failed_count"]}
         turn.refs.saw_status(job["status"], "t", batch_id)
     rates: dict[str, list[float]] = defaultdict(list)

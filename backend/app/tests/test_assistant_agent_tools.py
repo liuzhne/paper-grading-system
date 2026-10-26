@@ -47,7 +47,7 @@ def test_task_overview_counts_and_rankings_without_score_numbers(client, agent):
 
     result = _last_tool_result(model)
     assert result["task"]["ref"] == "t0" and result["材料"]["总数"] == 2 and result["材料"]["已评分"] == 2
-    assert result["评分"]["状态"] in {"completed", "completed_with_errors"}
+    assert result["评分"]["状态"] in {"评分作业已结束", "评分作业已结束，有评分失败的"}  # 给模型看说法，不给状态码
     assert result["失分从多到少的评分项"] and len(result["总分最低的材料"]) <= 3
     rendered = json.dumps(result, ensure_ascii=False)
     assert "final_score" not in rendered and "latest_final_score" not in rendered
@@ -439,8 +439,8 @@ def test_task_list_counts_papers_so_how_many_is_one_step(client, agent):  # noqa
     _say(client, _conversation(client), "现在已经评分了几篇论文？")
     result = _last_tool_result(model)
     task = next(entry for entry in result["tasks"] if entry["name"] == name)
-    assert task["材料"] == 2 and task["已评分"] == 2 and task["需要复核"] == 2
-    assert task["评分状态"] in {"completed", "completed_with_errors"}
+    assert task["材料"] == 2 and task["已评分"] == 2 and task["还没有评分结果"] == 0 and task["需要复核"] == 2
+    assert task["评分状态"] in {"评分作业已结束", "评分作业已结束，有评分失败的"}
     # 合计是各任务的和（种子数据里另有一个任务）。
     assert result["合计"]["任务"] == len(result["tasks"])
     assert all(result["合计"][key] == sum(entry[key] for entry in result["tasks"]) for key in ("材料", "已评分", "需要复核"))
@@ -497,3 +497,20 @@ def test_an_item_without_a_valid_result_gets_no_revision_advice(client, agent): 
     _say(client, conversation_id, "整体怎么样")
     # 修复前，没评出结果的项按“失了全分”排第一；现在排第一的是真失了分的那一项。
     assert _last_tool_result(model)["失分从多到少的评分项"][0] == halved_name
+
+
+
+def test_task_list_does_not_let_a_finished_job_pass_for_all_papers_scored(client, agent):  # noqa: F811
+    # #60 复审：作业 completed_with_errors 时，模型照原样把状态说成“已完成”，可 4 份里只评出 2 份。
+    _conversation_id, batch_id = _scored_task(client)
+    with client.session_factory() as session:
+        papers = session.scalars(select(models.Paper).where(models.Paper.batch_id == batch_id)).all()
+        for run in session.scalars(select(models.ScoringRun).where(models.ScoringRun.paper_id == papers[0].id)):
+            session.delete(run)  # 第一份没有评分结果
+        session.commit()
+        name = session.get(models.GradingBatch, batch_id).name
+    model = agent(step(("task_list", {})), reply("评分作业结束了，还有 1 份没有评分结果。"))
+    _say(client, _conversation(client), "这批评完了吗")
+    task = next(entry for entry in _last_tool_result(model)["tasks"] if entry["name"] == name)
+    assert task["已评分"] == 1 and task["还没有评分结果"] == 1
+    assert "completed" not in task["评分状态"] and task["评分状态"].startswith("评分作业已结束")

@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-26 | 评分助手 A1.1 第三轮复审（CodeRabbit） | 无模块变化：`scoring/suggestions.SCORE_CHANGE_PATTERN` 由回复校验共用；`task_list`、任务概况的评分状态改给中文说法。 |
 | 2026-10-26 | 评分助手 A1.1 第二轮复审（CodeRabbit） | 无模块变化：分数样式与回复校验补两种说法；评测判定更严。 |
 | 2026-10-26 | 评分助手 A1.1 复审（CodeRabbit） | 无模块变化：`scoring/suggestions.py` 持有分数样式与去分数句、注入占位，回复校验改用它；`paper_result` 与任务概况跳过没评出结果的项。 |
 | 2026-10-26 | 评分助手 A1.1 | 新增 `scoring/suggestions.py`（修改建议与系统说明分开）；评分项接口多 `revision_suggestion`；`paper_result` 带评分理由与修改建议、`task_list` 带数量；评测工作流支持候选镜像。 |

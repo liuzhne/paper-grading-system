@@ -17,6 +17,14 @@ SCORE_PATTERN = re.compile(
     r"\d+(?:\.\d+)?\s*(?:分(?!钟)|points?\b|pts?\b)|满分|(?:总分|得分|分数)(?:是|为)?\s*\d|得了\s*\d",
     re.IGNORECASE,
 )
+_NUM = r"\s*\d+(?:\.\d+)?"
+#: 改分的说法（数字后面不一定带“分”）：“改为 8 分”“建议给 3 分”“加 2 分”“得分调到 7”“将总分改为 8”。
+#: “建议把引用数量改为 8 条”是修改建议，不算。评分助手的回复校验也用这一份（#60 复审）。
+SCORE_CHANGE_PATTERN = re.compile(
+    r"(?:建议给|应得|应该得|应该给|改为|改成|调高到|调低到|调到|提高到|降到)" + _NUM + r"\s*分(?!钟)"
+    + r"|(?:分数|得分|总分|成绩|分值)[^。！？!?；;\n]{0,8}?(?:改为|改成|调高到|调低到|调到|提高到|降到|给)" + _NUM
+    + r"|(?:加|减|扣|多给|少给)" + _NUM + r"\s*分|可以加分|调高分数|调低分数"
+)
 SENTENCE_PATTERN = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?|\n")
 INJECTION_PLACEHOLDER = "（该条疑似包含指令，未显示）"
 
@@ -33,10 +41,10 @@ _SCORED = {None, "", "calculated"}
 
 
 def without_scores(text) -> str:
-    """去掉含分数样式的句子。"""
+    """去掉含分数样式或改分说法的句子。"""
 
     return "".join(piece for piece in SENTENCE_PATTERN.findall(str(text or ""))
-                   if piece == "\n" or not SCORE_PATTERN.search(piece)).strip()
+                   if piece == "\n" or not (SCORE_PATTERN.search(piece) or SCORE_CHANGE_PATTERN.search(piece))).strip()
 
 
 def revision_suggestion(suggestion, auto_score_status=None) -> str | None:
@@ -56,5 +64,5 @@ def revision_suggestion(suggestion, auto_score_status=None) -> str | None:
     return without_scores(raw) or None
 
 
-__all__ = ["INJECTION_PLACEHOLDER", "SCORE_PATTERN", "SENTENCE_PATTERN", "SYSTEM_SUGGESTION_MARKERS",
+__all__ = ["INJECTION_PLACEHOLDER", "SCORE_CHANGE_PATTERN", "SCORE_PATTERN", "SENTENCE_PATTERN", "SYSTEM_SUGGESTION_MARKERS",
            "revision_suggestion", "without_scores"]
