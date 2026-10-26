@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from datetime import timedelta
 from typing import Literal
@@ -34,6 +35,7 @@ from backend.app.services.assistant import intents
 from backend.app.services.assistant import model as assistant_model
 from backend.app.services.assistant import tools
 from backend.app.services.assistant.agent import budget as agent_budget
+from backend.app.services.assistant.agent import evaluated as agent_evaluated
 from backend.app.services.assistant.agent import turn as agent_turn
 from backend.app.services.assistant.checkpointer import SqlCheckpointSaver
 from backend.app.services.assistant.context import RunContext
@@ -47,6 +49,8 @@ from backend.app.services.assistant.views import PENDING_LABELS
 from backend.app.services.assistant.views import QUICK_ACTIONS
 from backend.app.services.assistant.views import help_text
 from backend.app.services.assistant.views import quick_actions_card
+
+logger = logging.getLogger(__name__)
 
 LOCK_SECONDS = 120
 PENDING_TTL = timedelta(days=7)        # M3
@@ -328,6 +332,11 @@ def _agent_scorer(ctx: RunContext):
     scorer = assistant_model.build_scorer(ctx.db, effective, user_id=ctx.user_id,
                                           organization_id=ctx.principal.organization_id)
     if scorer is None or getattr(scorer, "provider", "") == "mock":
+        return None
+    # 只对评测达标过的模型开 Agent（§12.5）：别的模型照旧走规则模式，不去调一个没评测过的模型。
+    if not agent_evaluated.is_evaluated(getattr(scorer, "model_name", None), getattr(scorer, "base_url", None)):
+        logger.info("assistant_agent_model_not_evaluated model=%s",
+                    agent_evaluated.model_id(getattr(scorer, "model_name", None)) or "-")
         return None
     if not agent_budget.daily_budget_left(ctx.db, ctx.user_id):
         return None

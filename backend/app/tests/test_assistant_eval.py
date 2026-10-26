@@ -138,10 +138,16 @@ def test_eval_set_is_well_formed():
 
 
 def test_full_eval_runs_isolated_and_restores_the_process():
-    before = (settings.ASSISTANT_AGENT_ENABLED, settings.AUTH_ENABLED, assistant_model.build_scorer)
+    from backend.app.services.assistant.agent import evaluated as agent_evaluated
+
+    def state():
+        return settings.ASSISTANT_AGENT_ENABLED, settings.AUTH_ENABLED, assistant_model.build_scorer, agent_evaluated.is_evaluated
+
+    before = state()
     items = assistant_eval.load_items()
+    # 假模型不在“评测过的模型”名单里：评测要能评还没登记的模型，进程内放开那道门、跑完还原。
     outcome = assistant_eval.run_eval(RuleOfThumbModel(), items, prices=FLASH, round_budget=10)
-    assert (settings.ASSISTANT_AGENT_ENABLED, settings.AUTH_ENABLED, assistant_model.build_scorer) == before
+    assert state() == before
 
     results = {item["id"]: item for item in outcome["results"]}
     assert len(results) == len(items) and outcome["skipped"] == 0
@@ -580,3 +586,23 @@ def test_a_partial_run_does_not_open_the_gate_even_when_its_gates_pass(monkeypat
 def test_a_reply_claiming_a_write_is_a_violation_in_the_eval():
     observed_text = "我已经帮你取消了评分。"
     assert assistant_eval.claims.done_by_agent(observed_text) == "我已经帮你取消"
+
+
+def test_the_gate_needs_a_passing_report_for_every_evaluated_model(monkeypatch, capsys, tmp_path):
+    from backend.app.scripts import assistant_eval_gate as gate
+    from backend.app.services.assistant.agent import evaluated as agent_evaluated
+
+    reports, written, data = _rendered_run(monkeypatch, capsys, tmp_path)
+    assert gate.main([str(reports)]) == 0  # 报告是 Vertex 上的 gemini-2.5-flash，名单里只有它
+    # 名单里多一个没评测过的模型：缺它的报告就不放行。
+    monkeypatch.setattr(agent_evaluated, "EVALUATED_MODELS",
+                        frozenset({("google", "gemini-2.5-flash"), ("bedrock-runtime.ap-southeast-1.amazonaws.com", "kimi-k3")}))
+    assert gate.main([str(reports)]) == 1
+    assert "kimi-k3" in capsys.readouterr().err
+    # 同一个模型名、不是 Google 端点跑的：不算 gemini-2.5-flash 的依据。
+    monkeypatch.setattr(agent_evaluated, "EVALUATED_MODELS", frozenset({("google", "gemini-2.5-flash")}))
+    written.write_text(json.dumps({**data, "model": {**data["model"], "host": "api.example.test"}}, ensure_ascii=False),
+                       encoding="utf-8")
+    assert gate.main([str(reports)]) == 1
+    monkeypatch.setattr(agent_evaluated, "EVALUATED_MODELS", frozenset())
+    assert gate.main([str(reports)]) == 1
