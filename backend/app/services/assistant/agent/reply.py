@@ -25,6 +25,9 @@ from backend.app.services.assistant.agent import claims
 from backend.app.services.assistant.agent.refs import TurnRefs
 from backend.app.services.assistant.views import QUICK_ACTIONS
 from backend.app.services.scoring.core.evidence import detect_injection
+from backend.app.services.scoring.suggestions import SCORE_CHANGE_PATTERN
+from backend.app.services.scoring.suggestions import SCORE_PATTERN
+from backend.app.services.scoring.suggestions import SENTENCE_PATTERN
 
 MAX_TEXT_CHARS = 300
 MAX_CARDS = 3
@@ -57,14 +60,13 @@ class ValidReply:
     help_refs: tuple[str, ...] = ()
 
 
-# 分数样式：“2 分”“3.5 points”“满分”“总分 78”“得了 80”“得分 6”“分数是 7”。“2 分钟”不算。
-_SCORE = re.compile(
-    r"\d+(?:\.\d+)?\s*(?:分(?!钟)|points?\b|pts?\b)|满分|总分\s*\d|得了\s*\d|得分\s*\d|分数(?:是|为)\s*\d",
-    re.IGNORECASE,
-)
-_SUGGESTION = re.compile(r"建议给|应得|应该得|应该给|改为|改成|可以加分|加\s*\d|减\s*\d|调高|调低到")
+# 分数样式与分句：与评分侧的修改建议过滤同一份（scoring/suggestions.py）。
+_SCORE = SCORE_PATTERN
+# 与分数有关的建议才拦：“改为 8 分”“建议给 3 分”“加 2 分”“应得 6 分”“得分调到 7”“将总分改为 8”。A1.1 起论文的
+# 修改建议（“建议把研究方法一节改为分步骤说明”“把引用数量改为 8 条”）要能说出来（§31.3）。与评分侧共用一份。
+_SUGGESTION = SCORE_CHANGE_PATTERN
 _LINK = re.compile(r"https?://|www\.|[\w.+-]+@[\w-]+\.[\w.]+|<[a-zA-Z/][^>]*>|\*\*|__|`|^#+\s", re.MULTILINE)
-_SENTENCE = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?|\n")
+_SENTENCE = SENTENCE_PATTERN
 
 
 def _clean_text(text: str) -> tuple[str, int]:

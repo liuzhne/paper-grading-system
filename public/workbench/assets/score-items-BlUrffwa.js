@@ -1,0 +1,1 @@
+function s(o){const r=((o==null?void 0:o.deduction_items)||[]).map(n=>String((n==null?void 0:n.reason)||"").trim()).filter(Boolean);return r.length?r:((o==null?void 0:o.deductions)||[]).map(n=>String(n||"").trim()).filter(Boolean)}export{s as d};

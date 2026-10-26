@@ -188,3 +188,20 @@ it("并发冲突（409）提示先刷新看清当前分数，不叫用户「稍�
   expect(text).not.toContain("稍后重试");
   wrapper.unmount();
 });
+
+it("每个评分项下显示扣分理由与修改建议：助手按这些说“怎么改”，老师在这里核对依据", async () => {
+  withRun([
+    { ...ITEMS[1], id: "i3", deduction_items: [{ reason: "未说明研究方法", points: 2 }],
+      revision_suggestion: "补充研究方法的步骤与依据。" },
+    { ...ITEMS[1], id: "i4", deduction_items: [], deductions: ["文献综述不充分"], revision_suggestion: null },
+  ]);
+  const wrapper = await mountGrade();
+  await flushPromises();
+
+  const [withAdvice, withoutAdvice] = wrapper.findAll(".item");
+  expect(withAdvice.get('[data-test="item-deductions"]').text()).toContain("未说明研究方法");
+  expect(withAdvice.get('[data-test="item-suggestion"]').text()).toBe("修改建议：补充研究方法的步骤与依据。");
+  expect(withoutAdvice.get('[data-test="item-deductions"]').text()).toContain("文献综述不充分");
+  expect(withoutAdvice.find('[data-test="item-suggestion"]').exists()).toBe(false);
+  wrapper.unmount();
+});

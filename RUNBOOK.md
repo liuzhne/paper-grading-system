@@ -1147,6 +1147,10 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-26 | 评分助手 A1.1 第三轮复审（CodeRabbit） | 无新命令；只改工具输出，不改提示词与评测集，不用重跑评测。 |
+| 2026-10-26 | 评分助手 A1.1 第二轮复审（CodeRabbit） | 无新命令；评测集又变，按候选镜像流程重跑后再合并。 |
+| 2026-10-26 | 评分助手 A1.1 复审（CodeRabbit） | 评测说明分清线上镜像与候选镜像：候选镜像在合并前评测、报告进同一个 PR。 |
+| 2026-10-26 | 评分助手 A1.1 | 开关打开后改提示词的发布顺序（候选镜像上评测 → 报告进 PR → 合并）；评测工作流输入 `candidate`；排错：改了提示词的 PR 合并后部署卡在门槛。 |
 | 2026-10-26 | Agent 只对评测过的模型开 | 打开开关的步骤；排错：开关开了仍是规则模式（模型不在名单）；平台模型配置的现状。 |
 | 2026-10-25 | 评分助手提示词 @5 与复审 | 验证命令补上 Agent 与评测的测试文件；`reply_invalid` 排错补“文字反问”；报告文件名带时分秒。 |
 | 2026-10-25 | 评分助手提示词 @4 | 提示词升到 @4，开关打开前要在 @4 上重跑评测；无新命令。 |
@@ -2350,10 +2354,14 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   - 排错：报告里一大片“没有走 Agent 回合（degraded）”、原因 `ProviderCallError` / `CircuitOpenError`——**报错指向模型出错，真正的原因多半是服务商限流**。看失败条目的结束方式是不是 `degrade（rate_limited）` 或 `degrade（PROVIDER_CIRCUIT_OPEN）`，或者在运行日志里找 `llm_call_failed … status=429 provider_type=RESOURCE_EXHAUSTED`。A1 第一轮就是这样：连发 11 次后 Vertex 返回 429，连续 5 次失败后熔断（`PROVIDER_CIRCUIT_FAILURE_THRESHOLD`），其后整轮都被熔断挡住。限流挡住的一轮不能当作 Agent 的成绩，报告照样提交（它是已花费用的账本），并标为作废：JSON 顶层加 `"obsolete": true` 与 `"obsolete_reason"`，Markdown 标题下加一段 `> **⚠️ 本轮作废…**` 引用块，`docs/评测报告/评分助手/README.md` 的“各轮说明”里写一行。报告脚本挑上一轮对比基线时跳过作废的轮次（`baseline`），合计已花费用时照算（`spent`）——**不标作废，下一轮的“与上一轮对比”就会拿这一轮当基线，看起来像进步了一大截**。
   - 线上同样的现象：助手回复“助手模型暂时没有响应”，用户消息的 `meta.error_code` 是 `rate_limited` 或 `PROVIDER_CIRCUIT_OPEN`（实例日志 `assistant_agent_model_failed … code=rate_limited`）。Agent 回合每一步（原生工具调用）遇到 429 会等 1.5 秒重试 1 次（2026-10-25 起，`budget.RATE_LIMIT_RETRY_SECONDS`），不超过这一步的截止时间：重试成功，老师只是这一句慢约 1.5 秒，日志里先有一条 `llm_call_failed … status=429 … retry=yes`，随后是成功的调用；**重试也被 429 挡住、剩下的时间不够等、熔断器已打开（`PROVIDER_CIRCUIT_OPEN`）、或者是额度用完（`quota_exhausted`，不重试），这一句才退回规则模式**，属于预期行为。超时与 5xx 不重试。
   - 排错：日志里 429 写着 `attempt=1/2 retry=no`——**看上去是判定“不该重试”，真正的原因是截止时间**：传输层要求等完之后离截止时间还剩 `MIN_SECONDS_FOR_RETRY_CALL`（30 秒），而 Agent 一步只有 20 秒，所以 A1 第三轮评测里 10 次 429 一次都没重试。Agent 这一步改传 `rate_limit_min_call_seconds=5`（`budget.RATE_LIMIT_MIN_CALL_SECONDS`）。以后给短截止时间的调用加重试，同样要传这个值，并用带截止时间的测试验证（不带截止时间的测试永远会重试）。一大片 `PROVIDER_CIRCUIT_OPEN` 说明同一连接连续失败了 5 次（`PROVIDER_CIRCUIT_FAILURE_THRESHOLD`），要等冷却（`PROVIDER_CIRCUIT_COOLDOWN_SECONDS`）。
-  - 排错：工作流以“实例返回 2”失败 = 预算拒绝，**或模型没有登记价目**（摘要写“没有登记这个模型的价目”；报错指向预算，真正的原因是平台模型不是 Gemini——A1 第一次估算时平台模型是 Bedrock 上的 Claude，旧脚本照样按 Gemini 价报了个数）；“返回 3” = 生产上没有生效的平台模型，或指定的连接找不到、没启用；“没有评测结果的标记” = SSH 或容器没起来，看上一步的输出。评测脚本跟随镜像：改了评测集或脚本，要先合并部署，实例上才是新版本。
+  - 排错：工作流以“实例返回 2”失败 = 预算拒绝，**或模型没有登记价目**（摘要写“没有登记这个模型的价目”；报错指向预算，真正的原因是平台模型不是 Gemini——A1 第一次估算时平台模型是 Bedrock 上的 Claude，旧脚本照样按 Gemini 价报了个数）；“返回 3” = 生产上没有生效的平台模型，或指定的连接找不到、没启用；“没有评测结果的标记” = SSH 或容器没起来，看上一步的输出。评测脚本跟随镜像：**用线上镜像评测**（`candidate=false`）时，改了评测集或脚本要先合并部署，实例上才是新版本；**用候选镜像评测**（`candidate=true`，开关打开后改提示词、评测集或工具的 PR 都这样做）时，在 PR 分支上评测、把达标的报告提交进同一个 PR 再合并——先合并会让部署卡在门槛上（评测集一变，旧报告的评测集版本就对不上了）。
 - 2026-10-22 A0（Agent 回合，开关默认关）：迁移 `0041_assistant_agent_state`（两个可空 JSON 列）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0041_assistant_agent_state`），再合并部署。开关不打开时对外行为不变，部署后照常核对助手页即可；回滚：两列都没有数据时才允许降级（开关一直关着就不会有数据）。生产打开开关：GitHub 仓库变量 `ASSISTANT_AGENT_ENABLED=true`（部署时由 `scripts/production_env.py` 写进实例的 `.env`，只收 true / false），A1 的真实模型评测达到上线门槛之前不要设。
 - 2026-10-25 A1 调优（提示词 `assistant-agent@3`，同日升到 `@4`：提议工具改为常驻；无迁移）：**改评分助手的提示词正文、tools 或任何工具的说明（purpose、when、参数说明）时**：bump `backend/app/services/assistant/agent/context.py` 的 `SYSTEM_VERSION`，在 `backend/app/tests/test_assistant_agent.py` 的 `PROMPT_FINGERPRINTS` 里新增一行（测试失败信息里给出新指纹），不要改已有行；合并部署后在新版本上重跑一轮评测并提交报告，才能打开开关。
   - 排错：部署流水线停在 “Check the assistant eval gate”，日志写“还没有达标的评测”——**报错指向部署，真正的原因是仓库变量 `ASSISTANT_AGENT_ENABLED=true`，而镜像里这一版提示词还没有达标的评测**（改了提示词或工具说明、或者改了评测集，就会这样；只跑了几条 `max_items` 的一轮也不算）。在新版本上跑评测、提交达标的报告，或者把变量改回 `false` 再部署。
+  - M0 基线（`backend/app/tests/golden/m0/`）：有意改变评分项接口或运行导出时，`UPDATE_M0_GOLDENS=1 .venv/bin/python -m pytest -q backend/app/tests/test_m0_characterization.py` 重新生成，核对差异只有预期的字段后提交，并在 DECISIONS 写明为什么变（A1.1 加 `revision_suggestion` 时这样更新过）。
+  - **开关打开后改提示词**（10-26 起，A1.1）：改了提示词正文、tools 或工具说明的 PR，**先在候选镜像上评测再合并**：`gh workflow run assistant-eval.yml --ref <PR 分支> -f candidate=true -f mode=estimate …`（其余输入同上）看估算，维护者同意后 `mode=run`；工作流用这个分支构建镜像、送到实例、只在一次性容器里评测（覆盖文件 `candidate-eval-<提交>.yml` 只改 app 的镜像），跑完删掉候选镜像，不动线上。把达标的报告提交进同一个 PR，再合并；部署门槛按镜像里的指纹读到这份报告才放行。
+  - 排错：改提示词的 PR 合并后，部署停在 “Check the assistant eval gate”——**报错指向部署，真正的原因是合并前没在候选镜像上评测**（开关打开时，部署只认当前指纹上达标的报告）。补跑候选镜像评测、提交报告后再推一次；急着发别的修复，可以把仓库变量临时改回 `false`。
+  - 排错：候选镜像评测的工作流在 “Build and ship the candidate image” 很慢或失败——镜像与部署任务同样大，载入要几分钟；实例磁盘不够时先 `docker image prune` 再重跑（候选镜像跑完会自动删）。
   - **打开 Agent 开关**（10-26 起只对评测过的模型生效）：确认 `docs/评测报告/评分助手/` 里有当前提示词指纹上、`agent/evaluated.py` 名单里每个模型都达标的报告（本地可先跑 `.venv/bin/python -m backend.app.scripts.assistant_eval_gate docs/评测报告/评分助手`），再把仓库变量 `ASSISTANT_AGENT_ENABLED` 设为 `true`，然后部署一次（合并到 main，或重跑 main 上最近一次 `pgs-production-gates`）。关掉：变量改回 `false` 再部署。
   - 排错：开关打开了，某位老师仍是规则模式、实例日志有 `assistant_agent_model_not_evaluated model=…`——**看上去像 Agent 没生效，真正的原因是这位老师用的模型不在评测过的名单里**（比如没配连接、回落到平台模型）。要给这个模型开，先用它跑一轮评测（工作流填它的 `connection_id`）、提交达标报告，再把它加进 `agent/evaluated.py`。
   - 注意：生产的平台模型配置是 Bedrock 上的 `anthropic.claude-opus-5`（10-14 初始化时写入），10-26 核对时用量账本里没有它的任何调用记录，维护者的 Bedrock 账号也没有开放它的权限。没配连接的老师，评分同样会落到它上面；改平台模型在运维页操作。

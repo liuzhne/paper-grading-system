@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import statistics
 import tempfile
 import time
@@ -95,7 +96,7 @@ def _seed_scored_papers(session, rubric) -> None:
         session.add(run)
         session.flush()
         total = 0.0
-        for criterion, loss in zip(criteria, losses):
+        for position, (criterion, loss) in enumerate(zip(criteria, losses)):
             maximum = float(criterion.max_score)
             awarded = round(maximum * (1 - loss), 1)
             total += awarded
@@ -103,6 +104,8 @@ def _seed_scored_papers(session, rubric) -> None:
                 scoring_run_id=run.id, criterion_id=criterion.id, max_score=maximum, ai_score=awarded,
                 final_score=awarded, evidence_sufficient=True, reason="合成的评分理由。", deductions=[],
                 deduction_items=[{"reason": "%s论述不够充分（合成）" % criterion.name, "points": None}] if loss else [],
+                # 旧评分路径写的修改建议（合成）；Core 路径没有这一项，助手要能只凭扣分理由回答“怎么改”。
+                suggestion=("补充%s的论证与引用（合成）。" % criterion.name) if loss and position % 2 == 0 else None,
                 evidence=[{"text": "合成的证据片段。"}], need_manual_review=review and loss >= 0.4,
             ))
         run.final_total_score = round(total, 1)
@@ -248,6 +251,39 @@ def _send(db, conversation, text: str) -> dict:
 
 # --- 逐条判定 -----------------------------------------------------------------------
 
+#: “怎么改”的动作词：一句话里既点到评分项、又有动作，才算给了修改建议（只说“研究方法失分了”不算，#60 复审）。
+#: 不收“规范”“论证”：它们是评分项名（写作规范、论证与分析）的一部分。
+_ADVICE_VERBS = re.compile(r"补充|增加|完善|加强|说明|明确|调整|修改|梳理|精简|删去|删除|提供|充实|改写|重写|细化|突出|阐述|核对|统一")
+_CLAUSE = re.compile(r"[^。！？!?；;\n*]+")
+#: 谈分数的句子不算修改建议：“建议修改评分项分数”是改分，不是改论文（#60 复审）。不收“扣分”：“按扣分理由补充……”是建议。
+_ABOUT_SCORE = re.compile(r"分数|得分|改分|调分|加分|总分|满分|评分项的?分")
+#: 数量所在的分句（“共 2 份，已评 1 份”里 2 与“已评”不在同一分句）。
+_COUNT_CLAUSE = re.compile(r"[^，,。！？!?；;\n]+")
+#: 中文数词：“十二篇”里的“二”不是“两篇”（#60 复审）。
+_CHINESE_NUMERALS = "零一二两三四五六七八九十百千"
+_CHINESE_DIGITS = {0: "零", 1: "一", 2: "两|二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十"}
+
+
+def _gives_advice(text: str, names: list[str]) -> bool:
+    return any(any(name in clause for name in names) and _ADVICE_VERBS.search(clause) and not _ABOUT_SCORE.search(clause)
+               for clause in _CLAUSE.findall(text))
+
+
+def _says_count(text: str, value: int, units: list[str], measure: list[str] | None = None) -> bool:
+    """回复里说了这个数量：阿拉伯数字或中文数词后面跟单位；“第 3 篇”这样的序数、“十二篇”里的“二”不算。
+
+    给了 ``measure``（如“已评”“复核”）时，数量要和它在同一个分句里：“共 2 份，已评 1 份”不算“已评 2 份”。
+    """
+
+    number = str(value) if value not in _CHINESE_DIGITS else "%d|%s" % (value, _CHINESE_DIGITS[value])
+    pattern = re.compile(r"(?<![第\d.%s])(?<!第\s)(?:%s)(?![\d.%s])\s*(?:%s)" % (
+        _CHINESE_NUMERALS, number, _CHINESE_NUMERALS, "|".join(re.escape(unit) for unit in units)))
+    clauses = _COUNT_CLAUSE.findall(text) if measure else [text]
+    return any(pattern.search(clause) and (not measure or any(word in clause for word in measure)) for clause in clauses)
+#: 反问老师“是哪个”“是这个吗”（A1.1：只有一个候选、或问的是数量时不该反问）。
+_ASKS_BACK = re.compile(r"是想问|您是想|你是想|是这个.{0,8}吗|哪个任务|哪一个任务|哪一份|哪个批次")
+
+
 def judge(item: dict, observed: dict) -> list[str]:
     """返回不通过的原因；空列表即通过。"""
 
@@ -278,6 +314,21 @@ def judge(item: dict, observed: dict) -> list[str]:
         reasons.append("没有出现卡片：%s" % "、".join(expect["cards_any"]))
     if expect.get("pending_unchanged") and observed["pending_before"] != observed["pending_after"]:
         reasons.append("等待中的步骤被改变了")
+    cited = set(observed.get("help_refs") or [])
+    wrong = [ref for ref in expect.get("help_refs_none", []) if ref in cited]
+    if wrong:
+        reasons.append("引用了不该引用的帮助条目：%s" % "、".join(wrong))
+    text = observed.get("reply_text") or ""
+    if expect.get("reply_mentions_any") and not any(word in text for word in expect["reply_mentions_any"]):
+        reasons.append("回复没有点到这些里的任何一个：%s" % "、".join(expect["reply_mentions_any"]))
+    if expect.get("reply_advises_on") and not _gives_advice(text, expect["reply_advises_on"]):
+        reasons.append("回复没有针对评分项说怎么改（要在同一句里点到评分项并给出动作）")
+    count = expect.get("reply_count")
+    if count and not _says_count(text, int(count["value"]), list(count["units"]), count.get("measure")):
+        reasons.append("回复里没有给出正确的数量（%s %s%s）" % (
+            count["value"], "/".join(count["units"]), "，与“%s”同一分句" % "/".join(count["measure"]) if count.get("measure") else ""))
+    if expect.get("reply_not_asks") and _ASKS_BACK.search(text):
+        reasons.append("该直接回答，却反问了老师")
     reasons.extend(observed["violations"])
     return reasons
 
@@ -381,7 +432,7 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             "help_refs": list(meta.get("help_refs") or []),
             "card_types": [card.get("type") for message in replies for card in message.cards or []],
             "pending_before": pending_before, "pending_after": pending_after,
-            "violations": violations,
+            "violations": violations, "reply_text": text,
         }
         reasons = judge(item, observed)
         return {

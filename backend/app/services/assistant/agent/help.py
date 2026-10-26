@@ -23,7 +23,7 @@ class HelpEntry:
 ENTRIES: tuple[HelpEntry, ...] = (
     HelpEntry("assistant.capabilities", "助手能做什么",
               "我可以帮你开始评分、导入自己的评分规则和模板，查询评分进度、每份的得分与扣分点、需要复核的内容和整体情况，"
-              "失败时说明原因并提议重试。我不打分、不改分，改动数据的操作都要你在卡片上确认。",
+              "按扣分理由说明每一份怎么改，失败时说明原因并提议重试。我不打分、不改分，改动数据的操作都要你在卡片上确认。",
               ("能做什么", "功能", "帮助", "你是谁", "介绍")),
     HelpEntry("grading.start", "怎么开始评分",
               "说“开始评分”或点输入框左边的附件按钮，选择待评分的文件（.docx 或 .pdf，一次最多 30 份）。"
@@ -50,7 +50,12 @@ ENTRIES: tuple[HelpEntry, ...] = (
               ("复核", "人工确认", "待确认", "需要确认")),
     HelpEntry("score.edit", "怎么改分",
               "改分在评分工作区完成：打开那一份，在对应评分项上改分并写明原因，改分会记入复核记录。助手现在不能直接改分。",
-              ("改分", "修改分数", "调分", "给分不对")),
+              # 不用“修改分数”：它和“修改建议”共享“修改”一词，会把问怎么改论文的老师带到改分上（10-26 生产）。
+              ("改分", "改一下分数", "调分", "给分不对", "分数不对")),
+    HelpEntry("paper.suggestion", "修改建议在哪看",
+              "评分页每个评分项下面有扣分理由，评分模型写了修改建议的也一并显示。也可以直接问我，例如“第 3 份怎么改”，"
+              "我会按扣分理由逐项说怎么改。",
+              ("修改建议", "修改意见", "怎么改", "改进", "提高")),
     HelpEntry("retry.failed", "评分失败了怎么办",
               "临时性错误（例如模型限流、超时）会自动重试一次。仍然失败的，可以说“重试失败项”，确认后只重跑失败的那几份，"
               "已成功的结果保留。反复失败时卡片上会写明原因和处理办法。",
@@ -68,7 +73,11 @@ BY_KEY = {entry.key: entry for entry in ENTRIES}
 
 
 def lookup(topic: str, *, limit: int = 3) -> list[HelpEntry]:
-    """按条目键或关键词找帮助条目：键完全一致优先，其余按词重合度排序。"""
+    """按条目键或关键词找帮助条目：键完全一致优先，其余按词重合度排序。
+
+    只有单个字重合不算命中（至少要有一个两字以上的词重合）：10-26 生产上“修改建议”靠“修”“改”两个字
+    命中了“怎么改分”，固定说明把回答带偏。找不到就返回空，由调用方明说“没有相关帮助条目”。
+    """
 
     topic = str(topic or "").strip()
     if topic in BY_KEY:
@@ -77,9 +86,9 @@ def lookup(topic: str, *, limit: int = 3) -> list[HelpEntry]:
     scored = []
     for position, entry in enumerate(ENTRIES):
         words = set(catalog.tokenize(" ".join([entry.title, *entry.keywords])))
-        overlap = len(terms & words)
-        if overlap:
-            scored.append((-overlap, position, entry))
+        shared = terms & words
+        if any(len(word) >= 2 for word in shared):
+            scored.append((-len(shared), position, entry))
     scored.sort()
     return [entry for _overlap, _position, entry in scored[:limit]]
 

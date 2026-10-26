@@ -7,6 +7,10 @@ name: pgs-assistant-eval
 # 所以只用连接编号（UUID）指定连接，不填连接名称或人名；输出里也只有模型名与主机。维护者授权：每轮不超过 0.5 美元，合计不超过 3 美元，每次跑之前先报预计花费。
 #
 # 用法：先用 mode=estimate 看预计花费；维护者同意后，用 mode=run 并把 confirm_usd 填成看过的估算值。
+#
+# 候选镜像（candidate=true，方案 §31.3）：用这次运行所在分支（gh workflow run --ref <分支>）的代码构建镜像、
+# 送到实例，只在一次性容器里评测，不替换正在服务的 app 与 worker，跑完删掉候选镜像。开关打开后，
+# 改了提示词的版本要先这样评测、把达标的报告提交进同一个 PR，合并后部署门槛才放行。
 # 正式运行的报告（Markdown + JSON）作为附件上传，下载后提交到 docs/评测报告/评分助手/。
 
 on:
@@ -43,6 +47,11 @@ on:
         required: false
         default: ""
         type: string
+      candidate:
+        description: "用这次运行所在分支的代码构建候选镜像来评测（不部署）；不勾用实例上正在服务的版本"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -54,7 +63,7 @@ concurrency:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45  # 候选镜像要先构建、载入（约十分钟），再加评测与限流等待
     environment: production
     defaults:
       run:
@@ -110,7 +119,16 @@ jobs:
             StrictHostKeyChecking yes
             ServerAliveInterval 30
           CONFIG
-      # 一次性容器：同一个镜像与 .env，跑完即删；不影响正在服务的 app 与 worker。
+      # 候选镜像：与部署任务同样的构建与载入方式，但只打 candidate 标签，不切 current。
+      - name: Build and ship the candidate image
+        if: inputs.candidate
+        env:
+          CANDIDATE: paper-grading-system:candidate-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker build --pull --tag "$CANDIDATE" .
+          docker save "$CANDIDATE" | gzip -1 | ssh pgs 'gunzip | docker load'
+      # 一次性容器：同一份 .env，跑完即删；不影响正在服务的 app 与 worker。
       - name: Run on the instance
         id: run
         env:
@@ -121,18 +139,32 @@ jobs:
           MAX_ITEMS: ${{ inputs.max_items }}
           SPENT: ${{ steps.spent.outputs.usd }}
           CONNECTION_ID: ${{ inputs.connection_id }}
+          CANDIDATE_RUN: ${{ inputs.candidate }}
         run: |
           set -euo pipefail
           confirm=""
           if [[ -n "$CONFIRM" ]]; then confirm="--confirm-usd $CONFIRM"; fi
           connection=""
           if [[ -n "$CONNECTION_ID" ]]; then connection="--connection-id $CONNECTION_ID"; fi
+          files="--file compose.yml"
+          commit='$(cat RELEASE 2>/dev/null || echo unknown)'
+          if [[ "$CANDIDATE_RUN" == "true" ]]; then
+            # 只覆盖 app 的镜像：环境变量、.env、卷都与线上一致；文件名带提交号，不和别的运行撞。
+            override="candidate-eval-${GITHUB_SHA}.yml"
+            ssh pgs "cd /opt/pgs && printf 'services:\n  app:\n    image: paper-grading-system:candidate-%s\n' '${GITHUB_SHA}' > '$override'"
+            files="--file compose.yml --file $override"
+            commit="$GITHUB_SHA"
+          fi
           status=0
-          ssh pgs "cd /opt/pgs && docker compose --project-name pgs --file compose.yml run --rm --no-deps -T app \
+          ssh pgs "cd /opt/pgs && docker compose --project-name pgs $files run --rm --no-deps -T app \
             python -m backend.app.scripts.run_assistant_eval --mode $MODE --phase $PHASE \
             --round-budget-usd $ROUND --total-budget-usd 3 --spent-usd $SPENT $confirm \
-            --max-items $MAX_ITEMS $connection --commit \$(cat RELEASE 2>/dev/null || echo unknown)" > raw.txt || status=$?
+            --max-items $MAX_ITEMS $connection --commit $commit" > raw.txt || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Remove the candidate image
+        if: always() && inputs.candidate
+        run: |
+          ssh pgs "cd /opt/pgs && rm -f 'candidate-eval-${GITHUB_SHA}.yml' && docker image rm 'paper-grading-system:candidate-${GITHUB_SHA}'" || true
       - name: Render the report
         run: |
           set -euo pipefail
