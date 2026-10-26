@@ -43,6 +43,7 @@ from backend.app.services.assistant import model as assistant_model
 from backend.app.services.assistant import runner
 from backend.app.services.assistant.agent import catalog
 from backend.app.services.assistant.agent import claims
+from backend.app.services.assistant.agent import evaluated as agent_evaluated
 from backend.app.services.assistant.agent.context import estimate_tokens
 from backend.app.services.assistant.agent.context import system_prompt
 from backend.app.services.assistant.agent.context import tools_array
@@ -168,6 +169,7 @@ def isolated_environment(scorer):
     saved = {name: getattr(settings, name) for name in (
         "ASSISTANT_AGENT_ENABLED", "ASSISTANT_AGENT_DAILY_TURNS", "AUTH_ENABLED", "STORAGE_ROOT")}
     saved_build = assistant_model.build_scorer
+    saved_evaluated = agent_evaluated.is_evaluated
     engine = create_engine("sqlite+pysqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
     with tempfile.TemporaryDirectory(prefix="assistant-eval-") as storage:
         try:
@@ -176,6 +178,8 @@ def isolated_environment(scorer):
             settings.AUTH_ENABLED = False
             settings.STORAGE_ROOT = Path(storage)  # 种子数据只建目录；指到临时目录，碰不到实例的存储卷
             assistant_model.build_scorer = lambda *args, **kwargs: scorer
+            # 评测就是用来评还没登记的模型：进程内放开“只对评测过的模型开”这道门（§12.5）。
+            agent_evaluated.is_evaluated = lambda *args, **kwargs: True
             Base.metadata.create_all(engine)
             factory = sessionmaker(bind=engine, expire_on_commit=False)
             with factory() as session:
@@ -191,6 +195,7 @@ def isolated_environment(scorer):
             yield factory
         finally:
             assistant_model.build_scorer = saved_build
+            agent_evaluated.is_evaluated = saved_evaluated
             for name, value in saved.items():
                 setattr(settings, name, value)
             engine.dispose()

@@ -68,9 +68,14 @@ def reply(text, **extra):
     return step(("reply", {"text": text, **extra}))
 
 
+VERTEX_URL = "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi"
+
+
 class ScriptedModel:
+    # 以评测达标过的模型出现（agent/evaluated.py）：没登记的模型不走 Agent 回合。
     provider = "fake"
-    model_name = "fake-agent"
+    model_name = "google/gemini-2.5-flash"
+    base_url = VERTEX_URL
 
     def __init__(self, *steps):
         self.steps = list(steps)
@@ -142,7 +147,7 @@ def test_agent_reply_with_a_task_card_and_metadata(client, agent):
     assert _texts(body)[-1] == "最近有这几个评分任务，第一个的概况在下面。"
     overview = _cards(body, "overview")
     assert len(overview) == 1 and overview[0]["batch_id"]
-    assert body["messages"][0]["intent"] == "agent" and body["messages"][-1]["model_name"] == "fake-agent"
+    assert body["messages"][0]["intent"] == "agent" and body["messages"][-1]["model_name"] == "google/gemini-2.5-flash"
 
     first, second = model.requests
     names = [tool["function"]["name"] for tool in first["tools"]]
@@ -258,6 +263,9 @@ def test_connections_without_native_tool_calls_use_the_json_action_protocol(clie
     model = JsonModel()
     monkeypatch.setattr(settings, "ASSISTANT_AGENT_ENABLED", True)
     monkeypatch.setattr(assistant_model, "build_scorer", lambda *args, **kwargs: model)
+    # 测的是 JSON 动作协议本身：线上还没有评测达标的非原生模型，这里放开“只对评测过的模型开”那道门。
+    from backend.app.services.assistant.agent import evaluated as agent_evaluated
+    monkeypatch.setattr(agent_evaluated, "is_evaluated", lambda *args, **kwargs: True)
     conversation_id = _conversation(client)
     body = _say(client, conversation_id, "列出任务")
     assert _texts(body)[-1] == "列好了。"
@@ -673,7 +681,7 @@ def test_a_turn_survives_one_429_end_to_end(client, monkeypatch):
     monkeypatch.setattr(transport.time, "sleep", slept.append)
     scorer = OpenAICompatibleChatScorer(
         api_key="test-key", base_url="https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi",
-        model_name="google/gemini-turn-retry-test", thinking_type="disabled",
+        model_name="google/gemini-2.5-flash", thinking_type="disabled",
         client=httpx.Client(transport=httpx.MockTransport(lambda request: responses.pop(0))))
     monkeypatch.setattr(settings, "ASSISTANT_AGENT_ENABLED", True)
     monkeypatch.setattr(assistant_model, "build_scorer", lambda *args, **kwargs: scorer)
@@ -802,3 +810,34 @@ def test_the_short_rate_limit_wait_never_undercuts_retry_after(monkeypatch):
         scorer("google/gemini-retry-after-30", "30").complete_with_tools(
             [{"role": "user", "content": "hi"}], agent_context.tools_array(), deadline=time.monotonic() + 20, **options)
     assert slept == []
+
+
+
+# --- 只对评测过的模型开 Agent（§12.5，维护者 10-26 定） -------------------------------------------
+
+@pytest.mark.parametrize(("model_name", "base_url", "evaluated"), [
+    ("google/gemini-2.5-flash", VERTEX_URL, True),
+    ("models/gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai", True),
+    ("anthropic.claude-opus-5", "https://bedrock-runtime.ap-southeast-1.amazonaws.com", False),
+    ("gemini-2.5-flash", "https://api.example.test/v1", False),  # 名字一样、端点不是 Google 的
+    ("google/gemini-2.5-pro", VERTEX_URL, False),
+])
+def test_only_evaluated_models_are_recognized(model_name, base_url, evaluated):
+    from backend.app.services.assistant.agent import evaluated as agent_evaluated
+
+    assert agent_evaluated.is_evaluated(model_name, base_url) is evaluated
+
+
+class _Unevaluated(ScriptedModel):
+    model_name = "anthropic.claude-opus-5"
+    base_url = "https://bedrock-runtime.ap-southeast-1.amazonaws.com"
+
+
+def test_a_model_without_a_passing_eval_stays_in_rules_mode(client, monkeypatch):
+    monkeypatch.setattr(settings, "ASSISTANT_AGENT_ENABLED", True)
+    model = _Unevaluated(reply("不该被调用"))
+    monkeypatch.setattr(assistant_model, "build_scorer", lambda *args, **kwargs: model)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "开始评分")
+    assert model.requests == [] and body["pending"]["kind"] == "pick_files"  # 规则模式照常
+    assert not any((message.meta or {}).get("mode") == "agent" for message in _agent_messages(client, conversation_id))

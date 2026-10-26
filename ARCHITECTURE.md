@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-26 | Agent 只对评测过的模型开 | 新增 `agent/evaluated.py`；`_agent_scorer` 多一道模型核对；`assistant_eval_gate` 逐个模型找达标报告。 |
 | 2026-10-25 | 评分助手提示词 @5 与复审 | 无模块变化：提议工具按状态唯一定位、开始评分按标准名找；claims 多一类“文字反问”；429 等待取短等与 Retry-After 的较长者。 |
 | 2026-10-25 | 评分助手提示词 @4 | 常驻工具 4 → 8（提议工具改为常驻）；重试与取消多 `task_name` 参数；`call_tool` 接受常驻工具。 |
 | 2026-10-25 | A1 第三轮评测与 429 重试修复 | 无模块变化：`post_with_retry` 多一个 `rate_limit_min_call_seconds`；评测报告文件名带开始时分。 |
@@ -1490,7 +1491,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 
 ```
 附件 → 开始评分流程；quick_action 键 → 按键分派；整句命中固定命令（intents.FAST_COMMANDS）→ 一期分派
-否则 _try_agent_turn：开关打开、助手模型可用（不是 Mock）、当天回合数未用完
+否则 _try_agent_turn：开关打开、助手模型可用（不是 Mock）、模型评测达标过（agent/evaluated.py）、当天回合数未用完
     agent.turn.run_turn
         ├─ 取消息表 → context.build_prefix（①tools ②系统指令 ③压缩内容 ④历史）
         ├─ compaction.maybe_compact：需要时发一次与主对话参数相同的摘要请求，写回 conversations.compaction，重建前缀
@@ -1505,6 +1506,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 模块（`services/assistant/agent/`）：
 - `catalog.py`：工具目录（登记表）、给模型看的说明、原生定义（Gemini 能收的 schema 子集）、自写 BM25（中文单字 + 两字）、`select:`、登记表检查与指纹。
 - `business.py`：模型可调用的业务工具；A0 只登记 `task_list`（常驻）与 `rubric_list`（延迟），A1 补齐。
+- `evaluated.py`：评测达标过的助手模型名单（端点家族 + 模型名，现在只有 Google 端点上的 `gemini-2.5-flash`）；不在名单里的模型不走 Agent 回合。部署门槛 `assistant_eval_gate` 要求名单里每个模型都有当前提示词指纹上的达标评测。
 - `refs.py`：引用编号（`t1`、`p1`、`r1`、`i1`，焦点里的 `t0`、`p0`），模型看不到数据库 ID。
 - `context.py`：请求组装与确定性渲染；历史每轮是用户原话、加载记录（合成的 `tool_search(select:…)` 调用与结果）与回复文字，卡片只留占位；已加载名单从历史推出；系统指令版本 `assistant-agent@1`。
 - `reply.py`：输出契约（整体作废、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
