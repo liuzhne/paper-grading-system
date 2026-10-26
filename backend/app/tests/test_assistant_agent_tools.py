@@ -443,6 +443,7 @@ def test_task_list_counts_papers_so_how_many_is_one_step(client, agent):  # noqa
     assert task["评分状态"] in {"评分作业已结束", "评分作业已结束，有评分失败的"}
     # 合计是各任务的和（种子数据里另有一个任务）。
     assert result["合计"]["任务"] == len(result["tasks"])
+    assert result["合计"]["范围"] == "最近 %d 个任务" % len(result["tasks"])  # 合计只算这次返回的任务
     assert all(result["合计"][key] == sum(entry[key] for entry in result["tasks"]) for key in ("材料", "已评分", "需要复核"))
 
 

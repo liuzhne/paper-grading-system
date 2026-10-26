@@ -271,8 +271,10 @@ def _task_list(turn: TurnContext, params: TaskListParams) -> dict:
                       **counts, "评分状态": _job_label(job)})
     return {
         "tasks": tasks,
-        "合计": {"任务": len(tasks), **total} if tasks else {"任务": 0},
-        "说明": "按创建时间倒序；没有任务时为空列表。只有一个任务时直接用它，不必问老师是不是这个；"
+        # 合计只算这次返回的任务（最近 limit 个）：老师问“一共”时要说清范围，更早的任务不在里面（#60 复审）。
+        "合计": {"范围": "最近 %d 个任务" % len(tasks), "任务": len(tasks), **total} if tasks else {"任务": 0},
+        "说明": "按创建时间倒序；合计只统计这次返回的任务，说“一共”时带上范围，更早的任务可以调大 limit 再查；"
+                "没有任务时为空列表。只有一个任务时直接用它，不必问老师是不是这个；"
                 "评分状态说的是评分作业，评完没有看“还没有评分结果”是不是 0；要看失分最多的评分项、最差的几份，用 task_overview。",
     }
 
