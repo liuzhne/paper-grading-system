@@ -1207,7 +1207,7 @@ Claude 适配器的调用链：
 | `kinds` | 条目种类登记：`WorkKind`（条目表、父任务表、`begin` / `execute` / `abandon` / `made_progress` / `converge`）与 `ClaimedItem`（围栏号 `attempt`） |
 | `sources` | 来源键（`connection:<id>` / `platform`）、名额上限、来源行加锁（Postgres `FOR UPDATE`；SQLite 用不改值的写入拿库级写锁）、在跑/可执行计数 |
 | `claim` | `claim_next_item(source_key)`：锁来源 → 部分索引统计在跑条目 → `FOR UPDATE SKIP LOCKED` 按 `ordinal, created_at, id` 取下一个 → 条件更新为 running |
-| `runner` | `execute_next`：领取 → 15 秒心跳线程（带围栏的条件更新）→ 种类执行并落库 → 接力叫醒；`run_worker_loop`：N 个领取线程 + 主线程定期巡检；`IdleGate`：空闲时只留一条线程探测，间隔从 3 秒翻倍到 30 秒，领到条目即复位并叫醒其它线程 |
+| `runner` | `execute_next`：领取 → 15 秒心跳线程（带围栏的条件更新）→ 种类执行并落库 → 接力叫醒；`run_worker_loop`：N 个领取线程 + 主线程定期巡检；`IdleGate`：空闲时只留一条线程探测，间隔从 `--poll-seconds`（默认 3 秒）翻倍到 `--idle-max-seconds`（默认 30 秒），领到条目即复位并叫醒其它线程；探测线程卡住超过 `2 × 上限 + 30` 秒（默认 90 秒）由等着的线程接手 |
 | `sweep` | `sweep_stale_items`：心跳过期的条目按“有无新检查点”续评或在连续无进展 3 次后判失败；收敛父任务计数与状态；给“有待处理、有空位、没人在跑”的来源补发叫醒。`sweep_parent_on_read`（进度读取，每任务 30 秒一次）、`ensure_sweep_chain`（补投断掉的巡检链） |
 | `wake` / `messages` | 平台相关的一层：Vercel 上发 `pgs-work` 消息（`{source_key}` / `{sweep}`），worker 部署里全部空操作；消息处理与平台无关 |
 | `state` | `work_runtime_state`：最近一次全系统巡检、最近一次补投巡检链 |

@@ -150,8 +150,18 @@ def test_execute_next_reports_the_claim_before_executing(monkeypatch):
     assert order == ["claimed", "execute"]
 
 
-def test_worker_cli_rejects_an_idle_cap_below_the_poll_interval():
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--poll-seconds", "3", "--idle-max-seconds", "1"],
+        ["--idle-max-seconds", "nan"],
+        ["--idle-max-seconds", "inf"],
+        ["--poll-seconds", "nan"],
+        ["--poll-seconds", "inf"],
+    ],
+)
+def test_worker_cli_rejects_a_bad_idle_cap_or_poll_interval(argv):
     from backend.app.scripts import run_batch_worker
 
     with pytest.raises(SystemExit):
-        run_batch_worker.main(["--poll-seconds", "3", "--idle-max-seconds", "1"])
+        run_batch_worker.main(argv)

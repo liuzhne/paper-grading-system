@@ -7,6 +7,7 @@
 """
 
 import argparse
+import math
 import signal
 from threading import Event
 
@@ -42,10 +43,11 @@ def main(argv=None):
         help="收到停止信号后最多等多少秒让在执行的条目做完（生产 compose 传 100；默认不等）",
     )
     args = parser.parse_args(argv)
-    if args.poll_seconds <= 0:
-        parser.error("--poll-seconds must be positive")
-    if args.idle_max_seconds < args.poll_seconds:
-        parser.error("--idle-max-seconds must not be less than --poll-seconds")
+    # float() 收 nan 与 inf；nan 与任何数比较都是 False，会绕过下面的大小检查。
+    if not math.isfinite(args.poll_seconds) or args.poll_seconds <= 0:
+        parser.error("--poll-seconds must be a positive finite number")
+    if not math.isfinite(args.idle_max_seconds) or args.idle_max_seconds < args.poll_seconds:
+        parser.error("--idle-max-seconds must be a finite number not less than --poll-seconds")
     if args.sweep_seconds <= 0:
         parser.error("--sweep-seconds must be positive")
     if args.threads is not None and args.threads < 1:
