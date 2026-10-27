@@ -8,6 +8,7 @@ import os
 
 from backend.app.core.config import settings
 from backend.app.services.deployment.backup import create_backup
+from backend.app.services.deployment.backup import current_migration_head
 from backend.app.services.deployment.backup import restore_backup
 from backend.app.services.deployment.backup import verify_backup
 
@@ -19,7 +20,8 @@ def _parser():
     create.add_argument("--database-url", default=settings.DATABASE_URL)
     create.add_argument("--storage-root", default=str(settings.STORAGE_ROOT))
     create.add_argument("--destination", required=True)
-    create.add_argument("--migration-head", default="0028_export_event_backfill")
+    # 默认取镜像里的 head；原来写死的 0028 早已过时，备份清单会记错版本。
+    create.add_argument("--migration-head", default=None)
     create.add_argument("--revision", default=os.environ.get("GITHUB_SHA", "local"))
     create.add_argument("--rto-minutes", type=int, default=settings.OPS_RTO_MINUTES)
     create.add_argument("--rpo-minutes", type=int, default=settings.OPS_RPO_MINUTES)
@@ -40,7 +42,7 @@ def main(argv=None):
             database_url=args.database_url,
             storage_root=args.storage_root,
             destination_root=args.destination,
-            migration_head=args.migration_head,
+            migration_head=args.migration_head or current_migration_head(),
             revision=args.revision,
             rto_minutes=args.rto_minutes,
             rpo_minutes=args.rpo_minutes,

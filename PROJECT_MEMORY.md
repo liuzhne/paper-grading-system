@@ -46,5 +46,6 @@
 - 2026-08-22 已将本次数据库、Supabase、鉴权、BYOK 和运行时 Production 变量同步为 Vercel `Sensitive`，并保存到受 Git 忽略、权限 `0600` 的 `.env.local`；未记录任何值。
 - 已移除代码未使用、指向旧项目的 Production `SUPABASE_JWT_SECRET`，避免保留过期凭据。
 - 部署平台迁移（2026-10-13 起）：生产将从 Vercel 迁到一台新加坡 AWS Lightsail 实例 `grading-sg`（静态 IP `3.1.190.143`，`deploy/production/`，方案 `docs/部署平台迁移到AWS方案.md`）。维护者决定生产数据不保留：新建 Supabase 项目 `grading-system`（ref `mfkmbwkuiimhaytkazvk`，新加坡），用 `init_database` 初始化；旧项目 `euizniwqisnhfhxwiqsg` 在切流量后由维护者删除。运行时密钥只存 GitHub `production` 环境，部署任务生成实例的 `/opt/pgs/.env`（权限 `0600`），同样不得记录任何值。AWS 账号先用 Free 计划（6 个月或额度用完即到期）。切流量之前 Vercel 仍是正式入口；步骤与开关见 RUNBOOK 9.4。
+- 迁出 Supabase（2026-10-27 起）：Supabase 组织（Free 套餐）被 Fair Use 限制，存储签名上传返回 402。维护者决定不再使用 Supabase：数据库改为实例上的 db 容器、文件存实例磁盘，只迁移账号、组织、成员、邀请、平台模型配置、模型连接、助手偏好与官网申请，其余数据不保留。新增 production 环境密钥 `POSTGRES_PASSWORD`、`PGS_APP_PASSWORD`（维护者 2026-10-27 已设置；不得记录任何值）。切换由 `pgs-production-cutover` 执行，实例上的 `/opt/pgs/DATA_PLANE` 记录当前数据位置；切换稳定 7 天后由维护者删除两个 Supabase 项目，再清理代码。方案 `docs/迁出Supabase到单机Docker方案.md`，操作见 RUNBOOK 9.4.1。
 - 生产函数自 2026-08-28（`d902e99`）起在 `sin1`（新加坡），与数据库、Storage 同区域（见 `docs/上线清单.md`）；大批评分仍受 Vercel 300 秒函数时限影响，应通过持久化批任务和运维监控处理，不应以默认 Core 切换作为缓解手段。
 - 任何历史上曾暴露于终端输出、日志或本机 shell 配置的第三方 API Key，仍应按其提供商流程轮换；当前生产不使用平台托管真实 LLM Key。

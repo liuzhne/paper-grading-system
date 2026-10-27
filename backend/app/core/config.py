@@ -66,6 +66,10 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://paper:paper@localhost:5432/paper_grading",
         validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL"),
     )
+    # 直连 PostgreSQL 时每个进程的连接池（SQLAlchemy 默认 5 + 10）；6543 事务池与 Vercel 不用池。
+    # 生产 compose 设为 10 + 10：worker 8 条领取线程，每个执行中的条目还有一条心跳线程。
+    DB_POOL_SIZE: int = Field(default=5, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
     STORAGE_ROOT: Path = Path("storage")
     STORAGE_PROVIDER: Literal["local", "supabase"] = "local"
     SUPABASE_URL: Optional[str] = None

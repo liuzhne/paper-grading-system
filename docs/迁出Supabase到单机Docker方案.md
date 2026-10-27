@@ -1,6 +1,6 @@
 # 迁出 Supabase：数据库与文件改到 Lightsail 实例上
 
-状态：Q1–Q6 已答复（2026-10-27），待维护者最终确认后实施
+状态：已确认（2026-10-27），实施中；第 15 节记录实施时与初稿不同的细节
 关联：`docs/部署平台迁移到AWS方案.md`（单机拓扑）、RUNBOOK 9.4、PR #61（worker 空闲退避）
 
 ## 1. 背景
@@ -36,7 +36,7 @@
             │                 ├──▶ db（postgres:16，卷 pg_data）     │
             │          worker ┘                                      │
             │   app、worker 共用卷 app_storage（上传文件、L0 缓存）    │
-            │   /opt/pgs/backups（每晚逻辑备份，保留 7 份）           │
+            │   backup 服务 → 卷 backups（每晚逻辑备份，保留 7 份）   │
             └────────────────────────────────────────────────────────┘
                     实例每日自动快照（AWS 保存，保留 7 份）
 ```
@@ -46,7 +46,7 @@
 - **镜像**：`postgres:16-bookworm`。生产镜像里的客户端（`POSTGRES_MAJOR=16`）、CI 的迁移门禁和本地 compose 都是 16；用 Debian 镜像，排序规则与 CI 一致（不用 alpine 的 musl）。
 - **不暴露端口**：只在 compose 内网可达。app 与 worker 用主机名 `db:5432` 连接；GitHub 的运行器连不到它（见 5.2）。
 - **卷**：`pg_data`，删容器不丢数据。
-- **超级用户密码**：`POSTGRES_PASSWORD` 写在单独的 `/opt/pgs/db.env`（0600），只给 `db` 服务。app 与 worker 的 `.env` 里没有这个密码。
+- **超级用户密码**：`POSTGRES_PASSWORD` 写在单独的 `/opt/pgs/db.env`（0600），只给 `db` 与 `backup` 服务；`db.env` 同时记录数据位置 `PGS_DATA_PLANE`，backup 据此决定做不做备份。app 与 worker 的 `.env` 里没有这个密码。
 - **内存参数**（实例 2 GB，现在用了约 860 MB，另有 2 GB swap）：
 
   | 参数 | 取值 |
@@ -58,7 +58,7 @@
 
   以上用 `command: postgres -c …` 写在 compose 里，随仓库评审。
 - **健康检查与启动顺序**：健康检查用 `pg_isready`；app 与 worker 设 `depends_on: db: condition: service_healthy`。
-- **连接池**：直连后 `db/session.py` 不再走 `NullPool`（那只对 6543 事务池），改用 SQLAlchemy 默认的 QueuePool，每个进程最多 15 条连接。worker 有 8 条领取线程，每个执行中的条目还有一条心跳线程。实施时要按并发显式设 `pool_size` / `max_overflow`，并保证 app 与 worker 的上限之和小于 `max_connections`。
+- **连接池**：直连后 `db/session.py` 不再走 `NullPool`（那只对 6543 事务池），改用 SQLAlchemy 默认的 QueuePool，每个进程最多 15 条连接。worker 有 8 条领取线程，每个执行中的条目还有一条心跳线程。实施：新增 `DB_POOL_SIZE` / `DB_MAX_OVERFLOW`（默认 5 / 10），生产 compose 给 app 与 worker 都设 10 / 10，两者合计最多 40 条，加上 backup 与一次性容器仍小于 `max_connections=50`。
 - **角色**：
   - `postgres`：超级用户，只用于初始化和迁移。
   - `pgs_app`：运行角色，沿用现在的做法——只有 DML 权限，全表开 RLS 并建 `pgs_app_dml` 策略，由 `init_database.py` 建好。
@@ -155,7 +155,7 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 | 层 | 内容 | 防什么 | 费用 |
 |---|---|---|---|
 | 实例每日自动快照（Lightsail 控制台开启，保留 7 份） | 整块磁盘：数据库卷、文件卷、配置 | 实例损坏、整机误操作；AWS 在实例之外保存 | 按快照实际占用 0.05 美元/GB·月，预计每月不到 1 美元 |
-| 每晚逻辑备份（`ops_backup create`，存 `/opt/pgs/backups`，保留 7 份） | `pg_dump` + 存储目录打包 + 校验清单 | 误删数据、迁移出错，需要单独恢复数据库的情况；比整盘恢复快 | 0（占实例磁盘） |
+| 每晚逻辑备份（backup 服务调用 `create_backup`，存卷 `backups`，保留 7 份） | `pg_dump` + 存储目录打包 + 校验清单 | 误删数据、迁移出错，需要单独恢复数据库的情况；比整盘恢复快 | 0（占实例磁盘） |
 
 - 最坏情况：实例整机损坏时，从前一天的快照恢复，**最多丢一天数据**。
 - 逻辑备份与数据库在同一块盘上，盘坏了要靠快照，它不能替代快照。
@@ -190,7 +190,7 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 1. 通知老师停机时间（预计约 15 分钟），并说明除账号、邀请和模型配置外，数据都不保留。
 2. 在 Lightsail 控制台手动拍一份实例快照。
 
-**运行 `production-cutover.yml`（手动触发 + production 环境审批）**，按以下顺序执行：
+**运行 `production-cutover.yml`（手动触发 + production 环境审批；在 main 上、实例正在运行的那个提交上运行；真正切换要取消 `dry_run` 并在 `confirm` 里填 `cutover`）**，按以下顺序执行：
 
 1. **前置检查**：标记必须是 `supabase`；新库必须是空的；旧库与镜像的 Alembic head 必须相同。任一项不满足就停下，不动任何东西。
 2. 停 worker，再停 app（这期间网站不可用，Caddy 返回 502）。
@@ -269,9 +269,23 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 3. **切换**：维护者通知老师、拍快照，然后运行 `production-cutover.yml`，再做切换后的三项核对（8.2）。
 4. **观察 7 天**：维护者删除 Supabase 项目，再开清理 PR。
 
+## 15. 实施时与初稿不同的细节
+
+| 初稿 | 实施 | 原因 |
+|---|---|---|
+| 备份存 `/opt/pgs/backups`，由 systemd 定时器触发 | compose 的 `backup` 服务常驻，存命名卷 `backups` | 部署用户 `deploy` 没有 root，装不了定时器；宿主机目录归 `deploy`，容器里的用户未必写得进 |
+| 备份调用 `ops_backup create` | `nightly_backup` 调用同一个 `create_backup`，并负责调度、空间检查、保留 7 份 | 需要常驻调度与清理；`ops_backup` 的 `--migration-head` 默认值顺手改为读取镜像里的 head（原来写死 `0028`） |
+| 一次性容器的变量与 `.env` 同一格式 | `--kind ops` 输出不加引号 | `docker run --env-file` 不处理引号，会把引号原样当成值的一部分 |
+| 迁移在实例上用“当前已部署的镜像”执行 | 迁移工作流构建本提交的镜像、送到实例，跑完删除 | 迁移要用本提交的代码；已部署的镜像可能比它旧 |
+| 切换只靠审批与 `dry_run` | 再加 `confirm=cutover`，并要求在实例正在运行的提交上运行 | 切换会让生产停机，误点代价大；切换用实例上已有的镜像 |
+| 切换失败一律人工处理 | 标记写入之前失败：自动放回旧的 `.env`、`db.env` 并按原样启动；之后失败：不自动回退 | 标记写入前，新库还没被任何人使用，回退是安全的 |
+| 复制脚本只在 SQLite 上测 | CI 的 PostgreSQL 任务里另建两个临时库走一遍（`PGS_TEST_POSTGRES_URL`） | 只读事务与 JSON 等列类型在 SQLite 上测不到 |
+| 复制顺序按“其余几张没有外键”排 | 模型连接、助手偏好也有外键；测试按模型元数据核对“外键只能指向排在前面的表” | 初稿的外键普查漏掉了多行写法的定义 |
+
 ## 维护记录
 
 | 日期 | 变化 |
 |---|---|
 | 2026-10-27 | 初稿：背景、已定决定 D1–D4、目标拓扑、迁移范围、备份、两步切换、费用、风险、放弃项、待确认 Q1–Q6。 |
 | 2026-10-27 | 按 Q1–Q6 答复修订：D5–D7；改为一次切完，用实例上的 `DATA_PLANE` 标记决定渲染方式，本机连接串由两个新密码拼出，复制源直接用 `RUNTIME_DATABASE_URL`；补放弃项。 |
+| 2026-10-27 | 实施：新增第 15 节（与初稿不同的细节）；备份改为 compose 服务与命名卷，连接池取值，切换的确认项与失败回退。 |

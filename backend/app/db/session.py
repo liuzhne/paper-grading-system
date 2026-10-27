@@ -12,20 +12,23 @@ from backend.app.services.observability import install_sqlalchemy_timing
 from backend.app.services.observability import note_session_opened
 
 
-def _engine_options(database_url: str):
+def engine_options(database_url: str):
     options = {"pool_pre_ping": True}
     url = make_url(database_url)
     serverless = bool(os.getenv("VERCEL"))
     transaction_pooler = url.get_backend_name() == "postgresql" and url.port == 6543
     if serverless or transaction_pooler:
         options["poolclass"] = NullPool
+    elif url.get_backend_name() == "postgresql":
+        options["pool_size"] = settings.DB_POOL_SIZE
+        options["max_overflow"] = settings.DB_MAX_OVERFLOW
     if transaction_pooler and url.drivername.endswith("+psycopg"):
         # Supavisor transaction mode does not support prepared statements.
         options["connect_args"] = {"prepare_threshold": None}
     return options
 
 
-engine = create_engine(settings.DATABASE_URL, **_engine_options(settings.DATABASE_URL))
+engine = create_engine(settings.DATABASE_URL, **engine_options(settings.DATABASE_URL))
 enable_sqlite_foreign_keys(engine)
 install_sqlalchemy_timing(engine)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, class_=Session)
