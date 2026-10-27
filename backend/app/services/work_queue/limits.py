@@ -21,9 +21,14 @@ PAGE_SWEEP_SECONDS = 30
 # 一次领取最多跳过多少个被别人抢先的候选（SQLite 没有行锁，靠条件更新防重复领取）。
 CLAIM_CANDIDATE_LIMIT = 20
 
+# worker 空闲时的探测间隔上限：从 --poll-seconds 起，连续领不到就翻倍到这里。
+# 叫醒层在 worker 部署上是空操作，长时间空闲后第一份任务最多晚这么久开始。
+IDLE_POLL_MAX_SECONDS = 30
+
 __all__ = [
     "CLAIM_CANDIDATE_LIMIT",
     "HEARTBEAT_SECONDS",
+    "IDLE_POLL_MAX_SECONDS",
     "ITEM_LEASE_SECONDS",
     "PAGE_SWEEP_SECONDS",
     "STALL_LIMIT",
