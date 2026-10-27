@@ -1,6 +1,6 @@
 # 迁出 Supabase：数据库与文件改到 Lightsail 实例上
 
-状态：草案，待维护者确认（2026-10-27）
+状态：Q1–Q6 已答复（2026-10-27），待维护者最终确认后实施
 关联：`docs/部署平台迁移到AWS方案.md`（单机拓扑）、RUNBOOK 9.4、PR #61（worker 空闲退避）
 
 ## 1. 背景
@@ -22,6 +22,9 @@
 | D2 | PostgreSQL 用 Docker 跑在现有实例上；文件存实例磁盘（`STORAGE_PROVIDER=local`），不跑 S3 兼容服务。每月不增加费用。 |
 | D3 | 只迁移固定配置与人员账号（含密码）；其余生产数据都不迁移。 |
 | D4 | worker 空闲退避（PR #61）先行，单独发布。 |
+| D5 | 迁移范围在 6 张必迁表之外，加上 `organization_invitations` 与 `site_leads`；`audit_logs` 不迁移（Q1）。 |
+| D6 | **一次切完**：文件与数据库在同一个维护窗口里切换；代码合并本身不改变生产行为，切换前上传仍不可用（Q2）。 |
+| D7 | Q3–Q6 按建议：迁移仍手动审批、改到实例上执行；先不做异地备份；切换稳定 7 天并删除 Supabase 项目后再清理代码；PostgreSQL 16。 |
 
 被否掉的方案及理由见第 12 节。
 
@@ -71,13 +74,13 @@
 
 | 位置 | 改动 |
 |---|---|
-| `deploy/production/compose.yml` | 新增 `db` 服务与卷 `pg_data`；`STORAGE_PROVIDER: local`；app/worker 依赖 `db` 健康。 |
-| `scripts/production_env.py` | 必需变量去掉 `SUPABASE_URL` / `SUPABASE_SECRET_KEY`；`DATABASE_URL` 的校验从“端口必须 6543”改为“主机 `db`、端口 5432”；另写 `db.env`（`POSTGRES_PASSWORD`）。 |
-| `.github/workflows/ci.yml`（部署任务） | 渲染并上传 `db.env`；部署前检查实例磁盘空闲空间。 |
-| `.github/workflows/production-migrate.yml` | 改为经 SSH 在实例上跑一次性容器执行迁移（见 5.2），保留手动触发、审批、`expected_head` 与 `dry_run`。 |
+| `deploy/production/compose.yml` | 新增 `db` 服务与卷 `pg_data`；app/worker 依赖 `db` 健康；`STORAGE_PROVIDER` 不再写死在 compose 里，改由 `.env` 按数据位置写入（见 8.1）。 |
+| `scripts/production_env.py` | 新增 `--data-plane supabase|local`。`supabase`：与现在相同。`local`：`DATABASE_URL` 由 `PGS_APP_PASSWORD` 拼成 `pgs_app@db:5432/pgs`，写 `STORAGE_PROVIDER=local`，不再要求 `SUPABASE_*`。两种模式都另写 `db.env`（只有 `POSTGRES_PASSWORD`）。 |
+| `.github/workflows/ci.yml`（部署任务） | 先读实例上的 `/opt/pgs/DATA_PLANE`（没有即 `supabase`），按它渲染 `.env`，并在日志里打印；渲染并上传 `db.env`；报告实例磁盘空闲空间。 |
+| `.github/workflows/production-migrate.yml` | 改为经 SSH 在实例上跑一次性容器执行迁移（见 5.2），按 `DATA_PLANE` 选连接：`local` 用 `POSTGRES_PASSWORD` 拼出的 `postgres@db:5432`，`supabase` 用现有的 `MIGRATION_DATABASE_URL`；保留手动触发、审批、`expected_head` 与 `dry_run`。 |
 | 新增 `backend/app/scripts/copy_fixed_config.py` | 一次性把固定配置与账号从旧库复制到新库（见第 6 节）。 |
-| 新增 `.github/workflows/production-cutover.yml` | 手动触发并审批：初始化新库 → 复制配置 → 切换连接 → 核对（见第 8 节）。 |
-| `deploy/production/compose.yml` 的 `backup` 服务 | 同一镜像，每天 03:00（UTC+8）调用 `ops_backup create`，保留 7 份，空间不足时拒绝并记日志（见第 7 节）。随 compose 部署：部署用户 `deploy` 没有 root，装不了 systemd 定时器。 |
+| 新增 `.github/workflows/production-cutover.yml` | 手动触发并审批：停服务 → 初始化新库 → 复制配置 → 写 `DATA_PLANE=local` → 按本机模式重新渲染 `.env` 并启动 → 核对（见 8.2）。 |
+| `deploy/production/compose.yml` 的 `backup` 服务 + 新增 `backend/app/scripts/nightly_backup.py` | 同一镜像，每天 03:00（UTC+8）调用 `create_backup`，保留 7 份，空间不足时拒绝并记日志（见第 7 节）；`STORAGE_PROVIDER` 不是 `local`（切换前）时只记一行日志、不备份。随 compose 部署：部署用户 `deploy` 没有 root，装不了 systemd 定时器。 |
 | `backend/app/scripts/ops_backup.py` | `--migration-head` 默认值还停在 `0028`，改为读取当前 Alembic head。 |
 | `backend/app/db/session.py` | 直连时按配置设连接池大小（见 3.1）。 |
 | 测试 | `test_production_deployment.py` 里“compose 只有 caddy/app/worker、没有数据库”的断言改为四个服务，并校验 `db` 不暴露端口、不读 `.env`；补 `production_env` 新校验、`copy_fixed_config`（SQLite → SQLite，以及 CI 上 Postgres → Postgres）的测试。 |
@@ -123,16 +126,16 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 | `platform_llm_config` | 1 | **迁移** | 平台模型配置（密文，见 6.3）。 |
 | `ai_connections` | 1 | **迁移** | 模型连接（密文）。保留 ID，评测工作流的 `--connection-id` 照常可用。 |
 | `assistant_preferences` | 1 | **迁移** | 评分助手的模型选择。 |
-| `organization_invitations` | 2 | 待定（Q1） | 已发出、未接受的邀请。不迁移的话，邮件里的邀请链接会失效。 |
-| `site_leads` | 2 | 待定（Q1） | 官网试用申请，是业务线索，不是学生数据。 |
-| `audit_logs` | 51 | 待定（Q1） | 操作审计记录。 |
+| `organization_invitations` | 2 | **迁移**（D5） | 已发出、未接受的邀请，邮件里的邀请链接继续有效。 |
+| `site_leads` | 2 | **迁移**（D5） | 官网试用申请，是业务线索，不是学生数据。 |
+| `audit_logs` | 51 | 不迁移（D5） | 操作审计记录，对应的评分标准、批次等都不迁移，留着对不上。 |
 | 其余表 | — | 不迁移 | 评分标准、批次、论文、评分结果、助手会话、用量账本、登录会话等，按 D3 丢弃；所有人需要重新登录。 |
 
 ### 6.2 做法：`copy_fixed_config.py`
 
 - **源库**：旧 Supabase 库，经 Session pooler（IPv4、5432）连接，在只读事务（`begin read only … rollback`）里读取。只读事务即使在 Fair Use 把库切成只读之后也能用。
 - **目标库**：新库，用 owner 连接写入。
-  - 按外键顺序复制：`users` → `organizations` → `organization_members` → 其余各表。
+  - 按外键顺序复制：`users` → `organizations` → `organization_members` / `organization_invitations` → 其余各表。
   - 只复制两边都有的列，保留原 ID。
   - 全部在一个事务里完成，任一步失败整体回滚。
 - **前置检查**：两边的 Alembic head 必须相同（都是 `0041`）；目标表必须为空，否则拒绝执行，重跑前要先清空新库。
@@ -160,46 +163,53 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 - 备份含学生 PII：目录权限 0700、文件 0600，不进 CI artifact，不出实例（异地备份见 Q4）。
 - **恢复演练**：切换完成前，在实例上把当晚的备份恢复到一个临时库（`ops_backup restore --confirm-database …`），核对行数后删除临时库。RUNBOOK 写明步骤。
 
-## 8. 切换步骤
+## 8. 切换步骤（一次切完，D6）
 
-推荐分两步（Q2）。第一步先让上传恢复；第二步在维护窗口里切数据库。
+### 8.1 数据位置标记 `DATA_PLANE`
 
-### 第一步：文件改存实例磁盘（随代码 PR 部署，无停机）
+实例上的 `/opt/pgs/DATA_PLANE` 记录这台实例的数据在哪里：没有这个文件即 `supabase`，切换后为 `local`。部署任务每次先读它，再按它渲染 `.env`：
 
-- 合并代码 PR，部署时 `STORAGE_PROVIDER` 变为 `local`，`db` 容器随之启动（空库，暂不使用）。
-- 数据库仍连 Supabase。上传立即恢复，因为不再调用 Supabase Storage。
-- 这期间新上传的材料存在实例磁盘上、记录在 Supabase 库里。第二步按 D3 不迁移它们，过渡期只用于测试。
+| 标记 | `DATABASE_URL` | `STORAGE_PROVIDER` | 需要的密钥 |
+|---|---|---|---|
+| `supabase`（默认） | `RUNTIME_DATABASE_URL`（与现在相同） | `supabase` | 现有全部 |
+| `local` | 由 `PGS_APP_PASSWORD` 拼成 `pgs_app@db:5432/pgs` | `local` | `PGS_APP_PASSWORD`、`POSTGRES_PASSWORD`、`AUTH_*`、`BYOK_MASTER_KEY` |
 
-### 第二步：数据库切换（维护窗口，预计停机约 15 分钟）
+为什么放在实例上，而不用仓库变量：切换完成到改仓库变量之间，只要有一次推送触发部署，就会按旧值把 app 连回 Supabase，数据会分成两半。标记文件由切换工作流在同一步里写入，没有这个空档。代价是生产当前用哪个库，要看部署日志或实例上的这个文件，而不是在仓库里一眼看到。
 
-**维护者准备**：
+### 8.2 步骤
 
-1. 在 Lightsail 控制台开启自动快照，并手动拍一份快照。
-2. 在 GitHub production 环境设置：
-   - `POSTGRES_PASSWORD`、`PGS_APP_PASSWORD`：只用字母和数字，24 位以上；
-   - 新的 `MIGRATION_DATABASE_URL`（`postgres@db:5432`）；
-   - 旧库连接串另存为 `SOURCE_DATABASE_URL`。
-3. 通知老师停机时间，并说明除账号外的数据都不保留。
+**准备（维护者，合并代码 PR 之前）**：
 
-**运行 `production-cutover.yml`（手动触发 + 审批）**：
+1. 在 GitHub production 环境新增两个 secret：`POSTGRES_PASSWORD`、`PGS_APP_PASSWORD`。都只用字母和数字，24 位以上。部署任务会校验，缺了不部署，因为合并后 `db` 容器就要用它们初始化。
+2. 在 Lightsail 控制台开启实例的自动快照。
 
-1. 停 worker，再停 app（这期间网站不可用，Caddy 返回 502）；
-2. 对新库跑 `init_database`；
-3. 跑 `copy_fixed_config`，打印每张表复制了多少行；
-4. 把 `.env` 的 `DATABASE_URL` 换成 `pgs_app@db:5432`，启动 app 与 worker；
-5. 核对：健康检查通过；用原账号能登录；平台模型配置可读；做一次 `ops_backup create` 并 `verify`。
+**合并代码 PR**：部署后 `db` 容器启动（空库，暂不使用）。标记仍是 `supabase`，生产行为不变，上传仍然不可用。
 
-**切换后，由维护者确认**：
+**切换前（维护者）**：
 
-1. 测试连接；
-2. 上传一篇论文走完评分；
-3. 把 GitHub 里的 `RUNTIME_DATABASE_URL` 改成新值，以后每次部署渲染的都是新库。
+1. 通知老师停机时间（预计约 15 分钟），并说明除账号、邀请和模型配置外，数据都不保留。
+2. 在 Lightsail 控制台手动拍一份实例快照。
 
-### 回滚
+**运行 `production-cutover.yml`（手动触发 + production 环境审批）**，按以下顺序执行：
 
-- **切换后、老师开始使用前**：把 `DATABASE_URL` 改回 Supabase 重新部署即可，新库原样保留，下次再切。
+1. **前置检查**：标记必须是 `supabase`；新库必须是空的；旧库与镜像的 Alembic head 必须相同。任一项不满足就停下，不动任何东西。
+2. 停 worker，再停 app（这期间网站不可用，Caddy 返回 502）。
+3. 对新库跑 `init_database`。
+4. 跑 `copy_fixed_config`：源库是现有的 `RUNTIME_DATABASE_URL`（还指向 Supabase），目标是新库。打印每张表复制了多少行。
+5. 写入 `DATA_PLANE=local`，按本机模式重新渲染 `.env`，用当前版本启动 app 与 worker。
+6. 核对：健康检查通过；行数与第 4 步一致；做一次 `ops_backup create` 并 `verify`。
+
+**切换后（维护者）**：
+
+1. 用原账号登录；
+2. 在运维页对平台模型点“测试连接”；
+3. 上传一篇论文，走完评分。
+
+### 8.3 回滚
+
+- **切换后、老师开始使用前**：在实例上删掉 `/opt/pgs/DATA_PLANE`，重跑一次部署，即回到 Supabase（上传仍不可用）。新库原样保留，下次切换前要先清空它。
 - **老师开始使用新库之后**：回滚会丢掉这期间的新数据，不再提供。之后的故障按第 7 节恢复。
-- **Supabase 项目**：切换后保留 7 天（免费套餐不产生费用），确认无误后由维护者删除。删除不可撤销，是维护者自己的操作。
+- **Supabase 项目**：切换后保留 7 天（免费套餐不产生费用），确认无误后由维护者删除，删除不可撤销。清理 PR 会同时删掉 `supabase` 模式与 `RUNTIME_DATABASE_URL`、`MIGRATION_DATABASE_URL`、`SUPABASE_*` 这几个 secret 的用途。
 
 ## 9. 费用
 
@@ -237,24 +247,26 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 - **只把文件搬走、数据库继续用 Supabase**：Fair Use 按组织计算，数据库的出流量照样计费，限制还可能升级为只读或暂停。
 - **升级 Supabase Pro**：每月 25 美元，比托管数据库还贵。
 - **用 `pg_dump` 整库恢复到新库再删数据**：要把全部生产数据（含学生 PII）搬一遍再删，与 D3 相反；按表复制只碰需要的那几张。
-- **一次切完（文件与数据库同一个维护窗口）**：更简单，但上传要一直坏到维护窗口；分两步的话，代码一合并上传就恢复（Q2）。
+- **分两步（先切文件、后切数据库）**：代码一合并上传就能恢复，但过渡期会出现“数据库在 Supabase、文件在本机”的混合状态，过渡期数据最后还要丢弃。维护者选了一次切完（Q2），代价是上传要一直不可用到维护窗口。
+- **用仓库变量控制数据位置**：切换完成到改变量之间的任何一次部署都会连回 Supabase；改为实例上的标记文件（8.1）。
+- **另存一个旧库连接串 `SOURCE_DATABASE_URL`**：GitHub secret 写进去就读不出来，维护者要重新拼一遍旧库连接串；切换时 `RUNTIME_DATABASE_URL` 本来就指向旧库，直接用它。
 
-## 13. 待确认问题
+## 13. 问题与答复（维护者 2026-10-27）
 
-| 编号 | 问题 | 建议 |
+| 编号 | 问题 | 答复 |
 |---|---|---|
-| Q1 | 6.1 里三张待定的表是否迁移？ | `organization_invitations` 迁移（已发出的邀请链接继续有效）、`site_leads` 迁移（业务线索）、`audit_logs` 不迁移（与已丢弃的数据对应不上）。 |
-| Q2 | 分两步（先文件、后数据库）还是一次切完？ | 分两步，上传先恢复。 |
-| Q3 | 迁移仍然手动审批，还是部署时自动执行？ | 仍然手动审批，只是改到实例上执行，不改现有规矩。 |
-| Q4 | 是否需要异地备份（例如每周把逻辑备份拉到维护者的电脑）？ | 先不做：快照已存在实例之外；备份含 PII，拉到个人电脑反而多一个泄露面。 |
-| Q5 | Supabase 相关代码与依赖什么时候删？ | 切换稳定 7 天、Supabase 项目删除后，另开一个清理 PR。 |
-| Q6 | PostgreSQL 用哪个大版本？ | 16，与镜像客户端、CI、本地一致；以后统一升级。 |
+| Q1 | 6.1 里三张待定的表是否迁移？ | 迁移 `organization_invitations` 与 `site_leads`，`audit_logs` 不迁移（D5）。 |
+| Q2 | 分两步还是一次切完？ | 一次切完（D6）。 |
+| Q3 | 迁移仍然手动审批，还是部署时自动执行？ | 仍然手动审批，改到实例上执行。 |
+| Q4 | 是否需要异地备份？ | 先不做：快照已存在实例之外；备份含 PII，拉到个人电脑反而多一个泄露面。 |
+| Q5 | Supabase 相关代码与依赖什么时候删？ | 切换稳定 7 天、Supabase 项目删除后，另开清理 PR。 |
+| Q6 | PostgreSQL 用哪个大版本？ | 16，与镜像客户端、CI、本地一致。 |
 
 ## 14. 实施顺序
 
 1. **PR #61**：worker 空闲退避，独立合并。
-2. **本方案确认后，代码 PR**：第 4 节除“清理”外的全部内容 + 三份文档 + 测试。合并即完成第一步（文件改存实例磁盘）。
-3. **维护者准备**（第 8 节），然后运行 `production-cutover.yml`，完成第二步。
+2. **代码 PR**：第 4 节除“清理”外的全部内容 + 三份文档 + 测试。合并前维护者先设好两个新 secret；合并后生产行为不变。
+3. **切换**：维护者通知老师、拍快照，然后运行 `production-cutover.yml`，再做切换后的三项核对（8.2）。
 4. **观察 7 天**：维护者删除 Supabase 项目，再开清理 PR。
 
 ## 维护记录
@@ -262,3 +274,4 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 | 日期 | 变化 |
 |---|---|
 | 2026-10-27 | 初稿：背景、已定决定 D1–D4、目标拓扑、迁移范围、备份、两步切换、费用、风险、放弃项、待确认 Q1–Q6。 |
+| 2026-10-27 | 按 Q1–Q6 答复修订：D5–D7；改为一次切完，用实例上的 `DATA_PLANE` 标记决定渲染方式，本机连接串由两个新密码拼出，复制源直接用 `RUNTIME_DATABASE_URL`；补放弃项。 |
