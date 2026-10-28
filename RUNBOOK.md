@@ -231,6 +231,7 @@ export LANGFUSE_RELEASE=<deployment-commit>
 | 结果意外来自 Mock | `LLM_PROVIDER`、`LLM_FALLBACK_TO_MOCK`、集成状态 | 正式评估设 fallback=false；检查日志中的 provider identity，不要把 Mock 结果当质量证据 |
 | 缓存结果疑似陈旧 | `PROMPT_VERSION`、模型/采样/RubricVersion/anchor identity | 修复输入构造时 bump Core 与 cache 的 prompt 版本；不要只删除用户数据或扩大 cache key 复用 |
 | 上传失败/413 | Caddy 限制、`MAX_UPLOAD_SIZE_MB`、直传上限、Supabase CORS/TUS | 对齐批准的限制；serverless 大文件使用私有直传，不要改公开桶或暴露 service key |
+| 助手回复“文件都没能上传成功”，网络面板里 `POST /api/papers/direct-upload-intents` 返回 502 `DIRECT_UPLOAD_SIGNING_FAILED`（2026-10-27） | Supabase 边缘日志里 `/storage/v1/object/upload/sign/…` 的状态码；组织的套餐与 Usage 页 | 报错指向我们的签名接口，真正原因在 Supabase：签名请求返回 **402**，是组织超出免费额度后的 Fair Use 限制，作用于组织里的所有项目，与代码、密钥、桶无关（10-16 同样请求是 200）。项目自身数据库 22 MB、存储 2.7 MB，疑为连接池出流量：空闲 worker 8 条线程各自每 3 秒领一次，14 天 1200 万条语句。已改为空闲时单线程探测、默认退避到 30 秒；限制本身只能等计费周期重置或升级套餐，维护者已决定迁出 Supabase。后端目前不记录签名异常、前端不显示每个文件的失败原因，查这类问题要看 Supabase 日志 |
 | Paper 长时间 `parsing` | `PAPER_PARSE_LEASE_SECONDS`、对象是否存在/大小一致、worker 中断 | 租约未过期时禁止并发接管；超时后用“重新解析”，仅在新解析成功后替换 chunks |
 | Submission 422 | 文件仅支持 DOCX/文本 PDF、Profile 元数据、解析质量、Profile identity | 修正输入或选择正确 Profile；不要让通用 Core 猜业务元数据 |
 | Rubric 无法发布 | compilation、rule review、template link、total/policy、provenance blocker | 用 execution draft/graph 定位并由授权人补齐；不要自动批准或清 blocker |
@@ -1147,6 +1148,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-27 | worker 空闲退避 | `run_batch_worker` 新增 `--idle-max-seconds`（默认 30）；常见故障：助手上传失败、直传申请 502，真正原因是 Supabase 组织 Fair Use 限制（402）。 |
 | 2026-10-26 | 评分助手 A1.1 第三轮复审（CodeRabbit） | 无新命令；只改工具输出，不改提示词与评测集，不用重跑评测。 |
 | 2026-10-26 | 评分助手 A1.1 第二轮复审（CodeRabbit） | 无新命令；评测集又变，按候选镜像流程重跑后再合并。 |
 | 2026-10-26 | 评分助手 A1.1 复审（CodeRabbit） | 评测说明分清线上镜像与候选镜像：候选镜像在合并前评测、报告进同一个 PR。 |
@@ -2150,7 +2152,7 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 本节取代 2026-09-15「持久化后台评分」与 2026-10-08「自部署后台评分 worker」里关于投递、租约和执行次数的说明，以及上一节“当前行为（实施前排查用）”。
 
 运行与配置：
-- 内网/本地：`python -m backend.app.scripts.run_batch_worker [--threads N] [--sweep-seconds 120] [--poll-seconds 3]`。`--threads` 默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`（未设为 8），即这台 worker 同时执行的条目数；`--scale worker=N` 多开时，每个连接的同时请求数仍在领取时统一检查，不会超。compose 与 `start-web-pg.sh` 的命令不变。
+- 内网/本地：`python -m backend.app.scripts.run_batch_worker [--threads N] [--sweep-seconds 120] [--poll-seconds 3] [--idle-max-seconds 30]`。`--threads` 默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`（未设为 8），即这台 worker 同时执行的条目数；空闲时只留一条线程探测，间隔从 `--poll-seconds` 翻倍到 `--idle-max-seconds`，任何线程领到条目就复位并叫醒其它线程（2026-10-27 起；长时间空闲后第一份任务最多晚 `--idle-max-seconds` 开始，默认 30 秒；两值相等即不退避；探测线程卡住超过 `2 × 上限 + 30` 秒，默认 90 秒，由等着的线程接手）；`--scale worker=N` 多开时，每个连接的同时请求数仍在领取时统一检查，不会超。compose 与 `start-web-pg.sh` 的命令不变。
 - Vercel：`pyproject.toml` 只有一条订阅声明（入口 `vercel_queue:score_batch_item`），它生成的函数挂两个触发器——`handle_work_message`（主题 `pgs-work`）与旧主题的 `score_batch_item`。同一模块不能写两条声明（见 2026-10-10 “发布 0035–0037”）。消息只带来源键或巡检槽号；巡检链在首次建任务或进度读取时自动补投，不需要手工发消息。
 - 在真实 PostgreSQL 上跑并发领取用例：`PGS_TEST_POSTGRES_URL=postgresql+psycopg://…@127.0.0.1:5432/<可清空的空库> .venv/bin/python -m pytest -q backend/app/tests/test_unified_work_queue.py`（只接受本机地址；用例会 `drop_all` / `create_all`）。不设置时该参数化用例跳过，SQLite 版照常运行。
 
