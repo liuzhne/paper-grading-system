@@ -30,7 +30,7 @@
   - `rubric_import/`：三层解析（见 `docs/评分规则解析模块重构方案.md`）——`sources/` 格式适配器（Excel/Word → 原文单元台账 `SourceLedger`，不用 LLM）、`extraction/` 抽取器（确定性表格/Word 抽取、E1–E8 触发、用户确认的结构覆盖、LLM 结构识别兜底）、`classification/` 兜底分类器；`coverage` 覆盖率、`parse_state` 单元处理与发布门禁、`structure_state` 结构建议合入/撤销、`review`/`review_state` 规则审查；`pipeline` 只做组装与持久化；`compiler` 结构化扣分规则（`compile_criterion_rules` 旧 LLM 编译仅供 CLI）。
   - `document_parser/`：docx/PDF 解析(`parser`)、分块(`chunking`)、格式解析(`format_resolver`)、格式比对(`format_check`)。
   - `papers/ingestion`：解析+落库共享服务（路由与离线脚本复用）。
-  - `assistant/`：评分助手（见 `docs/对话评分助手改造方案.md`）。LangGraph 流程图 `flow` + 查询图 `queries`，运行器 `runner`，自写状态存储 `checkpointer`（写入先缓冲、主线程落库），工具登记 `tools`，意图识别 `intents`（规则优先）。评分权为零。
+  - `assistant/`：评分助手（见 `docs/对话评分助手改造方案.md`）。LangGraph 流程图 `flow` + 查询图 `queries`，计划卡片 `plan`（流程开始时由代码列出步骤、逐步更新，见 `docs/评分助手计划卡片方案.md`），运行器 `runner`，自写状态存储 `checkpointer`（写入先缓冲、主线程落库），工具登记 `tools`，意图识别 `intents`（规则优先）。评分权为零。
   - `scoring/engine`：评分编排（**核心**）；`rules` 总分/等级；`validator` 结构化输出校验+注入检测。
   - `batch_scoring/jobs`：数据库持久化批任务、论文级检查点、租约恢复/取消/定向重试、观察策略与 Core 切换信号；只做观察，不授予 GATE-03 发布权限。它是 `work_queue` 的一种条目。
   - `work_queue/`：数据库即队列——`claim_next_item`（来源名额 + `SKIP LOCKED` + 任务内序号轮转）、条目心跳、`sweep_stale_items` 巡检（连续无进展上限）、叫醒（Vercel 上 `pgs-work` 只带来源键；内网、本地与 Lightsail 生产由 worker 循环调用同一个领取函数）。

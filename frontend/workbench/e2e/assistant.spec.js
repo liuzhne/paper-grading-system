@@ -91,6 +91,18 @@ test.describe("评分助手", () => {
     await expect(importCard).not.toContainText("已放弃");
   });
 
+  test("导入评分标准：先出一张 8 步的计划卡片，标题下显示当前第几步，空着的工作区也显示它", async ({ page }) => {
+    await openAssistant(page);
+    await ask(page, "上传我的评分规则和模板");
+
+    const plan = page.getByRole("region", { name: "对话" }).locator(".acard-plan").last();
+    await expect(plan).toContainText("导入并评分的步骤");
+    await expect(plan.locator(".plan-steps li")).toHaveCount(8);
+    await expect(plan.locator(".step-current")).toContainText("上传评分规则和模板");
+    await expect(page.getByRole("button", { name: "第 1/8 步 · 上传评分规则和模板" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "工作区" }).locator(".acard-plan")).toBeVisible();
+  });
+
   test("规则识别不了的话：说没理解，并给出快捷按钮", async ({ page }) => {
     await openAssistant(page);
     await ask(page, "今天天气怎么样");

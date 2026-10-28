@@ -10,7 +10,7 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import AssistantCard from "@/components/AssistantCard.vue";
 import AssistantSetupDialog from "@/components/AssistantSetupDialog.vue";
-import { MAX_FILES, QUICK_ACTIONS } from "@/lib/assistant-flow.js";
+import { MAX_FILES, QUICK_ACTIONS, activePlan, planProgressText } from "@/lib/assistant-flow.js";
 import { useAssistantStore } from "@/stores/assistant.js";
 
 const store = useAssistantStore();
@@ -28,6 +28,9 @@ const loadError = ref(null);
 const routeId = computed(() => (typeof route.params.conversationId === "string" ? route.params.conversationId : null));
 const effective = computed(() => store.settings?.effective || null);
 const workspaceSrc = computed(() => (store.workspacePath ? router.resolve(store.workspacePath).href : null));
+// 进行中的计划：标题下显示当前第几步，工作区空着时显示整张计划（计划卡片方案 §4）。
+const plan = computed(() => activePlan(store.messages));
+const planProgress = computed(() => (plan.value ? planProgressText(plan.value.card) : ""));
 
 async function openRoute(id) {
   loadError.value = null;
@@ -58,6 +61,12 @@ watch(() => store.conversation?.id, (id) => {
 });
 watch(() => store.messages.length, () => scrollToEnd());
 watch(() => store.workspacePath, (path) => { if (path) workspaceOpen.value = true; });
+
+function scrollToPlan() {
+  const id = plan.value?.card.id;
+  const target = id && thread.value?.querySelector(`[data-card-id="${id}"]`);
+  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 function scrollToEnd() {
   nextTick(() => {
@@ -137,6 +146,9 @@ function timeText(value) {
         <div class="chat-title">
           <h1>{{ store.conversation?.title || "评分助手" }}</h1>
           <span v-if="effective" class="faint model">助手模型：{{ effective.label }}</span>
+          <button v-if="planProgress" class="plan-progress" type="button" title="查看这次的步骤" @click="scrollToPlan">
+            {{ planProgress }}
+          </button>
         </div>
         <button class="btn btn-sm only-narrow" type="button" @click="panel = panel === 'chat' ? 'workspace' : 'chat'">
           {{ panel === "chat" ? "工作区" : "对话" }}
@@ -188,6 +200,10 @@ function timeText(value) {
     <section v-show="workspaceOpen" class="workspace" aria-label="工作区">
       <button class="btn btn-sm only-narrow back-to-chat" type="button" @click="panel = 'chat'">← 回到对话</button>
       <iframe v-if="workspaceSrc" :key="store.workspaceKey" class="frame" :src="workspaceSrc" title="工作区"></iframe>
+      <div v-else-if="plan" class="workspace-plan">
+        <AssistantCard :message="plan.message" :card="plan.card" />
+        <p class="faint">建好评分任务后，这里会换成任务页面。</p>
+      </div>
       <div v-else class="workspace-empty">
         <p>评分的每一步会显示在这里：评分进度、评分结果、评分标准核对。</p>
       </div>
@@ -226,6 +242,8 @@ function timeText(value) {
 .chat-title { flex: 1; min-width: 0; }
 .chat-title h1 { margin: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model { font-size: 12px; }
+.plan-progress { display: block; margin-top: 2px; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; text-align: left; }
+.plan-progress:hover { text-decoration: underline; }
 .thread { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .welcome { margin: auto 0; padding: 24px 4px; }
 .welcome h2 { margin: 0 0 8px; font-size: 20px; }
@@ -249,6 +267,8 @@ function timeText(value) {
 .back-to-chat { position: absolute; top: 10px; right: 12px; z-index: 2; }
 .frame { width: 100%; height: 100%; border: 0; display: block; }
 .workspace-empty { display: grid; place-items: center; height: 100%; padding: 24px; color: var(--text-muted); text-align: center; }
+.workspace-plan { max-width: 520px; margin: 0 auto; padding: 32px 24px; }
+.workspace-plan > p { margin-top: 12px; font-size: 13px; }
 
 .only-narrow { display: none; }
 

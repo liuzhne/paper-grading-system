@@ -77,6 +77,19 @@ class RunContext:
         self.db.flush()
         self.updated_message_ids.add(message.id)
 
+    def patch_card(self, message_id: str | None, card_id: str | None, fields: dict) -> None:
+        """改卡片的任意字段（计划卡片的步骤）；`update_card` 只改状态与结果。"""
+
+        if not message_id or not card_id:
+            return
+        message = self.db.get(AssistantMessage, message_id)
+        if message is None or message.conversation_id != self.conversation.id:
+            return
+        message.cards = [{**card, **fields} if card.get("id") == card_id else dict(card) for card in message.cards or []]
+        flag_modified(message, "cards")
+        self.db.flush()
+        self.updated_message_ids.add(message.id)
+
     def find_card(self, card_id: str):
         """在本会话里找卡片，返回 (消息, 卡片)。"""
 

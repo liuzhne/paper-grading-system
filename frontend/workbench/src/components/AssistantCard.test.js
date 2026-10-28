@@ -45,3 +45,29 @@ it("“得分详情”卡片显示扣分理由与修改建议（方案 §31.3）
   expect(review.find('[data-test="card-suggestion"]').exists()).toBe(false);
   wrapper.unmount();
 });
+
+it("计划卡片按顺序列出步骤，带状态记号与说明（计划卡片方案 §4）", () => {
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/:any(.*)", component: { template: "<div />" } }] });
+  const card = {
+    id: "plan-1", type: "plan", status: "running", flow: "grading",
+    steps: [
+      { key: "rubric", label: "评分标准", status: "done", detail: "《毕业论文》v1" },
+      { key: "files", label: "选择待评分文件", status: "current", detail: null },
+      { key: "upload", label: "上传与预检", status: "blocked", detail: "1 份无法评分，等你决定是否移除" },
+      { key: "report", label: "汇报结果", status: "todo", detail: null },
+    ],
+  };
+  const wrapper = mount(AssistantCard, { props: { message: { id: "m1" }, card }, global: { plugins: [router] } });
+
+  expect(wrapper.get(".plan-head").text()).toContain("评分的步骤");
+  expect(wrapper.get(".plan-head").text()).toContain("进行中");
+  const steps = wrapper.findAll(".plan-steps li");
+  expect(steps.map((step) => step.classes().find((name) => name.startsWith("step-")))).toEqual(
+    ["step-done", "step-current", "step-blocked", "step-todo"]);
+  expect(steps[0].text()).toContain("1. 评分标准");
+  expect(steps[0].text()).toContain("《毕业论文》v1");
+  expect(steps[2].get(".mark").text()).toBe("!");
+  expect(steps[2].text()).toContain("（等你决定）");
+  expect(wrapper.attributes("data-card-id")).toBe("plan-1");
+  wrapper.unmount();
+});

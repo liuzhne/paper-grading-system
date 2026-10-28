@@ -8,7 +8,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
-import { MAX_FILES, papersInUploadOrder, publishedRubrics, scoreOverview } from "@/lib/assistant-flow.js";
+import { MAX_FILES, PLAN_STATUS_TEXT, PLAN_STEP_MARKS, papersInUploadOrder, publishedRubrics, scoreOverview } from "@/lib/assistant-flow.js";
 import { DOCUMENT_TYPES, documentTypeLabel, rememberedDocumentType } from "@/lib/document-types.js";
 import { finishedCount, jobPercent, jobStatusLabel } from "@/lib/score-jobs.js";
 import { deductionReasons } from "@/lib/score-items.js";
@@ -130,9 +130,27 @@ function evidenceLabel(view) {
 </script>
 
 <template>
-  <div class="acard" :class="[`acard-${card.type}`, `is-${card.status || 'info'}`]">
+  <div class="acard" :class="[`acard-${card.type}`, `is-${card.status || 'info'}`]" :data-card-id="card.id">
+    <!-- 计划：这次要走的步骤，每走一步后端在原卡片上更新（计划卡片方案） -->
+    <template v-if="card.type === 'plan'">
+      <div class="plan-head">
+        <strong>{{ card.flow === "import" ? "导入并评分的步骤" : "评分的步骤" }}</strong>
+        <span class="faint small">{{ PLAN_STATUS_TEXT[card.status] || "" }}</span>
+      </div>
+      <ol class="plan-steps">
+        <li v-for="(step, index) in card.steps" :key="step.key" :class="`step-${step.status}`">
+          <span class="mark" aria-hidden="true">{{ PLAN_STEP_MARKS[step.status]?.mark || "○" }}</span>
+          <span class="step-body">
+            <span class="step-label">{{ index + 1 }}. {{ step.label }}</span>
+            <span class="sr-only">（{{ PLAN_STEP_MARKS[step.status]?.text || step.status }}）</span>
+            <span v-if="step.detail" class="faint small step-detail">{{ step.detail }}</span>
+          </span>
+        </li>
+      </ol>
+    </template>
+
     <!-- 快捷按钮 -->
-    <div v-if="card.type === 'quick_actions'" class="chips">
+    <div v-else-if="card.type === 'quick_actions'" class="chips">
       <button v-for="action in card.actions" :key="action.label" class="btn btn-sm" type="button"
               :disabled="disabled" @click="store.send(action.text, action.intent)">{{ action.label }}</button>
     </div>
@@ -396,4 +414,16 @@ function evidenceLabel(view) {
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 @media (max-width: 760px) { .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .type-choice { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; }
+.plan-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.plan-steps { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.plan-steps li { display: flex; gap: 8px; align-items: flex-start; }
+.plan-steps .mark { width: 16px; flex: none; text-align: center; color: var(--text-muted); }
+.step-body { display: flex; flex-wrap: wrap; gap: 2px 8px; min-width: 0; }
+.step-done .mark { color: var(--accent); }
+.step-current .step-label { font-weight: 600; }
+.step-current .mark { color: var(--accent); }
+.step-blocked .mark, .step-blocked .step-label { color: var(--warn-ink); }
+.step-failed .mark, .step-failed .step-label { color: var(--danger-ink); }
+.step-todo .step-label, .step-skipped .step-label { color: var(--text-muted); }
+.step-skipped .step-label { text-decoration: line-through; }
 </style>
