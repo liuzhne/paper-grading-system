@@ -391,7 +391,7 @@ docker compose --env-file .env.intranet logs -f app worker caddy
 
 首次部署后（S2）：用 `AUTH_USERNAME` / `AUTH_PASSWORD` 登录（第一次登录会建平台管理员），在平台模型设置里填 Bedrock API Key，再邀请用户。
 
-日常发布：合并到 `main` 后，`deploy-lightsail-production` 在门禁通过、`production` 环境审批后构建镜像，经 SSH 载入实例，先读实例上的 `/opt/pgs/DATA_PLANE`（日志里一行“数据位置：…”，见 9.4.1），按它用 GitHub 上的密钥与变量重新生成实例的 `/opt/pgs/.env` 与 `/opt/pgs/db.env`，再运行 `/opt/pgs/deploy.sh <SHA>`：先确保 db 就绪，再换 app（Caddy 让空档期间的请求等着），健康后换 worker（最多等 100 秒让在执行的条目做完）与 backup，最后热加载 Caddy。迁移顺序不变：需要迁移的版本先跑 `production-migrate.yml`（2026-10-27 起在实例上执行，见 9.4.1）。
+日常发布：合并到 `main` 后，`deploy-lightsail-production` 在门禁通过、`production` 环境审批后构建镜像，经 SSH 载入实例，先读实例上的 `/opt/pgs/DATA_PLANE`（日志里一行“数据位置：…”，见 9.4.1），按它用 GitHub 上的密钥与变量重新生成实例的 `/opt/pgs/.env` 与 `/opt/pgs/db.env`，再运行 `/opt/pgs/deploy.sh <SHA>`：先确保 db 就绪，再换 app（Caddy 让空档期间的请求等着），健康后换 worker（最多等 100 秒让在执行的条目做完），再删掉 compose.yml 里已经没有的服务留下的容器，最后热加载 Caddy。迁移顺序不变：需要迁移的版本先跑 `production-migrate.yml`（2026-10-27 起在实例上执行，见 9.4.1）。
 
 在实例上（`ssh deploy@<静态 IP>`）：
 
@@ -547,23 +547,37 @@ ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db psq
 
 **备份**：2026-10-28 起不做自动备份（维护者决定，见 DECISIONS 同日一条）。实例、磁盘坏了或误操作，数据库（账号、配置、评分结果）与上传文件一起丢失。Lightsail 快照开不开由维护者在控制台决定：开了，整机损坏时从快照新建实例、把静态 IP 挂过去，回到那份快照的时刻。
 
-迁移等有风险的操作之前想留一份，手工导出到实例上。第一条只导出数据库，迁移只改数据库，用它就够；上传的文件（与 L0 缓存）在卷 `app_storage` 里，要一起留再跑第二条。导出里有账号的密码散列、加密后的模型密钥与论文原文，用完删掉：
+迁移等有风险的操作之前想留一份，手工导出到实例上。导出里有账号的密码散列、加密后的模型密钥与论文原文，用完删掉。
+
+两种都先记下当时的版本（`RELEASE` 与 `alembic_version`），恢复时要部署同一个版本。
+
+**只导出数据库**（迁移只改数据库，用它就够）：不用停服务，`pg_dump` 本身是一致的快照。
 
 ```bash
+ssh pgs-prod 'cd /opt/pgs && cat RELEASE && docker compose -p pgs -f compose.yml exec -T db psql -U postgres -d pgs -tAc "select version_num from alembic_version"'
 ssh pgs-prod 'cd /opt/pgs && umask 077 && docker compose -p pgs -f compose.yml exec -T db pg_dump -U postgres -Fc pgs > pgs-$(date +%Y%m%d%H%M).dump'
-ssh pgs-prod 'cd /opt/pgs && umask 077 && docker compose -p pgs -f compose.yml exec -T app tar czf - -C /app/storage . > storage-$(date +%Y%m%d%H%M).tgz'
 ```
 
-要用它们恢复时，先停 app 与 worker，恢复后用当前版本重新部署。数据库导出带着授权，恢复后不用再跑 `init_database`。文件包只覆盖同名文件，导出之后新传的文件还在，但数据库里已经没有它们的记录：
+**连上传文件一起**（文件与 L0 缓存在卷 `app_storage` 里）：先停 app 与 worker，两份导出之间没有写入；服务停着，文件包用一次性容器打；导完用原版本拉起来。
+
+```bash
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml stop app worker'
+ssh pgs-prod 'cd /opt/pgs && cat RELEASE && docker compose -p pgs -f compose.yml exec -T db psql -U postgres -d pgs -tAc "select version_num from alembic_version"'
+ssh pgs-prod 'cd /opt/pgs && umask 077 && docker compose -p pgs -f compose.yml exec -T db pg_dump -U postgres -Fc pgs > pgs-$(date +%Y%m%d%H%M).dump'
+ssh pgs-prod 'cd /opt/pgs && umask 077 && docker compose -p pgs -f compose.yml run --rm --no-deps -T app tar czf - -C /app/storage . > storage-$(date +%Y%m%d%H%M).tgz'
+ssh pgs-prod '/opt/pgs/deploy.sh "$(cat /opt/pgs/RELEASE)"'
+```
+
+要用它们恢复时，先停 app 与 worker，恢复后部署**导出时记下的那个版本**，不要用当前版本：生产 app 启动时不跑迁移，健康检查也不查库，新版本连着恢复出来的旧表结构会显得健康，请求却失败。那个版本的镜像要还在本机（`deploy.sh --list`，只留最近 3 个）。之后要用的迁移照常走 `production-migrate.yml`。数据库导出带着授权，恢复后不用再跑 `init_database`。文件包只覆盖同名文件，导出之后新传的文件还在，但数据库里已经没有它们的记录：
 
 ```bash
 ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml stop app worker'
 ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db pg_restore -U postgres -d pgs --clean --if-exists < pgs-<时间>.dump'
 ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T app tar xzf - -C /app/storage < storage-<时间>.tgz'
-ssh pgs-prod '/opt/pgs/deploy.sh "$(cat /opt/pgs/RELEASE)"'
+ssh pgs-prod '/opt/pgs/deploy.sh <导出时记下的 RELEASE>'
 ```
 
-核对：健康检查通过；`docker compose … exec -T db psql -U postgres -d pgs -c "select count(*) from users"` 的行数与导出前一致；原账号能登录，导出前上传的论文能打开。
+核对：健康检查通过；`alembic_version` 与导出时记下的一致；`docker compose … exec -T db psql -U postgres -d pgs -c "select count(*) from users"` 的行数与导出前一致；原账号能登录，导出前上传的论文能打开。
 
 切换时留下的卷 `pgs_backups`（一份 1.4 MB 的备份）不会自动删除；不要了就 `ssh pgs-prod 'docker volume rm pgs_backups'`。
 
@@ -1203,6 +1217,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-28 | 不做自动备份复审（#63 CodeRabbit） | 9.4.1 手工导出：只导数据库时不停服务，连文件一起时先停 app 与 worker、文件包用一次性容器；导出时记下版本与迁移 head，恢复后部署同一个版本；日常发布的步骤去掉 backup。 |
 | 2026-10-28 | 生产不做自动备份 | 9.4.1“备份”改为不做自动备份：手工导出与恢复命令（数据库，加上可选的 `app_storage` 文件包）与核对、旧卷 `pgs_backups` 的删除；去掉每晚备份与恢复演练的命令；`deploy.sh` 两条分支都删孤儿容器。 |
 | 2026-10-28 | 迁出 Supabase 复审（#62 CodeRabbit） | 无新命令；排错：复制报“新库有迁移预置以外的数据”；切换前置检查改为精确匹配 db 的 `(healthy)`。 |
 | 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 新增 9.4.1：`DATA_PLANE` 标记、两个新密钥、`pgs-production-cutover` 切换与回滚、迁移改在实例上执行、每晚备份与恢复演练；排错：切换停在实例检查、旧库版本落后、改密码后认证失败、标记文件被改坏。 |
