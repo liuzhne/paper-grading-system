@@ -165,7 +165,7 @@ def _compose():
 
 def test_production_compose_runs_app_worker_caddy_and_a_private_database():
     services = _compose()["services"]
-    assert set(services) == {"caddy", "app", "worker", "db", "backup"}
+    assert set(services) == {"caddy", "app", "worker", "db"}
     app, worker, caddy = services["app"], services["worker"], services["caddy"]
 
     # 同一镜像、同一份配置；deploy.sh 把要上线的版本打成 current。
@@ -205,34 +205,31 @@ def test_production_compose_runs_app_worker_caddy_and_a_private_database():
         assert service["logging"]["options"]["max-size"]
 
 
-def test_production_database_is_private_and_only_db_and_backup_read_its_password():
+def test_production_database_is_private_and_only_db_reads_its_password():
     services = _compose()["services"]
-    db, backup = services["db"], services["backup"]
+    db = services["db"]
 
     # 大版本与镜像里的 postgresql-client、CI 的迁移门禁相同；Debian 镜像，排序规则与 CI 一致。
     assert db["image"] == "postgres:16-bookworm"
     assert "16" in (ROOT / "Dockerfile").read_text(encoding="utf-8").split("POSTGRES_MAJOR=")[1][:3]
     # 不对外开端口：GitHub runner 与公网都连不到，迁移与切换在实例上用一次性容器执行。
-    assert "ports" not in db and "ports" not in backup
+    assert "ports" not in db
     assert db["environment"] == {"POSTGRES_USER": "postgres", "POSTGRES_DB": "pgs"}
     assert "pg_data:/var/lib/postgresql/data" in db["volumes"]
     assert "pg_isready" in " ".join(db["healthcheck"]["test"])
-    # 超级用户密码只在 db.env：app 与 worker 读 .env，拿不到它；backup 只读 db.env，拿不到应用密钥。
-    assert db["env_file"] == "db.env" and backup["env_file"] == "db.env"
+    # 超级用户密码只在 db.env：app 与 worker 读 .env，拿不到它。
+    assert db["env_file"] == "db.env"
     for name in ("app", "worker"):
         assert services[name]["env_file"] == ".env"
-    # 备份：与线上同一镜像，存储卷只读，备份进单独的卷（宿主机目录归 deploy 用户，容器未必写得进）。
-    assert backup["image"] == "paper-grading-system:current"
-    assert backup["command"][:3] == ["python", "-m", "backend.app.scripts.nightly_backup"]
-    assert "app_storage:/app/storage:ro" in backup["volumes"] and "backups:/backups" in backup["volumes"]
-    assert {"pg_data", "backups", "app_storage"} <= set(_compose()["volumes"])
+    assert {"pg_data", "app_storage"} <= set(_compose()["volumes"])
 
 
 def test_deploy_brings_the_database_up_before_switching_the_app():
     script = (PRODUCTION / "deploy.sh").read_text(encoding="utf-8")
     db = script.index("--wait-timeout 120 db")
     app = script.index("--force-recreate --wait --wait-timeout 180 app")
-    assert db < app < script.index("--force-recreate backup")
+    # 从 compose.yml 删掉的服务（2026-10-28 的 backup）不清掉会一直跑：最后一步顺带删孤儿容器。
+    assert db < app < script.index("compose up --detach --no-recreate --remove-orphans\n")
     assert 'for file in .env db.env' in script
 
 
@@ -653,12 +650,12 @@ def test_local_env_requires_a_plain_database_password(tmp_path, capsys):
     assert "缺少必需变量 PGS_APP_PASSWORD" in capsys.readouterr().err
 
 
-def test_db_env_has_only_the_superuser_password_and_the_data_plane(tmp_path, capsys):
+def test_db_env_has_only_the_superuser_password(tmp_path, capsys):
     script = _env_script()
     output = tmp_path / "db.env"
 
     assert script.main(["--source", str(_local_source(tmp_path)), "--kind", "db", "--output", str(output)]) == 0
-    assert _written(output) == {"POSTGRES_PASSWORD": "'%s'" % _ROOT_PASSWORD, "PGS_DATA_PLANE": "'supabase'"}
+    assert _written(output) == {"POSTGRES_PASSWORD": "'%s'" % _ROOT_PASSWORD}
     assert output.stat().st_mode & 0o777 == 0o600
     assert _ROOT_PASSWORD not in capsys.readouterr().out
 

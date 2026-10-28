@@ -3,7 +3,7 @@
 三种文件（``--kind``）：
 
 - ``app``（默认）：/opt/pgs/.env，给 app 与 worker。
-- ``db``：/opt/pgs/db.env，只给 db 与 backup 服务：超级用户密码与数据位置。app 与 worker 拿不到它。
+- ``db``：/opt/pgs/db.env，只给 db 服务：超级用户密码。app 与 worker 拿不到它。
 - ``ops``：一次性运维容器（迁移、切换）用的连接串，经 SSH 标准输入交给 deploy/production/ops.sh，
   用完即删。``docker run --env-file`` 不处理引号，这一种不加引号。
 
@@ -59,7 +59,6 @@ DROPPED = {
     "PGS_APP_PASSWORD",
     "MIGRATION_DATABASE_URL",
     "RUNTIME_DATABASE_URL",
-    "PGS_DATA_PLANE",
 }
 DATA_PLANES = ("supabase", "local")
 KINDS = ("app", "db", "ops")
@@ -149,8 +148,8 @@ def app_problems(values: dict, data_plane: str) -> list[str]:
     return problems(select_variables(values))
 
 
-def db_variables(values: dict, data_plane: str) -> dict:
-    return {"POSTGRES_PASSWORD": values.get("POSTGRES_PASSWORD") or "", "PGS_DATA_PLANE": data_plane}
+def db_variables(values: dict) -> dict:
+    return {"POSTGRES_PASSWORD": values.get("POSTGRES_PASSWORD") or ""}
 
 
 def db_problems(values: dict) -> list[str]:
@@ -284,7 +283,7 @@ def main(argv=None) -> int:
         selected = app_variables(values, args.data_plane)
     elif args.kind == "db":
         found = db_problems(values)
-        selected = db_variables(values, args.data_plane)
+        selected = db_variables(values)
     else:
         found = ops_problems(values, args.data_plane, args.with_source)
         selected = ops_variables(values, args.data_plane, args.with_source)

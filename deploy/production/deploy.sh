@@ -71,8 +71,9 @@ else
 	compose up --detach --no-deps --force-recreate --wait --wait-timeout 180 app
 	# 再换 worker：旧 worker 停下前最多等 100 秒让在执行的条目做完。
 	compose up --detach --no-deps --force-recreate worker
-	compose up --detach --no-deps --force-recreate backup
-	compose up --detach --no-recreate caddy
+	# 不指定服务：caddy 没在跑就拉起来，已在跑的一律不重建；--remove-orphans 删掉 compose.yml 里
+	# 已经没有的服务留下的容器（例如 2026-10-28 停用的 backup），否则它照旧运行。卷原样保留。
+	compose up --detach --no-recreate --remove-orphans
 	compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 fi
 

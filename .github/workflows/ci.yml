@@ -550,7 +550,7 @@ jobs:
         working-directory: deploy/production
         run: |
           printf 'PGS_SITE_ADDRESS=pgs-ci.duckdns.org\n' > .env
-          printf 'POSTGRES_PASSWORD=ci\nPGS_DATA_PLANE=supabase\n' > db.env
+          printf 'POSTGRES_PASSWORD=ci\n' > db.env
           docker compose --project-name pgs --file compose.yml config --quiet
       - name: Validate the production Caddyfile
         run: |

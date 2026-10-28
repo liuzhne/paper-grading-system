@@ -526,13 +526,13 @@ docker compose -p pgs -f compose.yml exec -T app python - < check.py
 
 **数据位置 `/opt/pgs/DATA_PLANE`**：没有这个文件即 `supabase`（切换前：app 连 Supabase，文件存 Supabase Storage）；`local`（切换后：app 连同机的 db 容器，文件存卷 `app_storage`）。部署、迁移工作流都先读它，日志里有一行“数据位置：…”。它只由切换工作流写入；不用仓库变量，因为切换完成到改变量之间的任何一次部署都会连回 Supabase。db 容器两种情况下都在运行，切换前是空库。
 
-**密钥**（production 环境，合并本次改动之前设好）：`POSTGRES_PASSWORD`（db 超级用户，只写进 `db.env`，只给 db 与 backup）、`PGS_APP_PASSWORD`（运行角色）。都只用字母和数字、24 位以上：本机连接串由它们直接拼成 `…@db:5432/pgs`，不做编码。部署任务缺了会停在 “Validate deployment settings”。
+**密钥**（production 环境，合并本次改动之前设好）：`POSTGRES_PASSWORD`（db 超级用户，只写进 `db.env`，只给 db）、`PGS_APP_PASSWORD`（运行角色）。都只用字母和数字、24 位以上：本机连接串由它们直接拼成 `…@db:5432/pgs`，不做编码。部署任务缺了会停在 “Validate deployment settings”。
 
 **切换（一次性，预计停机约 15 分钟）**：
 
-1. Lightsail 控制台给实例开启自动快照（每日，保留 7 份），再手动拍一份；通知老师停机时间，并说明除账号、邀请、官网申请与模型配置外数据都不保留。
+1. Lightsail 控制台手动拍一份快照；通知老师停机时间，并说明除账号、邀请、官网申请与模型配置外数据都不保留。
 2. 先预演：Actions → `pgs-production-cutover` → Run workflow，分支选 `main`（必须是实例上正在运行的提交），`expected_head` 填当前 head，保持 `dry_run` 勾选。看 “Check the source and target databases” 打印的两边版本与每张表的行数。
-3. 正式：取消 `dry_run`，`confirm` 填 `cutover`，审批。工作流依次停 worker 与 app → `init_database` → `copy_fixed_config apply` → 写 `DATA_PLANE=local` 并重写 `.env`、`db.env` → `deploy.sh` → 冒烟 → 备份一份并校验。
+3. 正式：取消 `dry_run`，`confirm` 填 `cutover`，审批。工作流依次停 worker 与 app → `init_database` → `copy_fixed_config apply` → 写 `DATA_PLANE=local` 并重写 `.env`、`db.env` → `deploy.sh` → 冒烟（2026-10-28 已执行；当时最后还备份了一份新库，之后去掉了这一步）。
 4. 核对：用原账号登录；运维页对平台模型点“测试连接”（一次真实调用）；上传一篇论文走完评分。
 
 **回滚**（只在老师开始使用新库之前）：`ssh pgs-prod 'rm /opt/pgs/DATA_PLANE'`，再重跑一次 main 上最近的部署任务，即按 Supabase 模式重新生成 `.env` 并重启（上传仍不可用）。新库原样保留；下次切换前先清空它，否则复制会拒绝执行：
@@ -545,30 +545,29 @@ ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db psq
 
 **迁移**（用法不变：手动触发、审批、默认只预演）：`production-migrate.yml` 现在构建本提交的镜像、送到实例，用一次性容器（`/opt/pgs/ops.sh`）跑 `production_migrate survey|pending|upgrade|verify`，最后删除镜像 `paper-grading-system:migrate-<SHA>`；连接串按 `DATA_PLANE` 选，经 SSH 标准输入传入。比原来多几分钟构建与传输。
 
-**备份**：backup 服务每天 03:00（UTC+8）做一份（`pg_dump` + 存储目录 + 校验清单），存在卷 `backups`，留 7 份；空闲不足 5 GB 时不做并记错误。数据还在 Supabase 时只记 `nightly_backup_skipped reason=data_plane`。
+**备份**：2026-10-28 起不做自动备份（维护者决定，见 DECISIONS 同日一条）。实例、磁盘坏了或误操作，数据库（账号、配置、评分结果）与上传文件一起丢失。Lightsail 快照开不开由维护者在控制台决定：开了，整机损坏时从快照新建实例、把静态 IP 挂过去，回到那份快照的时刻。
+
+迁移等有风险的操作之前想留一份，手工导出到实例上。导出里有账号的密码散列与加密后的模型密钥，用完删掉：
 
 ```bash
-ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml logs backup | grep nightly_backup'
-ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T backup ls /backups'
-ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T backup python -m backend.app.scripts.nightly_backup --storage-root /app/storage --destination /backups --once'
+ssh pgs-prod 'cd /opt/pgs && umask 077 && docker compose -p pgs -f compose.yml exec -T db pg_dump -U postgres -Fc pgs > pgs-$(date +%Y%m%d%H%M).dump'
 ```
 
-**恢复演练**（切换后做一次，之后每季度一次）：恢复到临时库，核对后删除。`pg_dump` 带 `--no-privileges`，恢复出来的库没有 `pgs_app` 的授权；真要用它替换线上库时，恢复后再跑一次 `init_database`（重跑无副作用，会补授权与行级安全并逐表核对）。
+要用它恢复时，先停 app 与 worker，恢复后用当前版本重新部署（`deploy.sh $(cat /opt/pgs/RELEASE)`）。导出带着授权，恢复后不用再跑 `init_database`：
 
 ```bash
-ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db createdb -U postgres pgs_restore_drill'
-ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T backup sh -c "python -m backend.app.scripts.ops_backup restore /backups/<包名> --database-url postgresql://postgres:\$POSTGRES_PASSWORD@db:5432/pgs_restore_drill --storage-target /tmp/restore-drill --confirm-database pgs_restore_drill"'
-ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db psql -U postgres -d pgs_restore_drill -c "select count(*) from users"'
-ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db dropdb -U postgres pgs_restore_drill'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml stop app worker'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db pg_restore -U postgres -d pgs --clean --if-exists < pgs-<时间>.dump'
+ssh pgs-prod '/opt/pgs/deploy.sh "$(cat /opt/pgs/RELEASE)"'
 ```
 
-实例整机损坏时，从 Lightsail 快照新建实例、把静态 IP 挂过去，最多丢一天数据。
+切换时留下的卷 `pgs_backups`（一份 1.4 MB 的备份）不会自动删除；不要了就 `ssh pgs-prod 'docker volume rm pgs_backups'`。
 
 排错：
 
 - **切换工作流停在 “Check the instance”，提示实例上运行的不是本提交。** 报错像版本不对，真正原因是在分支或旧提交上点了 Run workflow，或者最新的部署还没跑完。切换用实例上已有的镜像，只能在 main 上、已部署的那个提交上运行。
 - **“Check the source and target databases” 报旧库的迁移版本与镜像不同。** 报错指向复制脚本，真正原因是旧库（Supabase）还没迁移到这个版本。先用 `production-migrate.yml` 迁移旧库（`DATA_PLANE` 还是 supabase，连的就是旧库），再切换。
-- **改了 GitHub 上的 `POSTGRES_PASSWORD` 或 `PGS_APP_PASSWORD` 之后，备份、迁移或应用报 `password authentication failed`。** 报错指向密码，真正原因是库里的密码没跟着变：postgres 镜像只在数据卷为空时用 `POSTGRES_PASSWORD` 初始化，`init_database` 也只在建角色时设一次 `pgs_app` 的密码。改密码要先在库里改（`docker compose … exec -T db psql -U postgres -c "ALTER ROLE pgs_app PASSWORD '<新值>'"`，超级用户同理），再改 GitHub 上的值并重新部署。
+- **改了 GitHub 上的 `POSTGRES_PASSWORD` 或 `PGS_APP_PASSWORD` 之后，迁移或应用报 `password authentication failed`。** 报错指向密码，真正原因是库里的密码没跟着变：postgres 镜像只在数据卷为空时用 `POSTGRES_PASSWORD` 初始化，`init_database` 也只在建角色时设一次 `pgs_app` 的密码。改密码要先在库里改（`docker compose … exec -T db psql -U postgres -c "ALTER ROLE pgs_app PASSWORD '<新值>'"`，超级用户同理），再改 GitHub 上的值并重新部署。
 - **复制一步报“新库这些表有迁移预置以外的数据，拒绝复制”。** 报错指向新库，真正原因多半是上一次切换跑到一半：新库已经初始化并写入过数据，或者有人在回滚后用过新库。迁移 0022 预置的三行（引导管理员、Default Organization 与其成员记录）是允许的，复制会先删掉它们再按旧库写入；除此之外有任何一行都会拒绝。按上面“回滚”里的命令清空新库后重跑切换。
 - **部署任务报 `/opt/pgs/DATA_PLANE 只能是 supabase 或 local`。** 报错指向工作流，真正原因是有人手工改过这个文件（多了空格、大小写或别的值）。按实际情况改回 `local`，或删掉它回到 Supabase 模式。
 
@@ -1200,6 +1199,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-28 | 生产不做自动备份 | 9.4.1“备份”改为不做自动备份：手工导出与恢复命令、旧卷 `pgs_backups` 的删除；去掉每晚备份与恢复演练的命令；`deploy.sh` 删孤儿容器。 |
 | 2026-10-28 | 迁出 Supabase 复审（#62 CodeRabbit） | 无新命令；排错：复制报“新库有迁移预置以外的数据”；切换前置检查改为精确匹配 db 的 `(healthy)`。 |
 | 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 新增 9.4.1：`DATA_PLANE` 标记、两个新密钥、`pgs-production-cutover` 切换与回滚、迁移改在实例上执行、每晚备份与恢复演练；排错：切换停在实例检查、旧库版本落后、改密码后认证失败、标记文件被改坏。 |
 | 2026-10-27 | worker 空闲退避 | `run_batch_worker` 新增 `--idle-max-seconds`（默认 30）；常见故障：助手上传失败、直传申请 502，真正原因是 Supabase 组织 Fair Use 限制（402）。 |
