@@ -1,7 +1,8 @@
 """评分助手的流程图（LangGraph，有状态，方案 §7.3–§7.5）。
 
 三种流程共用一张图：
-- grading：选文件 → 确认开始 → 建任务 → 等浏览器上传 → 预检 →（是否移除）→ 开评 → 等评分结束 → 汇报；
+- grading：查前提（已发布的评分标准、评分模型）→ 选文件 → 确认开始 → 建任务 → 等浏览器上传 → 预检 →
+  （是否移除）→ 开评 → 等评分结束 → 汇报；
 - import：等浏览器建导入草稿 → 等用户在工作区确认并发布 → 转 grading；
 - watch：手动重试后观察一次已存在的作业，评完汇报。
 
@@ -117,6 +118,9 @@ def begin(state: FlowState, runtime: Runtime[RunContext]):
         return {"next": "ask_rubric_files", "flow_started_at": _now_iso()}
     if mode == "watch":
         return {"next": "post_progress", "flow_started_at": _now_iso()}
+    # 先查前提再让老师选文件：没有已发布的评分标准或评分模型，选了文件也评不了（2026-10-28）。
+    if not _grading_ready(_ctx(runtime), state.get("preset_rubric_id")):
+        return {"next": END}
     target = "propose_start" if state.get("file_count") else "ask_files"
     return {"next": target, "flow_started_at": _now_iso()}
 
@@ -163,6 +167,28 @@ def _scoring_model_label(ctx: RunContext) -> str | None:
     if platform_available(ctx.db):
         return "平台模型"
     return None
+
+
+def _grading_ready(ctx: RunContext, preset_id: str | None) -> bool:
+    """评分的两个前提：有可用的已发布评分标准、有评分模型。缺了就说明怎么补上，返回 False。"""
+
+    has_rubric = _resolve_rubric(ctx, preset_id) is not None
+    has_model = _scoring_model_label(ctx) is not None
+    if has_rubric and has_model:
+        return True
+    model_link = {"type": "link", "label": "去配置模型连接", "path": "/account"}
+    rubric_cards = [quick_actions_card(["import_rubric"]), {"type": "link", "label": "打开评分标准页", "path": "/rubrics"}]
+    if not has_model and not has_rubric:
+        ctx.say("现在还不能评分：还没有已发布的评分标准，也还没有可用的评分模型。"
+                "先在账户页配置模型连接，再上传你的评分规则和模板，我来帮你导入。",
+                [model_link, *rubric_cards], intent="start_grading")
+    elif not has_rubric:
+        ctx.say("还没有已发布的评分标准，评分要先有标准。可以上传你的评分规则和模板，我来帮你导入，"
+                "发布后接着选待评分文件；评分标准页里已有草稿的，发布后再说“开始评分”。",
+                rubric_cards, intent="start_grading")
+    else:
+        ctx.say("还没有可用的评分模型，请先在账户页配置自己的模型连接。", [model_link], intent="start_grading")
+    return False
 
 
 def propose_start(state: FlowState, runtime: Runtime[RunContext]):
@@ -517,6 +543,11 @@ def wait_publish(state: FlowState, runtime: Runtime[RunContext]):
         return {"next": "wait_publish"}
     ctx.update_card(card["message_id"], card["card_id"], "done", {"rubric_id": rubric.id})
     ctx.say("评分标准《%s》%s 已发布。" % (rubric.name, rubric.version))
+    # 接着评分之前同样先查评分模型，不让老师选完文件才发现评不了。
+    if _scoring_model_label(ctx) is None:
+        ctx.say("还没有可用的评分模型，请先在账户页配置自己的模型连接，配好后再说“开始评分”。",
+                [{"type": "link", "label": "去配置模型连接", "path": "/account"}])
+        return {"next": END}
     return {"preset_rubric_id": rubric.id, "rubric_name": rubric.name, "rubric_version": rubric.version,
             "mode": "grading", "file_count": 0, "next": "ask_files"}
 
@@ -545,7 +576,7 @@ NODES = {
 
 #: 每个节点可能去往的下一个节点（`next` 字段），供条件边声明与图校验。
 ROUTES = {
-    "begin": ["ask_files", "propose_start", "ask_rubric_files", "post_progress"],
+    "begin": ["ask_files", "propose_start", "ask_rubric_files", "post_progress", END],
     "ask_files": ["wait_files"],
     "wait_files": ["propose_start"],
     "propose_start": ["wait_confirm", END],
