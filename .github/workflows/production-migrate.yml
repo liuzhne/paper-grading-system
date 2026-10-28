@@ -15,7 +15,7 @@ name: pgs-production-migrate
 #
 # 不导出数据库快照作为 artifact：生产库含学生 PII，仓库的既有约定是真实论文、
 # Secret 与 PII 不得进入 CI artifact。回滚依赖 PostgreSQL 的事务化 DDL（任一迁移
-# 失败整体回滚）与备份：本机数据库是每晚备份与实例快照，Supabase 是它自身的备份。
+# 失败整体回滚）与备份：本机数据库不做自动备份（RUNBOOK 9.4.1），迁移前需要时手工导出一份。
 
 on:
   workflow_dispatch:

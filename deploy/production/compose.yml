@@ -1,4 +1,4 @@
-# 生产（AWS Lightsail 单机）：caddy + app + worker + db + backup。方案见
+# 生产（AWS Lightsail 单机）：caddy + app + worker + db。方案见
 # docs/部署平台迁移到AWS方案.md 与 docs/迁出Supabase到单机Docker方案.md。
 #
 # 数据在哪里由实例上的 /opt/pgs/DATA_PLANE 决定（没有这个文件即 supabase）：部署任务按它生成
@@ -7,16 +7,17 @@
 # 载入实例，deploy.sh 把要上线的版本打成 current 标签。
 #
 # 密钥在同目录的 .env 与 db.env（权限 0600，不进仓库）：每次部署由 CI 用 GitHub production
-# 环境的密钥生成（scripts/production_env.py --from-environment）。db.env 只有超级用户密码与
-# 数据位置，只给 db 与 backup。下面 environment 里的是不含密钥的生产配置，随仓库评审；同名
-# 变量以这里为准。
+# 环境的密钥生成（scripts/production_env.py --from-environment）。db.env 只有超级用户密码，
+# 只给 db。下面 environment 里的是不含密钥的生产配置，随仓库评审；同名变量以这里为准。
+#
+# 不做自动备份（2026-10-28 维护者决定，DECISIONS.md）：实例或磁盘损坏，库与文件一起丢。
 
 x-app-environment: &app-environment
   # 上传文件与 L0 缓存（llm_cache.sqlite）放在卷里：发版换容器不丢，app 与 worker 共用。
   # STORAGE_PROVIDER 由 .env 按数据位置写入。
   STORAGE_ROOT: /app/storage
   # 直连 db 时用连接池（6543 事务池才用 NullPool）：app 与 worker 各最多 20 条，
-  # 加上 backup 与一次性运维容器，仍小于 db 的 max_connections=50。
+  # 加上一次性运维容器，仍小于 db 的 max_connections=50。
   DB_POOL_SIZE: "10"
   DB_MAX_OVERFLOW: "10"
   AUTH_ENABLED: "true"
@@ -118,22 +119,6 @@ services:
     restart: unless-stopped
     logging: *logging
 
-  backup:
-    # 每天 03:00（UTC+8）做一份带校验清单的逻辑备份（pg_dump + 存储目录），留 7 份。数据还在
-    # Supabase 时（PGS_DATA_PLANE 不是 local）只记日志、不备份。只读 db.env：拿不到应用密钥。
-    image: paper-grading-system:current
-    env_file: db.env
-    command:
-      ["python", "-m", "backend.app.scripts.nightly_backup", "--storage-root", "/app/storage", "--destination", "/backups"]
-    volumes:
-      - app_storage:/app/storage:ro
-      - backups:/backups
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: unless-stopped
-    logging: *logging
-
   caddy:
     image: caddy:2-alpine
     # 只给站点地址，拿不到应用密钥。
@@ -157,6 +142,5 @@ services:
 volumes:
   app_storage:
   pg_data:
-  backups:
   caddy_data:
   caddy_config:

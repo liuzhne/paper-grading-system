@@ -1,10 +1,8 @@
-"""迁出 Supabase：本机数据库的复制、备份、迁移脚本与切换工作流（docs/迁出Supabase到单机Docker方案.md）。"""
+"""迁出 Supabase：本机数据库的复制、迁移脚本与切换工作流（docs/迁出Supabase到单机Docker方案.md）。"""
 
 from __future__ import annotations
 
 from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +16,6 @@ import yaml
 from backend.app.db import models
 from backend.app.db.models import Base
 from backend.app.scripts import copy_fixed_config
-from backend.app.scripts import nightly_backup
 from backend.app.scripts import production_migrate
 from backend.app.services.deployment.backup import current_migration_head
 
@@ -303,78 +300,6 @@ def test_copy_on_postgres_reads_the_source_read_only(tmp_path):
         admin.dispose()
 
 
-# ---- 每晚备份 ----
-
-
-def _environ_local(**extra):
-    values = {"PGS_DATA_PLANE": "local", "POSTGRES_PASSWORD": "R" * 28}
-    values.update(extra)
-    return values
-
-
-def _fake_create(calls):
-    def create(**kwargs):
-        calls.append(kwargs)
-        package = Path(kwargs["destination_root"]) / ("backup-20991231T190000Z-nightly-%04d" % len(calls))
-        package.mkdir()
-        (package / "manifest.json").write_text("{}", encoding="utf-8")
-        return package
-
-    return create
-
-
-def test_backup_is_skipped_until_the_data_is_local(tmp_path):
-    calls = []
-    for environ in ({"PGS_DATA_PLANE": "supabase", "POSTGRES_PASSWORD": "x"}, {"PGS_DATA_PLANE": "local"}):
-        assert nightly_backup.run_once(tmp_path / "b", tmp_path, environ, create=_fake_create(calls)) is None
-    assert calls == []
-
-
-def test_backup_refuses_when_the_disk_is_nearly_full(tmp_path):
-    calls = []
-    full = lambda _path: SimpleNamespace(free=1024**3)  # noqa: E731
-    assert nightly_backup.run_once(
-        tmp_path / "b", tmp_path, _environ_local(), create=_fake_create(calls), disk_usage=full
-    ) is None
-    assert calls == []
-
-
-def test_backup_uses_the_superuser_verifies_and_keeps_seven(tmp_path):
-    destination = tmp_path / "backups"
-    destination.mkdir()
-    for day in range(1, 9):
-        (destination / ("backup-202610%02dT190000Z-nightly-old" % day)).mkdir()
-    (destination / "backup-20261009T190000Z-nightly-x.partial").mkdir()  # 没做完的包不算、不删
-    calls, verified = [], []
-
-    package = nightly_backup.run_once(
-        destination, tmp_path / "storage", _environ_local(), create=_fake_create(calls),
-        verify=verified.append, disk_usage=lambda _path: SimpleNamespace(free=50 * 1024**3),
-    )
-
-    assert verified == [package]
-    # pg_dump 默认关闭行级安全，pgs_app 绕不过去：用超级用户。
-    assert calls[0]["database_url"] == "postgresql://postgres:%s@db:5432/pgs" % ("R" * 28)
-    assert calls[0]["migration_head"] == current_migration_head()
-    kept = [path.name for path in nightly_backup.packages(destination)]
-    assert len(kept) == 7 and package.name in kept
-    assert "backup-20261001T190000Z-nightly-old" not in kept and "backup-20261002T190000Z-nightly-old" not in kept
-    assert (destination / "backup-20261009T190000Z-nightly-x.partial").is_dir()
-
-
-def test_backup_runs_at_three_in_the_morning_utc_plus_eight():
-    late = datetime(2026, 10, 27, 20, 0, tzinfo=timezone.utc)  # UTC+8 的 28 日 04:00
-    early = datetime(2026, 10, 27, 18, 30, tzinfo=timezone.utc)  # UTC+8 的 28 日 02:30
-    assert nightly_backup.next_run(late).isoformat() == "2026-10-29T03:00:00+08:00"
-    assert nightly_backup.next_run(early).isoformat() == "2026-10-28T03:00:00+08:00"
-    assert nightly_backup.next_run(early) - early < timedelta(hours=1)
-
-
-def test_backup_once_fails_loudly_when_nothing_was_backed_up(tmp_path):
-    # 切换工作流靠这个退出码确认新库确实备份过。
-    assert nightly_backup.main(["--destination", str(tmp_path), "--once"], environ={"PGS_DATA_PLANE": "supabase"}) == 1
-
-
 # ---- 迁移的实例侧脚本 ----
 
 
@@ -453,7 +378,7 @@ def test_cutover_changes_nothing_before_its_checks_and_runs_in_order():
         "Copy the fixed configuration",
         "Switch the instance to the local database",
         "Smoke test through the public address",
-        "Back up and verify the new database",
+        "Finish the cutover",
     ]
     assert [names.index(name) for name in order] == sorted(names.index(name) for name in order)
     for name in order[3:]:
@@ -466,7 +391,7 @@ def test_cutover_changes_nothing_before_its_checks_and_runs_in_order():
     assert "--with-source" in by_name["Render the credentials"]["run"]
     switch = by_name["Switch the instance to the local database"]["run"]
     assert switch.index("before-cutover") < switch.index("DATA_PLANE.new") < switch.index("deploy.sh")
-    assert "--once" in by_name["Back up and verify the new database"]["run"]
+    assert "before-cutover" in by_name["Finish the cutover"]["run"]
     fallback = by_name["Put the old services back on failure"]
     assert fallback["if"] == "failure() && steps.stop.outputs.stopped == 'true'"
     assert '"$plane" == "local"' in fallback["run"] and "before-cutover" in fallback["run"]

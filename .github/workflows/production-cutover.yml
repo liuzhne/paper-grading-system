@@ -5,8 +5,9 @@ name: pgs-production-cutover
 # cutover——这一步会让生产停机约 15 分钟。
 #
 # 顺序：前置检查 → 停 worker 与 app → init_database 初始化新库 → copy_fixed_config 复制固定配置
-# 与账号 → 写 /opt/pgs/DATA_PLANE=local 并按本机模式重写 .env、db.env → deploy.sh 启动 → 冒烟
-# 与备份校验。之后每次部署都按 DATA_PLANE 渲染，不会再连回 Supabase。
+# 与账号 → 写 /opt/pgs/DATA_PLANE=local 并按本机模式重写 .env、db.env → deploy.sh 启动 → 冒烟。
+# 之后每次部署都按 DATA_PLANE 渲染，不会再连回 Supabase。2026-10-28 已执行；不做自动备份之后，
+# 收尾一步不再备份新库。
 #
 # 只在 main 上、实例正在运行的那个提交上执行：用实例上已有的镜像，不另外构建。复制的源库是
 # GitHub 上的 RUNTIME_DATABASE_URL（切换时还指向 Supabase），只读。日志只有表名与行数。
@@ -211,12 +212,10 @@ jobs:
             --output health.json "${SITE_URL%/}/api/system/health"
           cat health.json
 
-      - name: Back up and verify the new database
+      - name: Finish the cutover
         if: env.REAL_RUN == 'true'
         run: |
           set -euo pipefail
-          ssh pgs 'cd /opt/pgs && docker compose --project-name pgs --file compose.yml run --rm --no-deps -T backup \
-            python -m backend.app.scripts.nightly_backup --storage-root /app/storage --destination /backups --once'
           ssh pgs 'cd /opt/pgs && rm -f .env.before-cutover db.env.before-cutover'
           {
             echo "### 已切换到本机数据库"
