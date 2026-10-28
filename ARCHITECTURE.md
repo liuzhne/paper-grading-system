@@ -590,6 +590,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 生产 compose 新增 db 与 backup；`DATA_PLANE` 标记决定 app 连哪个库、文件存哪里；新增 `copy_fixed_config`、`production_migrate`、`nightly_backup` 与 `ops.sh`；迁移与切换改在实例上执行；直连时 SQLAlchemy 用有界连接池（`DB_POOL_SIZE` / `DB_MAX_OVERFLOW`）。 |
+| 2026-10-27 | worker 空闲退避 | 无模块变化：`work_queue/runner` 新增 `IdleGate`，`execute_next` 多一个领到即回调的 `on_claimed`；领取函数、叫醒层与 Vercel 路径不变。 |
 | 2026-10-26 | 评分助手 A1.1 第三轮复审（CodeRabbit） | 无模块变化：`scoring/suggestions.SCORE_CHANGE_PATTERN` 由回复校验共用；`task_list`、任务概况的评分状态改给中文说法。 |
 | 2026-10-26 | 评分助手 A1.1 第二轮复审（CodeRabbit） | 无模块变化：分数样式与回复校验补两种说法；评测判定更严。 |
 | 2026-10-26 | 评分助手 A1.1 复审（CodeRabbit） | 无模块变化：`scoring/suggestions.py` 持有分数样式与去分数句、注入占位，回复校验改用它；`paper_result` 与任务概况跳过没评出结果的项。 |
@@ -1207,7 +1208,7 @@ Claude 适配器的调用链：
 | `kinds` | 条目种类登记：`WorkKind`（条目表、父任务表、`begin` / `execute` / `abandon` / `made_progress` / `converge`）与 `ClaimedItem`（围栏号 `attempt`） |
 | `sources` | 来源键（`connection:<id>` / `platform`）、名额上限、来源行加锁（Postgres `FOR UPDATE`；SQLite 用不改值的写入拿库级写锁）、在跑/可执行计数 |
 | `claim` | `claim_next_item(source_key)`：锁来源 → 部分索引统计在跑条目 → `FOR UPDATE SKIP LOCKED` 按 `ordinal, created_at, id` 取下一个 → 条件更新为 running |
-| `runner` | `execute_next`：领取 → 15 秒心跳线程（带围栏的条件更新）→ 种类执行并落库 → 接力叫醒；`run_worker_loop`：N 个领取线程 + 主线程定期巡检 |
+| `runner` | `execute_next`：领取 → 15 秒心跳线程（带围栏的条件更新）→ 种类执行并落库 → 接力叫醒；`run_worker_loop`：N 个领取线程 + 主线程定期巡检；`IdleGate`：空闲时只留一条线程探测，间隔从 `--poll-seconds`（默认 3 秒）翻倍到 `--idle-max-seconds`（默认 30 秒），领到条目即复位并叫醒其它线程；探测线程卡住超过 `2 × 上限 + 30` 秒（默认 90 秒）由等着的线程接手 |
 | `sweep` | `sweep_stale_items`：心跳过期的条目按“有无新检查点”续评或在连续无进展 3 次后判失败；收敛父任务计数与状态；给“有待处理、有空位、没人在跑”的来源补发叫醒。`sweep_parent_on_read`（进度读取，每任务 30 秒一次）、`ensure_sweep_chain`（补投断掉的巡检链） |
 | `wake` / `messages` | 平台相关的一层：Vercel 上发 `pgs-work` 消息（`{source_key}` / `{sweep}`），worker 部署里全部空操作；消息处理与平台无关 |
 | `state` | `work_runtime_state`：最近一次全系统巡检、最近一次补投巡检链 |
@@ -1218,7 +1219,7 @@ Claude 适配器的调用链：
 
 - **建任务** `POST /batches/{id}/score-jobs` → `create_batch_scoring_job` 写任务与条目（来源键、发起人、任务内序号）→ `wake_for_capacity`（Vercel：按 `min(空位, 可执行条目)` 发叫醒）→ `ensure_sweep_chain`。
 - **Vercel**：订阅 `pgs-work` 的 `handle_work_message` → `messages.handle_wake_payload` → `execute_next(source_key)`；`{sweep}` 先 `schedule_next_sweep`（下一个 2 分钟槽，幂等键 `sweep-<槽号>`）再 `run_global_sweep`。旧主题 `batch-scoring-items` 的 `score_batch_item` 保留一个发布周期，旧消息按“叫醒该条目所属来源”处理。两个 `@subscribe` 同在 `vercel_queue` 模块里，`pyproject.toml` 只写一条声明，Vercel 生成一个函数、挂两个触发器。
-- **内网/本地**：`run_batch_worker` → `run_worker_loop`：`--threads`（默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`，未设为 8）个线程循环 `run_worker_cycle` → `execute_next(None)`（依次尝试有可执行条目的来源）；主线程每 `--sweep-seconds`（默认 120）`run_global_sweep`。
+- **内网/本地**：`run_batch_worker` → `run_worker_loop`：`--threads`（默认读 `BATCH_SCORING_QUEUE_CONCURRENCY`，未设为 8）个线程循环 `run_worker_cycle` → `execute_next(None)`（依次尝试有可执行条目的来源；领到即回调 `IdleGate.claimed`），领不到就进 `IdleGate.idle`（`--poll-seconds` 3 → `--idle-max-seconds` 30）；主线程每 `--sweep-seconds`（默认 120）`run_global_sweep`。
 - **同步入口** `POST /batch-scoring-jobs/{id}/run`（非 Vercel）→ `run_batch_scoring_job`：先对本任务巡检，再开 `max_workers` 个线程调用 `execute_next(parent_id=job_id)`。同一个领取函数，只是限定在一个任务内。
 - **进度读取** `GET /batch-scoring-jobs/{id}`、`GET /batches/{id}/score-jobs/latest`（活动任务）→ `sweep_parent_on_read`：原子条件更新 `batch_scoring_jobs.last_swept_at`（不刷新 `updated_at`），抢到才巡检本任务。
 
