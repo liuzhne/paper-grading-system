@@ -33,6 +33,7 @@ from backend.app.db.models import AssistantMessage
 from backend.app.db.models import utcnow
 from backend.app.services.assistant import intents
 from backend.app.services.assistant import model as assistant_model
+from backend.app.services.assistant import plan
 from backend.app.services.assistant import tools
 from backend.app.services.assistant.agent import budget as agent_budget
 from backend.app.services.assistant.agent import evaluated as agent_evaluated
@@ -155,6 +156,7 @@ def _end_flow(ctx: RunContext, saver: SqlCheckpointSaver) -> None:
 def _abandon_flow(ctx: RunContext, saver: SqlCheckpointSaver, *, status: str) -> None:
     pending = ctx.conversation.pending or {}
     ctx.update_card(pending.get("message_id"), pending.get("card_id"), status)
+    plan.close(ctx, pending.get("plan"), status)
     if ctx.conversation.thread_id:
         saver.delete_thread(ctx.conversation.thread_id)
     ctx.conversation.thread_id = None
@@ -180,6 +182,10 @@ def _after_flow(ctx: RunContext, graph, saver: SqlCheckpointSaver) -> None:
         ctx.conversation.pending = {**interrupts[0], "created_at": utcnow().isoformat(), "thread_id": thread_id}
         saver.prune_thread(thread_id, keep=KEEP_CHECKPOINTS)
     else:
+        # 兜底：流程结束了计划卡片还在进行中（某条结束路径漏了更新），标“已结束”，不猜成败。
+        ref = (state.values or {}).get("plan")
+        if plan.is_running(ctx, ref):
+            plan.close(ctx, ref, "ended")
         _end_flow(ctx, saver)
 
 

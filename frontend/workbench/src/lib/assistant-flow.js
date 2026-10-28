@@ -3,7 +3,7 @@
  * 评分助手前端的展示用纯函数。
  *
  * 流程判定、材料定位、失败诊断都在后端（`backend/app/services/assistant/`，以后端为准）；
- * 这里只留界面需要的：快捷按钮、文件数上限、换评分标准时的列表、概览卡片的统计。
+ * 这里只留界面需要的：快捷按钮、文件数上限、换评分标准时的列表、概览卡片的统计、计划卡片的进度。
  */
 
 import { isWorkbenchType } from "./document-types.js";
@@ -76,4 +76,45 @@ export function scoreOverview(papers) {
     min: scores.length ? Math.min(...scores) : null,
     needReview: (papers || []).filter((paper) => paper.latest_need_manual_review).length,
   };
+}
+
+/** 计划卡片的步骤记号与读屏文字（docs/评分助手计划卡片方案.md §4）。 */
+export const PLAN_STEP_MARKS = {
+  done: { mark: "✓", text: "完成" },
+  current: { mark: "●", text: "进行中" },
+  todo: { mark: "○", text: "待做" },
+  blocked: { mark: "!", text: "等你决定" },
+  failed: { mark: "✕", text: "没完成" },
+  skipped: { mark: "–", text: "跳过" },
+};
+
+/** 计划卡片自身的状态文字。 */
+export const PLAN_STATUS_TEXT = {
+  running: "进行中", done: "已完成", failed: "未完成", dismissed: "已放弃", expired: "已过期", ended: "已结束",
+};
+
+/**
+ * 进行中的计划：最近一张状态为 running 的计划卡片，连同它所在的消息。没有时返回 null。
+ * @param {Array<{id: string, cards?: Array<{type?: string, status?: string}>}>} messages
+ */
+export function activePlan(messages) {
+  for (let index = (messages || []).length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const card = (message.cards || []).find((item) => item.type === "plan");
+    if (card) return card.status === "running" ? { message, card } : null;
+  }
+  return null;
+}
+
+/**
+ * “第 3/7 步 · 选择待评分文件”：标题下的一行进度。等你决定的那一步写明。
+ * @param {{steps?: Array<{label: string, status: string}>}} card
+ */
+export function planProgressText(card) {
+  const steps = card?.steps || [];
+  const index = steps.findIndex((step) => step.status === "blocked" || step.status === "current");
+  if (index < 0) return "";
+  const step = steps[index];
+  const suffix = step.status === "blocked" ? "（等你决定）" : "";
+  return `第 ${index + 1}/${steps.length} 步 · ${step.label}${suffix}`;
 }

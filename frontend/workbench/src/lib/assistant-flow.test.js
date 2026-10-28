@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_FILES, limitFiles, papersInUploadOrder, publishedRubrics, scoreOverview } from "./assistant-flow.js";
+import { MAX_FILES, activePlan, limitFiles, papersInUploadOrder, planProgressText, publishedRubrics, scoreOverview } from "./assistant-flow.js";
 
 describe("助手展示用纯函数", () => {
   it("超过 30 份只收前 30 份", () => {
@@ -39,5 +39,23 @@ describe("助手展示用纯函数", () => {
       { latest_final_score: null },
     ]);
     expect(overview).toEqual({ total: 3, scored: 2, average: 85.56, max: 91.12, min: 80, needReview: 1 });
+  });
+
+  it("进行中的计划只看最近一张计划卡片：它结束了就没有进行中的计划", () => {
+    const old = { type: "plan", status: "dismissed", steps: [] };
+    const running = { type: "plan", status: "running", steps: [] };
+    expect(activePlan([{ id: "m1", cards: [old] }, { id: "m2", cards: [running] }, { id: "m3", cards: [] }])?.card).toBe(running);
+    expect(activePlan([{ id: "m1", cards: [running] }, { id: "m2", cards: [old] }])).toBeNull();
+    expect(activePlan([])).toBeNull();
+  });
+
+  it("标题下的进度：第几步、共几步，等你决定的那一步写明", () => {
+    const steps = [
+      { label: "评分标准", status: "done" }, { label: "选择待评分文件", status: "current" }, { label: "评分", status: "todo" },
+    ];
+    expect(planProgressText({ steps })).toBe("第 2/3 步 · 选择待评分文件");
+    steps[1].status = "blocked";
+    expect(planProgressText({ steps })).toBe("第 2/3 步 · 选择待评分文件（等你决定）");
+    expect(planProgressText({ steps: [{ label: "评分", status: "done" }] })).toBe("");
   });
 });
