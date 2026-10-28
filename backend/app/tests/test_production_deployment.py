@@ -230,6 +230,8 @@ def test_deploy_brings_the_database_up_before_switching_the_app():
     app = script.index("--force-recreate --wait --wait-timeout 180 app")
     # 从 compose.yml 删掉的服务（2026-10-28 的 backup）不清掉会一直跑：最后一步顺带删孤儿容器。
     assert db < app < script.index("compose up --detach --no-recreate --remove-orphans\n")
+    # app 被停掉之后（手工恢复）走第一条分支：那里也要删孤儿容器。
+    assert "compose up --detach --wait --wait-timeout 180 --remove-orphans\n" in script
     assert 'for file in .env db.env' in script
 
 

@@ -199,7 +199,7 @@ owner 连接串只在这次运行里经标准输入传入，不写进实例上�
 3. 对新库跑 `init_database`。
 4. 跑 `copy_fixed_config`：源库是现有的 `RUNTIME_DATABASE_URL`（还指向 Supabase），目标是新库。打印每张表复制了多少行。
 5. 写入 `DATA_PLANE=local`，按本机模式重新渲染 `.env`，用当前版本启动 app 与 worker。
-6. 核对：健康检查通过；行数与第 4 步一致；做一次 `ops_backup create` 并 `verify`。
+6. 核对：健康检查通过；行数与第 4 步一致；做一次 `ops_backup create` 并 `verify`（2026-10-28 切换时做过；之后不做自动备份，工作流已去掉这一步，见第 7 节）。
 
 **切换后（维护者）**：
 

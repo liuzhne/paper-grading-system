@@ -62,8 +62,9 @@ fi
 docker tag "$IMAGE:$tag" "$IMAGE:current"
 
 if [[ -z "$(compose ps --quiet app 2>/dev/null)" ]]; then
-	# 第一次部署：全部建起来（caddy 等 app 健康后才启动）。
-	compose up --detach --wait --wait-timeout 180
+	# 第一次部署，或 app 被停掉之后（例如 RUNBOOK 9.4.1 的手工恢复）：全部建起来（caddy 等 app
+	# 健康后才启动）。--remove-orphans 与下面一样，删掉 compose.yml 里已经没有的服务的容器。
+	compose up --detach --wait --wait-timeout 180 --remove-orphans
 else
 	# db 先就绪：下面换 app、worker 都带 --no-deps，不会顺带把它拉起来。配置没变时不重建。
 	compose up --detach --wait --wait-timeout 120 db

@@ -547,19 +547,23 @@ ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db psq
 
 **备份**：2026-10-28 起不做自动备份（维护者决定，见 DECISIONS 同日一条）。实例、磁盘坏了或误操作，数据库（账号、配置、评分结果）与上传文件一起丢失。Lightsail 快照开不开由维护者在控制台决定：开了，整机损坏时从快照新建实例、把静态 IP 挂过去，回到那份快照的时刻。
 
-迁移等有风险的操作之前想留一份，手工导出到实例上。导出里有账号的密码散列与加密后的模型密钥，用完删掉：
+迁移等有风险的操作之前想留一份，手工导出到实例上。第一条只导出数据库，迁移只改数据库，用它就够；上传的文件（与 L0 缓存）在卷 `app_storage` 里，要一起留再跑第二条。导出里有账号的密码散列、加密后的模型密钥与论文原文，用完删掉：
 
 ```bash
 ssh pgs-prod 'cd /opt/pgs && umask 077 && docker compose -p pgs -f compose.yml exec -T db pg_dump -U postgres -Fc pgs > pgs-$(date +%Y%m%d%H%M).dump'
+ssh pgs-prod 'cd /opt/pgs && umask 077 && docker compose -p pgs -f compose.yml exec -T app tar czf - -C /app/storage . > storage-$(date +%Y%m%d%H%M).tgz'
 ```
 
-要用它恢复时，先停 app 与 worker，恢复后用当前版本重新部署（`deploy.sh $(cat /opt/pgs/RELEASE)`）。导出带着授权，恢复后不用再跑 `init_database`：
+要用它们恢复时，先停 app 与 worker，恢复后用当前版本重新部署。数据库导出带着授权，恢复后不用再跑 `init_database`。文件包只覆盖同名文件，导出之后新传的文件还在，但数据库里已经没有它们的记录：
 
 ```bash
 ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml stop app worker'
 ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db pg_restore -U postgres -d pgs --clean --if-exists < pgs-<时间>.dump'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T app tar xzf - -C /app/storage < storage-<时间>.tgz'
 ssh pgs-prod '/opt/pgs/deploy.sh "$(cat /opt/pgs/RELEASE)"'
 ```
+
+核对：健康检查通过；`docker compose … exec -T db psql -U postgres -d pgs -c "select count(*) from users"` 的行数与导出前一致；原账号能登录，导出前上传的论文能打开。
 
 切换时留下的卷 `pgs_backups`（一份 1.4 MB 的备份）不会自动删除；不要了就 `ssh pgs-prod 'docker volume rm pgs_backups'`。
 
@@ -1199,7 +1203,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-10-28 | 生产不做自动备份 | 9.4.1“备份”改为不做自动备份：手工导出与恢复命令、旧卷 `pgs_backups` 的删除；去掉每晚备份与恢复演练的命令；`deploy.sh` 删孤儿容器。 |
+| 2026-10-28 | 生产不做自动备份 | 9.4.1“备份”改为不做自动备份：手工导出与恢复命令（数据库，加上可选的 `app_storage` 文件包）与核对、旧卷 `pgs_backups` 的删除；去掉每晚备份与恢复演练的命令；`deploy.sh` 两条分支都删孤儿容器。 |
 | 2026-10-28 | 迁出 Supabase 复审（#62 CodeRabbit） | 无新命令；排错：复制报“新库有迁移预置以外的数据”；切换前置检查改为精确匹配 db 的 `(healthy)`。 |
 | 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 新增 9.4.1：`DATA_PLANE` 标记、两个新密钥、`pgs-production-cutover` 切换与回滚、迁移改在实例上执行、每晚备份与恢复演练；排错：切换停在实例检查、旧库版本落后、改密码后认证失败、标记文件被改坏。 |
 | 2026-10-27 | worker 空闲退避 | `run_batch_worker` 新增 `--idle-max-seconds`（默认 30）；常见故障：助手上传失败、直传申请 502，真正原因是 Supabase 组织 Fair Use 限制（402）。 |

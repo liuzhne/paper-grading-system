@@ -2351,11 +2351,11 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 背景：迁出 Supabase 的方案里有两层备份——Lightsail 实例每日快照，加 backup 服务每晚 `pg_dump` 与存储目录打包、留 7 份。切换当天（10-28）维护者决定不需要备份。生产只从旧库迁来了账号与固定配置，其余数据都是切换之后重新上传的。
 
 选择：
-- 去掉生产 compose 的 backup 服务与卷声明 `backups`，删除 `scripts/nightly_backup.py`。`deploy.sh` 最后一步改为不指定服务、带 `--remove-orphans` 的 `compose up --no-recreate`：下一次部署时删掉实例上还在跑的 backup 容器，卷原样保留，切换时那份备份还在里面，删不删由维护者定（RUNBOOK 9.4.1）。
+- 去掉生产 compose 的 backup 服务与卷声明 `backups`，删除 `scripts/nightly_backup.py`。`deploy.sh` 两条分支的 `compose up` 都带 `--remove-orphans`（平常那条改为不指定服务的 `compose up --no-recreate`）：下一次部署时删掉实例上还在跑的 backup 容器，卷原样保留，切换时那份备份还在里面，删不删由维护者定（RUNBOOK 9.4.1）。
 - 切换工作流的收尾一步不再备份新库（切换已在 10-28 执行完）。
-- `db.env` 只剩超级用户密码：`PGS_DATA_PLANE` 只有 backup 读。
+- `db.env` 只剩超级用户密码：此前只有已去掉的 backup 服务读 `PGS_DATA_PLANE`，一并删除。
 - 实例快照不由仓库管：开不开由维护者在 Lightsail 控制台决定。
-- 留着 `ops_backup`（CI 的备份恢复演练在用）；生产上需要时（例如迁移前）手工 `pg_dump` 一份，命令在 RUNBOOK 9.4.1。
+- 留着 `ops_backup`（CI 的备份恢复演练在用）；生产上需要时（例如迁移前）手工 `pg_dump` 一份，要连上传文件一起留再打包卷 `app_storage`，命令在 RUNBOOK 9.4.1。
 
 放弃了什么：
 - **每晚 `pg_dump`、留 7 份**：实例或磁盘出问题、误删数据时，原来最多丢一天；现在没开快照就全丢，开了快照就回到快照那一刻。
