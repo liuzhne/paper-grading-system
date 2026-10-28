@@ -7,7 +7,7 @@ from sqlalchemy.pool import NullPool
 from storage3.exceptions import StorageApiError
 
 from backend.app.core.config import Settings, settings
-from backend.app.db.session import _engine_options
+from backend.app.db.session import engine_options
 from backend.app.services.storage import local as artifact_storage
 
 
@@ -84,7 +84,7 @@ def test_supabase_missing_object_error_is_normalized():
 
 
 def test_supabase_transaction_pooler_disables_client_pool_and_prepares():
-    options = _engine_options(
+    options = engine_options(
         "postgresql+psycopg://postgres.example:secret@aws-0.pooler.supabase.com:6543/postgres"
     )
     assert options["poolclass"] is NullPool

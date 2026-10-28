@@ -5,6 +5,9 @@ Secrets 由工作流使用，好过在某台笔记本上手工执行：凭据不
 shell 历史，每次执行有审批与日志。
 
 但一个"能改生产库"的按钮本身就是风险。这里钉住几条不该被随手改掉的约束。
+
+2026-10-27 起迁移在实例上执行（数据库改成不对外的 db 容器）：工作流把本提交的镜像送过去，
+用一次性容器跑 backend/app/scripts/production_migrate.py。约束跟着搬到了那个脚本里。
 """
 
 import pathlib
@@ -84,11 +87,33 @@ def test_verification_uses_the_runtime_role_not_the_owner():
 
     0026/0027 的新表缺 `pgs_app` 授权，就是只有用运行角色验证才暴露得出来。
     """
-    steps = {step["name"]: step for step in _job()["steps"] if "name" in step}
-    verify = steps["Verify with the runtime role"]
+    from backend.app.scripts import production_migrate
 
-    assert "RUNTIME_DATABASE_URL" in verify["env"]["DATABASE_URL"]
-    assert "MIGRATION_DATABASE_URL" not in verify["env"]["DATABASE_URL"]
+    steps = {step["name"]: step for step in _job()["steps"] if "name" in step}
+    assert "production_migrate verify" in steps["Verify with the runtime role"]["run"]
+    assert production_migrate.CREDENTIAL["verify"] == "RUNTIME_DATABASE_URL"
+    assert {production_migrate.CREDENTIAL[name] for name in ("survey", "pending", "upgrade")} == {
+        "MIGRATION_DATABASE_URL"
+    }
+
+
+def test_runs_on_the_instance_with_this_commit_and_cleans_up():
+    """数据库不对外：在实例上用本提交的镜像跑一次性容器，连接串走标准输入，跑完删镜像。"""
+    steps = [step.get("name", "") for step in _job()["steps"]]
+    by_name = {step["name"]: step for step in _job()["steps"] if "name" in step}
+
+    assert steps.index("Build and ship the migration image") < steps.index("Survey the database before migrating")
+    for name in ("Survey the database before migrating", "Show pending migrations", "Upgrade to head",
+                 "Verify with the runtime role"):
+        run = by_name[name]["run"]
+        assert "/opt/pgs/ops.sh $IMAGE_TAG" in run and '< "$RUNNER_TEMP/ops.env"' in run, name
+    assert _job()["env"]["IMAGE_TAG"] == "migrate-${{ github.sha }}"
+    cleanup = by_name["Remove the migration image and credentials"]
+    assert cleanup["if"] == "always()"
+    assert "docker image rm" in cleanup["run"] and 'rm -f "$RUNNER_TEMP/ops.env"' in cleanup["run"]
+    # 连接串按实例上的 DATA_PLANE 选，由 production_env.py 渲染；不在命令行里出现。
+    credentials = by_name["Validate the migration credential is configured"]
+    assert '--kind ops --data-plane "$DATA_PLANE"' in credentials["run"]
 
 
 def test_no_database_dump_is_uploaded_as_an_artifact():
@@ -130,7 +155,6 @@ def test_the_runtime_check_covers_every_table_that_needed_a_grant():
     """
     import re
 
-    text = WORKFLOW.read_text(encoding="utf-8")
     versions = (
         pathlib.Path(__file__).resolve().parents[3] / "alembic" / "versions"
     )
@@ -162,10 +186,11 @@ def test_the_runtime_check_covers_every_table_that_needed_a_grant():
         for match in re.findall(r'op\.create_table\(\s*("[^"]+"|[A-Z][A-Z_]*)', source):
             granted |= names(source, constants, match)
 
-    missing = sorted(table for table in granted if table not in text)
-    assert not missing, "迁移给这些表授了权，但工作流没验证运行角色能读：%s" % (
-        ", ".join(missing)
-    )
+    # 工作流的运行角色验证（production_migrate verify）逐张读 RUNTIME_ACCESS_TABLES。
+    script = (
+        pathlib.Path(__file__).resolve().parents[3] / "backend" / "app" / "scripts" / "production_migrate.py"
+    ).read_text(encoding="utf-8")
+    assert "for name in RUNTIME_ACCESS_TABLES:" in script
 
     from backend.app.services.deployment.postgres_verifier import RUNTIME_ACCESS_TABLES
 

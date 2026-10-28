@@ -8,6 +8,8 @@
 
 生产正从 Vercel 迁到一台新加坡 AWS Lightsail 实例（`deploy/production/`：Caddy + app + worker），数据库与存储换成新建的 Supabase 项目，用 `backend/app/scripts/init_database.py` 初始化，运行时密钥存 GitHub `production` 环境。方案见 `docs/部署平台迁移到AWS方案.md`，准备、发布、回滚与切流量顺序见 RUNBOOK 9.4。**2026-10-18 起流水线不再部署 Vercel**（仓库变量 `VERCEL_DEPLOY_ENABLED=false`，用户已通知迁移到 Lightsail），Lightsail 是正式入口；Vercel 停在最后一次部署上，改为只跳转、删除旧 Supabase 项目尚待维护者操作。
 
+**2026-10-27 起迁出 Supabase**（组织被 Fair Use 限制，上传返回 402）：数据库改为实例上的 db 容器（`postgres:16-bookworm`，不对外开端口）、文件存卷（`STORAGE_PROVIDER=local`），只迁移账号与固定配置。数据在哪里由实例上的 `/opt/pgs/DATA_PLANE` 决定（没有即 `supabase`），由手动审批的 `pgs-production-cutover` 一次切换；迁移与切换都在实例上用一次性容器执行（`deploy/production/ops.sh`）。方案见 `docs/迁出Supabase到单机Docker方案.md`，操作见 RUNBOOK 9.4.1。
+
 ## 命令
 - 测试：`.venv/bin/python -m pytest -q`（或 `uv run pytest`）。**全套自包含**：内存 SQLite + Mock LLM，无需 Postgres/API Key/联网。
 - 本地起服务（无 Docker）：`DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run alembic upgrade head && ... uv run uvicorn backend.app.main:app --port 8000`（详见 README）。

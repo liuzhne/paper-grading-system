@@ -95,6 +95,16 @@ def _archive_storage(storage_root, target):
                 )
 
 
+def current_migration_head() -> str:
+    """镜像里的 Alembic head：备份清单记录它，恢复时与目标库核对。"""
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[4]
+    return ScriptDirectory.from_config(Config(str(root / "alembic.ini"))).get_current_head()
+
+
 def create_backup(
     *,
     database_url,

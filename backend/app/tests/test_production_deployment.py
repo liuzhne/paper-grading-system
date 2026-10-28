@@ -163,9 +163,9 @@ def _compose():
     return yaml.safe_load((PRODUCTION / "compose.yml").read_text(encoding="utf-8"))
 
 
-def test_production_compose_runs_app_worker_and_caddy_without_a_database():
+def test_production_compose_runs_app_worker_caddy_and_a_private_database():
     services = _compose()["services"]
-    assert set(services) == {"caddy", "app", "worker"}
+    assert set(services) == {"caddy", "app", "worker", "db", "backup"}
     app, worker, caddy = services["app"], services["worker"], services["caddy"]
 
     # 同一镜像、同一份配置；deploy.sh 把要上线的版本打成 current。
@@ -181,8 +181,14 @@ def test_production_compose_runs_app_worker_and_caddy_without_a_database():
     assert worker["stop_grace_period"] == "110s"
     # 请求里同步跑整批评分会和 worker 抢条目。
     assert app["environment"]["INLINE_JOB_RUN_ENABLED"] == "false"
-    assert app["environment"]["STORAGE_PROVIDER"] == "supabase"
+    # 文件存哪里跟着数据位置走，由 production_env.py 写进 .env；compose 里写死会盖掉它。
+    assert "STORAGE_PROVIDER" not in app["environment"]
     assert app["environment"]["AUTH_ENABLED"] == "true"
+    # 直连 db 用连接池：app 与 worker 各最多 20 条，小于 db 的 max_connections。
+    pool = int(app["environment"]["DB_POOL_SIZE"]) + int(app["environment"]["DB_MAX_OVERFLOW"])
+    assert 2 * pool < 50 and "max_connections=50" in services["db"]["command"]
+    for service in (app, worker):
+        assert service["depends_on"]["db"]["condition"] == "service_healthy"
     # L0 缓存在卷里：发版换容器不丢，app 与 worker 共用。
     assert app["environment"]["STORAGE_ROOT"] == "/app/storage"
     assert "app_storage:/app/storage" in app["volumes"]
@@ -197,6 +203,37 @@ def test_production_compose_runs_app_worker_and_caddy_without_a_database():
     for service in services.values():
         assert service["restart"] == "unless-stopped"
         assert service["logging"]["options"]["max-size"]
+
+
+def test_production_database_is_private_and_only_db_and_backup_read_its_password():
+    services = _compose()["services"]
+    db, backup = services["db"], services["backup"]
+
+    # 大版本与镜像里的 postgresql-client、CI 的迁移门禁相同；Debian 镜像，排序规则与 CI 一致。
+    assert db["image"] == "postgres:16-bookworm"
+    assert "16" in (ROOT / "Dockerfile").read_text(encoding="utf-8").split("POSTGRES_MAJOR=")[1][:3]
+    # 不对外开端口：GitHub runner 与公网都连不到，迁移与切换在实例上用一次性容器执行。
+    assert "ports" not in db and "ports" not in backup
+    assert db["environment"] == {"POSTGRES_USER": "postgres", "POSTGRES_DB": "pgs"}
+    assert "pg_data:/var/lib/postgresql/data" in db["volumes"]
+    assert "pg_isready" in " ".join(db["healthcheck"]["test"])
+    # 超级用户密码只在 db.env：app 与 worker 读 .env，拿不到它；backup 只读 db.env，拿不到应用密钥。
+    assert db["env_file"] == "db.env" and backup["env_file"] == "db.env"
+    for name in ("app", "worker"):
+        assert services[name]["env_file"] == ".env"
+    # 备份：与线上同一镜像，存储卷只读，备份进单独的卷（宿主机目录归 deploy 用户，容器未必写得进）。
+    assert backup["image"] == "paper-grading-system:current"
+    assert backup["command"][:3] == ["python", "-m", "backend.app.scripts.nightly_backup"]
+    assert "app_storage:/app/storage:ro" in backup["volumes"] and "backups:/backups" in backup["volumes"]
+    assert {"pg_data", "backups", "app_storage"} <= set(_compose()["volumes"])
+
+
+def test_deploy_brings_the_database_up_before_switching_the_app():
+    script = (PRODUCTION / "deploy.sh").read_text(encoding="utf-8")
+    db = script.index("--wait-timeout 120 db")
+    app = script.index("--force-recreate --wait --wait-timeout 180 app")
+    assert db < app < script.index("--force-recreate backup")
+    assert 'for file in .env db.env' in script
 
 
 def test_production_caddyfile_keeps_vercel_headers_and_cache_rules():
@@ -218,7 +255,7 @@ def test_production_caddyfile_keeps_vercel_headers_and_cache_rules():
 
 
 def test_deploy_scripts_are_strict_and_never_print_the_env_file():
-    for name in ("bootstrap.sh", "deploy.sh"):
+    for name in ("bootstrap.sh", "deploy.sh", "ops.sh"):
         script = (PRODUCTION / name).read_text(encoding="utf-8")
         assert script.startswith("#!/usr/bin/env bash\n")
         assert "set -euo pipefail" in script
@@ -277,8 +314,11 @@ def test_production_env_drops_platform_and_compose_managed_variables(tmp_path, c
         "SUPABASE_URL",
         "SUPABASE_SECRET_KEY",
         "BYOK_MASTER_KEY",
+        "STORAGE_PROVIDER",
     }
     assert "AUTH_SECRET='%s'" % _SECRET in written
+    # 来源里的 STORAGE_PROVIDER 不照抄：按数据位置写（默认 supabase）。
+    assert "STORAGE_PROVIDER='supabase'" in written
     printed = capsys.readouterr()
     assert _SECRET not in printed.out + printed.err
     assert "AUTH_SECRET" in printed.out
@@ -548,3 +588,143 @@ def test_the_assistant_eval_can_run_on_a_candidate_image_without_deploying_it():
     assert "--file compose.yml --file $override" in run and 'commit="$GITHUB_SHA"' in run
     cleanup = workflow[workflow.index("- name: Remove the candidate image"):workflow.index("- name: Render the report")]
     assert "if: always() && inputs.candidate" in cleanup and "docker image rm" in cleanup
+
+
+_APP_PASSWORD = "A" * 12 + "b" * 12 + "123"
+_ROOT_PASSWORD = "R" * 20 + "9" * 8
+
+
+def _local_source(tmp_path, **extra):
+    """切换后：没有 Supabase 的变量也能生成；GitHub 上旧的 RUNTIME_DATABASE_URL 还在也不会写进去。"""
+
+    values = {
+        "AUTH_SECRET": _SECRET,
+        "AUTH_PASSWORD": _SECRET,
+        "BYOK_MASTER_KEY": _SECRET,
+        "PGS_APP_PASSWORD": _APP_PASSWORD,
+        "POSTGRES_PASSWORD": _ROOT_PASSWORD,
+        "RUNTIME_DATABASE_URL": "postgresql://pgs_app.ref:%s@pooler.supabase.com:6543/postgres" % _SECRET,
+        "SUPABASE_URL": "https://old.supabase.co",
+        "SUPABASE_SECRET_KEY": _SECRET,
+    }
+    values.update(extra)
+    path = tmp_path / "local.env"
+    path.write_text("".join('%s="%s"\n' % item for item in values.items()), encoding="utf-8")
+    return path
+
+
+def _written(path):
+    return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines() if "=" in line)
+
+
+def test_local_app_env_points_at_the_db_container_and_carries_no_database_passwords(tmp_path, capsys):
+    script = _env_script()
+    output = tmp_path / "pgs.env"
+
+    code = script.main([
+        "--source", str(_local_source(tmp_path)), "--data-plane", "local",
+        "--site-address", "pgs.duckdns.org", "--output", str(output),
+    ])
+
+    assert code == 0
+    written = _written(output)
+    assert written["DATABASE_URL"] == "'postgresql+psycopg://pgs_app:%s@db:5432/pgs'" % _APP_PASSWORD
+    assert written["STORAGE_PROVIDER"] == "'local'"
+    # 超级用户密码、运行角色密码本身、旧库连接串与 Supabase 的变量都不进 app 的 .env。
+    for name in ("POSTGRES_PASSWORD", "PGS_APP_PASSWORD", "RUNTIME_DATABASE_URL", "SUPABASE_URL", "SUPABASE_SECRET_KEY"):
+        assert name not in written, name
+    assert _ROOT_PASSWORD not in output.read_text(encoding="utf-8")
+    printed = capsys.readouterr()
+    assert _SECRET not in printed.out + printed.err and _APP_PASSWORD not in printed.out
+    assert "数据位置 local" in printed.out
+
+
+def test_local_env_requires_a_plain_database_password(tmp_path, capsys):
+    script = _env_script()
+    output = tmp_path / "pgs.env"
+    args = ["--data-plane", "local", "--site-address", "pgs.duckdns.org", "--output", str(output)]
+
+    assert script.main(["--source", str(_local_source(tmp_path, PGS_APP_PASSWORD="short-and:odd")), *args]) == 1
+    errors = capsys.readouterr().err
+    assert "PGS_APP_PASSWORD 只能是字母和数字，至少 24 位" in errors and "short-and:odd" not in errors
+    assert not output.exists()
+
+    assert script.main(["--source", str(_local_source(tmp_path, PGS_APP_PASSWORD="")), *args]) == 1
+    assert "缺少必需变量 PGS_APP_PASSWORD" in capsys.readouterr().err
+
+
+def test_db_env_has_only_the_superuser_password_and_the_data_plane(tmp_path, capsys):
+    script = _env_script()
+    output = tmp_path / "db.env"
+
+    assert script.main(["--source", str(_local_source(tmp_path)), "--kind", "db", "--output", str(output)]) == 0
+    assert _written(output) == {"POSTGRES_PASSWORD": "'%s'" % _ROOT_PASSWORD, "PGS_DATA_PLANE": "'supabase'"}
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert _ROOT_PASSWORD not in capsys.readouterr().out
+
+    output.unlink()
+    assert script.main([
+        "--source", str(_local_source(tmp_path, POSTGRES_PASSWORD="")), "--kind", "db", "--output", str(output),
+    ]) == 1
+    assert "缺少必需变量 POSTGRES_PASSWORD" in capsys.readouterr().err
+
+    import pytest
+
+    with pytest.raises(SystemExit):  # 只有 app 有站点地址
+        script.main(["--source", str(_local_source(tmp_path)), "--kind", "db", "--site-address", "pgs.duckdns.org",
+                     "--output", str(output)])
+
+
+def test_ops_env_is_unquoted_and_switches_connections_with_the_data_plane(tmp_path):
+    script = _env_script()
+    output = tmp_path / "ops.env"
+
+    assert script.main([
+        "--source", str(_local_source(tmp_path)), "--kind", "ops", "--data-plane", "local", "--with-source",
+        "--output", str(output),
+    ]) == 0
+    written = _written(output)
+    # docker run --env-file 不处理引号：引号会变成值的一部分。
+    assert written == {
+        "MIGRATION_DATABASE_URL": "postgresql+psycopg://postgres:%s@db:5432/pgs" % _ROOT_PASSWORD,
+        "RUNTIME_DATABASE_URL": "postgresql+psycopg://pgs_app:%s@db:5432/pgs" % _APP_PASSWORD,
+        "PGS_APP_PASSWORD": _APP_PASSWORD,
+        # 切换时 GitHub 上的 RUNTIME_DATABASE_URL 还指向 Supabase：复制的源库。
+        "SOURCE_DATABASE_URL": "postgresql://pgs_app.ref:%s@pooler.supabase.com:6543/postgres" % _SECRET,
+    }
+
+    output.unlink()
+    supabase = _local_source(tmp_path, MIGRATION_DATABASE_URL="postgresql://postgres.ref:x@pooler.supabase.com:5432/postgres")
+    assert script.main(["--source", str(supabase), "--kind", "ops", "--output", str(output)]) == 0
+    assert set(_written(output)) == {"MIGRATION_DATABASE_URL", "RUNTIME_DATABASE_URL"}
+
+
+def test_ops_env_refuses_a_source_outside_the_cutover(tmp_path, capsys):
+    script = _env_script()
+    output = tmp_path / "ops.env"
+
+    assert script.main([
+        "--source", str(_local_source(tmp_path)), "--kind", "ops", "--with-source", "--output", str(output),
+    ]) == 1
+    assert "--with-source 只用于切换到本机数据库" in capsys.readouterr().err
+    assert script.main([
+        "--source", str(_local_source(tmp_path, RUNTIME_DATABASE_URL="")), "--kind", "ops", "--data-plane", "local",
+        "--with-source", "--output", str(output),
+    ]) == 1
+    assert "RUNTIME_DATABASE_URL" in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_lightsail_deploy_renders_both_env_files_for_the_instance_data_plane():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
+    read = lightsail.index("- name: Read where the data lives")
+    write = lightsail.index("- name: Write the runtime environment")
+    switch = lightsail.index("- name: Switch to this version")
+    assert read < write < switch
+    assert "cat /opt/pgs/DATA_PLANE" in lightsail[read:write]
+    step = lightsail[write:switch]
+    assert step.count('--data-plane "$DATA_PLANE"') == 2 and "--kind db" in step
+    assert "/opt/pgs/db.env" in step
+    assert "POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}" in step
+    assert "ops.sh" in lightsail[lightsail.index("- name: Ship the image and deployment files"):write]

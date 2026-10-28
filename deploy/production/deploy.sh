@@ -47,10 +47,12 @@ if ! docker image inspect "$IMAGE:$tag" >/dev/null 2>&1; then
 	echo "本机没有镜像 $IMAGE:$tag。用 deploy.sh --list 查看可用版本。" >&2
 	exit 1
 fi
-if [[ ! -f .env ]]; then
-	echo "缺少 /opt/pgs/.env：部署任务会在调用本脚本前写好它；手工部署见 RUNBOOK 9.4。" >&2
-	exit 1
-fi
+for file in .env db.env; do
+	if [[ ! -f "$file" ]]; then
+		echo "缺少 /opt/pgs/$file：部署任务会在调用本脚本前写好它；手工部署见 RUNBOOK 9.4。" >&2
+		exit 1
+	fi
+done
 
 # 先校验 Caddy 配置，再动服务：配置有错时线上保持原样。
 if [[ -n "$(compose ps --quiet caddy 2>/dev/null)" ]]; then
@@ -63,10 +65,13 @@ if [[ -z "$(compose ps --quiet app 2>/dev/null)" ]]; then
 	# 第一次部署：全部建起来（caddy 等 app 健康后才启动）。
 	compose up --detach --wait --wait-timeout 180
 else
+	# db 先就绪：下面换 app、worker 都带 --no-deps，不会顺带把它拉起来。配置没变时不重建。
+	compose up --detach --wait --wait-timeout 120 db
 	# 先换 app：Caddy 在空档期间让新请求等着，用户只看到几秒延迟。
 	compose up --detach --no-deps --force-recreate --wait --wait-timeout 180 app
 	# 再换 worker：旧 worker 停下前最多等 100 秒让在执行的条目做完。
 	compose up --detach --no-deps --force-recreate worker
+	compose up --detach --no-deps --force-recreate backup
 	compose up --detach --no-recreate caddy
 	compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 fi

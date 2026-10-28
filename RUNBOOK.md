@@ -231,7 +231,7 @@ export LANGFUSE_RELEASE=<deployment-commit>
 | 结果意外来自 Mock | `LLM_PROVIDER`、`LLM_FALLBACK_TO_MOCK`、集成状态 | 正式评估设 fallback=false；检查日志中的 provider identity，不要把 Mock 结果当质量证据 |
 | 缓存结果疑似陈旧 | `PROMPT_VERSION`、模型/采样/RubricVersion/anchor identity | 修复输入构造时 bump Core 与 cache 的 prompt 版本；不要只删除用户数据或扩大 cache key 复用 |
 | 上传失败/413 | Caddy 限制、`MAX_UPLOAD_SIZE_MB`、直传上限、Supabase CORS/TUS | 对齐批准的限制；serverless 大文件使用私有直传，不要改公开桶或暴露 service key |
-| 助手回复“文件都没能上传成功”，网络面板里 `POST /api/papers/direct-upload-intents` 返回 502 `DIRECT_UPLOAD_SIGNING_FAILED`（2026-10-27） | Supabase 边缘日志里 `/storage/v1/object/upload/sign/…` 的状态码；组织的套餐与 Usage 页 | 报错指向我们的签名接口，真正原因在 Supabase：签名请求返回 **402**，是组织超出免费额度后的 Fair Use 限制，作用于组织里的所有项目，与代码、密钥、桶无关（10-16 同样请求是 200）。项目自身数据库 22 MB、存储 2.7 MB，疑为连接池出流量：空闲 worker 8 条线程各自每 3 秒领一次，14 天 1200 万条语句。已改为空闲时单线程探测、默认退避到 30 秒；限制本身只能等计费周期重置或升级套餐，维护者已决定迁出 Supabase。后端目前不记录签名异常、前端不显示每个文件的失败原因，查这类问题要看 Supabase 日志 |
+| 助手回复“文件都没能上传成功”，网络面板里 `POST /api/papers/direct-upload-intents` 返回 502 `DIRECT_UPLOAD_SIGNING_FAILED`（2026-10-27） | Supabase 边缘日志里 `/storage/v1/object/upload/sign/…` 的状态码；组织的套餐与 Usage 页 | 报错指向我们的签名接口，真正原因在 Supabase：签名请求返回 **402**，是组织超出免费额度后的 Fair Use 限制，作用于组织里的所有项目，与代码、密钥、桶无关（10-16 同样请求是 200）。项目自身数据库 22 MB、存储 2.7 MB，疑为连接池出流量：空闲 worker 8 条线程各自每 3 秒领一次，14 天 1200 万条语句。已改为空闲时单线程探测、默认退避到 30 秒；限制本身只能等计费周期重置或升级套餐，维护者已决定迁出 Supabase（9.4.1）。后端目前不记录签名异常、前端不显示每个文件的失败原因，查这类问题要看 Supabase 日志 |
 | Paper 长时间 `parsing` | `PAPER_PARSE_LEASE_SECONDS`、对象是否存在/大小一致、worker 中断 | 租约未过期时禁止并发接管；超时后用“重新解析”，仅在新解析成功后替换 chunks |
 | Submission 422 | 文件仅支持 DOCX/文本 PDF、Profile 元数据、解析质量、Profile identity | 修正输入或选择正确 Profile；不要让通用 Core 猜业务元数据 |
 | Rubric 无法发布 | compilation、rule review、template link、total/policy、provenance blocker | 用 execution draft/graph 定位并由授权人补齐；不要自动批准或清 blocker |
@@ -391,7 +391,7 @@ docker compose --env-file .env.intranet logs -f app worker caddy
 
 首次部署后（S2）：用 `AUTH_USERNAME` / `AUTH_PASSWORD` 登录（第一次登录会建平台管理员），在平台模型设置里填 Bedrock API Key，再邀请用户。
 
-日常发布：合并到 `main` 后，`deploy-lightsail-production` 在门禁通过、`production` 环境审批后构建镜像，经 SSH 载入实例，用 GitHub 上的密钥与变量重新生成实例的 `/opt/pgs/.env`，再运行 `/opt/pgs/deploy.sh <SHA>`：先换 app（Caddy 让空档期间的请求等着），健康后再换 worker（最多等 100 秒让在执行的条目做完），最后热加载 Caddy。迁移顺序不变：需要迁移的版本先跑 `production-migrate.yml`。
+日常发布：合并到 `main` 后，`deploy-lightsail-production` 在门禁通过、`production` 环境审批后构建镜像，经 SSH 载入实例，先读实例上的 `/opt/pgs/DATA_PLANE`（日志里一行“数据位置：…”，见 9.4.1），按它用 GitHub 上的密钥与变量重新生成实例的 `/opt/pgs/.env` 与 `/opt/pgs/db.env`，再运行 `/opt/pgs/deploy.sh <SHA>`：先确保 db 就绪，再换 app（Caddy 让空档期间的请求等着），健康后换 worker（最多等 100 秒让在执行的条目做完）与 backup，最后热加载 Caddy。迁移顺序不变：需要迁移的版本先跑 `production-migrate.yml`（2026-10-27 起在实例上执行，见 9.4.1）。
 
 在实例上（`ssh deploy@<静态 IP>`）：
 
@@ -517,8 +517,60 @@ docker compose -p pgs -f compose.yml exec -T app python - < check.py
 - **Gemini 返回 `403`，日志里 `provider_type=PERMISSION_DENIED`（2026-10-15 之前是 `-`）。** Google 的错误类型在 `error.status`，日志记它；更细的原因在 `error.details[].reason`（如 `SERVICE_DISABLED`、`API_KEY_SERVICE_BLOCKED`、`API_KEY_HTTP_REFERRER_BLOCKED`），日志不记（鉴权类说明常带项目信息）。用同一把 Key 在 CloudShell 里 `curl -s -H "x-goog-api-key: $KEY" https://generativelanguage.googleapis.com/v1beta/models` 可以看到原因；`API_KEY_INVALID`（400）是 Key 本身无效或没复制全。
 - **AI 起草某一批总是失败，提示“模型拒绝处理这一批起草请求（invalid_request，HTTP 400）”，同一连接的其他批次都成功。** 报错像连接问题，真正原因是模型拒绝了这一批请求本身（参数、输出格式约束或内容），确切说明在 worker 日志 `llm_call_failed` 行尾的 `provider_message="…"` 里：`sudo docker compose -p pgs -f /opt/pgs/compose.yml logs worker | grep 'llm_call_failed.*status=400'`。2026-10-15 之前这行只有 `provider_code=- provider_type=-`：Vertex AI 把错误体包在数组里（`[{"error": {...}}]`），解析器整段丢弃，说明也按约定不进日志；当时页面还提示去测试连接，测了也会通过。注意「重试失败的批次」原样重发任务冻结的这一批输入，不会读到后来对评分项或规则来源的修改：它适合在这次修复部署后复现一次、拿到说明；要换内容，就手动编写这几段原文对应的规则，或调整该评分项的规则来源后点「AI 根据规则来源起草」新建任务。条目的 `attempt_history` 里有每次的 `http_status`、`provider_code`、`provider_type`。2026-10-15 生产上 T02 第 2/5 批的说明是 `The specified schema produces a constraint that has too many states for serving`：被拒的是我们附带的输出格式约束，不是原文内容。2026-10-16 起这种情况会自动改用精简格式重发一次（worker 日志 `rubric_ai_draft_schema_fallback`），一般不再失败。
 - **起草提示“模型处理不了这一批起草所需的输出格式约束，精简格式也没有通过”。** 报错像格式问题，真正原因在模型侧：这个模型的结构化输出连精简 Schema 也编译不了。重试和改原文都没用，换用其他模型的连接后点「AI 根据规则来源起草」重新起草，或手写这几段规则。日志里应能看到同一批先后两行 `llm_call_failed … status=400 … provider_message="…too many states…"`，中间一行 `rubric_ai_draft_schema_fallback`。
-- **部署任务在 “Write the runtime environment” 失败，提示缺少变量或不是 6543。** 报错指向脚本，真正原因是 GitHub `production` 环境里少配了密钥，或 `RUNTIME_DATABASE_URL` 用的是 Session pooler（5432）。输出里只有变量名，按名字补齐。
+- **部署任务在 “Write the runtime environment” 失败，提示缺少变量或不是 6543。** 报错指向脚本，真正原因是 GitHub `production` 环境里少配了密钥，或（数据还在 Supabase 时）`RUNTIME_DATABASE_URL` 用的是 Session pooler（5432）。输出里只有变量名，按名字补齐。切到本机数据库之后不再检查 `RUNTIME_DATABASE_URL` 与 `SUPABASE_*`，连接串由 `PGS_APP_PASSWORD` 拼出。
 - **app 反复重启，日志里是 `permission denied` 或 `must be owner`，出现在 `alembic upgrade head` 之后。** 报错像数据库权限问题，真正原因是生产 compose 的 `command` 被删掉了，容器回到了 Dockerfile 的 CMD，在启动时迁移；生产运行角色 `pgs_app` 没有 DDL。迁移只走 `production-migrate.yml`。
+
+#### 9.4.1 迁出 Supabase：数据库与文件改到实例上（2026-10-27）
+
+方案：`docs/迁出Supabase到单机Docker方案.md`。起因见第 6 节常见故障“助手回复‘文件都没能上传成功’”：Supabase 组织被 Fair Use 限制，所有 API 返回 402。
+
+**数据位置 `/opt/pgs/DATA_PLANE`**：没有这个文件即 `supabase`（切换前：app 连 Supabase，文件存 Supabase Storage）；`local`（切换后：app 连同机的 db 容器，文件存卷 `app_storage`）。部署、迁移工作流都先读它，日志里有一行“数据位置：…”。它只由切换工作流写入；不用仓库变量，因为切换完成到改变量之间的任何一次部署都会连回 Supabase。db 容器两种情况下都在运行，切换前是空库。
+
+**密钥**（production 环境，合并本次改动之前设好）：`POSTGRES_PASSWORD`（db 超级用户，只写进 `db.env`，只给 db 与 backup）、`PGS_APP_PASSWORD`（运行角色）。都只用字母和数字、24 位以上：本机连接串由它们直接拼成 `…@db:5432/pgs`，不做编码。部署任务缺了会停在 “Validate deployment settings”。
+
+**切换（一次性，预计停机约 15 分钟）**：
+
+1. Lightsail 控制台给实例开启自动快照（每日，保留 7 份），再手动拍一份；通知老师停机时间，并说明除账号、邀请、官网申请与模型配置外数据都不保留。
+2. 先预演：Actions → `pgs-production-cutover` → Run workflow，分支选 `main`（必须是实例上正在运行的提交），`expected_head` 填当前 head，保持 `dry_run` 勾选。看 “Check the source and target databases” 打印的两边版本与每张表的行数。
+3. 正式：取消 `dry_run`，`confirm` 填 `cutover`，审批。工作流依次停 worker 与 app → `init_database` → `copy_fixed_config apply` → 写 `DATA_PLANE=local` 并重写 `.env`、`db.env` → `deploy.sh` → 冒烟 → 备份一份并校验。
+4. 核对：用原账号登录；运维页对平台模型点“测试连接”（一次真实调用）；上传一篇论文走完评分。
+
+**回滚**（只在老师开始使用新库之前）：`ssh pgs-prod 'rm /opt/pgs/DATA_PLANE'`，再重跑一次 main 上最近的部署任务，即按 Supabase 模式重新生成 `.env` 并重启（上传仍不可用）。新库原样保留；下次切换前先清空它，否则复制会拒绝执行：
+
+```bash
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db psql -U postgres -d postgres -c "DROP DATABASE pgs WITH (FORCE)" -c "CREATE DATABASE pgs"'
+```
+
+切换失败时：标记还没写入，工作流会把旧的 `.env`、`db.env` 放回去并按原样启动（日志里一条 warning）；新库可能已初始化一半，同样先清空再重试。标记已写入，工作流不自动回退，按上面的回滚处理。
+
+**迁移**（用法不变：手动触发、审批、默认只预演）：`production-migrate.yml` 现在构建本提交的镜像、送到实例，用一次性容器（`/opt/pgs/ops.sh`）跑 `production_migrate survey|pending|upgrade|verify`，最后删除镜像 `paper-grading-system:migrate-<SHA>`；连接串按 `DATA_PLANE` 选，经 SSH 标准输入传入。比原来多几分钟构建与传输。
+
+**备份**：backup 服务每天 03:00（UTC+8）做一份（`pg_dump` + 存储目录 + 校验清单），存在卷 `backups`，留 7 份；空闲不足 5 GB 时不做并记错误。数据还在 Supabase 时只记 `nightly_backup_skipped reason=data_plane`。
+
+```bash
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml logs backup | grep nightly_backup'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T backup ls /backups'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T backup python -m backend.app.scripts.nightly_backup --storage-root /app/storage --destination /backups --once'
+```
+
+**恢复演练**（切换后做一次，之后每季度一次）：恢复到临时库，核对后删除。`pg_dump` 带 `--no-privileges`，恢复出来的库没有 `pgs_app` 的授权；真要用它替换线上库时，恢复后再跑一次 `init_database`（重跑无副作用，会补授权与行级安全并逐表核对）。
+
+```bash
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db createdb -U postgres pgs_restore_drill'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml run --rm --no-deps -T backup sh -c "python -m backend.app.scripts.ops_backup restore /backups/<包名> --database-url postgresql://postgres:\$POSTGRES_PASSWORD@db:5432/pgs_restore_drill --storage-target /tmp/restore-drill --confirm-database pgs_restore_drill"'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db psql -U postgres -d pgs_restore_drill -c "select count(*) from users"'
+ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db dropdb -U postgres pgs_restore_drill'
+```
+
+实例整机损坏时，从 Lightsail 快照新建实例、把静态 IP 挂过去，最多丢一天数据。
+
+排错：
+
+- **切换工作流停在 “Check the instance”，提示实例上运行的不是本提交。** 报错像版本不对，真正原因是在分支或旧提交上点了 Run workflow，或者最新的部署还没跑完。切换用实例上已有的镜像，只能在 main 上、已部署的那个提交上运行。
+- **“Check the source and target databases” 报旧库的迁移版本与镜像不同。** 报错指向复制脚本，真正原因是旧库（Supabase）还没迁移到这个版本。先用 `production-migrate.yml` 迁移旧库（`DATA_PLANE` 还是 supabase，连的就是旧库），再切换。
+- **改了 GitHub 上的 `POSTGRES_PASSWORD` 或 `PGS_APP_PASSWORD` 之后，备份、迁移或应用报 `password authentication failed`。** 报错指向密码，真正原因是库里的密码没跟着变：postgres 镜像只在数据卷为空时用 `POSTGRES_PASSWORD` 初始化，`init_database` 也只在建角色时设一次 `pgs_app` 的密码。改密码要先在库里改（`docker compose … exec -T db psql -U postgres -c "ALTER ROLE pgs_app PASSWORD '<新值>'"`，超级用户同理），再改 GitHub 上的值并重新部署。
+- **复制一步报“新库这些表有迁移预置以外的数据，拒绝复制”。** 报错指向新库，真正原因多半是上一次切换跑到一半：新库已经初始化并写入过数据，或者有人在回滚后用过新库。迁移 0022 预置的三行（引导管理员、Default Organization 与其成员记录）是允许的，复制会先删掉它们再按旧库写入；除此之外有任何一行都会拒绝。按上面“回滚”里的命令清空新库后重跑切换。
+- **部署任务报 `/opt/pgs/DATA_PLANE 只能是 supabase 或 local`。** 报错指向工作流，真正原因是有人手工改过这个文件（多了空格、大小写或别的值）。按实际情况改回 `local`，或删掉它回到 Supabase 模式。
 
 ## 10. 回滚
 
@@ -1148,6 +1200,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-28 | 迁出 Supabase 复审（#62 CodeRabbit） | 无新命令；排错：复制报“新库有迁移预置以外的数据”；切换前置检查改为精确匹配 db 的 `(healthy)`。 |
+| 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 新增 9.4.1：`DATA_PLANE` 标记、两个新密钥、`pgs-production-cutover` 切换与回滚、迁移改在实例上执行、每晚备份与恢复演练；排错：切换停在实例检查、旧库版本落后、改密码后认证失败、标记文件被改坏。 |
 | 2026-10-27 | worker 空闲退避 | `run_batch_worker` 新增 `--idle-max-seconds`（默认 30）；常见故障：助手上传失败、直传申请 502，真正原因是 Supabase 组织 Fair Use 限制（402）。 |
 | 2026-10-26 | 评分助手 A1.1 第三轮复审（CodeRabbit） | 无新命令；只改工具输出，不改提示词与评测集，不用重跑评测。 |
 | 2026-10-26 | 评分助手 A1.1 第二轮复审（CodeRabbit） | 无新命令；评测集又变，按候选镜像流程重跑后再合并。 |

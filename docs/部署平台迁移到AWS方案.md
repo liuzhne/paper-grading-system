@@ -8,6 +8,8 @@
 
 第三版（同日）：维护者已联系用户，**生产数据不再保留**，改为全新环境——新建 Supabase 项目 `grading-system`（`mfkmbwkuiimhaytkazvk`，新加坡），用初始化脚本建库（4.13），所有密钥重新生成并存进 GitHub `production` 环境（4.8）；不迁移数据，也不再新旧并行。旧项目在切流量后由维护者删除。
 
+**2026-10-27 更新**：Supabase 组织被 Fair Use 限制（上传返回 402），维护者决定不再使用 Supabase：数据库改为本实例上的 db 容器、文件存实例磁盘，只迁移账号与固定配置。本文里“数据库与存储在 Supabase”的部分以 [迁出Supabase到单机Docker方案.md](迁出Supabase到单机Docker方案.md) 为准。
+
 ---
 
 ## 1. 要解决什么、不动什么

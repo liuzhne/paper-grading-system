@@ -182,7 +182,7 @@ sequenceDiagram
 - 本地 CLI：`pgs` 直接调用服务层，默认独立使用 `~/.paper-grading/cli.db` 与 `~/.paper-grading/storage`，不需要 Web 服务。
 - 内网 Compose：Caddy HTTPS -> FastAPI app -> PostgreSQL 16，Postgres、应用 storage、备份和 Caddy CA 使用独立 volume；app 启动先 `alembic upgrade head`。
 - Vercel 生产：`public/` 由构建脚本生成指纹化静态资源；Python API 使用 Supabase/Postgres 连接。Vercel Git 直部署关闭，生产只能由 GitHub Actions 门禁后执行 prebuilt deploy。
-- Lightsail 生产（迁移中，`docs/部署平台迁移到AWS方案.md`）：一台新加坡实例跑 `deploy/production/compose.yml`——Caddy（Let's Encrypt、压缩、安全头与缓存头）→ app（uvicorn 单进程）；worker 循环领取与巡检，与内网相同，不用 Vercel 队列。数据库与文件存储是新建的 Supabase 项目（6543 事务池），由 `backend/app/scripts/init_database.py` 初始化（运行角色、现有迁移、全表授权与行级安全、私有桶）；旧项目数据不迁移。app 与 worker 共用卷 `/app/storage` 存 L0 缓存。生产 compose 覆盖 Dockerfile 的 CMD，启动时不迁移。镜像由 GitHub Actions 构建后经 SSH 载入，运行时密钥存 GitHub `production` 环境、部署时生成实例 `.env`，`deploy.sh` 切换 `current` 标签。app 与 worker 的应用日志由 `core/log_config.py` 统一配置（级别 `LOG_LEVEL`），输出到标准输出，由 Docker 按大小轮转。
+- Lightsail 生产（迁移中，`docs/部署平台迁移到AWS方案.md`）：一台新加坡实例跑 `deploy/production/compose.yml`——Caddy（Let's Encrypt、压缩、安全头与缓存头）→ app（uvicorn 单进程）；worker 循环领取与巡检，与内网相同，不用 Vercel 队列；db（`postgres:16-bookworm`，不对外开端口，卷 `pg_data`）；backup（每天 03:00 UTC+8 `nightly_backup`，卷 `backups`）。数据在哪里由实例上的 `/opt/pgs/DATA_PLANE` 决定（`docs/迁出Supabase到单机Docker方案.md`）：`supabase`（切换前）时数据库与文件存储是 Supabase 项目（6543 事务池），db 是空库；`local`（`pgs-production-cutover` 切换后）时 app 连 `pgs_app@db:5432/pgs`、`STORAGE_PROVIDER=local`、文件存卷 `/app/storage`，上传走 `POST /papers/upload`（不再有直传）。两种库都由 `backend/app/scripts/init_database.py` 初始化（运行角色、现有迁移、全表授权与行级安全；有 Supabase 的 `storage` 模式时建私有桶）；切换时 `copy_fixed_config` 只把账号、组织、成员、邀请、平台模型配置、模型连接、助手偏好与官网申请复制过来（新库里迁移 0022 预置的三行在同一事务里先删，再按旧库写入），其余数据不迁移。迁移与切换用一次性容器在实例上执行（`deploy/production/ops.sh`，连接串经 SSH 标准输入传入）。app 与 worker 共用卷 `/app/storage`（上传文件与 L0 缓存）。生产 compose 覆盖 Dockerfile 的 CMD，启动时不迁移。镜像由 GitHub Actions 构建后经 SSH 载入，运行时密钥存 GitHub `production` 环境、部署时生成实例 `.env`，`deploy.sh` 切换 `current` 标签。app 与 worker 的应用日志由 `core/log_config.py` 统一配置（级别 `LOG_LEVEL`），输出到标准输出，由 Docker 按大小轮转。
 
 FastAPI 中数据路由受 `enforce_auth` 保护；auth、公开集成自检和健康检查 `/api/system/health`（只返回检查项与状态）在登录前可达，`ops-readiness` 单独要求鉴权。开启 `AUTH_ENABLED` 后，弱密码、弱 `AUTH_SECRET` 或原文 LLM debug 会使应用 fail closed。
 
@@ -589,6 +589,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-28 | 迁出 Supabase 复审（#62 CodeRabbit） | 无模块变化：`copy_fixed_config` 允许并替换新库里 0022 预置的三行。 |
+| 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 生产 compose 新增 db 与 backup；`DATA_PLANE` 标记决定 app 连哪个库、文件存哪里；新增 `copy_fixed_config`、`production_migrate`、`nightly_backup` 与 `ops.sh`；迁移与切换改在实例上执行；直连时 SQLAlchemy 用有界连接池（`DB_POOL_SIZE` / `DB_MAX_OVERFLOW`）。 |
 | 2026-10-27 | worker 空闲退避 | 无模块变化：`work_queue/runner` 新增 `IdleGate`，`execute_next` 多一个领到即回调的 `on_claimed`；领取函数、叫醒层与 Vercel 路径不变。 |
 | 2026-10-26 | 评分助手 A1.1 第三轮复审（CodeRabbit） | 无模块变化：`scoring/suggestions.SCORE_CHANGE_PATTERN` 由回复校验共用；`task_list`、任务概况的评分状态改给中文说法。 |
 | 2026-10-26 | 评分助手 A1.1 第二轮复审（CodeRabbit） | 无模块变化：分数样式与回复校验补两种说法；评测判定更严。 |

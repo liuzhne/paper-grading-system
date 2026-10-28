@@ -1,0 +1,244 @@
+name: pgs-production-cutover
+
+# 一次性：把生产从 Supabase 切到实例上的 db 容器与本机磁盘（docs/迁出Supabase到单机Docker方案.md
+# 第 8 节）。**手动触发 + production 环境审批**；默认只做前置检查，真正切换还要在 confirm 里填
+# cutover——这一步会让生产停机约 15 分钟。
+#
+# 顺序：前置检查 → 停 worker 与 app → init_database 初始化新库 → copy_fixed_config 复制固定配置
+# 与账号 → 写 /opt/pgs/DATA_PLANE=local 并按本机模式重写 .env、db.env → deploy.sh 启动 → 冒烟
+# 与备份校验。之后每次部署都按 DATA_PLANE 渲染，不会再连回 Supabase。
+#
+# 只在 main 上、实例正在运行的那个提交上执行：用实例上已有的镜像，不另外构建。复制的源库是
+# GitHub 上的 RUNTIME_DATABASE_URL（切换时还指向 Supabase），只读。日志只有表名与行数。
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head:
+        description: "预期的迁移 head（照抄仓库当前 head，防止误点）"
+        required: true
+        type: string
+      dry_run:
+        description: "只做前置检查，不停服务、不写入"
+        required: false
+        default: true
+        type: boolean
+      confirm:
+        description: "真正切换时填 cutover"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+# 与部署任务同一组：切换期间不会有部署在重启服务。
+concurrency:
+  group: lightsail-production
+  cancel-in-progress: false
+
+jobs:
+  cutover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    defaults:
+      run:
+        shell: bash
+    env:
+      SITE_URL: ${{ vars.PRODUCTION_SITE_URL }}
+      # 同时比较布尔与字符串：UI 给真布尔，`gh workflow run -f` 可能给字符串（见 production-migrate.yml）。
+      REAL_RUN: ${{ inputs.dry_run == false || inputs.dry_run == 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install the locked environment
+        run: uv sync --locked
+
+      - name: Refuse to run unless the requested head matches this commit
+        env:
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          actual="$(uv run python - <<'PY'
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          config = Config()
+          config.set_main_option("script_location", "alembic")
+          print(ScriptDirectory.from_config(config).get_current_head())
+          PY
+          )"
+          if [[ "$actual" != "$EXPECTED_HEAD" ]]
+          then
+            echo "::error::输入的 head 与本 commit 不一致：仓库为 $actual，输入为 $EXPECTED_HEAD"
+            exit 1
+          fi
+          if [[ "$REAL_RUN" == "true" && "$CONFIRM" != "cutover" ]]
+          then
+            echo "::error::真正切换要在 confirm 里填 cutover；只想检查就保持 dry_run 勾选。"
+            exit 1
+          fi
+          echo "head 校验通过：$actual；本次$([[ "$REAL_RUN" == "true" ]] && echo 切换 || echo 只检查)"
+
+      - name: Validate deployment settings
+        env:
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in PRODUCTION_SSH_KEY PRODUCTION_SSH_HOST PRODUCTION_SSH_KNOWN_HOSTS SITE_URL
+          do
+            if [[ -z "${!name:-}" ]]
+            then
+              echo "::error::Required production setting ${name} is not configured."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Configure SSH
+        env:
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$PRODUCTION_SSH_KEY" > ~/.ssh/pgs_deploy
+          chmod 0600 ~/.ssh/pgs_deploy
+          printf '%s\n' "$PRODUCTION_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<CONFIG
+          Host pgs
+            HostName ${PRODUCTION_SSH_HOST}
+            User deploy
+            IdentityFile ~/.ssh/pgs_deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          CONFIG
+
+      # 实例上必须正在运行本提交（用它的镜像起一次性容器、重启服务），且还没切换过。
+      - name: Check the instance
+        run: |
+          set -euo pipefail
+          release="$(ssh pgs 'cat /opt/pgs/RELEASE 2>/dev/null || true')"
+          if [[ "$release" != "$GITHUB_SHA" ]]
+          then
+            echo "::error::实例上运行的是 ${release:-未知版本}，不是本提交 $GITHUB_SHA：在 main 上已部署的那个提交运行本工作流。"
+            exit 1
+          fi
+          plane="$(ssh pgs 'cat /opt/pgs/DATA_PLANE 2>/dev/null || true')"
+          if [[ -n "$plane" && "$plane" != "supabase" ]]
+          then
+            echo "::error::实例已经是 DATA_PLANE=$plane：不要重复切换。回滚见 RUNBOOK 9.4。"
+            exit 1
+          fi
+          ssh pgs 'test -x /opt/pgs/ops.sh'
+          ssh pgs 'cd /opt/pgs && docker compose --project-name pgs --file compose.yml ps db --format "{{.Name}} {{.Status}}" | grep -Fq "(healthy)"' \
+            || { echo "::error::db 容器没在运行或不健康：先完成一次本提交的部署。"; exit 1; }
+          ssh pgs 'df -h / | tail -1'
+
+      # 缺哪个 secret 都停在这里，什么都还没动。文件写在 runner 临时目录，最后一步删除。
+      - name: Render the credentials
+        env:
+          RUNTIME_DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          PGS_APP_PASSWORD: ${{ secrets.PGS_APP_PASSWORD }}
+          BYOK_MASTER_KEY: ${{ secrets.BYOK_MASTER_KEY }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+          AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
+          SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}
+          ASSISTANT_AGENT_ENABLED: ${{ vars.ASSISTANT_AGENT_ENABLED }}
+        run: |
+          set -euo pipefail
+          host="${SITE_URL#https://}"
+          host="${host%%/*}"
+          python3 scripts/production_env.py --from-environment --kind ops --data-plane local --with-source \
+            --output "$RUNNER_TEMP/ops.env"
+          python3 scripts/production_env.py --from-environment --data-plane local \
+            --site-address "$host" --output "$RUNNER_TEMP/pgs.env"
+          python3 scripts/production_env.py --from-environment --data-plane local \
+            --kind db --output "$RUNNER_TEMP/db.env"
+
+      - name: Check the source and target databases
+        run: ssh pgs "/opt/pgs/ops.sh $GITHUB_SHA python -m backend.app.scripts.copy_fixed_config check" < "$RUNNER_TEMP/ops.env"
+
+      - name: Stop the app and worker
+        id: stop
+        if: env.REAL_RUN == 'true'
+        run: |
+          set -euo pipefail
+          echo "stopped=true" >> "$GITHUB_OUTPUT"
+          # 先停 worker（最多等 100 秒让在执行的条目做完），再停 app；这期间网站返回 502。
+          ssh pgs 'cd /opt/pgs && docker compose --project-name pgs --file compose.yml stop worker app'
+
+      - name: Initialise the local database
+        if: env.REAL_RUN == 'true'
+        run: ssh pgs "/opt/pgs/ops.sh $GITHUB_SHA python -m backend.app.scripts.init_database" < "$RUNNER_TEMP/ops.env"
+
+      - name: Copy the fixed configuration
+        if: env.REAL_RUN == 'true'
+        run: ssh pgs "/opt/pgs/ops.sh $GITHUB_SHA python -m backend.app.scripts.copy_fixed_config apply" < "$RUNNER_TEMP/ops.env"
+
+      # 旧的 .env 与 db.env 先留一份：标记写入之前失败时，最后的回退步骤用它们把服务原样拉起。
+      - name: Switch the instance to the local database
+        if: env.REAL_RUN == 'true'
+        run: |
+          set -euo pipefail
+          ssh pgs 'cd /opt/pgs && cp -p .env .env.before-cutover && cp -p db.env db.env.before-cutover'
+          ssh pgs 'umask 077 && cat > /opt/pgs/.env.new' < "$RUNNER_TEMP/pgs.env"
+          ssh pgs 'umask 077 && cat > /opt/pgs/db.env.new' < "$RUNNER_TEMP/db.env"
+          ssh pgs 'cd /opt/pgs && echo local > DATA_PLANE.new && mv DATA_PLANE.new DATA_PLANE && mv .env.new .env && mv db.env.new db.env'
+          ssh pgs "/opt/pgs/deploy.sh ${GITHUB_SHA}"
+
+      - name: Smoke test through the public address
+        if: env.REAL_RUN == 'true'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors \
+            --output health.json "${SITE_URL%/}/api/system/health"
+          cat health.json
+
+      - name: Back up and verify the new database
+        if: env.REAL_RUN == 'true'
+        run: |
+          set -euo pipefail
+          ssh pgs 'cd /opt/pgs && docker compose --project-name pgs --file compose.yml run --rm --no-deps -T backup \
+            python -m backend.app.scripts.nightly_backup --storage-root /app/storage --destination /backups --once'
+          ssh pgs 'cd /opt/pgs && rm -f .env.before-cutover db.env.before-cutover'
+          {
+            echo "### 已切换到本机数据库"
+            echo "${GITHUB_SHA} → ${SITE_URL}；接下来按方案 8.2 核对：原账号登录、测试连接、上传一篇论文走完评分。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 标记还没写入：把旧的 .env、db.env 放回去，按原样启动（仍连 Supabase）。标记已写入：
+      # 不自动回退，按 RUNBOOK 9.4 处理——新库里可能已经有切换后写入的数据。
+      - name: Put the old services back on failure
+        if: failure() && steps.stop.outputs.stopped == 'true'
+        run: |
+          set -euo pipefail
+          plane="$(ssh pgs 'cat /opt/pgs/DATA_PLANE 2>/dev/null || true')"
+          if [[ "$plane" == "local" ]]
+          then
+            echo "::error::DATA_PLANE 已是 local，未自动回退。按 RUNBOOK 9.4「切换失败」处理。"
+            exit 1
+          fi
+          ssh pgs 'cd /opt/pgs && if [ -f .env.before-cutover ]; then mv .env.before-cutover .env; fi && if [ -f db.env.before-cutover ]; then mv db.env.before-cutover db.env; fi'
+          ssh pgs "/opt/pgs/deploy.sh ${GITHUB_SHA}"
+          echo "::warning::切换失败，已按原样启动（仍连 Supabase）。新库保留原样，下次切换前要先清空它（RUNBOOK 9.4）。"
+
+      - name: Remove the credentials and deploy key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ops.env" "$RUNNER_TEMP/pgs.env" "$RUNNER_TEMP/db.env" ~/.ssh/pgs_deploy

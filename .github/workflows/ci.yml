@@ -200,6 +200,12 @@ jobs:
           # verify_postgres_ops 的 pgs_app 运行角色清单包含 rubric_import_sessions。
           uv run python -m backend.app.scripts.verify_postgres_ops --exercise-ci-fixture \
             | tee pgs_ops_artifacts/postgres-verification.json
+      # 切换到本机数据库时的复制（docs/迁出Supabase到单机Docker方案.md 6.2）：在同一个服务里另建
+      # 两个临时库走一遍，验证只读事务与 JSON 等列类型；用完删掉，不碰上面的 paper_grading。
+      - name: Rehearse the cutover copy on PostgreSQL
+        env:
+          PGS_TEST_POSTGRES_URL: postgresql+psycopg://paper:ci-only-postgres-password@127.0.0.1:5432/paper_grading
+        run: uv run pytest -q backend/app/tests/test_local_data_plane.py -k postgres
       - name: Prove lossy 0017 downgrade is rejected without DDL damage
         run: |
           set -euo pipefail
@@ -544,6 +550,7 @@ jobs:
         working-directory: deploy/production
         run: |
           printf 'PGS_SITE_ADDRESS=pgs-ci.duckdns.org\n' > .env
+          printf 'POSTGRES_PASSWORD=ci\nPGS_DATA_PLANE=supabase\n' > db.env
           docker compose --project-name pgs --file compose.yml config --quiet
       - name: Validate the production Caddyfile
         run: |
@@ -551,7 +558,7 @@ jobs:
             -v "$PWD/deploy/production/caddy:/etc/caddy:ro" caddy:2-alpine \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Lint the deployment scripts
-        run: shellcheck deploy/production/bootstrap.sh deploy/production/deploy.sh
+        run: shellcheck deploy/production/bootstrap.sh deploy/production/deploy.sh deploy/production/ops.sh
 
   deploy-lightsail-production:
     # 生产部署到 AWS Lightsail 单机（docs/部署平台迁移到AWS方案.md）。仓库变量
@@ -583,15 +590,17 @@ jobs:
           BYOK_MASTER_KEY: ${{ secrets.BYOK_MASTER_KEY }}
           AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
           AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
+          # db 容器两种数据位置下都在运行：切换前也要用它初始化（空库）。
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          PGS_APP_PASSWORD: ${{ secrets.PGS_APP_PASSWORD }}
+        # RUNTIME_DATABASE_URL 与 SUPABASE_* 只在数据还在 Supabase 时需要：由 production_env.py
+        # 按实例上的 DATA_PLANE 检查（docs/迁出Supabase到单机Docker方案.md 8.1）。
         run: |
           set -euo pipefail
           missing=0
           for name in PRODUCTION_SSH_KEY PRODUCTION_SSH_HOST PRODUCTION_SSH_KNOWN_HOSTS SITE_URL \
-            RUNTIME_DATABASE_URL BYOK_MASTER_KEY AUTH_SECRET AUTH_PASSWORD SUPABASE_SECRET_KEY \
-            SUPABASE_URL AUTH_USERNAME
+            BYOK_MASTER_KEY AUTH_SECRET AUTH_PASSWORD AUTH_USERNAME POSTGRES_PASSWORD PGS_APP_PASSWORD
           do
             if [[ -z "${!name:-}" ]]
             then
@@ -624,6 +633,22 @@ jobs:
             StrictHostKeyChecking yes
             ServerAliveInterval 30
           CONFIG
+      # 实例上的 /opt/pgs/DATA_PLANE 决定 .env 连哪个库（没有即 supabase）：由切换工作流
+      # production-cutover.yml 写入，不用仓库变量——切换完成到改变量之间的任何一次部署都会连回 Supabase。
+      - name: Read where the data lives
+        id: plane
+        run: |
+          set -euo pipefail
+          plane="$(ssh pgs 'cat /opt/pgs/DATA_PLANE 2>/dev/null || true')"
+          plane="${plane:-supabase}"
+          if [[ "$plane" != "supabase" && "$plane" != "local" ]]
+          then
+            echo "::error::/opt/pgs/DATA_PLANE 只能是 supabase 或 local"
+            exit 1
+          fi
+          echo "plane=$plane" >> "$GITHUB_OUTPUT"
+          echo "数据位置：$plane"
+          ssh pgs 'df -h / | tail -1'
       - name: Build the application image
         run: docker build --pull --tag "$IMAGE" .
       # 打开评分助手 Agent 的门槛（docs/评分助手Agent化方案.md §12.5）：按这个镜像里的提示词指纹，
@@ -637,13 +662,16 @@ jobs:
         run: |
           set -euo pipefail
           docker save "$IMAGE" | gzip -1 | ssh pgs 'gunzip | docker load'
-          tar -C deploy/production -czf - compose.yml deploy.sh caddy \
-            | ssh pgs 'tar -xzf - -C /opt/pgs && chmod 0755 /opt/pgs/deploy.sh'
+          tar -C deploy/production -czf - compose.yml deploy.sh ops.sh caddy \
+            | ssh pgs 'tar -xzf - -C /opt/pgs && chmod 0755 /opt/pgs/deploy.sh /opt/pgs/ops.sh'
       # 实例上的 .env 每次部署都由这里重新生成：生产密钥只存在 GitHub production 环境里，
       # 改密钥就是改 GitHub 上的值再部署一次。经 SSH 的标准输入写入，不落在命令行里。
       - name: Write the runtime environment
         env:
+          DATA_PLANE: ${{ steps.plane.outputs.plane }}
           DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          PGS_APP_PASSWORD: ${{ secrets.PGS_APP_PASSWORD }}
           BYOK_MASTER_KEY: ${{ secrets.BYOK_MASTER_KEY }}
           AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
           AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
@@ -659,9 +687,14 @@ jobs:
           host="${SITE_URL#https://}"
           host="${host%%/*}"
           env_file="$RUNNER_TEMP/pgs.env"
-          trap 'rm -f "$env_file"' EXIT
-          python3 scripts/production_env.py --from-environment --site-address "$host" --output "$env_file"
+          db_file="$RUNNER_TEMP/db.env"
+          trap 'rm -f "$env_file" "$db_file"' EXIT
+          python3 scripts/production_env.py --from-environment --data-plane "$DATA_PLANE" \
+            --site-address "$host" --output "$env_file"
+          python3 scripts/production_env.py --from-environment --data-plane "$DATA_PLANE" \
+            --kind db --output "$db_file"
           ssh pgs 'umask 077 && cat > /opt/pgs/.env.new && mv /opt/pgs/.env.new /opt/pgs/.env' < "$env_file"
+          ssh pgs 'umask 077 && cat > /opt/pgs/db.env.new && mv /opt/pgs/db.env.new /opt/pgs/db.env' < "$db_file"
       - name: Switch to this version
         run: ssh pgs "/opt/pgs/deploy.sh ${GITHUB_SHA}"
       - name: Smoke test through the public address
