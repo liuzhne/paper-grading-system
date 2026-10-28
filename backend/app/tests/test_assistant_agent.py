@@ -838,6 +838,7 @@ def test_a_model_without_a_passing_eval_stays_in_rules_mode(client, monkeypatch)
     monkeypatch.setattr(settings, "ASSISTANT_AGENT_ENABLED", True)
     model = _Unevaluated(reply("不该被调用"))
     monkeypatch.setattr(assistant_model, "build_scorer", lambda *args, **kwargs: model)
+    _seed_published_rubric(client)  # 没有已发布的评分标准时“开始评分”不弹选文件
     conversation_id = _conversation(client)
     body = _say(client, conversation_id, "开始评分")
     assert model.requests == [] and body["pending"]["kind"] == "pick_files"  # 规则模式照常

@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-28 | 评分助手：开始评分先查前提 | 无模块变化：`assistant/flow.py` 的 `begin` 先查已发布的评分标准与评分模型，缺了就结束流程；`wait_publish` 接着评分前先查评分模型。 |
 | 2026-10-28 | 生产不做自动备份 | 生产 compose 去掉 backup 服务与卷 `backups`，删除 `scripts/nightly_backup.py`；`deploy.sh` 最后一步删掉 compose 里已没有的服务的容器；`db.env` 只剩超级用户密码；切换工作流收尾不再备份。 |
 | 2026-10-28 | 迁出 Supabase 复审（#62 CodeRabbit） | 无模块变化：`copy_fixed_config` 允许并替换新库里 0022 预置的三行。 |
 | 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 生产 compose 新增 db 与 backup；`DATA_PLANE` 标记决定 app 连哪个库、文件存哪里；新增 `copy_fixed_config`、`production_migrate`、`nightly_backup` 与 `ops.sh`；迁移与切换改在实例上执行；直连时 SQLAlchemy 用有界连接池（`DB_POOL_SIZE` / `DB_MAX_OVERFLOW`）。 |
@@ -1321,7 +1322,7 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 模块边界：
 - `api/guards.py`：可见性守卫（批次、论文、评分记录、作业、评分标准、导入草稿）。路由模块里的 `_visible_*`、`_batch_or_404`、`_job_or_404` 现在是这里的别名，同一个函数对象。
 - `api/actions.py`：共享写动作——建批次、预检、删除论文、开评、重试、取消（以及评分标准版本冻结判定）。每个函数自己执行守卫与角色校验；路由保留一行守卫给静态门禁测试看，业务逻辑只在这里一份。开评与重试只落库，路由在异步上下文里派发，图在工作线程里用 `dispatch_job_from_worker_thread` 派发。
-- `services/assistant/flow.py`：流程图（LangGraph `StateGraph`，有状态）。grading / import / watch 三种流程共用一张图；“等待”节点第一行就 `interrupt()`，有副作用的节点放在其后并幂等（建批次按“本人 + 批次名 + 流程开始时间”找回）。状态只有编号与标志位。
+- `services/assistant/flow.py`：流程图（LangGraph `StateGraph`，有状态）。grading / import / watch 三种流程共用一张图；grading 在入口先查前提（已发布的评分标准、评分模型），缺了就说明怎么补、不弹选文件，导入流程发布后接着评分之前同样先查评分模型；“等待”节点第一行就 `interrupt()`，有副作用的节点放在其后并幂等（建批次按“本人 + 批次名 + 流程开始时间”找回）。状态只有编号与标志位。
 - `services/assistant/queries.py`：查询图（无状态），流程等待时也能随时查询；重试、取消只给确认卡片。
 - `services/assistant/tools.py`：工具登记（名称、说明、Pydantic 参数可导出 JSON Schema、是否只读）；写工具必须 `allow_write=True`，只由流程节点或用户确认后的选择卡片调用，永不开放给模型。
 - `services/assistant/checkpointer.py`：自写 `BaseCheckpointSaver`，表 `assistant_checkpoints` / `assistant_checkpoint_writes`。**写入先进加锁的内存缓冲，运行结束后由运行器在主线程 `persist()`**：LangGraph 在后台线程保存快照，SQLAlchemy 会话不能跨线程并发使用。

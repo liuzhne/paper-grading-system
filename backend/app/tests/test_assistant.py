@@ -628,6 +628,29 @@ def test_import_flow_waits_for_publication_then_asks_for_files(client):
     assert "已发布" in published["messages"][-2]["text"]
 
 
+def test_import_flow_checks_the_model_before_asking_for_files(client, monkeypatch):
+    from backend.app.services.assistant import flow
+
+    rubric_id, _ = _seed_published_rubric(client)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "我要上传自己的评分规则和模板")
+    session = client.post("/api/rubrics/import-sessions", data={"name": "我的标准", "version": "v1"},
+                          files={"rules_file": ("rules.xlsx", fx.simple_rules_xlsx(), XLSX)})
+    session_id = session.json()["id"]
+    body = _resume(client, conversation_id, body["pending"], {"import_session_id": session_id})
+    with client.session_factory() as db:
+        row = db.get(models.RubricImportSession, session_id)
+        row.status = "confirmed"
+        row.rubric_id = rubric_id
+        db.commit()
+
+    monkeypatch.setattr(flow, "_scoring_model_label", lambda ctx: None)
+    published = _resume(client, conversation_id, body["pending"], {"action": "check"})
+    assert published["pending"] is None and not _cards(published, "pick_files")
+    assert "已发布" in published["messages"][-2]["text"]
+    assert "还没有可用的评分模型" in published["messages"][-1]["text"]
+
+
 def test_delete_conversation_removes_flow_state(client):
     _seed_published_rubric(client)
     conversation_id = _conversation(client)
@@ -648,6 +671,36 @@ def test_help_unknown_and_no_rubric_replies(client):
     no_rubric = _run(client, conversation_id, type="message", attachments={"count": 1, "names": ["a.docx"]})
     assert no_rubric["pending"] is None
     assert "还没有已发布的评分标准" in no_rubric["messages"][-1]["text"]
+
+
+def test_start_grading_checks_the_rubric_and_model_before_asking_for_files(client, monkeypatch):
+    """先查前提再选文件（2026-10-28 生产反馈）：缺了评分标准或评分模型，不弹选文件卡片。"""
+
+    from backend.app.services.assistant import flow
+
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "开始评分")
+    assert body["pending"] is None and not _cards(body, "pick_files")
+    assert "还没有已发布的评分标准" in body["messages"][-1]["text"]
+    assert [action["intent"] for action in _cards(body, "quick_actions")[0]["actions"]] == ["import_rubric"]
+    assert _cards(body, "link")[0]["path"] == "/rubrics"
+
+    real_label = flow._scoring_model_label
+    monkeypatch.setattr(flow, "_scoring_model_label", lambda ctx: None)
+    both = _say(client, conversation_id, "开始评分")
+    assert both["pending"] is None and not _cards(both, "pick_files")
+    assert "也还没有可用的评分模型" in both["messages"][-1]["text"]
+    assert [card["path"] for card in _cards(both, "link")] == ["/account", "/rubrics"]
+
+    _seed_published_rubric(client)
+    no_model = _say(client, conversation_id, "开始评分")
+    assert no_model["pending"] is None and not _cards(no_model, "pick_files")
+    assert "还没有可用的评分模型" in no_model["messages"][-1]["text"]
+    assert [card["path"] for card in _cards(no_model, "link")] == ["/account"]
+
+    monkeypatch.setattr(flow, "_scoring_model_label", real_label)
+    ready = _say(client, conversation_id, "开始评分")
+    assert ready["pending"]["kind"] == "pick_files"
 
 
 # --- 鉴权、归属与助手模型 -------------------------------------------------------------
