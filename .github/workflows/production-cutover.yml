@@ -145,7 +145,7 @@ jobs:
             exit 1
           fi
           ssh pgs 'test -x /opt/pgs/ops.sh'
-          ssh pgs 'cd /opt/pgs && docker compose --project-name pgs --file compose.yml ps db --format "{{.Name}} {{.Status}}" | grep -q healthy' \
+          ssh pgs 'cd /opt/pgs && docker compose --project-name pgs --file compose.yml ps db --format "{{.Name}} {{.Status}}" | grep -Fq "(healthy)"' \
             || { echo "::error::db 容器没在运行或不健康：先完成一次本提交的部署。"; exit 1; }
           ssh pgs 'df -h / | tail -1'
 

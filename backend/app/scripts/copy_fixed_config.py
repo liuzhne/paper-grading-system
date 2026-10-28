@@ -9,6 +9,11 @@
   只在只读事务里读取，最后回滚。
 - ``MIGRATION_DATABASE_URL``：新库的 owner 连接串。所有表在一个事务里写入，任一步失败整体回滚。
 
+新库由 init_database 跑完全部迁移，迁移 0022 会在里面预置三行（引导管理员、Default Organization
+与其成员记录，ID 固定）；旧库也是同样建出来的，线上唯一的组织就是这个预置组织。所以新库里只允许
+有这三行：复制在同一个事务里先删掉它们，再把旧库这几张表原样写入，新库与旧库一致。除此之外
+新库里有任何数据都拒绝复制。
+
 只复制两边都有的列、保留原 ID：密码哈希原样复制，老师用原密码登录；模型连接的密钥是用
 ``BYOK_MASTER_KEY`` 加密的密文，这个密钥不换，新库就能解密；评测工作流的 ``--connection-id``
 照常可用。这些表的主键都是字符串 UUID，没有序列需要重置。
@@ -23,10 +28,14 @@ import os
 import sys
 
 from sqlalchemy import MetaData
+from sqlalchemy import and_
 from sqlalchemy import create_engine
+from sqlalchemy import delete
 from sqlalchemy import func
+from sqlalchemy import not_
 from sqlalchemy import inspect
 from sqlalchemy import select
+from sqlalchemy import column
 from sqlalchemy import table
 from sqlalchemy import text
 
@@ -47,6 +56,22 @@ TABLES = (
     "assistant_preferences",
     "site_leads",
 )
+
+#: 迁移 0022_legacy_tenant_backfill 在空库上预置的行（测试核对与迁移里的常量一致）。
+SEED_USER_ID = "00000000-0000-0000-0000-000000000001"
+SEED_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000002"
+
+
+def _seed_condition(name, columns):
+    """这张表里属于 0022 预置的行；不在预置范围的表返回 None。"""
+
+    if name == "users":
+        return columns.id == SEED_USER_ID
+    if name == "organizations":
+        return columns.id == SEED_ORGANIZATION_ID
+    if name == "organization_members":
+        return and_(columns.organization_id == SEED_ORGANIZATION_ID, columns.user_id == SEED_USER_ID)
+    return None
 
 
 def _url(raw: str) -> str:
@@ -73,14 +98,23 @@ def _read_only(connection):
         connection.execute(text("SET TRANSACTION READ ONLY"))
 
 
-def _counts(connection, tables=TABLES) -> dict:
+def _counts(connection, tables=TABLES, *, without_seed=False) -> dict:
+    """各表行数；``without_seed`` 时不算 0022 预置的行（新库上只有它们是允许的）。"""
+
     present = set(inspect(connection).get_table_names())
     counts = {}
     for name in tables:
-        if name in present:
-            counts[name] = connection.execute(select(func.count()).select_from(table(name))).scalar_one()
-        else:
+        if name not in present:
             counts[name] = None
+            continue
+        # 条件与 FROM 必须是同一个表对象，否则会生成两个 FROM（笛卡尔积）。
+        target = table(name, column("id"), column("organization_id"), column("user_id"))
+        query = select(func.count()).select_from(target)
+        if without_seed:
+            condition = _seed_condition(name, target.c)
+            if condition is not None:
+                query = query.where(not_(condition))
+        counts[name] = connection.execute(query).scalar_one()
     return counts
 
 
@@ -95,7 +129,7 @@ def survey(source_engine, target_engine, *, image_head=None) -> dict:
         source.rollback()
     with target_engine.connect() as target:
         target_head = _head(target)
-        target_counts = _counts(target)
+        target_counts = _counts(target, without_seed=True)
         target.rollback()
     return {
         "image_head": image_head,
@@ -120,7 +154,7 @@ def problems(report: dict, *, require_initialized: bool) -> list[str]:
         found.append("新库的迁移版本 %s 与镜像 %s 不同" % (report["target_head"], report["image_head"]))
     occupied = [name for name, count in report["target"].items() if count]
     if occupied:
-        found.append("新库这些表已有数据，拒绝复制（重跑前先清空新库）：%s" % ", ".join(occupied))
+        found.append("新库这些表有迁移预置以外的数据，拒绝复制（重跑前先清空新库，见 RUNBOOK 9.4.1）：%s" % ", ".join(occupied))
     return found
 
 
@@ -136,9 +170,17 @@ def copy_tables(source_engine, target_engine, tables=TABLES) -> dict:
         with target_engine.begin() as target:
             target_meta = MetaData()
             target_meta.reflect(bind=target, only=list(tables))
+            # 先删 0022 预置的行（按外键倒序），旧库里同样的行随后原样写入。
+            for name in reversed(tables):
+                condition = _seed_condition(name, target_meta.tables[name].c)
+                if condition is not None:
+                    target.execute(delete(target_meta.tables[name]).where(condition))
             for name in tables:
                 source_table = source_meta.tables[name]
                 target_table = target_meta.tables[name]
+                existing = target.execute(select(func.count()).select_from(target_table)).scalar_one()
+                if existing:
+                    raise RuntimeError("%s 在新库里还有 %d 行迁移预置以外的数据" % (name, existing))
                 columns = [column.name for column in target_table.columns if column.name in source_table.columns]
                 extra = sorted(set(source_table.columns.keys()) - set(columns))
                 if extra:
@@ -161,7 +203,7 @@ def _print_report(report: dict):
     for name in TABLES:
         target = report["target"][name]
         print(
-            "  %-26s 旧库 %s 行 / 新库 %s"
+            "  %-26s 旧库 %s 行 / 新库预置以外 %s"
             % (
                 name,
                 "缺表" if report["source"][name] is None else report["source"][name],

@@ -569,6 +569,7 @@ ssh pgs-prod 'cd /opt/pgs && docker compose -p pgs -f compose.yml exec -T db dro
 - **切换工作流停在 “Check the instance”，提示实例上运行的不是本提交。** 报错像版本不对，真正原因是在分支或旧提交上点了 Run workflow，或者最新的部署还没跑完。切换用实例上已有的镜像，只能在 main 上、已部署的那个提交上运行。
 - **“Check the source and target databases” 报旧库的迁移版本与镜像不同。** 报错指向复制脚本，真正原因是旧库（Supabase）还没迁移到这个版本。先用 `production-migrate.yml` 迁移旧库（`DATA_PLANE` 还是 supabase，连的就是旧库），再切换。
 - **改了 GitHub 上的 `POSTGRES_PASSWORD` 或 `PGS_APP_PASSWORD` 之后，备份、迁移或应用报 `password authentication failed`。** 报错指向密码，真正原因是库里的密码没跟着变：postgres 镜像只在数据卷为空时用 `POSTGRES_PASSWORD` 初始化，`init_database` 也只在建角色时设一次 `pgs_app` 的密码。改密码要先在库里改（`docker compose … exec -T db psql -U postgres -c "ALTER ROLE pgs_app PASSWORD '<新值>'"`，超级用户同理），再改 GitHub 上的值并重新部署。
+- **复制一步报“新库这些表有迁移预置以外的数据，拒绝复制”。** 报错指向新库，真正原因多半是上一次切换跑到一半：新库已经初始化并写入过数据，或者有人在回滚后用过新库。迁移 0022 预置的三行（引导管理员、Default Organization 与其成员记录）是允许的，复制会先删掉它们再按旧库写入；除此之外有任何一行都会拒绝。按上面“回滚”里的命令清空新库后重跑切换。
 - **部署任务报 `/opt/pgs/DATA_PLANE 只能是 supabase 或 local`。** 报错指向工作流，真正原因是有人手工改过这个文件（多了空格、大小写或别的值）。按实际情况改回 `local`，或删掉它回到 Supabase 模式。
 
 ## 10. 回滚
@@ -1199,6 +1200,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-28 | 迁出 Supabase 复审（#62 CodeRabbit） | 无新命令；排错：复制报“新库有迁移预置以外的数据”；切换前置检查改为精确匹配 db 的 `(healthy)`。 |
 | 2026-10-27 | 迁出 Supabase：数据库与文件改到实例上 | 新增 9.4.1：`DATA_PLANE` 标记、两个新密钥、`pgs-production-cutover` 切换与回滚、迁移改在实例上执行、每晚备份与恢复演练；排错：切换停在实例检查、旧库版本落后、改密码后认证失败、标记文件被改坏。 |
 | 2026-10-27 | worker 空闲退避 | `run_batch_worker` 新增 `--idle-max-seconds`（默认 30）；常见故障：助手上传失败、直传申请 502，真正原因是 Supabase 组织 Fair Use 限制（402）。 |
 | 2026-10-26 | 评分助手 A1.1 第三轮复审（CodeRabbit） | 无新命令；只改工具输出，不改提示词与评测集，不用重跑评测。 |

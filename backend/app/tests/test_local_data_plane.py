@@ -95,6 +95,87 @@ def _environ(source: Path, target: Path) -> dict:
     return {"SOURCE_DATABASE_URL": "sqlite:///%s" % source, "MIGRATION_DATABASE_URL": "sqlite:///%s" % target}
 
 
+SEED_USER = copy_fixed_config.SEED_USER_ID
+SEED_ORG = copy_fixed_config.SEED_ORGANIZATION_ID
+
+
+def _seed_like_0022(engine, *, member_ids=()):
+    """迁移 0022 在空库上预置的三行；``member_ids`` 是同样加进预置组织的其他用户。"""
+
+    with Session(engine) as session:
+        session.add(models.User(id=SEED_USER, username="dev-user", display_name="Bootstrap Admin",
+                                role="platform_admin", platform_role="platform_admin"))
+        session.flush()
+        session.add(models.Organization(id=SEED_ORG, name="Default Organization", created_by=SEED_USER))
+        session.flush()
+        for user_id in (SEED_USER, *member_ids):
+            session.add(models.OrganizationMember(
+                id="%s-%s" % (SEED_ORG[:18], user_id[-17:]), organization_id=SEED_ORG, user_id=user_id,
+                role="org_admin" if user_id == SEED_USER else "teacher",
+            ))
+        session.commit()
+
+
+def test_seed_ids_match_migration_0022():
+    source = (ROOT / "alembic" / "versions" / "0022_legacy_tenant_backfill.py").read_text(encoding="utf-8")
+    assert 'DEFAULT_USER_ID = "%s"' % SEED_USER in source
+    assert 'DEFAULT_ORGANIZATION_ID = "%s"' % SEED_ORG in source
+
+
+def test_copy_replaces_the_rows_migrations_seed_into_a_fresh_target(tmp_path, capsys):
+    """线上就是这样：旧库与新库都由迁移建出，都有 0022 的三行；老师是预置组织的成员。"""
+
+    head = current_migration_head()
+    source = tmp_path / "source.db"
+    target = tmp_path / "target.db"
+    source_engine = _database(source, head)
+    with Session(source_engine) as session:
+        session.add(models.User(id="u-teacher", username="liuzhen", display_name="老师", password_hash="hash-t"))
+        session.commit()
+    _seed_like_0022(source_engine, member_ids=("u-teacher",))
+    with source_engine.begin() as connection:  # 旧库里预置组织改过名：复制后以旧库为准
+        connection.execute(text("UPDATE organizations SET name = '学院' WHERE id = :id"), {"id": SEED_ORG})
+    target_engine = _database(target, head)
+    _seed_like_0022(target_engine)
+
+    assert copy_fixed_config.main(["check"], environ=_environ(source, target)) == 0
+    assert copy_fixed_config.main(["apply"], environ=_environ(source, target)) == 0
+
+    with Session(target_engine) as session:
+        assert session.query(models.User).count() == 2
+        assert session.get(models.User, "u-teacher").password_hash == "hash-t"
+        assert session.get(models.Organization, SEED_ORG).name == "学院"
+        members = {member.user_id for member in session.query(models.OrganizationMember)}
+        assert members == {SEED_USER, "u-teacher"}
+    assert "已复制 organization_members       2 行" in capsys.readouterr().out
+
+
+def test_copy_refuses_rows_beyond_the_seed_and_leaves_the_seed_alone(tmp_path, capsys):
+    head = current_migration_head()
+    source = tmp_path / "source.db"
+    target = tmp_path / "target.db"
+    _seed(_database(source, head))
+    target_engine = _database(target, head)
+    _seed_like_0022(target_engine)
+    with Session(target_engine) as session:
+        session.add(models.User(id="stray", username="stray", display_name="多出来的"))
+        session.commit()
+
+    assert copy_fixed_config.main(["apply"], environ=_environ(source, target)) == 1
+    errors = capsys.readouterr().err
+    assert "迁移预置以外的数据" in errors and "users" in errors
+    with Session(target_engine) as session:
+        assert session.get(models.User, SEED_USER) is not None
+        assert session.query(models.User).count() == 2
+
+    # 检查之后才冒出来的数据：复制事务里再核对一次，整体回滚，预置行也不删。
+    engines = copy_fixed_config.make_engine("sqlite:///%s" % source), copy_fixed_config.make_engine("sqlite:///%s" % target)
+    with pytest.raises(RuntimeError, match="迁移预置以外"):
+        copy_fixed_config.copy_tables(*engines)
+    with Session(target_engine) as session:
+        assert session.get(models.User, SEED_USER) is not None
+
+
 def test_copy_keeps_ids_and_password_hashes_and_skips_everything_else(tmp_path, capsys):
     head = current_migration_head()
     source = tmp_path / "source.db"
@@ -129,7 +210,7 @@ def test_copy_refuses_a_second_run_and_mismatched_versions(tmp_path, capsys):
     capsys.readouterr()
 
     assert copy_fixed_config.main(["apply"], environ=environ) == 1
-    assert "新库这些表已有数据，拒绝复制" in capsys.readouterr().err
+    assert "新库这些表有迁移预置以外的数据，拒绝复制" in capsys.readouterr().err
 
     other = tmp_path / "other.db"
     _database(other, "0040_reasoning_tokens")
@@ -163,9 +244,12 @@ def test_copy_failure_does_not_echo_the_connection_string(tmp_path, capsys):
 
 
 def test_copy_on_postgres_reads_the_source_read_only(tmp_path):
-    """真实 PostgreSQL 上再走一遍：只读事务、JSON 等列类型的反射与写入（CI 的 postgres 任务设置 URL）。"""
+    """真实 PostgreSQL 上再走一遍（CI 的 postgres 任务设置 URL）：两边都像 init_database 那样跑完全部
+    迁移（含 0022 的预置行），再验证只读事务、JSON 等列类型的反射与写入。"""
 
     import os
+    import subprocess
+    import sys
 
     from sqlalchemy.engine import make_url
 
@@ -187,14 +271,24 @@ def test_copy_on_postgres_reads_the_source_read_only(tmp_path):
 
     recreate()
     urls = [base.set(database=name).render_as_string(hide_password=False) for name in names]
-    head = current_migration_head()
-    engines = [_database(url, head) for url in urls]
+    for url in urls:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=ROOT, env=dict(os.environ, DATABASE_URL=url), check=True, capture_output=True,
+        )
+    engines = [create_engine(url) for url in urls]
     try:
         _seed(engines[0])
+        with Session(engines[0]) as session:  # 线上老师就在 0022 预置的组织里
+            session.add(models.OrganizationMember(id="m-seed", organization_id=SEED_ORG, user_id="u1", role="teacher"))
+            session.commit()
         environ = {"SOURCE_DATABASE_URL": urls[0], "MIGRATION_DATABASE_URL": urls[1]}
         assert copy_fixed_config.main(["apply"], environ=environ) == 0
         with Session(engines[1]) as session:
             assert session.get(models.User, "u1").password_hash == "hash-u1"
+            assert session.get(models.User, SEED_USER) is not None
+            assert {m.user_id for m in session.query(models.OrganizationMember).filter_by(organization_id=SEED_ORG)} == {
+                SEED_USER, "u1"}
             assert session.get(models.AIConnection, "c1").provider_options == {}
             assert session.query(models.AuditLog).count() == 0
         # 源库只在只读事务里读：同一套读法下写入会被拒绝。
