@@ -6,6 +6,7 @@ import pytest
 from langgraph.graph import END
 from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy import text
 
 from backend.app.core.config import settings
 from backend.app.db import models
@@ -634,6 +635,56 @@ def test_import_flow_waits_for_publication_then_asks_for_files(client):
     assert _steps(card) == {"import": "done", "publish": "done", "model": "done", "files": "current",
                             "confirm": "todo", "upload": "todo", "scoring": "todo", "report": "todo"}
     assert _detail(card, "import") == "《我的标准》"
+
+
+def test_a_failed_platform_lookup_keeps_what_the_run_already_wrote(client, monkeypatch):
+    """读平台配置出错（迁移窗口）只撤销这次查询：老师刚发的消息不能跟着整个会话回滚（#65 复审）。"""
+
+    from backend.app.services import platform_llm
+
+    def missing_table(db):
+        db.execute(text("SELECT 1 FROM platform_llm_config_not_migrated_yet"))
+
+    _login(client, monkeypatch, "platform-lookup")
+    monkeypatch.setattr(platform_llm, "get_active_config", missing_table)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "开始评分")
+    assert body["pending"] is None
+    assert "还没有可用的评分模型" in body["messages"][-1]["text"]
+
+    detail = client.get(f"/api/assistant/conversations/{conversation_id}").json()
+    assert [message["text"] for message in detail["messages"] if message["role"] == "user"] == ["开始评分"]
+    assert detail["title"] == "开始评分"
+
+
+def test_import_plan_picks_up_a_model_configured_before_publication(client, monkeypatch):
+    from backend.app.services.assistant import flow
+
+    rubric_id, _ = _seed_published_rubric(client)
+    real_label = flow._scoring_model_label
+    monkeypatch.setattr(flow, "_scoring_model_label", lambda ctx: None)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "我要上传自己的评分规则和模板")
+    card = _plans(client, conversation_id)[0]
+    assert _steps(card)["model"] == "blocked" and "发布后要先配置" in _detail(card, "model")
+    assert _steps(card)["import"] == "current"
+
+    session = client.post("/api/rubrics/import-sessions", data={"name": "我的标准", "version": "v1"},
+                          files={"rules_file": ("rules.xlsx", fx.simple_rules_xlsx(), XLSX)})
+    body = _resume(client, conversation_id, body["pending"], {"import_session_id": session.json()["id"]})
+    with client.session_factory() as db:
+        row = db.get(models.RubricImportSession, session.json()["id"])
+        row.status = "confirmed"
+        row.rubric_id = rubric_id
+        db.commit()
+
+    monkeypatch.setattr(flow, "_scoring_model_label", real_label)  # 核对发布期间配好了模型
+    published = _resume(client, conversation_id, body["pending"], {"action": "check"})
+    assert published["pending"]["kind"] == "pick_files"
+    card = _plans(client, conversation_id)[0]
+    assert card["status"] == "running"
+    assert _steps(card)["model"] == "done" and _detail(card, "model") == "开发模式模型"
+    assert _steps(card)["publish"] == "done" and _steps(card)["files"] == "current"
 
 
 def test_import_flow_checks_the_model_before_asking_for_files(client, monkeypatch):

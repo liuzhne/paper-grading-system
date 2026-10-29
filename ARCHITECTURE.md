@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询 | 无模块变化：`assistant/model.platform_available` 改用保存点，不再回滚整个会话。 |
 | 2026-10-28 | 评分助手计划卡片 | 新增 `assistant/plan.py`；`RunContext.patch_card`；流程状态与中断载荷带计划卡片编号；运行器放弃、作废、兜底时更新它；前端卡片、标题下的进度与空工作区的计划。 |
 | 2026-10-28 | 评分助手：开始评分先查前提 | 无模块变化：`assistant/flow.py` 的 `begin` 先查已发布的评分标准与评分模型，缺了就结束流程；`wait_publish` 接着评分前先查评分模型。 |
 | 2026-10-28 | 生产不做自动备份 | 生产 compose 去掉 backup 服务与卷 `backups`，删除 `scripts/nightly_backup.py`；`deploy.sh` 最后一步删掉 compose 里已没有的服务的容器；`db.env` 只剩超级用户密码；切换工作流收尾不再备份。 |
