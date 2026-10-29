@@ -203,6 +203,12 @@ onMounted(async () => {
     }
   }
 });
+
+/** 上传清单的状态点：解析完成绿、失败红，其余灰。 */
+function queueTone(status) {
+  if (status === "done") return "accent";
+  return ["failed", "rejected"].includes(status) ? "danger" : "muted";
+}
 </script>
 
 <template>
@@ -331,11 +337,15 @@ onMounted(async () => {
             </span>
           </label>
 
-          <ul v-if="upload.queue.length" class="queue">
-            <li v-for="entry in upload.queue" :key="entry.id" :class="entry.status">
-              <span class="q-name">{{ entry.name }}</span>
-              <span class="q-status faint mono">{{ uploadStatusLabel(entry.status) }}</span>
-              <span v-if="entry.error" class="q-error">{{ entry.error }}</span>
+          <!-- 与评分助手工作区“待评分文件”同一套清单样式（v2 界面改造方案 §5）。 -->
+          <ul v-if="upload.queue.length" class="queue row-list">
+            <li v-for="(entry, index) in upload.queue" :key="entry.id" class="row" :class="[entry.status, { 'is-warn': ['failed', 'rejected'].includes(entry.status) }]">
+              <span class="row-idx">{{ String(index + 1).padStart(2, "0") }}</span>
+              <div class="row-main">
+                <div class="row-title q-name">{{ entry.name }}</div>
+                <div v-if="entry.error" class="row-note q-error">{{ entry.error }}</div>
+              </div>
+              <span class="status-dot q-status" :class="`dot-${queueTone(entry.status)}`">{{ uploadStatusLabel(entry.status) }}</span>
             </li>
           </ul>
 
@@ -584,33 +594,17 @@ onMounted(async () => {
   list-style: none;
   margin: 0 0 14px;
   padding: 0;
-  font-size: 12.5px;
-}
-
-.queue li {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--border-row);
-  flex-wrap: wrap;
 }
 
 .queue li.failed .q-name,
-.queue li.rejected .q-name {
-  color: var(--danger);
-}
-
-.q-name {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
+.queue li.rejected .q-name,
 .q-error {
-  flex-basis: 100%;
   color: var(--danger);
-  font-size: 12px;
 }
+
+.dot-accent { color: var(--accent); }
+.dot-danger { color: var(--danger); }
+.dot-muted { color: var(--text-muted); }
 
 .upload-actions {
   margin-bottom: 4px;

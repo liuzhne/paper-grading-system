@@ -3394,7 +3394,7 @@ export interface components {
             /** Card Id */
             card_id?: string | null;
             /** Quick Action */
-            quick_action?: ("start_grading" | "import_rubric" | "query_progress" | "query_paper" | "query_review" | "query_overview") | null;
+            quick_action?: ("start_grading" | "import_rubric" | "query_progress" | "query_paper" | "query_review" | "query_overview" | "next_steps") | null;
             /** Text */
             text?: string | null;
             /**
@@ -3532,6 +3532,8 @@ export interface components {
             latest_grade?: string | null;
             /** Latest Need Manual Review */
             latest_need_manual_review?: boolean | null;
+            /** Latest Review Reasons */
+            latest_review_reasons?: string[];
             /** Latest Run Id */
             latest_run_id?: string | null;
             /** Latest Run Status */

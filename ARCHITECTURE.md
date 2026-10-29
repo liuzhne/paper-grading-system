@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-29 | 评分助手 v2 界面（原生工作区） | 前端：工作区由 iframe 改为原生面板（`components/assistant/`、`lib/assistant-workspace.js`），任务标签按计划卡片、结果标签按结果卡片从消息算出；`RuleCard` 由助手与评分标准页共用。后端：流程改为选文件 → 建草稿任务并上传 → 预检 → 确认开始；`RunContext.event` / `set_progress`；`plan.answer_progress` / `answer_next_steps`；批次汇总加 `latest_review_reasons`；契约版本 → `2026-10-29.assistant-v2`。无迁移。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询（#67 复审） | 无模块变化：`platform_available` 进保存点前先写库。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询 | 无模块变化：`assistant/model.platform_available` 改用保存点，不再回滚整个会话。 |
 | 2026-10-28 | 评分助手计划卡片 | 新增 `assistant/plan.py`；`RunContext.patch_card`；流程状态与中断载荷带计划卡片编号；运行器放弃、作废、兜底时更新它；前端卡片、标题下的进度与空工作区的计划。 |
@@ -1325,14 +1326,14 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 模块边界：
 - `api/guards.py`：可见性守卫（批次、论文、评分记录、作业、评分标准、导入草稿）。路由模块里的 `_visible_*`、`_batch_or_404`、`_job_or_404` 现在是这里的别名，同一个函数对象。
 - `api/actions.py`：共享写动作——建批次、预检、删除论文、开评、重试、取消（以及评分标准版本冻结判定）。每个函数自己执行守卫与角色校验；路由保留一行守卫给静态门禁测试看，业务逻辑只在这里一份。开评与重试只落库，路由在异步上下文里派发，图在工作线程里用 `dispatch_job_from_worker_thread` 派发。
-- `services/assistant/flow.py`：流程图（LangGraph `StateGraph`，有状态）。grading / import / watch 三种流程共用一张图；grading 在入口先查前提（已发布的评分标准、评分模型），缺了就说明怎么补、不弹选文件，导入流程发布后接着评分之前同样先查评分模型；“等待”节点第一行就 `interrupt()`，有副作用的节点放在其后并幂等（建批次按“本人 + 批次名 + 流程开始时间”找回）。状态只有编号与标志位。
+- `services/assistant/flow.py`：流程图（LangGraph `StateGraph`，有状态）。grading / import / watch 三种流程共用一张图；grading 在入口先查前提（已发布的评分标准、评分模型），缺了就说明怎么补、不弹选文件，导入流程发布后接着评分之前同样先查评分模型；2026-10-29 起顺序是选文件（之前可以换评分标准）→ 建草稿任务 → 等浏览器上传 → 预检 → 确认开始（无法评分的文件在这一步一起移除）→ 开评，流程卡片带 `step`（计划步骤的键）；“等待”节点第一行就 `interrupt()`，有副作用的节点放在其后并幂等（建批次按“本人 + 批次名 + 流程开始时间”找回）。状态只有编号与标志位。
 - `services/assistant/plan.py`：计划卡片（`docs/评分助手计划卡片方案.md`）。grading 与 import 开始时由代码列出固定步骤（7 步 / 8 步），各节点走完一步就用 `RunContext.patch_card` 在原卡片上更新；编号记在流程状态的 `plan`，并随每个中断存进会话的 `pending`（接口不返回），运行器放弃或作废流程时据此把卡片标成已放弃或已过期，流程结束时卡片还在进行中则兜底标“已结束”。计划卡片不进 Agent 上下文。
 - `services/assistant/queries.py`：查询图（无状态），流程等待时也能随时查询；重试、取消只给确认卡片。
 - `services/assistant/tools.py`：工具登记（名称、说明、Pydantic 参数可导出 JSON Schema、是否只读）；写工具必须 `allow_write=True`，只由流程节点或用户确认后的选择卡片调用，永不开放给模型。
 - `services/assistant/checkpointer.py`：自写 `BaseCheckpointSaver`，表 `assistant_checkpoints` / `assistant_checkpoint_writes`。**写入先进加锁的内存缓冲，运行结束后由运行器在主线程 `persist()`**：LangGraph 在后台线程保存快照，SQLAlchemy 会话不能跨线程并发使用。
-- `services/assistant/context.py`：一次运行的上下文（经 `context=` 传给节点，不进快照）：写消息、推进卡片（`update_card` 改状态与结果，`patch_card` 改任意字段）、更新焦点与工作区（`focus.workspace` + `workspace_rev`）。
+- `services/assistant/context.py`：一次运行的上下文（经 `context=` 传给节点，不进快照）：写消息、写事件消息（`event`，`intent="event"`，前端显示为分隔线，不进 Agent 上下文）、推进卡片（`update_card` 改状态与结果，`patch_card` 改任意字段）、更新焦点（`focus.workspace` 记与当前步骤对应的完整页面；`focus.progress` 是计划进度，会话列表显示“步骤 2/8”）。
 - `services/assistant/model.py`、`intents.py`：助手模型的解析顺序与意图识别（模型输入只有本句、用户最近 3 句原话、任务名与评分标准名）。
-- 前端 `stores/assistant.js`：只发 `runs`、渲染、选文件与直传上传、轮询作业或评分标准状态后恢复；`lib/assistant-flow.js` 只剩展示用纯函数（含找出进行中的计划、算出“第几步”）；`AssistantView` 在标题下显示当前步骤，工作区空着时显示整张计划。`lib/scoring-actions.js` 供“新建评分任务”页与“评分进度”页使用。工作区是现有页面的同源 iframe，`AppShell` 在框架内隐藏侧栏与模型引导弹窗。
+- 前端 `stores/assistant.js`：只发 `runs`、渲染、选文件与直传上传、轮询作业或评分标准状态后恢复，并记工作区的界面状态（`ws`：标签、步骤、收起 / 全宽、新结果提示，不落库）；`lib/assistant-flow.js` 是展示用纯函数，`lib/assistant-workspace.js` 推导工作区（见下节 2026-10-29）。`lib/scoring-actions.js` 供“新建评分任务”页与“评分进度”页使用。2026-10-29 之前工作区是现有页面的同源 iframe，现在是原生面板；`AppShell` 在框架内隐藏侧栏的代码暂时保留。
 
 持久化：迁移 `0038_assistant_conversations` 新增五张表（偏好、会话、消息、两张状态存储表），全部给 `pgs_app` 授权并建 RLS，有数据时拒绝降级；`postgres_verifier` 与生产迁移工作流的运行角色检查覆盖这五张表。会话表另有 `thread_id`、`flow_seq`、`pending`、`run_locked_until`。
 
@@ -1341,6 +1342,28 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 相关改动：`DELETE /papers/{id}` 允许删除解析失败且从未评分的材料；能力表新增 `abilities.use_assistant`；`RubricsView` 支持 `?rubric=` 与 `?import_session=`；安全头由 `X-Frame-Options: DENY` 改为 `SAMEORIGIN` 并加 `frame-ancestors 'self'`。
 
 维护记录：2026-10-11 · 评分助手一期：LangGraph 后端编排（流程图 + 查询图）、自写状态存储、共享守卫与共享动作、前端薄客户端；head 升为 `0038_assistant_conversations`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装。
+
+### 2026-10-29 评分助手 v2 界面（原生工作区）
+
+方案见 [docs/评分助手v2界面改造方案.md](docs/评分助手v2界面改造方案.md)，设计稿是 Claude Design「评分助手 v2.dc.html」。
+
+数据流：工作区**不另存状态**，全部从会话消息算出（`lib/assistant-workspace.js`）——
+
+```
+消息 ──▶ latestPlan / flowContext ──▶ 任务标签：步骤条 + 当前步骤的视图（看哪一步由 store.ws.step 决定，null 跟着当前步骤）
+     └─▶ artifactsFrom ──────────────▶ 结果标签：不带 step 的结果卡片（进展快照、得分解释、待办、进度、概览），最新的在前
+pending + 计划卡片 ──▶ taskBar / chipsFor / todoItems ──▶ 输入区任务条、建议问题、待办清单
+```
+
+组件边界（`components/assistant/`）：`ConversationRail`（会话栏，`focus.progress` 显示第几步）、`ChatThread`（消息、事件分隔线、入口卡片）、`EntryCard`（流程卡片与结果卡片在对话里只是“在右侧查看”入口）、`ChatComposer`（任务条 + 建议问题 + 输入框）、`WorkspacePanel`（标签、更多、步骤条、新结果提示、回到当前）、`ws/*`（各步骤与结果视图，共用 `WsLayout` 的“滚动正文 + 底部操作条”）。对话本身的选择（选任务、重试、放弃上一步、失败诊断）仍是 `AssistantCard`。
+
+写动作仍走原接口：确认开始与换评分标准是 `runs` 的 `resume`（`store.answerConfirm` / `changeRubric`）；核对评分规则调用评分标准页同一组接口（`rules/{code}/confirm`、`submit-review`、`publish`），发布后立即 `resume` 让流程接着走。完整页面一律新标签页打开（选好的待评分文件只在本页内存里）。
+
+后端随之调整：流程顺序见上节 `flow.py`；`plan.answer_progress`（流程里问进展回 `progress_snapshot`，存提问时的计划副本）与 `answer_next_steps`（`todo` 卡片，清单前端实时算），都不经模型；`next_steps` 放在 `views.CHIP_ACTIONS`，不进 `QUICK_ACTIONS`（那里的键写在 Agent `reply.next_steps` 的工具定义里）。批次汇总每份加 `latest_review_reasons`（一次查询取需要复核的评分项与原因）。
+
+共用：`components/RuleCard.vue` 由助手的“核对评分规则”与评分标准页的 `RuleReviewPanel` 共用；`components.css` 新增 `row-list` / `tag` / `pill` / `status-dot` / `bar` / `ext` / `text-btn` / `btn-outline` / `sec-head` / `foot-text`，新建任务页的上传清单用同一套。
+
+维护记录：2026-10-29 · 评分助手 v2 界面：原生工作区、流程改序、事件消息、进展快照与待办、会话进度、复核原因；契约版本 → `2026-10-29.assistant-v2`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装；无迁移。
 
 ### 2026-10-11 通用文档评分（工作台按文档类型评分）
 

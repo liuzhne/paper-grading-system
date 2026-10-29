@@ -25,6 +25,7 @@ from backend.app.db.models import AssistantMessage
 from backend.app.services.assistant.agent import catalog
 from backend.app.services.assistant.agent.reply import MAX_TEXT_CHARS
 from backend.app.services.assistant.agent.reply import NEXT_STEPS
+from backend.app.services.assistant.context import EVENT_INTENT
 from backend.app.services.assistant.views import PENDING_LABELS
 from backend.app.services.assistant.views import QUICK_ACTIONS
 
@@ -50,8 +51,9 @@ CARD_LABELS = {
 #: 等待中的步骤在上面哪张卡片、卡片上有什么（§12：模型看得见等待中的步骤，才能回答“这一步怎么做”）。
 PENDING_DETAILS = {
     "pick_files": "选择待评分文件的卡片，.docx 或 .pdf，一次最多 30 份，还没选",
-    "confirm_start": "开始评分的确认卡片：评分标准、文档类型、文件、评分模型；按钮“开始评分”“换评分标准”“重新选择文件”“不评了”",
-    "upload_papers": "正在上传与解析文件",
+    "confirm_start": "开始评分的确认：文件已上传并预检，写明可评几份、需注意几份、无法评分几份（开始时移除）、"
+                     "评分标准、文档类型与评分模型；按钮“开始评分”“不评了”（任务留作草稿）",
+    "upload_papers": "正在上传文件并预检",
     "confirm_remove": "有解析失败的文件，卡片在问是否移除后再评",
     "create_import_session": "导入卡片：评分标准名称、文档类型（上传后不能再改）、评分规则文件、评分模板文件，还没有提交",
     "wait_publish": "导入的评分标准已在右侧打开，等老师核对并发布",
@@ -234,7 +236,7 @@ def turn_groups(messages: list[AssistantMessage], *, exclude_id: str | None = No
             ordered = ordered[positions[0]:]
     groups: list[TurnGroup] = []
     for message in ordered:
-        if message.id == exclude_id:
+        if message.id == exclude_id or message.intent == EVENT_INTENT:
             continue
         if message.role == "user":
             groups.append(TurnGroup(user=message))

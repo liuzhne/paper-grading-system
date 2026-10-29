@@ -46,7 +46,7 @@ async function importTemplate(page) {
   await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
   await page.getByRole("navigation", { name: "评分标准编辑步骤" }).getByRole("button", { name: /评分规则/ }).click();
   await page.locator(".criteria-nav .lib-item:not(.source-nav)").first().click();
-  await expect(page.locator("[data-test=rule-review-panel] tbody tr")).toHaveCount(2);
+  await expect(page.locator("[data-test=rule-review-panel] .rule-card")).toHaveCount(2);
   return { id, name };
 }
 
@@ -103,7 +103,7 @@ test("导入→原文核对→单条及当前评分项批量确认→刷新保�
   await checklist.getByRole('button', {name:'去核对条款（3）'}).click();
   const panel = page.locator("[data-test=rule-review-panel]");
   await expect(page.getByRole("navigation", { name: "评分标准编辑步骤" })).toBeVisible();
-  await panel.locator(".rule-source summary").first().click();
+  await panel.locator(".rule-card .sources summary").first().click();
   await expect(panel).toContainText("研究方法应完整且可复现");
   await panel.getByRole("button", { name: "确认", exact: true }).first().click();
   await expect(page.getByRole("status").filter({ hasText: "已确认 1 条规则" })).toBeVisible();

@@ -96,6 +96,8 @@ class BatchPaperSummary(BaseModel):
     latest_final_score: Optional[float] = None
     latest_grade: Optional[str] = None
     latest_need_manual_review: Optional[bool] = None
+    # 需要复核的评分项与原因（最多 3 条，“T03 名称：原因”），评分助手汇报页用。
+    latest_review_reasons: list[str] = Field(default_factory=list)
 
 
 class BatchSummary(BaseModel):

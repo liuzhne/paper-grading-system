@@ -18,7 +18,11 @@ from backend.app.db.models import AssistantConversation
 from backend.app.db.models import AssistantMessage
 from backend.app.db.models import utcnow
 
-#: 焦点里只放编号与名称（方案 §9.2）；`workspace` 与 `workspace_rev` 驱动右侧工作区。
+#: 事件消息的 intent：老师在工作区做的、推进了流程的动作（“你发布了《…》”），前端显示为分隔线，
+#: 不进 Agent 的上下文（docs/评分助手v2界面改造方案.md §4.4）。
+EVENT_INTENT = "event"
+
+#: 焦点里只放编号与名称（方案 §9.2）；`workspace` 是与当前步骤对应的完整页面，工作区“在页面打开”用它。
 FOCUS_KEYS = ("batch_id", "batch_name", "rubric_id", "rubric_name", "paper_id", "job_id")
 
 
@@ -59,6 +63,9 @@ class RunContext:
         self.db.flush()
         self.new_message_ids.append(message.id)
         return message
+
+    def event(self, text: str) -> AssistantMessage:
+        return self.say(text, intent=EVENT_INTENT)
 
     def update_card(self, message_id: str | None, card_id: str | None, status: str, result: dict | None = None) -> None:
         if not message_id or not card_id:
@@ -113,8 +120,16 @@ class RunContext:
         self.conversation.focus = focus
         flag_modified(self.conversation, "focus")
 
+    def set_progress(self, value: dict) -> None:
+        """计划进度（`plan.progress`）：会话列表显示“步骤 2/8”。和焦点存在一起，免得列会话时逐个读消息。"""
+
+        focus = dict(self.conversation.focus or {})
+        focus["progress"] = value
+        self.conversation.focus = focus
+        flag_modified(self.conversation, "focus")
+
     def show_workspace(self, path: str) -> None:
-        """切换右侧工作区；同一路径再次调用也会让前端重新加载（`workspace_rev` 递增）。"""
+        """记下与当前步骤对应的完整页面（`workspace_rev` 递增）；工作区的“在页面打开”链接用它。"""
 
         focus = dict(self.conversation.focus or {})
         focus["workspace"] = path

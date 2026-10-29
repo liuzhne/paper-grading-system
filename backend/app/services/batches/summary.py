@@ -6,7 +6,12 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.db.models import GradingBatch
 from backend.app.db.models import Paper
+from backend.app.db.models import RubricCriterion
+from backend.app.db.models import ScoreItem
 from backend.app.services.scoring.rules import as_float
+
+#: 每份最多列几条复核原因（评分助手汇报页的“建议人工复核”只放一两行）。
+MAX_REVIEW_REASONS = 3
 
 
 def get_batch_summary(db: Session, batch_id: str):
@@ -24,10 +29,12 @@ def get_batch_summary(db: Session, batch_id: str):
     paper_stats = Counter()
     run_stats = Counter()
     paper_summaries = []
+    latest_runs = {paper.id: _latest_run(paper.scoring_runs) for paper in batch.papers}
+    reasons = _review_reasons(db, [run.id for run in latest_runs.values() if run is not None and run.need_manual_review])
 
     for paper in sorted(batch.papers, key=lambda item: item.created_at, reverse=True):
         paper_stats[paper.status] += 1
-        latest_run = _latest_run(paper.scoring_runs)
+        latest_run = latest_runs[paper.id]
         if latest_run is not None:
             run_stats[latest_run.status] += 1
             if latest_run.need_manual_review:
@@ -49,6 +56,7 @@ def get_batch_summary(db: Session, batch_id: str):
                 "latest_final_score": as_float(latest_run.final_total_score) if latest_run else None,
                 "latest_grade": latest_run.grade if latest_run else None,
                 "latest_need_manual_review": latest_run.need_manual_review if latest_run else None,
+                "latest_review_reasons": reasons.get(latest_run.id, []) if latest_run else [],
             }
         )
 
@@ -60,6 +68,25 @@ def get_batch_summary(db: Session, batch_id: str):
         "run_stats": _with_defaults(run_stats, ["not_scored", "scored", "reviewing", "reviewed", "need_manual_review"]),
         "papers": paper_summaries,
     }
+
+
+def _review_reasons(db: Session, run_ids: list[str]) -> dict[str, list[str]]:
+    """需要复核的评分记录里，每份列出哪几项要看、为什么（“T03 分析与解决问题：证据不足”）。一次查询。"""
+
+    if not run_ids:
+        return {}
+    rows = db.execute(
+        select(ScoreItem.scoring_run_id, RubricCriterion.code, RubricCriterion.name, ScoreItem.review_reason)
+        .join(RubricCriterion, RubricCriterion.id == ScoreItem.criterion_id)
+        .where(ScoreItem.scoring_run_id.in_(run_ids), ScoreItem.need_manual_review.is_(True))
+        .order_by(ScoreItem.scoring_run_id, RubricCriterion.code)
+    ).all()
+    result: dict[str, list[str]] = {}
+    for run_id, code, name, reason in rows:
+        lines = result.setdefault(run_id, [])
+        if len(lines) < MAX_REVIEW_REASONS:
+            lines.append("%s %s：%s" % (code, name, reason or "需要人工复核"))
+    return result
 
 
 def _latest_run(runs):

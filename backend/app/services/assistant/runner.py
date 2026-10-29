@@ -21,6 +21,7 @@ from langgraph.types import Command
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import ValidationError
+from pydantic import model_validator
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import update
@@ -44,6 +45,7 @@ from backend.app.services.assistant.flow import USER_WAIT_KINDS
 from backend.app.services.assistant.flow import build_flow_graph
 from backend.app.services.assistant.queries import QUERY_INTENTS
 from backend.app.services.assistant.queries import build_query_graph
+from backend.app.services.assistant.views import CHIP_ACTIONS
 from backend.app.services.assistant.views import FLOW_LABELS
 from backend.app.services.assistant.views import MAX_FILES
 from backend.app.services.assistant.views import PENDING_LABELS
@@ -65,13 +67,25 @@ _QUERY_GRAPH = build_query_graph()
 # --- 恢复值校验：浏览器带回的数据先按中断类型校验，图只接收合规的值 ----------------------------
 
 class _PickFiles(BaseModel):
-    count: int = Field(ge=1, le=MAX_FILES)
+    """选好了文件，或在选文件之前换评分标准（v2 界面改造方案 §4.3）。"""
+
+    action: Literal["files", "change_rubric"] = "files"
+    count: int | None = Field(default=None, ge=1, le=MAX_FILES)
     names: list[str] = Field(default_factory=list, max_length=MAX_FILES)
+    rubric_id: str | None = Field(default=None, max_length=36)
+
+    @model_validator(mode="after")
+    def _shape(self):
+        if self.action == "files" and self.count is None:
+            raise ValueError("缺少文件数")
+        if self.action == "change_rubric" and not self.rubric_id:
+            raise ValueError("缺少评分标准编号")
+        return self
 
 
 class _ConfirmStart(BaseModel):
-    action: Literal["confirm", "change_rubric", "repick", "cancel"]
-    rubric_id: str | None = Field(default=None, max_length=36)
+    # 上传预检之后才确认：任务已建好、评分标准已锁定，只剩开始或放弃（§4.1）。
+    action: Literal["confirm", "cancel"]
 
 
 class _UploadPapers(BaseModel):
@@ -280,7 +294,7 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
 
     if attachments:
         result = intents.IntentResult(intent="start_grading")
-    elif quick_action in QUICK_ACTIONS:
+    elif quick_action in QUICK_ACTIONS or quick_action in CHIP_ACTIONS:
         # 快捷按钮按键直接分派，不经规则与模型（Agent 化方案 §16）。
         result = intents.IntentResult(intent=quick_action, source="quick_action")
     elif intents.fast_command(text):
@@ -320,6 +334,12 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
         _start_flow(ctx, saver, {"mode": "import"})
     elif result.intent == "help":
         ctx.say(help_text((ctx.conversation.pending or {}).get("kind")), [quick_actions_card()], intent="help")
+    elif result.intent == "next_steps":
+        plan.answer_next_steps(ctx)
+    elif result.intent == "query_progress" and plan.answer_progress(
+        ctx, waiting=(ctx.conversation.pending or {}).get("kind") in USER_WAIT_KINDS,
+    ):
+        pass  # 流程里问进展：回了进展快照（v2 界面改造方案 §4.6）
     elif result.intent in QUERY_INTENTS:
         _run_query(ctx, result.intent, ordinal=result.paper_ordinal, name=result.paper_name, text=text)
     else:
