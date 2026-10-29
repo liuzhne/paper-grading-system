@@ -657,6 +657,17 @@ def test_a_failed_platform_lookup_keeps_what_the_run_already_wrote(client, monke
     assert detail["title"] == "开始评分"
 
 
+def test_a_failed_write_is_not_mistaken_for_a_missing_platform_model(client):
+    """保存点之前要先写库；写入失败照常抛出，不能当成“读不到平台配置”吞掉（#67 复审）。"""
+
+    from sqlalchemy.exc import IntegrityError
+
+    with client.session_factory() as session:
+        session.add(models.AssistantMessage(conversation_id="missing", role=None, text="", cards=[]))
+        with pytest.raises(IntegrityError):
+            assistant_model.platform_available(session)
+
+
 def test_import_plan_picks_up_a_model_configured_before_publication(client, monkeypatch):
     from backend.app.services.assistant import flow
 
