@@ -64,10 +64,12 @@ def active_connections(db: Session, *, user_id: str, organization_id: str | None
 
 
 def platform_available(db: Session) -> bool:
+    # 迁移窗口里读不到平台配置，按“没有平台模型”处理。只撤销这一次查询（保存点）：
+    # 评分助手的一轮里，同一个会话已经写下老师的消息与卡片，整个会话回滚会把它们一起丢掉。
     try:
-        return platform_llm.get_active_config(db) is not None
-    except Exception:  # 迁移窗口里读不到平台配置，按“没有平台模型”处理。
-        db.rollback()
+        with db.begin_nested():
+            return platform_llm.get_active_config(db) is not None
+    except Exception:
         return False
 
 
