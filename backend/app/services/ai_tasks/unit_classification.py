@@ -64,7 +64,9 @@ def _item_error(failure):
             if code == "circuit_open"
             else _retry_after((failure or {}).get("retry_after"))
         )
-        return AITaskItemError(code, message, disposition="defer", retry_after_seconds=retry_after)
+        return AITaskItemError(
+            code, message, disposition="defer", retry_after_seconds=retry_after, circuit_open=code == "circuit_open",
+        )
     if code in _RETRY:
         return AITaskItemError(code, message, disposition="retry")
     if code in _REPAIR:

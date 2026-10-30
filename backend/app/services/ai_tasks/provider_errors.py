@@ -63,6 +63,7 @@ def provider_item_error(exc, *, code, message, hints=None) -> AITaskItemError:
                 message,
                 disposition="defer",
                 retry_after_seconds=settings.PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
+                circuit_open=True,
             )
         if isinstance(cause, ProviderCallError):
             provider_code = cause.error.code

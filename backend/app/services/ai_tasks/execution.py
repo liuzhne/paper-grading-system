@@ -39,6 +39,8 @@ logger = logging.getLogger("ai-tasks")
 KIND = "ai_task"
 # 429 延后的次数上限、默认等待与上下限；超时/5xx 与输出修正各再执行 1 次。
 MAX_DEFERRALS = 5
+# 熔断时请求没发到模型，不占上面的额度；连续熔断另有上限（连接一直不恢复时条目也要能结束）。
+MAX_CONSECUTIVE_CIRCUIT_WAITS = 5
 DEFAULT_RETRY_AFTER_SECONDS = 30
 MIN_RETRY_AFTER_SECONDS = 5
 MAX_RETRY_AFTER_SECONDS = 300
@@ -66,6 +68,23 @@ def _retry_after(error):
     if value is None:
         value = DEFAULT_RETRY_AFTER_SECONDS
     return int(max(MIN_RETRY_AFTER_SECONDS, min(MAX_RETRY_AFTER_SECONDS, value)))
+
+
+def _consecutive_circuit_waits(history):
+    """最近连续多少次因熔断而延后。判失败的那一次不算，所以“重试失败的批次”后重新计。"""
+
+    count = 0
+    for entry in reversed(history or []):
+        if not (entry.get("circuit_open") and entry.get("status") == "deferred"):
+            break
+        count += 1
+    return count
+
+
+def _may_defer(item, error):
+    if error.circuit_open:
+        return _consecutive_circuit_waits(item.attempt_history) < MAX_CONSECUTIVE_CIRCUIT_WAITS
+    return item.deferral_count < MAX_DEFERRALS
 
 
 def _begin(session, item, now):
@@ -222,11 +241,14 @@ def _finish(session_factory, claimed, *, output=None, error=None, latency_ms=0):
         else:
             entry["error_code"] = error.code
             entry.update(_provider_fields(error))
+            if error.circuit_open:
+                entry["circuit_open"] = True
             disposition = error.disposition
             target = "failed"
-            if disposition == "defer" and item.deferral_count < MAX_DEFERRALS:
+            if disposition == "defer" and _may_defer(item, error):
                 delay = _retry_after(error)
-                item.deferral_count += 1
+                if not error.circuit_open:
+                    item.deferral_count += 1
                 item.not_before = now + timedelta(seconds=delay)
                 target = "pending"
             elif disposition == "retry" and item.retry_count < MAX_RETRIES:
@@ -276,7 +298,6 @@ def _finish(session_factory, claimed, *, output=None, error=None, latency_ms=0):
         history.append(entry)
         item.attempt_history = history
         source_key = item.source_key
-        deferral = item.deferral_count
         session.flush()
         settle_task(session, task.id, now)
         session.commit()
@@ -286,7 +307,8 @@ def _finish(session_factory, claimed, *, output=None, error=None, latency_ms=0):
             source_key,
             1,
             reason="deferred",
-            token="%s-%s" % (claimed.item_id, deferral),
+            # 按执行次数去重：熔断延后不增加 deferral_count，用它会把下一次叫醒当成重放丢掉。
+            token="%s-%s" % (claimed.item_id, claimed.attempt),
             delay=delay,
         )
     return delay

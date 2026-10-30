@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无新命令、无迁移；排错：`work_item_deferred` 与 `deferral_count` 对不上时的读法。 |
 | 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无新命令、无迁移；排错：每个任务第 1 批成功、第 2 批被拒，日志 `reason=rejected_without_reason` 的读法。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash（#70 复审） | 排错条目补充：可直接执行的只读核对命令；回滚说明分开导入规则与手动规则的草稿。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无新命令；排错：导入的评分标准发布被 `global_policy_unsupported` 挡住（报错指向政策，真正原因是改了总分没重算 hash）。 |
@@ -1750,6 +1751,9 @@ npm --prefix frontend/workbench run test:e2e -- rubric-recognition.spec.js rubri
 - **现象**：日志出现 `rubric_ai_draft_failed exception_type=CircuitOpenError` 或提示「系统已暂停调用它约 30 秒」，接口返回 503。
   - 报错指向：熔断器。
   - 真正原因：同一连接之前连续发生的暂时性失败（超时、限流、上游 5xx）。熔断器按连接和进程统计，默认累计 5 次打开，冷却 30 秒；服务重启或 `--reload` 重载后清零。往前找同一连接的 `reason=request_timeout`，不要去查熔断器本身。
+- **现象**：AI 任务的条目 `work_item_deferred` 行数比 `deferral_count` 多，或一批延后了很久才失败。
+  - 报错指向：延后计数像是漏记了。
+  - 真正原因：2026-10-30 起熔断时请求没发到模型，这次延后不加 `deferral_count`，只在 `attempt_history` 里记 `circuit_open: true`。条目的上限是 5 次 429 和连续 5 次熔断，穿插出现时总次数可能到三十多次（每次至少等 30 秒）。判失败后点「重试失败的批次」，两个计数都重新开始。
 - **现象**：`rubric_ai_draft_failed reason=request_timeout status=None`。
   - 排查：看同一请求前面的 `rubric_ai_draft_request batch=i/n ... timeout_seconds=`。修复后未设显式超时的连接应显示 120；如果显示 60，说明运行的还是旧代码，先重启服务。
   - 如果 120 秒仍然超时：在「账户与连接」给该连接设置 `timeout_seconds`（1–300），不要改全局超时。

@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无模块变化：`ai_tasks/execution._finish` 对熔断延后不加 `deferral_count`，连续次数从 `attempt_history` 算（上限 5）；延迟叫醒的去重键改用执行次数。接口、数据库不变。 |
 | 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无模块变化：`_draft_deduction_rules_once` 的精简 Schema 退路多一个触发条件（`llm/errors.rejected_without_reason`）；接口、数据库、起草版本不变。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash（#70 复审） | `scoring/core/policy` 新增 `retarget_policy_total`；导入确认、原子重编译与路由的手动重编译命令共用，无调用链改向。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无模块变化：`import_sessions.prepared_for_confirmation` 写回满分时重新编译政策；`_manual_recompile_command` 总分不变也重算。 |
@@ -1273,7 +1274,7 @@ Claude 适配器的调用链：
 数据与持久化边界：
 
 - `ai_tasks`：冻结输入、锁定的连接与模型名、计数、合并结果、根因错误；`(rubric_id, fingerprint)` 上的部分唯一索引覆盖 queued/running/succeeded。生命周期：评分标准发布时 `delete_rubric_ai_tasks` 在发布事务内删除；评分标准删除时 FK 级联。
-- `ai_task_items`：本批输入（含 `repair_code`）、输出、`attempt/stall/deferral/retry/repair` 计数、`attempt_history`（错误码与耗时；模型调用失败时另记 `http_status`、`provider_code`、`provider_type`，不含厂商说明文字——请求被拒时的说明只进 `llm_call_failed` 日志）。“重试失败的批次”把失败条目连同冻结的输入原样重排，不重读评分项与规则来源；来源改了要新建起草任务。
+- `ai_task_items`：本批输入（含 `repair_code`）、输出、`attempt/stall/deferral/retry/repair` 计数（`deferral` 只数 429，熔断延后不占，连续次数由 `attempt_history` 的 `circuit_open` 算出）、`attempt_history`（错误码与耗时；模型调用失败时另记 `http_status`、`provider_code`、`provider_type`，不含厂商说明文字——请求被拒时的说明只进 `llm_call_failed` 日志）。“重试失败的批次”把失败条目连同冻结的输入原样重排，不重读评分项与规则来源；来源改了要新建起草任务。
 - 规则来源：前端采用 AI 结果时在结构化条目上写 `ai_origin` / `ai_model`；编译（`pipeline._rule`，只在规则来自 AI 时写进编译图）落到 `AtomicRule.ai_origin` / `ai_model`；`atomic_recompile`、版本复制保留它们；`rule_origin.is_ai_rule` 读字段；`review_workspace` 返回它们，规则面板显示 “AI · 模型名”。两列**不进版本内容 hash**。
 
 维护记录：2026-10-10 · AI 任务 A2：新增 `services/ai_tasks` 与任务 API，起草迁移到任务，规则记录 AI 来源与模型名，版本守卫；迁移 head → 0036。

@@ -184,6 +184,7 @@
 |---|---|
 | 成功 | 写结果，条目 `succeeded`，任务计数增量更新；AI 任务的所有条目都已成功时，锁任务行，按 `ordinal` 合并（复用 `draft_deduction_rules` 里的合并与 `validate_ai_rule_draft`），任务 `succeeded` |
 | 429（限流，可重试） | 条目回到 `pending`，`not_before = 现在 + Retry-After`（没有就 30 秒），`deferral_count + 1`，发延迟叫醒；超过 5 次才判失败 |
+| 熔断（请求没发到模型，2026-10-30 起） | 同样延后一个冷却时间，但不加 `deferral_count`；连续 5 次才判失败（见 DECISIONS 同日条目） |
 | 名额已满 | 不领取，不计数 |
 | 输出不合格（可修正） | 再执行 1 次（带修正提示），仍失败才判失败 |
 | 超时、5xx | 最多再执行 1 次 |
