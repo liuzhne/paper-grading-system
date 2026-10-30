@@ -1217,6 +1217,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-30 | 导入确认与重编译同步政策总分的 hash（#70 复审） | 排错条目补充：可直接执行的只读核对命令；回滚说明分开导入规则与手动规则的草稿。 |
+| 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无新命令；排错：导入的评分标准发布被 `global_policy_unsupported` 挡住（报错指向政策，真正原因是改了总分没重算 hash）。 |
 | 2026-10-30 | 评分细则排除落库 | 无迁移、无新命令；新增接口 `…/rules/{code}/exclude`、`…/restore`；契约版本 → `2026-10-30.rule-exclusion`。上线前只读 SQL 核对已发布版本里没有非 approved 的细则；排错：排除按钮灰着、排除 409、旧页面统一确认 409、`dependency_rejected`、回滚后评分哈希不一致。 |
 | 2026-10-29 | 评分助手 v2 界面（原生工作区） | 无新命令、无迁移；契约版本 → `2026-10-29.assistant-v2`。排错：旧页面的确认按钮 422、放弃后多出草稿任务、核对发布按钮不出现、进展快照不更新、工作区宽度复原。iframe 安全头那一条改为只适用于旧版本。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询（#67 复审） | 排错条目补充：进保存点前先 `db.flush()`，写入失败照常抛出。 |
@@ -2624,3 +2626,51 @@ rollback;
   - 真正原因：这些版本是在本版代码下发布的、含排除的版本；本版的版本哈希不含排除的细则，旧代码重算时把它们算了进去。数据没坏：重新部署本版，或克隆这些版本重新发布。
 
 维护记录：2026-10-30 · 评分细则排除落库：新增验证命令、上线前只读核对、回滚注意与排错条目；无迁移。
+
+### 2026-10-30 导入的评分标准发布被 `global_policy_unsupported` 挡住
+
+症状：导入会话刚确认，第 3 步或 `/api/rubrics/{id}/review-workspace` 的 `structural_blockers` 里就有 `global_policy_unsupported`（`field_path` 为 `/rubric_version/global_policy`）；在第 1 步把“标准满分”改了又改回原值再保存，阻断仍在（前端判断没有修改，不发 `recompile`）。
+
+- 报错指向：全局评分政策本身（schema 或取值不受支持）。
+- 真正原因：重编译或导入确认路径改了政策的总分，却没有按新总分重算 `policy_hash`。`compile_scoring_policy` 先比总分、再比 hash，hash 对不上报 `policy_hash does not match policy snapshot`，门禁同样归成这一条。2026-10-30 之前，导入会话确认（`import_sessions.prepared_for_confirmation`，`/{id}/reupload-confirm` 也用它）只改 `aggregation.total_score`；满分与解析时不同就会触发：人工改过满分、小数换算，或同一评分项下多行被折叠（例如两行各 10 分折成一个 10 分的评分项，解析总分 20、确认满分 10）。`prepare_atomic_ai_append` 不是原因：它先走 `prepare_atomic_recompile`，每次都重算。
+- 核对（只读，查完回滚；评分标准 ID 取自页面地址。本地把第一行换成 `.venv/bin/python - <评分标准 ID> <<'PY'`）：
+
+  ```bash
+  ssh pgs-prod 'docker exec -i pgs-app-1 python - <评分标准 ID>' <<'PY'
+  import sys
+
+  from sqlalchemy import select
+
+  from backend.app.db.models import Rubric, RubricCompilation, RubricVersion
+  from backend.app.db.session import SessionLocal
+  from backend.app.services.scoring.core.policy import compile_scoring_policy
+
+  db = SessionLocal()
+  try:
+      rubric = db.get(Rubric, sys.argv[1])
+      versions = db.scalars(
+          select(RubricVersion)
+          .join(RubricCompilation, RubricVersion.compilation_id == RubricCompilation.id)
+          .where(RubricVersion.rubric_id == rubric.id, RubricCompilation.status != "superseded")
+      ).all()
+      for version in versions:
+          try:
+              compile_scoring_policy(version.global_policy, total_score=rubric.total_score)
+              print(version.version, "OK")
+          except (TypeError, ValueError) as exc:
+              print(version.version, "FAILED:", exc)
+  finally:
+      db.rollback()
+      db.close()
+  PY
+  ```
+
+  输出 `FAILED: policy_hash does not match policy snapshot` 就是这个坑；`policy total_score does not match rubric total_score` 是总分本身没同步；`OK` 说明阻断不是这里来的。
+- 处理：修复上线后新导入的草稿不再出现。修复前已生成的草稿，在第 1 步任改一处（如说明）再保存，`recompile` 会按当前总分重算政策；三条重编译路径（原子编辑、AI 追加、只有手动规则）都会重算。不要直接改数据库里的 `policy_hash`，也不要放宽门禁。
+- 新增排错文案：确认时政策无法按新满分编译返回 422“满分与现有全局评分政策不兼容”；保存时返回 422“总分与现有全局评分政策不兼容”（原为“总分修改……”，现在总分不变也会重算）。
+
+验证：`.venv/bin/python -m pytest -q backend/app/tests/test_m1_policy.py backend/app/tests/test_rubric_import_sessions.py backend/app/tests/test_rubric_review_workspace.py`（覆盖 `retarget_policy_total`、折叠与人工改满分两种确认、AI 追加改总分、手动与原子编辑两条路径的过期 hash 自愈），再跑全套。
+
+发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；不改前端与评分逻辑，不需要 bump `PROMPT_VERSION`。回滚要一起回退 `policy.retarget_policy_total` 与它的三个调用点（`import_sessions.py`、`atomic_recompile.py`、`_manual_recompile_command`）。回滚后导入确认又会留下 hash 过期的草稿：这些草稿的规则来自导入，保存走原子编辑路径，仍按上面的“处理”保存一次恢复；回滚后的手动路径总分不变不重算，只有手动规则的草稿要先把总分改成别的值保存，再改回来保存。
+
+维护记录：2026-10-30 · 导入确认与重编译同步政策总分的 hash：新增排错条目（报错指向政策、真正原因是改了总分没重算 hash）。

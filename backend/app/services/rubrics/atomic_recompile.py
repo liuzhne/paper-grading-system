@@ -9,7 +9,7 @@ from backend.app.services.rubric_import.deduction_caps import normalize_ai_group
 from backend.app.services.rubric_import import pipeline
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.review_workspace import content_token, number_text
-from backend.app.services.scoring.core.policy import compile_scoring_policy
+from backend.app.services.scoring.core.policy import retarget_policy_total
 
 
 def _fields(obj, names):
@@ -92,10 +92,8 @@ def prepare_atomic_recompile(session, version, command, edits):
         criterion["deduction_rules_structured"] = normalize_ai_group_caps(
             criterion.get("deduction_rules_structured") or [],
             criterion_code=criterion["code"], maximum=criterion["max_score"])
-    policy = deepcopy(rubric["global_policy"])
-    policy["aggregation"]["total_score"] = number_text(rubric["total_score"])
-    policy.pop("policy_hash", None)
-    rubric["global_policy"] = compile_scoring_policy(policy, total_score=rubric["total_score"]).to_mapping()
+    rubric["global_policy"] = retarget_policy_total(
+        rubric["global_policy"], total_score=rubric["total_score"]).to_mapping()
     prepared = pipeline._base_graph(command=command, source_kind="atomic_edit",
         rubric=rubric, artifacts=artifact_values, source_rules=source_values,
         template_items=template_values, criteria=rubric["criteria"], atomic_rules=values,

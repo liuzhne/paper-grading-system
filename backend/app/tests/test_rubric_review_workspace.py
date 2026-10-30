@@ -1,6 +1,7 @@
 from backend.app.tests.test_m8_web_rubric_lifecycle import _import_rubric
 from backend.app.tests.test_rubric_visibility import _login
 from backend.app.db import models
+from backend.app.services.scoring.core.policy import compile_scoring_policy
 from sqlalchemy import select
 import pytest
 
@@ -127,6 +128,63 @@ def test_manual_total_edit_keeps_policy_consistent(client):
         "criteria":rubric['criteria']})
     assert saved.status_code == 200, saved.text
     assert 'global_policy_unsupported' not in {item['code'] for item in workspace(client, rubric['id'])['structural_blockers']}
+
+
+def _policy_total(client, rubric_id):
+    with client.session_factory() as session:
+        rubric = session.get(models.Rubric, rubric_id)
+        version = session.scalar(select(models.RubricVersion).where(
+            models.RubricVersion.rubric_id == rubric_id,
+            models.RubricVersion.compilation_id == workspace(client, rubric_id)["compilation_id"]))
+        return compile_scoring_policy(version.global_policy, total_score=rubric.total_score).aggregation.total_score
+
+
+def test_ai_append_total_edit_keeps_policy_consistent(client):
+    # 导入规则不带原子编辑保存时走 prepare_atomic_ai_append，它同样要同步政策总分。
+    rubric = _import_rubric(client, name="合成追加改总分")["rubric"]
+    before = workspace(client, rubric["id"])
+    criteria = rubric["criteria"]
+    criteria[0]["max_score"] = 20
+    criteria[0]["scoring_mode"] = "deductive"
+    criteria[0]["deduction_rules_structured"] = [{"match": "缺少论证", "trigger": "缺少论证", "points": 2,
+        "reason": "合成缺失论证", "source": "ai_inferred", "generation_fingerprint": "f" * 64,
+        "draft_row_key": "METHOD::G1::0", "confirmed": True}]
+    saved = client.post(f"/api/rubrics/{rubric['id']}/recompile", json={
+        "supersedes_compilation_id": before["compilation_id"], "version": "v2", "total_score": 20,
+        "criteria": criteria})
+    assert saved.status_code == 200, saved.text
+    assert "global_policy_unsupported" not in {item["code"] for item in workspace(client, rubric["id"])["structural_blockers"]}
+    assert _policy_total(client, rubric["id"]) == 20
+
+
+@pytest.mark.parametrize("source", ["manual", "atomic_edit"])
+def test_recompile_heals_stale_policy_hash_without_total_change(client, source):
+    if source == "manual":
+        created = client.post("/api/rubrics", json={"name": "合成过期哈希", "version": "v1", "total_score": 10,
+            "criteria": [{"code": "T01", "name": "论证", "max_score": 10, "scoring_mode": "deductive",
+                          "deduction_rules_structured": [{"match": "缺少论证", "points": 2, "reason": "合成条款"}]}]})
+        assert created.status_code == 200, created.text
+        rubric = created.json()
+    else:
+        rubric = _import_rubric(client, name="合成过期哈希")["rubric"]
+    before = workspace(client, rubric["id"])
+    # 模拟修复前导入确认留下的草稿：总分对得上，policy_hash 却是旧总分算的。
+    with client.session_factory() as session:
+        version = session.scalar(select(models.RubricVersion).where(
+            models.RubricVersion.compilation_id == before["compilation_id"]))
+        version.global_policy = {**version.global_policy, "policy_hash": "0" * 64}
+        session.commit()
+    assert "global_policy_unsupported" in {item["code"] for item in workspace(client, rubric["id"])["structural_blockers"]}
+
+    payload = {"supersedes_compilation_id": before["compilation_id"], "version": "v2",
+               "description": "只改说明", "criteria": rubric["criteria"]}
+    if source == "atomic_edit":
+        payload["atomic_rules"] = [{"id": rule["id"], "content_token": rule["content_token"], "changes": {}}
+                                   for rule in before["rules"]]
+    saved = client.post(f"/api/rubrics/{rubric['id']}/recompile", json=payload)
+    assert saved.status_code == 200, saved.text
+    assert "global_policy_unsupported" not in {item["code"] for item in workspace(client, rubric["id"])["structural_blockers"]}
+    assert _policy_total(client, rubric["id"]) == 10
 
 
 def test_import_view_confirm_and_reload_is_audited_without_publication(client):

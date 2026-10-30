@@ -3,12 +3,14 @@
 from io import BytesIO
 
 from openpyxl import Workbook
+import pytest
 from sqlalchemy import func
 from sqlalchemy import select
 from datetime import timedelta
 from urllib.parse import quote
 
 from backend.app.db import models
+from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.tests import rubric_parse_fixtures as fx
 
 
@@ -101,6 +103,59 @@ def test_multiple_atomic_rules_for_one_criterion_produce_one_draft_item(client):
     )
     assert confirmed.status_code == 200, confirmed.text
     assert [item["code"] for item in confirmed.json()["rubric"]["criteria"]] == ["METHOD"]
+
+
+def _edited_total(client, created):
+    """人工把满分和评分项分值一起改掉（第 1 步“标准满分”）。"""
+
+    criteria = [dict(item, max_score=item["max_score"] + 5) for item in created["criteria"]]
+    updated = client.patch(
+        f"/api/rubrics/import-sessions/{created['id']}",
+        json={
+            "expected_state_version": created["state_version"],
+            "total_score": sum(item["max_score"] for item in criteria),
+            "criteria": criteria,
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    return updated.json()
+
+
+@pytest.mark.parametrize(
+    ("rules", "edit", "expected_total"),
+    [
+        # 解析时两行合计 20，去重成一个评分项后满分只剩 10。
+        (_two_rules_for_one_criterion, None, 10),
+        # 原表 20 + 15，人工各加 5 分。
+        (fx.simple_rules_xlsx, _edited_total, 45),
+    ],
+    ids=["deduplicated", "edited"],
+)
+def test_confirm_with_changed_total_recomputes_policy_hash(client, rules, edit, expected_total):
+    created = _create_session(client, rules()).json()
+    if edit is not None:
+        created = edit(client, created)
+    assert created["total_score"] == expected_total
+
+    confirmed = client.post(
+        f"/api/rubrics/import-sessions/{created['id']}/confirm",
+        json={"expected_state_version": created["state_version"], "idempotency_key": "changed-total"},
+    )
+
+    assert confirmed.status_code == 200, confirmed.text
+    rubric_id = confirmed.json()["rubric"]["id"]
+    review = client.get(f"/api/rubrics/{rubric_id}/review-workspace").json()
+    assert "global_policy_unsupported" not in {
+        item["code"] for item in review["structural_blockers"]
+    }
+    with client.session_factory() as session:
+        rubric = session.get(models.Rubric, rubric_id)
+        version = session.scalar(
+            select(models.RubricVersion).where(models.RubricVersion.rubric_id == rubric_id)
+        )
+        policy = compile_scoring_policy(version.global_policy, total_score=rubric.total_score)
+    assert policy.aggregation.total_score == expected_total
+    assert policy.policy_hash == version.global_policy["policy_hash"]
 
 
 def test_confirm_session_persists_once_and_is_idempotent(client):
