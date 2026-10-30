@@ -16,7 +16,7 @@ from hashlib import sha256
 from sqlalchemy.orm import Session
 
 from backend.app.db import models
-from backend.app.services.scoring.core.policy import compile_scoring_policy
+from backend.app.services.scoring.core.policy import retarget_policy_total
 
 
 def _decimal_text(value: object) -> str:
@@ -355,16 +355,12 @@ def prepared_for_confirmation(row: models.RubricImportSession) -> dict:
     )
     raw = graph["compilation"].setdefault("raw_parse_output", {})
     raw["criteria"] = deepcopy(criteria)
-    # 满分可能被人工改过，或因评分项去重而与解析时不同；只改总分不重算
-    # policy_hash，发布门禁会报 global_policy_unsupported。
-    policy = deepcopy(graph["version"].get("global_policy") or {})
-    policy.setdefault("aggregation", {})["total_score"] = str(row.total_score)
-    policy.pop("policy_hash", None)
+    # 满分可能被人工改过，或因评分项去重而与解析时不同。
     try:
-        graph["version"]["global_policy"] = compile_scoring_policy(
-            policy, total_score=row.total_score
+        graph["version"]["global_policy"] = retarget_policy_total(
+            graph["version"].get("global_policy") or {}, total_score=row.total_score
         ).to_mapping()
-    except (KeyError, TypeError, ValueError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError("满分与现有全局评分政策不兼容，请核对政策配置。") from exc
     return graph
 

@@ -591,6 +591,23 @@ def compile_scoring_policy(policy_input: Mapping[str, Any] | ScoringPolicy, *, t
     )
 
 
+def retarget_policy_total(policy_input: Mapping[str, Any], *, total_score: Any) -> ScoringPolicy:
+    """把现有 policy 改到新总分并重算 hash；改总分都走这里。
+
+    总分受 hash 绑定：只改 ``aggregation.total_score`` 而留着旧 hash，
+    ``compile_scoring_policy`` 会拒绝这份 policy，发布门禁报 ``global_policy_unsupported``。
+    """
+
+    total = _positive_decimal(total_score, "total_score")
+    policy = dict(_mapping(policy_input, "policy"))
+    policy["aggregation"] = {
+        **_mapping(_required(policy, "aggregation", "policy"), "aggregation"),
+        "total_score": _decimal_text(total),
+    }
+    policy.pop("policy_hash", None)
+    return compile_scoring_policy(policy, total_score=total)
+
+
 def validate_weight_configuration(criteria: Sequence[Any], *, total_score: Any) -> WeightValidation:
     """验证唯一两种 weight 语义，不做任何静默量化。"""
 
@@ -871,5 +888,6 @@ __all__ = [
     "build_corrected_thesis_policy",
     "compile_scoring_policy",
     "quantize_decimal",
+    "retarget_policy_total",
     "validate_weight_configuration",
 ]

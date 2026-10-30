@@ -579,3 +579,46 @@ def test_policy_rejects_ambiguous_or_non_replayable_behavior(mutation):
 
     with pytest.raises(ValueError):
         _compile_scoring_policy(payload, total_score=Decimal("100"))
+
+
+def test_retarget_policy_total_recomputes_hash_without_mutating_input():
+    original = _compile(mode="points", total_score="30").to_mapping()
+    snapshot = deepcopy(original)
+
+    retargeted = _policy_module.retarget_policy_total(original, total_score=20)
+
+    assert original == snapshot
+    assert retargeted.aggregation.total_score == Decimal("20")
+    assert retargeted.policy_hash != original["policy_hash"]
+    # 结果能原样通过门禁用的那次编译，等级阈值等其它字段不变。
+    mapping = retargeted.to_mapping()
+    assert _policy_module.compile_scoring_policy(mapping, total_score="20.00").policy_hash == retargeted.policy_hash
+    assert mapping["grade_scale"] == original["grade_scale"]
+
+
+def test_retarget_policy_total_replaces_a_stale_hash():
+    stale = {**_compile(mode="points", total_score="30").to_mapping(), "policy_hash": "0" * 64}
+    with pytest.raises(ValueError, match="policy_hash"):
+        _policy_module.compile_scoring_policy(stale, total_score="30")
+
+    healed = _policy_module.retarget_policy_total(stale, total_score="30")
+
+    assert healed.policy_hash == _compile(mode="points", total_score="30").policy_hash
+
+
+@pytest.mark.parametrize(
+    ("policy", "total_score"),
+    [
+        ({}, 20),
+        ({"aggregation": "points"}, 20),
+        ("not-a-policy", 20),
+        ("__valid__", 0),
+        ("__valid__", "abc"),
+    ],
+)
+def test_retarget_policy_total_rejects_invalid_input_with_value_error(policy, total_score):
+    if policy == "__valid__":
+        policy = _compile(mode="points", total_score="30").to_mapping()
+    with pytest.raises(ValueError):
+        _policy_module.retarget_policy_total(policy, total_score=total_score)
+
