@@ -1,11 +1,12 @@
 /**
  * 评分助手（对话评分助手方案）：薄客户端。
  *
- * 流程由后端的 LangGraph 图推进；这里只做四件事：
- * - 把用户输入、卡片上的“确定”、选择卡片的操作发给 `POST /assistant/conversations/{id}/runs`；
+ * 流程由后端的 LangGraph 图推进；这里只做五件事：
+ * - 把用户输入、工作区与卡片上的“确定”、选择卡片的操作发给 `POST /assistant/conversations/{id}/runs`；
  * - 渲染返回的消息与卡片（卡片只有类型与编号，分数与证据渲染时现取）；
  * - 做浏览器才能做的事：选文件、直传上传（`upload` store）、建评分标准导入草稿（`rubrics` store）；
- * - 轮询评分进度或评分标准状态，发现可能结束后通知图继续——是否真的结束由后端核对。
+ * - 轮询评分进度或评分标准状态，发现可能结束后通知图继续——是否真的结束由后端核对；
+ * - 记住工作区的界面状态：看哪个标签、哪一步、收起还是全宽（v2 界面改造方案 §3.1，不落库）。
  */
 
 import { defineStore } from "pinia";
@@ -20,6 +21,10 @@ import { useUploadStore } from "@/stores/upload.js";
 const JOB_POLL_MS = 3000;
 const RUBRIC_POLL_MS = 5000;
 const SETUP_DISMISSED_KEY = "pgs.assistant.setupDismissed";
+/** 老师在任务标签上操作后这么久之内，新结果不抢焦点，改为顶部提示（设计稿：60 秒）。 */
+const BUSY_MS = 60000;
+/** 结果卡片：出现时在工作区开一个结果标签（流程里的带 `step`，是任务标签的入口，不算）。 */
+const ARTIFACT_TYPES = new Set(["progress_snapshot", "job_progress", "paper_result", "overview", "review_list", "todo"]);
 
 function errorText(err, fallback = "操作失败") {
   if (err instanceof ApiError) {
@@ -50,6 +55,12 @@ export const useAssistantStore = defineStore("assistant", () => {
   const jobs = reactive({});
   /** 本页内存里的待评文件：流程线程 → File[]。刷新后失效，卡片会请用户重新选择。 */
   const filesByThread = reactive({});
+  /**
+   * 工作区的界面状态（不落库）：`mode` open / closed / focus（全宽）；`tab` 是 "task" 或结果卡片编号；
+   * `step` 是老师点开的步骤，null 表示跟着当前步骤；`toast` 是没抢焦点的新结果；`narrow` 由页面按窗口宽度设置。
+   */
+  const ws = reactive({ mode: "open", tab: "task", step: /** @type {string|null} */ (null),
+    toast: /** @type {string|null} */ (null), lastTaskEdit: 0, narrow: false });
   /**
    * 附件触发了“要放弃上一步吗”的确认卡片时，新流程还没开始、没有线程：文件按那张卡片暂存
    * （卡片编号 → File[]），老师在这张卡片上点“放弃并开始”后再归到新线程，点“继续”就丢掉。
@@ -106,6 +117,56 @@ export const useAssistantStore = defineStore("assistant", () => {
     pending.value = null;
     workspacePath.value = null;
     error.value = null;
+    resetWorkspace();
+  }
+
+  // --- 工作区 --------------------------------------------------------------------
+
+  function resetWorkspace() {
+    ws.tab = "task";
+    ws.step = null;
+    ws.toast = null;
+    ws.lastTaskEdit = 0;
+  }
+
+  /** 打开任务标签的某一步（null 为当前步骤）；工作区收起时展开。 */
+  function openStep(step = null) {
+    ws.tab = "task";
+    ws.step = step;
+    if (ws.toast === "task") ws.toast = null;
+    if (ws.mode === "closed") ws.mode = "open";
+  }
+
+  function openArtifact(id) {
+    ws.tab = id;
+    ws.toast = null;
+    if (ws.mode === "closed") ws.mode = "open";
+  }
+
+  /** 老师在任务标签上操作过（确认细则、选文件……）：一分钟内的新结果改为提示，不打断。 */
+  function noteTaskEdit() {
+    ws.lastTaskEdit = Date.now();
+  }
+
+  /**
+   * 新出现的结果卡片：打开它的标签，或在老师正忙时只提示一下；新流程开始（计划卡片）时打开任务标签。
+   * 窄屏工作区收着时不弹出来，盖住对话反而打断老师。
+   */
+  function revealArtifacts(incoming) {
+    const cards = [...(incoming || [])].reverse().flatMap((item) => [...(item.cards || [])].reverse());
+    if (cards.some((item) => item.type === "plan")) {
+      if (!(ws.mode === "closed" && ws.narrow)) openStep(null);
+      return;
+    }
+    const card = cards.find((item) => ARTIFACT_TYPES.has(item.type) && !item.step);
+    if (!card) return;
+    const busy = ws.mode !== "closed" && ws.tab === "task" && Date.now() - ws.lastTaskEdit < BUSY_MS;
+    if (busy) {
+      ws.toast = card.id;
+      return;
+    }
+    if (ws.mode === "closed" && ws.narrow) return;
+    openArtifact(card.id);
   }
 
   function applyConversation(next) {
@@ -130,6 +191,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     conversation.value = null;
     applyConversation(detail);
     if (!detail.focus?.workspace) workspacePath.value = null;
+    resetWorkspace();
     reactToPending();
     return detail;
   }
@@ -166,7 +228,9 @@ export const useAssistantStore = defineStore("assistant", () => {
     const target = conversation.value || (await create());
     stopWatchers();
     const result = await api.post(`/assistant/conversations/${target.id}/runs`, body);
+    const known = new Set(messages.value.map((item) => item.id));
     mergeMessages(result.messages);
+    revealArtifacts((result.messages || []).filter((item) => !known.has(item.id)));
     pending.value = result.pending || null;
     applyConversation(result.conversation);
     return result;
@@ -207,6 +271,21 @@ export const useAssistantStore = defineStore("assistant", () => {
 
   function select(cardId, value) {
     return guarded(() => run({ type: "select", card_id: cardId, value }), "操作失败");
+  }
+
+  /** 工作区底部与任务条上的“开始评分”“不评了”：恢复正在等确认的流程（与卡片上的按钮同一个动作）。 */
+  function answerConfirm(action) {
+    const current = pending.value;
+    if (current?.kind !== "confirm_start") return Promise.resolve(undefined);
+    noteTaskEdit();
+    return resume(current.card_id, { action });
+  }
+
+  /** 选文件之前换评分标准（v2 界面改造方案 §4.3）。 */
+  function changeRubric(rubricId) {
+    const current = pending.value;
+    if (current?.kind !== "pick_files") return Promise.resolve(undefined);
+    return resume(current.card_id, { action: "change_rubric", rubric_id: rubricId });
   }
 
   /** 卡片当前是否就是流程在等的那一张。 */
@@ -272,6 +351,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     const { accepted } = limitFiles(fileList);
     if (!accepted.length || !pending.value) return;
     filesByThread[pending.value.thread_id] = accepted;
+    noteTaskEdit();
     await resume(card.id, { count: accepted.length, names: accepted.map((file) => file.name) });
   }
 
@@ -410,9 +490,10 @@ export const useAssistantStore = defineStore("assistant", () => {
 
   return {
     settings, conversations, conversation, messages, pending, sending, uploading, error, setupOpen,
-    workspacePath, workspaceKey, jobs, filesByThread,
+    workspacePath, workspaceKey, jobs, filesByThread, ws,
     loadSettings, saveSettings, dismissSetup, loadConversations, open, create, remove, clearConversation,
     showWorkspace, send, resume, select, switchFlow, isPending, filesForPending, attachFiles, pickFiles, replaceFiles,
     importRubric, reportError, reset, stopWatchers,
+    openStep, openArtifact, noteTaskEdit, answerConfirm, changeRubric,
   };
 });

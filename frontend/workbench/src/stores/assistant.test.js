@@ -271,3 +271,76 @@ describe("助手模型设置", () => {
     expect(store.setupOpen).toBe(false);
   });
 });
+
+describe("工作区（v2 界面改造方案 §3）", () => {
+  const snapshot = (id) => message(id, "现在在第 4 步", [{ id: `snap-${id}`, type: "progress_snapshot", steps: [], as_of: "2026-10-29T02:00:00" }]);
+
+  it("新出现的结果卡片打开它的标签；老师一分钟内在任务标签上操作过，只在顶部提示", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    let next = "a1";
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [200, { messages: [snapshot(next)], pending: null, conversation: conversation() }],
+    });
+
+    await store.send("现在进展到哪了？", "query_progress");
+    expect(store.ws.tab).toBe("snap-a1");
+
+    store.openStep(null);
+    store.noteTaskEdit();
+    next = "a22";
+    await store.send("现在进展到哪了？", "query_progress");
+    expect(store.ws.tab).toBe("task");
+    expect(store.ws.toast).toBe("snap-a22");
+  });
+
+  it("流程里的结果卡片（带 step）是任务标签的入口，不另开标签；窄屏工作区收着时不弹出来", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.ws.mode = "closed";
+    store.ws.narrow = true;
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [200, {
+        messages: [message("a1", "评分完成。", [{ id: "o1", type: "overview", batch_id: "b1", step: "report" }]), snapshot("a22")],
+        pending: null, conversation: conversation(),
+      }],
+    });
+    await store.send("现在进展到哪了？", "query_progress");
+    expect(store.ws.mode).toBe("closed");
+    expect(store.ws.tab).toBe("task");
+  });
+
+  it("“开始评分”“换评分标准”只恢复正在等的那一步，别的等待不受影响", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [200, { messages: [], pending: null, conversation: conversation() }],
+    });
+
+    store.pending = { kind: "pick_files", card_id: "files-1" };
+    await store.answerConfirm("confirm");
+    expect(calls).toHaveLength(0);
+    await store.changeRubric("r2");
+    expect(calls[0].body).toEqual({ type: "resume", card_id: "files-1", value: { action: "change_rubric", rubric_id: "r2" } });
+
+    store.pending = { kind: "confirm_start", card_id: "start-1" };
+    await store.answerConfirm("confirm");
+    expect(calls[1].body).toEqual({ type: "resume", card_id: "start-1", value: { action: "confirm" } });
+  });
+});
+
+it("新流程开始（计划卡片）时打开工作区的任务标签", async () => {
+  setActivePinia(createPinia());
+  const store = useAssistantStore();
+  store.conversation = conversation();
+  store.ws.mode = "closed";
+  fakeServer({
+    "POST /assistant/conversations/c1/runs": () => [200, {
+      messages: [message("a1", "这次评分分 7 步完成", [{ id: "plan-1", type: "plan", status: "running", steps: [] }])],
+      pending: null, conversation: conversation(),
+    }],
+  });
+  await store.send("开始评分", "start_grading");
+  expect(store.ws.mode).toBe("open");
+  expect(store.ws.tab).toBe("task");
+});

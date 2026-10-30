@@ -90,19 +90,28 @@ def _upload(client, batch_id, names):
     return ids
 
 
-def _start_until_waiting_job(client, names=("张三.docx", "李四.docx")):
-    """走到“等评分结束”：开始评分 → 选文件 → 确认 → 上传。"""
+def _until_confirm(client, conversation_id, names=("张三.docx", "李四.docx"), *, attach=False):
+    """走到“确认开始”：开始评分（或带附件）→ 选文件 → 建任务并上传 → 预检。"""
 
-    conversation_id = _conversation(client)
-    body = _say(client, conversation_id, "开始评分")
-    assert body["pending"]["kind"] == "pick_files"
-    body = _resume(client, conversation_id, body["pending"], {"count": len(names), "names": list(names)})
-    assert body["pending"]["kind"] == "confirm_start"
-    body = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
+    if attach:
+        body = _run(client, conversation_id, type="message", attachments={"count": len(names), "names": list(names)})
+    else:
+        body = _say(client, conversation_id, "开始评分")
+        assert body["pending"]["kind"] == "pick_files"
+        body = _resume(client, conversation_id, body["pending"], {"count": len(names), "names": list(names)})
     assert body["pending"]["kind"] == "upload_papers"
     batch_id = body["pending"]["client"]["batch_id"]
-    paper_ids = _upload(client, batch_id, names)
-    body = _resume(client, conversation_id, body["pending"], {"paper_ids": paper_ids})
+    body = _resume(client, conversation_id, body["pending"], {"paper_ids": _upload(client, batch_id, names)})
+    assert body["pending"]["kind"] == "confirm_start", body
+    return batch_id, body
+
+
+def _start_until_waiting_job(client, names=("张三.docx", "李四.docx")):
+    """走到“等评分结束”：开始评分 → 选文件 → 上传与预检 → 确认。"""
+
+    conversation_id = _conversation(client)
+    batch_id, body = _until_confirm(client, conversation_id, names)
+    body = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
     assert body["pending"]["kind"] == "wait_job", body
     return conversation_id, batch_id, body
 
@@ -306,18 +315,30 @@ def test_full_grading_flow_from_files_to_report(client):
     assert body["pending"]["kind"] == "pick_files"
     assert body["pending"]["client"] == {"type": "pick_files", "max": 30}
 
-    body = _resume(client, conversation_id, body["pending"], {"count": 2, "names": ["张三.docx", "李四.docx"]})
-    confirm = _cards(body, "confirm_start")[0]
-    assert confirm["rubric_id"] == rubric_id and confirm["file_count"] == 2
-    assert rubric_name in body["messages"][-1]["text"]
-    assert body["pending"] == {**body["pending"], "kind": "confirm_start", "card_id": confirm["id"]}
+    pick = _cards(body, "pick_files")[0]
+    assert pick["step"] == "files" and pick["rubric_id"] == rubric_id and pick["rubric_name"] == rubric_name
+    assert body["conversation"]["focus"]["progress"] == {"status": "running", "step": 3, "total": 7}
 
-    body = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
+    # 选完文件就建草稿任务并上传，确认放在预检之后（v2 界面改造方案 §4.1）。
+    body = _resume(client, conversation_id, body["pending"], {"count": 2, "names": ["张三.docx", "李四.docx"]})
+    assert body["pending"]["kind"] == "upload_papers"
     batch_id = body["pending"]["client"]["batch_id"]
+    upload = _cards(body, "upload_papers")[0]
+    assert upload["step"] == "upload" and upload["batch_id"] == batch_id and upload["file_count"] == 2
+    assert body["pending"]["card_id"] == upload["id"]
     assert body["conversation"]["focus"]["workspace"] == "/tasks/new?batch=%s" % batch_id
 
     paper_ids = _upload(client, batch_id, ["张三.docx", "李四.docx"])
     body = _resume(client, conversation_id, body["pending"], {"paper_ids": paper_ids})
+    confirm = _cards(body, "confirm_start")[0]
+    assert confirm["step"] == "confirm" and confirm["batch_id"] == batch_id and confirm["rubric_id"] == rubric_id
+    assert (confirm["file_count"], confirm["ready_count"], confirm["removable"], confirm["warnings"]) == (2, 2, [], [])
+    assert rubric_name in body["messages"][-1]["text"] and "2 份已上传并完成预检" in body["messages"][-1]["text"]
+    assert body["pending"] == {**body["pending"], "kind": "confirm_start", "card_id": confirm["id"]}
+    assert _cards(body, "upload_papers")[0]["status"] == "done"
+
+    body = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
+    assert _cards(body, "job_progress")[0]["step"] == "scoring"
     job_id = body["pending"]["client"]["job_id"]
     assert body["pending"]["kind"] == "wait_job"
     assert body["conversation"]["focus"]["workspace"] == "/tasks/%s/run" % batch_id
@@ -328,7 +349,9 @@ def test_full_grading_flow_from_files_to_report(client):
     report = body["messages"][-1]
     assert report["text"].startswith("评分完成。共 2 份，已出分 2 份")
     assert [card["type"] for card in report["cards"]] == ["overview", "quick_actions"]
+    assert report["cards"][0]["step"] == "report"
     assert body["conversation"]["focus"]["workspace"] == "/batches/%s/grade" % batch_id
+    assert body["conversation"]["focus"]["progress"] == {"status": "done", "step": 7, "total": 7}
 
     with client.session_factory() as session:
         conversation = session.get(models.AssistantConversation, conversation_id)
@@ -338,14 +361,14 @@ def test_full_grading_flow_from_files_to_report(client):
             models.GradingBatch.id == batch_id)) == 1
 
 
-def test_attachments_go_straight_to_the_key_confirmation(client):
+def test_attachments_go_straight_to_upload(client):
     _seed_published_rubric(client)
     conversation_id = _conversation(client)
     body = _run(client, conversation_id, type="message", attachments={"count": 3, "names": ["a.docx", "b.docx", "c.docx"]})
-    assert body["pending"]["kind"] == "confirm_start"
+    assert body["pending"]["kind"] == "upload_papers"
     # 前端靠线程编号把内存里的文件归到这次流程，响应里不能丢。
     assert body["pending"]["thread_id"] == "%s:1" % conversation_id
-    assert _cards(body, "confirm_start")[0]["file_count"] == 3
+    assert _cards(body, "upload_papers")[0]["file_count"] == 3
     assert body["messages"][0]["text"] == "评分这 3 份文件"
 
 
@@ -365,7 +388,6 @@ def test_uploaded_papers_must_belong_to_the_batch(client):
     conversation_id = _conversation(client)
     body = _say(client, conversation_id, "开始评分")
     body = _resume(client, conversation_id, body["pending"], {"count": 1, "names": ["外人.docx"]})
-    body = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
     body = _resume(client, conversation_id, body["pending"], {"paper_ids": foreign})
     assert body["pending"] is None
     assert "校验失败" in body["messages"][-1]["text"]
@@ -400,9 +422,14 @@ def test_queries_while_waiting_do_not_disturb_the_flow(client):
     conversation_id, batch_id, body = _start_until_waiting_job(client)
     pending = body["pending"]
 
+    # 流程里问进展：回进展快照（提问时的计划副本与评分计数），不打断等待（v2 界面改造方案 §4.6）。
     progress = _say(client, conversation_id, "评分进度")
     assert progress["pending"] == pending
-    assert _cards(progress, "job_progress")[0]["status"] == "info"
+    snapshot = _cards(progress, "progress_snapshot")[0]
+    assert snapshot["plan_status"] == "running" and snapshot["batch_id"] == batch_id
+    assert snapshot["job"]["total"] == 2 and snapshot["as_of"]
+    assert {step["key"]: step["status"] for step in snapshot["steps"]}["scoring"] == "current"
+    assert progress["messages"][-1]["text"].startswith("现在在第 6 步「评分」，已评完 0/2 份")
 
     another = _say(client, conversation_id, "开始评分")
     assert another["pending"] == pending
@@ -412,9 +439,8 @@ def test_queries_while_waiting_do_not_disturb_the_flow(client):
 def test_starting_another_flow_asks_before_abandoning_the_waiting_one(client):
     _seed_published_rubric(client)
     conversation_id = _conversation(client)
-    first = _run(client, conversation_id, type="message", attachments={"count": 1, "names": ["a.docx"]})
+    _batch_id, first = _until_confirm(client, conversation_id, ["a.docx"], attach=True)
     waiting = first["pending"]
-    assert waiting["kind"] == "confirm_start"
 
     # 打断保护（Agent 化方案 §17）：不再悄悄放弃，先问一句；旧流程原样等着。
     asked = _say(client, conversation_id, "上传我的评分规则和模板")
@@ -457,7 +483,7 @@ def test_saying_start_again_while_picking_files_points_back_to_the_card(client):
 def test_switch_card_expires_when_the_waiting_flow_already_ended(client):
     _seed_published_rubric(client)
     conversation_id = _conversation(client)
-    first = _run(client, conversation_id, type="message", attachments={"count": 1, "names": ["a.docx"]})
+    _batch_id, first = _until_confirm(client, conversation_id, ["a.docx"], attach=True)
     switch = _cards(_say(client, conversation_id, "开始评分"), "confirm_switch_flow")[0]
     ended = _resume(client, conversation_id, first["pending"], {"action": "cancel"})
     assert ended["pending"] is None
@@ -627,13 +653,16 @@ def test_import_flow_waits_for_publication_then_asks_for_files(client):
         db.commit()
     published = _resume(client, conversation_id, still["pending"], {"action": "check"})
     assert published["pending"]["kind"] == "pick_files"
-    assert "已发布" in published["messages"][-2]["text"]
+    # 发布是老师在工作区做的：记成事件消息，对话里显示为分隔线（§4.4）。
+    event = published["messages"][-2]
+    assert event["intent"] == "event" and event["text"].startswith("你发布了《") and not event["cards"]
+    assert _cards(published, "pick_files")[0]["rubric_id"] == rubric_id
     card = _plans(client, conversation_id)[0]
     assert card["flow"] == "import"
     assert [step["key"] for step in card["steps"]] == [
-        "import", "publish", "model", "files", "confirm", "upload", "scoring", "report"]
+        "import", "publish", "model", "files", "upload", "confirm", "scoring", "report"]
     assert _steps(card) == {"import": "done", "publish": "done", "model": "done", "files": "current",
-                            "confirm": "todo", "upload": "todo", "scoring": "todo", "report": "todo"}
+                            "upload": "todo", "confirm": "todo", "scoring": "todo", "report": "todo"}
     assert _detail(card, "import") == "《我的标准》"
 
 
@@ -717,7 +746,7 @@ def test_import_flow_checks_the_model_before_asking_for_files(client, monkeypatc
     monkeypatch.setattr(flow, "_scoring_model_label", lambda ctx: None)
     published = _resume(client, conversation_id, body["pending"], {"action": "check"})
     assert published["pending"] is None and not _cards(published, "pick_files")
-    assert "已发布" in published["messages"][-2]["text"]
+    assert published["messages"][-2]["intent"] == "event"
     assert "还没有可用的评分模型" in published["messages"][-1]["text"]
     card = _plans(client, conversation_id)[0]
     assert card["status"] == "failed" and _steps(card)["model"] == "failed"
@@ -797,25 +826,29 @@ def test_plan_card_lists_the_grading_steps_and_follows_the_flow(client):
     body = _say(client, conversation_id, "开始评分")
     card = _cards(body, "plan")[0]
     assert card["flow"] == "grading" and card["status"] == "running"
-    assert [step["key"] for step in card["steps"]] == ["rubric", "model", "files", "confirm", "upload", "scoring", "report"]
-    assert _steps(card) == {"rubric": "done", "model": "done", "files": "current", "confirm": "todo",
-                            "upload": "todo", "scoring": "todo", "report": "todo"}
-    assert "确认时可以换" in _detail(card, "rubric") and _detail(card, "model") == "开发模式模型"
+    assert [step["key"] for step in card["steps"]] == ["rubric", "model", "files", "upload", "confirm", "scoring", "report"]
+    assert _steps(card) == {"rubric": "done", "model": "done", "files": "current", "upload": "todo",
+                            "confirm": "todo", "scoring": "todo", "report": "todo"}
+    assert "选文件前可以换" in _detail(card, "rubric") and _detail(card, "model") == "开发模式模型"
+    assert body["messages"][-2]["text"] == "这次评分分 7 步完成，进度显示在右侧工作区顶部。"
     # 计划卡片是流程的第一条消息，选文件卡片在它后面。
     assert _cards(body, "pick_files") and body["messages"][-2]["cards"][0]["type"] == "plan"
 
     picked = _resume(client, conversation_id, body["pending"], {"count": 2, "names": ["张三.docx", "李四.docx"]})
     card = _cards(picked, "plan")[0]
     assert _steps(card)["files"] == "done" and _detail(card, "files") == "2 份"
+    assert _steps(card)["upload"] == "current"
+
+    batch_id = picked["pending"]["client"]["batch_id"]
+    checked = _resume(client, conversation_id, picked["pending"],
+                      {"paper_ids": _upload(client, batch_id, ["张三.docx", "李四.docx"])})
+    card = _cards(checked, "plan")[0]
+    assert _steps(card)["upload"] == "done" and _detail(card, "upload") == "2 份可以评分"
     assert _steps(card)["confirm"] == "current"
 
-    confirmed = _resume(client, conversation_id, picked["pending"], {"action": "confirm"})
-    assert _steps(_cards(confirmed, "plan")[0])["upload"] == "current"
-    batch_id = confirmed["pending"]["client"]["batch_id"]
-    uploaded = _resume(client, conversation_id, confirmed["pending"],
-                       {"paper_ids": _upload(client, batch_id, ["张三.docx", "李四.docx"])})
+    uploaded = _resume(client, conversation_id, checked["pending"], {"action": "confirm"})
     card = _cards(uploaded, "plan")[0]
-    assert _steps(card)["upload"] == "done" and _detail(card, "upload") == "2 份可以评分"
+    assert _steps(card)["confirm"] == "done" and _detail(card, "confirm") == "评 2 份"
     assert _steps(card)["scoring"] == "current" and _detail(card, "scoring") == "共 2 份"
     # 等待中的每一步都带着计划卡片的编号（只存在会话里，接口不返回），运行器放弃、作废流程时据此更新卡片。
     with client.session_factory() as session:
@@ -835,11 +868,17 @@ def test_plan_card_starts_with_the_files_done_when_they_came_with_the_request(cl
     body = _run(client, conversation_id, type="message", attachments={"count": 1, "names": ["a.docx"]})
     card = _cards(body, "plan")[0]
     assert _steps(card)["files"] == "done" and _detail(card, "files") == "1 份"
-    assert _steps(card)["confirm"] == "current"
+    assert _steps(card)["upload"] == "current"
 
+    batch_id = body["pending"]["client"]["batch_id"]
+    body = _resume(client, conversation_id, body["pending"], {"paper_ids": _upload(client, batch_id, ["a.docx"])})
     cancelled = _resume(client, conversation_id, body["pending"], {"action": "cancel"})
     card = _cards(cancelled, "plan")[0]
     assert card["status"] == "dismissed" and _steps(card)["confirm"] == "skipped"
+    # 放弃时任务留作草稿，回复写明任务名（§4.1）。
+    assert "任务已保存为草稿《助手评分" in cancelled["messages"][-1]["text"]
+    with client.session_factory() as session:
+        assert session.get(models.GradingBatch, batch_id) is not None
 
 
 def test_plan_card_is_dismissed_when_switching_flows_and_expires_with_the_wait(client):
@@ -870,10 +909,10 @@ def test_plan_card_fails_at_the_step_that_stopped(client, monkeypatch):
     conversation_id = _conversation(client)
     body = _say(client, conversation_id, "开始评分")
     body = _resume(client, conversation_id, body["pending"], {"count": 1, "names": ["张三.docx"]})
-    body = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
     paper_ids = _upload(client, body["pending"]["client"]["batch_id"], ["张三.docx"])
     ended = _resume(client, conversation_id, body["pending"], {"paper_ids": paper_ids})
     assert ended["pending"] is None
+    assert _cards(ended, "upload_papers")[0]["status"] == "failed"
     card = _cards(ended, "plan")[0]
     assert card["status"] == "failed"
     assert _steps(card)["upload"] == "failed" and _detail(card, "upload") == "1 份文件还没解析完"
@@ -890,7 +929,6 @@ def test_plan_card_left_running_by_an_unhandled_ending_is_marked_ended(client, m
     conversation_id = _conversation(client)
     body = _say(client, conversation_id, "开始评分")
     body = _resume(client, conversation_id, body["pending"], {"count": 1, "names": ["张三.docx"]})
-    body = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
     paper_ids = _upload(client, body["pending"]["client"]["batch_id"], ["张三.docx"])
     ended = _resume(client, conversation_id, body["pending"], {"paper_ids": paper_ids})
     assert ended["pending"] is None
@@ -902,6 +940,111 @@ def test_watching_a_retry_has_no_plan_card(client):
     _seed_published_rubric(client)
     conversation_id, _batch_id, body = _start_until_waiting_job(client)
     assert len(_plans(client, conversation_id)) == 1  # 只有开始评分那一张
+
+
+# --- v2 界面改造（docs/评分助手v2界面改造方案.md） -------------------------------------------
+
+def test_rubric_can_be_changed_only_while_picking_files(client):
+    rubric_id, rubric_name = _seed_published_rubric(client)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "开始评分")
+    waiting = body["pending"]
+
+    unknown = _resume(client, conversation_id, waiting, {"action": "change_rubric", "rubric_id": "no-such-rubric"})
+    assert unknown["pending"]["card_id"] == waiting["card_id"] and "不可用" in unknown["messages"][-1]["text"]
+
+    changed = _resume(client, conversation_id, waiting, {"action": "change_rubric", "rubric_id": rubric_id})
+    assert changed["pending"]["kind"] == "pick_files" and changed["pending"]["card_id"] == waiting["card_id"]
+    pick = _cards(changed, "pick_files")[0]
+    assert pick["rubric_id"] == rubric_id and pick["rubric_preset"] is True
+    assert _detail(_cards(changed, "plan")[0], "rubric") == "《%s》%s" % (rubric_name, pick["rubric_version"])
+
+    missing = client.post(f"/api/assistant/conversations/{conversation_id}/runs",
+                          json={"type": "resume", "card_id": waiting["card_id"], "value": {"action": "change_rubric"}})
+    assert missing.status_code == 422
+    # 上传之后任务已经锁定评分标准：确认那一步只剩开始或放弃。
+    _batch_id, body = _until_confirm(client, _conversation(client), ["a.docx"])
+    late = client.post(f"/api/assistant/conversations/{body['conversation']['id']}/runs", json={
+        "type": "resume", "card_id": body["pending"]["card_id"],
+        "value": {"action": "change_rubric", "rubric_id": rubric_id}})
+    assert late.status_code == 422
+
+
+def test_unscorable_files_are_decided_at_the_confirmation(client):
+    _seed_published_rubric(client)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "开始评分")
+    body = _resume(client, conversation_id, body["pending"], {"count": 2, "names": ["张三.docx", "坏.docx"]})
+    batch_id = body["pending"]["client"]["batch_id"]
+    good = _upload(client, batch_id, ["张三.docx"])
+    bad = client.post("/api/papers/upload", data={"batch_id": batch_id},
+                      files={"file": ("坏.docx", b"not a docx at all", DOCX)})
+    assert bad.status_code == 200, bad.text
+    body = _resume(client, conversation_id, body["pending"], {"paper_ids": [*good, bad.json()["id"]]})
+
+    confirm = _cards(body, "confirm_start")[0]
+    assert confirm["file_count"] == 2 and confirm["ready_count"] == 1
+    assert [row["file_name"] for row in confirm["removable"]] == ["坏.docx"]
+    assert "1 份无法评分，开始时会移除" in body["messages"][-1]["text"]
+    assert not _cards(body, "blocked_files")  # 不再单独问一次
+
+    started = _resume(client, conversation_id, body["pending"], {"action": "confirm"})
+    assert started["pending"]["kind"] == "wait_job"
+    assert _detail(_cards(started, "plan")[0], "confirm") == "移除 1 份，评 1 份"
+    with client.session_factory() as session:
+        assert session.get(models.Paper, bad.json()["id"]) is None
+        job = session.get(models.BatchScoringJob, started["pending"]["client"]["job_id"])
+        assert [item.paper_id for item in job.items] == good
+
+
+def test_next_steps_chip_answers_with_a_todo_card_without_rules_or_model(client, monkeypatch):
+    _seed_published_rubric(client)
+    monkeypatch.setattr(intents, "match_rules", lambda text: pytest.fail("规则不该被调用"))
+    conversation_id = _conversation(client)
+    idle = _say(client, conversation_id, "接下来我要做什么？", quick_action="next_steps")
+    assert "现在没有进行中的评分" in idle["messages"][-1]["text"]
+    assert _cards(idle, "quick_actions")[0]["actions"][0]["intent"] == "start_grading"
+
+    _say(client, conversation_id, "开始评分", quick_action="start_grading")
+    answered = _say(client, conversation_id, "接下来我要做什么？", quick_action="next_steps")
+    todo = _cards(answered, "todo")[0]
+    assert todo["plan_card_id"] == _plans(client, conversation_id)[0]["id"]
+    assert answered["messages"][-1]["text"].endswith("现在先处理第 3 步「选择待评分文件」。")
+    assert answered["messages"][-1]["intent"] == "next_steps"
+    # 只从工作区的建议问题发出，不进默认快捷按钮（Agent 的 next_steps 取值也就不变）。
+    assert "next_steps" not in [action["intent"] for action in _cards(idle, "quick_actions")[0]["actions"]]
+
+
+def test_event_messages_stay_out_of_the_agent_context():
+    from backend.app.services.assistant.agent.context import turn_groups
+
+    stamp = models.utcnow()
+    user = models.AssistantMessage(id="u1", role="user", text="开始评分", cards=[], created_at=stamp)
+    event = models.AssistantMessage(id="e1", role="assistant", text="你发布了《标准》v1", cards=[], intent="event",
+                                    created_at=stamp + timedelta(seconds=1))
+    reply = models.AssistantMessage(id="a1", role="assistant", text="请选择文件", cards=[],
+                                    created_at=stamp + timedelta(seconds=2))
+    groups = turn_groups([user, event, reply])
+    assert [message.id for message in groups[0].assistants] == ["a1"]
+
+
+def test_batch_summary_lists_why_a_paper_needs_review(client):
+    _seed_published_rubric(client)
+    _conversation_id, batch_id, body = _start_until_waiting_job(client, names=("张三.docx",))
+    _run_job(client, body["pending"]["client"]["job_id"])
+    with client.session_factory() as session:
+        run = session.scalar(select(models.ScoringRun).join(models.Paper).where(models.Paper.batch_id == batch_id))
+        run.need_manual_review = True
+        items = sorted(run.items, key=lambda item: item.id)
+        for item in items:  # Mock 评分自己也会标几项复核，先清掉
+            item.need_manual_review = False
+        items[0].need_manual_review = True
+        items[0].review_reason = "证据不足"
+        session.commit()
+        criterion = session.get(models.RubricCriterion, items[0].criterion_id)
+        expected = "%s %s：证据不足" % (criterion.code, criterion.name)
+    papers = client.get(f"/api/batches/{batch_id}/summary").json()["papers"]
+    assert papers[0]["latest_review_reasons"] == [expected]
 
 
 # --- 鉴权、归属与助手模型 -------------------------------------------------------------

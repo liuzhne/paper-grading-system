@@ -93,8 +93,11 @@ class AssistantAttachments(BaseModel):
     names: list[str] = Field(default_factory=list, max_length=MAX_FILES)
 
 
-#: 快捷按钮的键，与 `services/assistant/views.QUICK_ACTIONS`、前端 `lib/assistant-flow.js` 的 QUICK_ACTIONS 同名。
-QuickAction = Literal["start_grading", "import_rubric", "query_progress", "query_paper", "query_review", "query_overview"]
+#: 快捷按钮的键，与 `services/assistant/views.QUICK_ACTIONS` / `CHIP_ACTIONS`、前端 `lib/assistant-flow.js` 的
+#: QUICK_ACTIONS / CHIP_ACTIONS 同名。
+QuickAction = Literal[
+    "start_grading", "import_rubric", "query_progress", "query_paper", "query_review", "query_overview", "next_steps",
+]
 
 
 class AssistantRunCreate(BaseModel):

@@ -357,8 +357,6 @@ def test_a_task_name_matching_several_or_none_comes_back_as_choices(client, agen
 
 def test_start_grading_finds_the_rubric_by_name_or_document_type(client, agent):  # noqa: F811
     from backend.app.services.assistant.views import document_type_label
-    from backend.app.tests.test_assistant import _resume
-
     rubric_id, rubric_name = _seed_published_rubric(client)
     with client.session_factory() as session:
         kind = document_type_label(session.get(models.Rubric, rubric_id).business_profile_key)
@@ -367,9 +365,8 @@ def test_start_grading_finds_the_rubric_by_name_or_document_type(client, agent):
         conversation_id = _conversation(client)
         body = _say(client, conversation_id, "用%s帮我评一下" % said)
         assert body["pending"]["kind"] == "pick_files", said
-        body = _resume(client, conversation_id, body["pending"], {"count": 1, "names": ["张三.docx"]})
-        card = _cards(body, "confirm_start")[0]
-        assert card["rubric_id"] == rubric_id and "可以换" not in _texts(body)[-1]  # 是老师点名的标准，不是默认的
+        card = _cards(body, "pick_files")[0]
+        assert card["rubric_id"] == rubric_id and card["rubric_preset"] is True  # 是老师点名的标准，不是默认的
 
     model = agent(step(("action_start_grading", {"rubric_name": "不存在的标准"})), reply("没有这份标准，用哪一份？"))
     body = _say(client, _conversation(client), "用不存在的标准帮我评一下")
