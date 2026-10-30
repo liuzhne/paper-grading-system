@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无模块变化：`_draft_deduction_rules_once` 的精简 Schema 退路多一个触发条件（`llm/errors.rejected_without_reason`）；接口、数据库、起草版本不变。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash（#70 复审） | `scoring/core/policy` 新增 `retarget_policy_total`；导入确认、原子重编译与路由的手动重编译命令共用，无调用链改向。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无模块变化：`import_sessions.prepared_for_confirmation` 写回满分时重新编译政策；`_manual_recompile_command` 总分不变也重算。 |
 | 2026-10-30 | 评分细则排除落库 | 新增 `services/rubrics/rule_status.py`（是否参与评分的唯一口径）与 `exclude_rule` / `restore_rule` 两个接口；门禁、版本内容哈希、评分快照只算参与评分的细则；`review_carry` 与克隆沿用排除；`rule-coverage` 加 `rejected_count`；`RuleCard` 自带排除 / 恢复。契约版本 → `2026-10-30.rule-exclusion`。无迁移。 |
@@ -1000,7 +1001,7 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 
 `_draft_deduction_rules_once` 的模型调用改为最多两步：
 1. 照常带完整的有界 Schema（`_draft_output_schema`：字符串长度、分值范围、来源枚举与去重、组数和条数上限）。
-2. 只有厂商以 400 拒绝、说明里有 “too many states”（`llm/errors.schema_too_complex`，目前只见于 Gemini 的结构化输出）时，同一批、同一提示词立即改用 `_lean_draft_output_schema` 再发一次。精简版只保留结构、必填字段、`severity`/`repeat_policy`/`source` 三个短枚举，以及组数（≤2）、条数（≤3）上限。
+2. 只有厂商以 400 拒绝、说明里有 “too many states”（`llm/errors.schema_too_complex`，目前只见于 Gemini 的结构化输出），或 2026-10-30 起只有通用说明 “Request contains an invalid argument”（`llm/errors.rejected_without_reason`）时，同一批、同一提示词立即改用 `_lean_draft_output_schema` 再发一次。精简版只保留结构、必填字段、`severity`/`repeat_policy`/`source` 三个短枚举，以及组数（≤2）、条数（≤3）上限。
 
 去掉的约束由 `validate_ai_rule_draft` 在返回后按同一套上限检查，业务规则不放宽：文字长度上限、扣分 0.01～满分（`AI_RULE_DRAFT_MIN_POINTS`），来源先经 `_normalize_source_refs` 规整、去重，再由 `_source_ref_exists` 在输入里逐级查找——`/input_analysis/…` 与评分项字段下的子路径必须真实存在，不再按前缀放行。精简版仍被拒时只失败一次，不再继续降级。格式修正（repair）的那次执行同样先发完整版。
 

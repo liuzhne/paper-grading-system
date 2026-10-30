@@ -25,6 +25,7 @@ import httpx
 from backend.app.core.config import settings
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.llm.errors import project_provider_error
+from backend.app.services.llm.errors import rejected_without_reason
 from backend.app.services.llm.errors import schema_too_complex
 from backend.app.services.llm.factory import scorer_concurrency
 from backend.app.services.llm.rate_limit import CircuitOpenError
@@ -111,7 +112,7 @@ def _draft_output_schema(*, maximum: float, allowed_source_refs: list[str]):
 
 
 def _lean_draft_output_schema():
-    """Gemini 报“约束状态太多”时的退路：只留结构、必填字段、短枚举和组数/条数上限。
+    """Gemini 拒绝完整 Schema 时的退路：只留结构、必填字段、短枚举和组数/条数上限。
 
     去掉的字符串长度、数值范围、来源枚举，``validate_ai_rule_draft`` 在返回后按同一套
     上限检查：长度上限、0.01～满分、来源必须在输入里真实存在（先经 ``_normalize_source_refs``
@@ -599,6 +600,25 @@ def _rejection_error(
     )
 
 
+def _lean_schema_reason(error) -> str | None:
+    """这次拒绝值得换精简 Schema 再发一次时返回日志用的原因，否则返回 None。"""
+
+    if schema_too_complex(error):
+        return "schema_too_complex"
+    if rejected_without_reason(error):
+        return "rejected_without_reason"
+    return None
+
+
+def _source_ref_shape(refs: list[str]) -> str:
+    """完整 Schema 的来源枚举长什么样，供日志判断厂商的拒绝与枚举是否有关。不记值本身（含工作表名）。"""
+
+    kinds = sorted({ref.partition(":")[0] for ref in refs if ":" in ref and not ref.startswith("/")})
+    return "enum_values=%s longest_ref=%s ledger_kinds=%s" % (
+        len(refs), max((len(ref) for ref in refs), default=0), ",".join(kinds) or "-",
+    )
+
+
 def _draft_timeout_seconds(scorer) -> float:
     """与适配器的取值一致：连接显式超时优先，否则不低于起草缺省等待。"""
 
@@ -703,13 +723,15 @@ def _draft_deduction_rules_once(
             try:
                 raw = complete(schema)
             except ProviderCallError as exc:
-                if not schema_too_complex(exc.error):
+                reason = _lean_schema_reason(exc.error)
+                if reason is None:
                     raise
-                # 厂商编译不了这份 Schema（与内容无关，原样重发必然再失败）：同一批立即改用
-                # 精简 Schema 再发一次。这一次仍失败就按请求被拒处理，不再继续降级。
+                # 厂商编译不了这份 Schema，或拒绝了又不说原因（原样重发都没有意义）：同一批
+                # 立即改用精简 Schema 再发一次。这一次仍失败就按请求被拒处理，不再继续降级。
                 logger.warning(
-                    "rubric_ai_draft_schema_fallback batch=%s/%s reason=schema_too_complex",
+                    "rubric_ai_draft_schema_fallback batch=%s/%s reason=%s %s",
                     analysis.get("batch_index", 1), analysis.get("batch_count", 1),
+                    reason, _source_ref_shape(allowed_refs),
                 )
                 output_schema = "lean"
                 raw = complete(_lean_draft_output_schema())

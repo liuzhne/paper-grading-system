@@ -229,6 +229,18 @@ def schema_too_complex(error: ProviderError) -> bool:
     return error.http_status == 400 and any(marker in message for marker in _SCHEMA_TOO_COMPLEX_MARKERS)
 
 
+# 同样是 Gemini 的 400 INVALID_ARGUMENT，但说明只有这一句通用文字，不说哪里不对：可能是输出
+# Schema（2026-10-30 生产上只差一个来源枚举值的两批，一批通过、一批被拒），也可能是别的参数。
+_REJECTED_WITHOUT_REASON_MARKERS = ("request contains an invalid argument",)
+
+
+def rejected_without_reason(error: ProviderError) -> bool:
+    """厂商拒绝了请求但没说原因；是否与 Schema 有关，要换一份 Schema 才知道。"""
+
+    message = str(error.message or "").casefold()
+    return error.http_status == 400 and any(marker in message for marker in _REJECTED_WITHOUT_REASON_MARKERS)
+
+
 def raise_provider_call_error(provider: str, exc: BaseException):
     if isinstance(exc, ProviderCallError):
         raise exc
