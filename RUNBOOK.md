@@ -1217,6 +1217,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无新命令；排错：导入的评分标准发布被 `global_policy_unsupported` 挡住（报错指向政策，真正原因是改了总分没重算 hash）。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询（#67 复审） | 排错条目补充：进保存点前先 `db.flush()`，写入失败照常抛出。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询 | 无新命令；排错：刷新后老师刚发的消息不见了。 |
 | 2026-10-28 | 评分助手计划卡片 | 无新命令；排错：计划卡片显示“已结束”。 |
@@ -2564,3 +2565,19 @@ uv run python -m backend.app.scripts.verify_postgres_ops
 发布与回滚：无新迁移，head 保持 `0038_assistant_conversations`。先更新初始化入口，再接收真实凭据并运行；随后按 §9.4 核对数据库、私有桶及运行角色，再开启部署。若回滚业务版本，保留安全初始化脚本用于运维，不恢复会输出凭据的旧初始化入口；无需数据库降级或业务数据回滚。
 
 维护记录：2026-10-13 · 初始化连接串编码与凭据保护：新增安全错误诊断、隐藏输入、合成凭据回归与无迁移发布/回滚步骤。
+
+### 2026-10-30 导入的评分标准发布被 `global_policy_unsupported` 挡住
+
+症状：导入会话刚确认，第 3 步或 `/api/rubrics/{id}/review-workspace` 的 `structural_blockers` 里就有 `global_policy_unsupported`（`field_path` 为 `/rubric_version/global_policy`）；在第 1 步把“标准满分”改了又改回原值再保存，阻断仍在（前端判断没有修改，不发 `recompile`）。
+
+- 报错指向：全局评分政策本身（schema 或取值不受支持）。
+- 真正原因：重编译或导入确认路径改了政策的总分，却没有按新总分重算 `policy_hash`。`compile_scoring_policy` 先比总分、再比 hash，hash 对不上报 `policy_hash does not match policy snapshot`，门禁同样归成这一条。2026-10-30 之前，导入会话确认（`import_sessions.prepared_for_confirmation`，`/{id}/reupload-confirm` 也用它）只改 `aggregation.total_score`；满分与解析时不同就会触发：人工改过满分、小数换算，或同一评分项下多行被折叠（例如两行各 10 分折成一个 10 分的评分项，解析总分 20、确认满分 10）。`prepare_atomic_ai_append` 不是原因：它先走 `prepare_atomic_recompile`，每次都重算。
+- 核对：在一次性 Python 里读出该草稿的 `RubricVersion.global_policy`，用 `compile_scoring_policy(policy, total_score=rubric.total_score)` 看异常文字——`policy_hash does not match policy snapshot` 就是这个坑；`policy total_score does not match rubric total_score` 是总分本身没同步。
+- 处理：修复上线后新导入的草稿不再出现。修复前已生成的草稿，在第 1 步任改一处（如说明）再保存，`recompile` 会按当前总分重算政策；三条重编译路径（原子编辑、AI 追加、只有手动规则）都会重算。不要直接改数据库里的 `policy_hash`，也不要放宽门禁。
+- 新增排错文案：确认时政策无法按新满分编译返回 422“满分与现有全局评分政策不兼容”；保存时返回 422“总分与现有全局评分政策不兼容”（原为“总分修改……”，现在总分不变也会重算）。
+
+验证：`.venv/bin/python -m pytest -q backend/app/tests/test_rubric_import_sessions.py backend/app/tests/test_rubric_review_workspace.py`（覆盖折叠与人工改满分两种确认、AI 追加改总分、手动与原子编辑两条路径的过期 hash 自愈），再跑全套。
+
+发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；不改前端与评分逻辑，不需要 bump `PROMPT_VERSION`。回滚只回退 `import_sessions.py` 与 `_manual_recompile_command`，回滚后导入确认又会留下 hash 过期的草稿，按上面的“处理”保存一次恢复。
+
+维护记录：2026-10-30 · 导入确认与重编译同步政策总分的 hash：新增排错条目（报错指向政策、真正原因是改了总分没重算 hash）。

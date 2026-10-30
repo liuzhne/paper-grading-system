@@ -561,6 +561,8 @@ Alembic head `0030_platform_llm_config` 不变；用户已明确批准本次接�
 内容摘要应用用户编辑；在持久化锁内再次核对摘要，生成新草稿后重新确认。规则编号和
 来源原文保留，数据库行 ID 按新版本重建。总分修改仅同步 policy 的总分及 hash，
 不自动调整等级阈值、舍入或评分算法；普通评分项编辑同样同步政策总分及 hash。AI 指纹建议走追加合并，不能替换导入规则。
+三条重编译路径都按新总分重算政策 hash：原子编辑与 AI 追加（`prepare_atomic_ai_append` 内部先走 `prepare_atomic_recompile`）每次都重算；
+只有手动规则时走 `prepare_manual_json_recompile`，政策来自路由的 `_manual_recompile_command`，2026-10-30 起总分不变也重算，前一版 hash 过期的草稿保存一次即恢复。
 审核投影补充既有发布校验器的结构阻断，避免页面在规则配置矛盾时允许提交审核。
 
 ### 2026-09-14 OpenRouter 规则起草错误处理
@@ -589,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无模块变化：`import_sessions.prepared_for_confirmation` 写回满分时重新编译政策；`_manual_recompile_command` 总分不变也重算。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询（#67 复审） | 无模块变化：`platform_available` 进保存点前先写库。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询 | 无模块变化：`assistant/model.platform_available` 改用保存点，不再回滚整个会话。 |
 | 2026-10-28 | 评分助手计划卡片 | 新增 `assistant/plan.py`；`RunContext.patch_card`；流程状态与中断载荷带计划卡片编号；运行器放弃、作废、兜底时更新它；前端卡片、标题下的进度与空工作区的计划。 |
@@ -743,7 +746,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 第一步调用链为 `RubricsView/RubricImportWorkspace → /rubrics/import-sessions → rubric_import.pipeline.prepare_file_import(scorer=None) → import_sessions → rubric_import_sessions`。确定性解析只写临时会话，不创建 `Rubric`；会话保存组织/创建人、四态状态机、`state_version`、文件内容、prepared graph、可编辑草稿、冲突、换算提示和 24 小时过期时间。读取、编辑、原文预览、冲突裁决、替换和取消均复用评分标准可见性与教师/管理员写权限。
 
-确认调用链为 `/import-sessions/{id}/confirm → import_sessions.prepared_for_confirmation → pipeline.persist_prepared_import`。短事务锁定会话并校验版本/幂等键，原子创建 Rubric、评分项、来源图和首个 compilation，随后把会话标为 confirmed；任一步失败整体回滚。整数换算使用十进制 `ROUND_HALF_UP`，原值和提示保留；同一评分项下多条原子规则按 code 折叠，同 code 名称或分值冲突直接拒绝。
+确认调用链为 `/import-sessions/{id}/confirm → import_sessions.prepared_for_confirmation → pipeline.persist_prepared_import`。短事务锁定会话并校验版本/幂等键，原子创建 Rubric、评分项、来源图和首个 compilation，随后把会话标为 confirmed；任一步失败整体回滚。整数换算使用十进制 `ROUND_HALF_UP`，原值和提示保留；同一评分项下多条原子规则按 code 折叠，同 code 名称或分值冲突直接拒绝。确认后的满分（人工修改、换算或折叠都会让它与解析时不同）写回 `version.global_policy` 时去掉旧 `policy_hash`、按新满分重新编译政策；2026-10-30 之前只改数值不重算 hash，首个草稿就带 `global_policy_unsupported`。`/{id}/reupload-confirm` 复用同一个 `prepared_for_confirmation`。
 
 重新上传分两层：临时会话先 `/reupload-preview` 计算指纹与评分项差异，确认后才替换草稿；正式 draft Rubric 先 `/{id}/reupload-preview` 计算评分项和规则继承差异，`/{id}/reupload-confirm` 在一个短事务中 supersede 唯一活动的未发布 compilation 并生成后继。未变化项保留人工上下文、原子规则和仍有效的确认；名称/分值变化项使用新来源且确认失效；移除项在临时草稿软删除；新增项标记待补规则。review/published Rubric 不允许覆盖，必须复制新版本。迁移 head 为 `0031_rubric_import_sessions`，`pgs_app` 表权限/RLS 和 PostgreSQL verifier 均覆盖新表。评分引擎、prompt、Profile 与默认 `legacy` 不变。
 

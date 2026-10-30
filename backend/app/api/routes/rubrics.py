@@ -2057,13 +2057,15 @@ def _manual_recompile_command(
 ) -> dict:
     policy = deepcopy(predecessor_version.global_policy or {})
     next_total = payload.total_score or float(rubric.total_score)
-    if policy and next_total != float(rubric.total_score):
+    # 总分没变也重算：前一版的 policy_hash 可能已经过期（例如导入确认时只改了
+    # 总分），只在总分变化时同步会让这样的草稿怎么保存都发布不了。
+    if policy:
         try:
             policy["aggregation"]["total_score"] = str(next_total)
             policy.pop("policy_hash", None)
             policy = compile_scoring_policy(policy, total_score=next_total).to_mapping()
         except (KeyError, TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="总分修改与现有全局评分政策不兼容，请核对政策配置。") from exc
+            raise HTTPException(status_code=422, detail="总分与现有全局评分政策不兼容，请核对政策配置。") from exc
     return {
         "schema_version": rubric_pipeline.IMPORT_SCHEMA_VERSION,
         "source_kind": "manual_json",
