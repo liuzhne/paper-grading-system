@@ -2514,6 +2514,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 选择：
 - **放宽 2026-10-16 的条件**：400 且说明含 “request contains an invalid argument”（`llm/errors.rejected_without_reason`）时，同一批、同一提示词也改用精简 Schema 再发一次。精简版没有来源枚举；来源是否真实存在、长度、分值范围仍由 `validate_ai_rule_draft` 在返回后检查，业务规则不放宽。
+- **列出的来源必须完全一致**（CodeRabbit 复审指出）：`_source_ref_exists` 对输入列出的来源原来按前缀放行，`/criterion/description/not-a-field`、`docx:p[3]/x` 都算数。这个退路让精简 Schema 更容易走到，所以一起收紧：列出的来源要完全一致，评分项字段下的子路径仍要逐级真实存在。这与完整 Schema 的枚举等价。
 - **只降级一次**：精简版也被拒、厂商还是不说原因时，这时已经不能说“与原文内容和连接无关”，走请求被拒的通用提示，不套用 “too many states” 的说法。
 - **日志记枚举的形状**：`rubric_ai_draft_schema_fallback` 增加 `enum_values`、`longest_ref`、`ledger_kinds`，下次能直接判断拒绝与枚举是否有关。不记编号本身，因为 Excel 的编号含工作表名。
 - 起草版本不变（提示词与完整 Schema 都没改）；`PROMPT_VERSION` 与 QWK 基线不动（起草不走评分路径）。
@@ -2528,6 +2529,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 代价/约束：
 - 这类批次每次执行（包括格式修正那次）都先白发一次完整版，约 0.5 秒。
 - 精简版下模型更容易写错来源编号，格式修正可能变多；写错的由代码拦下，不会被采纳。
-- “Request contains an invalid argument” 不一定来自 Schema。精简版仍被拒时，要查请求的其他参数或内容。
+- “Request contains an invalid argument” 不一定来自 Schema。精简版同样带 Schema，所以它仍被拒时也不能排除 Schema，要同时查精简 Schema 本身、请求的其他参数和内容。
+- 不带 Schema 的适配器上，模型引用列出来源的子路径（如 `/criterion/deduction_rules/0/reason`）现在会进入一次格式修正，不再直接通过。
 
 维护记录：2026-10-30 · 起草被拒且厂商不说原因时也改用精简 Schema：新增 `rejected_without_reason`；放宽 2026-10-16 的降级条件；日志增加枚举形状。

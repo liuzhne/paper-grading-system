@@ -1062,6 +1062,12 @@ _NO_REASON = [{"error": {
 }}]
 
 
+def _source_ref_enum(body):
+    schema = body["response_format"]["json_schema"]["schema"]
+    rule = schema["properties"]["rule_groups"]["items"]["properties"]["rules"]["items"]
+    return rule["properties"]["source_refs"]["items"].get("enum") or []
+
+
 def _assigned_analysis():
     """生产上的形状：人工归入原文后第 1 批只有评分说明，从第 2 批起才带原文单元的编号。"""
 
@@ -1082,10 +1088,6 @@ def test_rejection_without_reason_is_resent_with_the_lean_schema(caplog):
     from backend.app.services.rubric_import.ai_rule_drafter import _draft_deduction_rules_once
 
     first, second = _assigned_analysis()
-    enum = lambda body: (
-        body["response_format"]["json_schema"]["schema"]["properties"]["rule_groups"]["items"]["properties"]
-        ["rules"]["items"]["properties"]["source_refs"]["items"].get("enum") or []
-    )
     group = _VALID_GROUPS["rule_groups"][0]
     output = {"rule_groups": [{**group, "rules": [{**group["rules"][0], "source_refs": ["xlsx:评分表!R3C2"]}]}]}
     calls = []
@@ -1098,10 +1100,10 @@ def test_rejection_without_reason_is_resent_with_the_lean_schema(caplog):
         ]
 
     # 第 1 批的枚举里没有原文单元，完整 Schema 通过，一个字节都不变。
-    assert not any(ref.startswith("xlsx:") for ref in enum(calls[0]))
+    assert not any(ref.startswith("xlsx:") for ref in _source_ref_enum(calls[0]))
     assert drafts[0]["generation_metadata"]["output_schema"] == "strict"
     # 第 2 批多了一个原文单元被拒，改发没有来源枚举的精简 Schema，其余请求内容不变。
-    assert "xlsx:评分表!R3C2" in enum(calls[1]) and enum(calls[2]) == []
+    assert "xlsx:评分表!R3C2" in _source_ref_enum(calls[1]) and _source_ref_enum(calls[2]) == []
     assert calls[1]["messages"] == calls[2]["messages"]
     assert drafts[1]["generation_metadata"]["output_schema"] == "lean"
     assert drafts[1]["rule_groups"][0]["rules"][0]["source_refs"] == ["xlsx:评分表!R3C2"]
@@ -1124,6 +1126,8 @@ def test_lean_schema_output_after_rejection_without_reason_is_still_validated():
                               business_profile_key="thesis")
     assert caught.value.code == "AI_DRAFT_SOURCE_INVALID"
     assert len(calls) == 4
+    # 修正那次执行同样先发完整 Schema，被拒后再发精简 Schema。
+    assert [bool(_source_ref_enum(call)) for call in calls] == [True, False, True, False]
 
 
 def test_lean_schema_rejected_without_reason_does_not_blame_the_schema():

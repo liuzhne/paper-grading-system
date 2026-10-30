@@ -210,20 +210,20 @@ def _pointer_target(value, segments):
 def _source_ref_exists(ref: str, *, criterion_code: str, criterion, input_assessment) -> bool:
     """来源必须指向输入里真实存在的位置：
 
-    - 输入列出的原文单元（``docx:p[12]``、``/criteria/T02/deduction_rules/0``）及其子路径；
+    - 输入列出的原文单元（``docx:p[12]``、``/criteria/T02/deduction_rules/0``）本身，必须完全一致；
     - ``/input_analysis`` 本身，或它下面真实存在的路径；
     - 评分项字段本身（``/criterion/description``），或字段下真实存在的下标。
 
-    以前按前缀放行，``/input_analysis/…`` 下随便写、``evidence_hints`` 写个不存在的下标都算数。
-    严格 Schema 的枚举挡得住这些值，精简 Schema 和不带 Schema 的适配器挡不住。
+    以前按前缀放行，``/input_analysis/…`` 下随便写、``evidence_hints`` 写个不存在的下标、
+    列出的单元后面再接一段（``docx:p[12]/x``）都算数。严格 Schema 的枚举挡得住这些值，
+    精简 Schema 和不带 Schema 的适配器挡不住。
     """
 
     input_assessment = input_assessment or {}
     for listed in input_assessment.get("source_refs") or []:
         listed = str(listed)
-        for candidate in (listed, listed.replace(f"/criteria/{criterion_code}/", "/criterion/", 1)):
-            if ref == candidate or ref.startswith(candidate + "/"):
-                return True
+        if ref in (listed, listed.replace(f"/criteria/{criterion_code}/", "/criterion/", 1)):
+            return True
     if ref == "/input_analysis":
         return True
     if ref.startswith("/input_analysis/"):

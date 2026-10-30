@@ -1003,7 +1003,7 @@ Core 持久化按评分值区分两类 `review_required`：已有 `auto_score` �
 1. 照常带完整的有界 Schema（`_draft_output_schema`：字符串长度、分值范围、来源枚举与去重、组数和条数上限）。
 2. 只有厂商以 400 拒绝、说明里有 “too many states”（`llm/errors.schema_too_complex`，目前只见于 Gemini 的结构化输出），或 2026-10-30 起只有通用说明 “Request contains an invalid argument”（`llm/errors.rejected_without_reason`）时，同一批、同一提示词立即改用 `_lean_draft_output_schema` 再发一次。精简版只保留结构、必填字段、`severity`/`repeat_policy`/`source` 三个短枚举，以及组数（≤2）、条数（≤3）上限。
 
-去掉的约束由 `validate_ai_rule_draft` 在返回后按同一套上限检查，业务规则不放宽：文字长度上限、扣分 0.01～满分（`AI_RULE_DRAFT_MIN_POINTS`），来源先经 `_normalize_source_refs` 规整、去重，再由 `_source_ref_exists` 在输入里逐级查找——`/input_analysis/…` 与评分项字段下的子路径必须真实存在，不再按前缀放行。精简版仍被拒时只失败一次，不再继续降级。格式修正（repair）的那次执行同样先发完整版。
+去掉的约束由 `validate_ai_rule_draft` 在返回后按同一套上限检查，业务规则不放宽：文字长度上限、扣分 0.01～满分（`AI_RULE_DRAFT_MIN_POINTS`），来源先经 `_normalize_source_refs` 规整、去重，再由 `_source_ref_exists` 在输入里逐级查找——输入列出的来源必须完全一致，`/input_analysis/…` 与评分项字段下的子路径必须真实存在，不再按前缀放行。精简版仍被拒时只失败一次，不再继续降级。格式修正（repair）的那次执行同样先发完整版。
 
 单批草稿的 `generation_metadata.output_schema` 记 `strict`、`lean` 或 `None`（未带 Schema 的适配器）；`merge_draft_batches` 合并后改记 `lean_schema_batches`（用了精简版的批次序号）。起草版本 `rubric-rule-draft@9`；起草不走 L0 缓存，全局缓存版本不变。
 
