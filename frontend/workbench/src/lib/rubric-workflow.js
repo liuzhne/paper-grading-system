@@ -11,11 +11,16 @@ export function compilationReady(execution, compilationId) {
     !execution.ambiguity);
 }
 
+/** 参与评分的细则全部已确认、至少 1 条；老师排除（rejected）的细则和它的模板映射不参与。 */
 export function rulesReviewed(execution) {
   const active = execution?.active_compilation;
-  return Boolean(active && (active.rules || []).length &&
-    active.rules.every((rule) => rule.status === "approved") &&
-    (active.template_links || []).every((link) => link.review_status === "confirmed"));
+  const all = active?.rules || [];
+  const rules = all.filter((rule) => rule.status !== "rejected");
+  const excluded = new Set(all.filter((rule) => rule.status === "rejected").map((rule) => rule.rule_code));
+  return Boolean(active && rules.length &&
+    rules.every((rule) => rule.status === "approved") &&
+    (active.template_links || []).filter((link) => !excluded.has(link.rule_code))
+      .every((link) => link.review_status === "confirmed"));
 }
 
 export function canSubmitReview(status, execution) {

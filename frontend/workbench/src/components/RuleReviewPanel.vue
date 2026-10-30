@@ -1,7 +1,7 @@
 <script setup>
 /**
- * 评分标准页“核对”步的扣分细则：逐条核对内容与来源后确认。每条用与评分助手工作区同一个 `RuleCard`
- * （v2 界面改造方案 §5），这里另加“排除”（只在本页，不进批量确认）与规则编号、上限、确认记录等明细。
+ * 评分标准页“核对”步的扣分细则：逐条核对内容与来源后确认或排除。每条用与评分助手工作区同一个 `RuleCard`
+ * （v2 界面改造方案 §5），确认、排除、恢复都即时保存（排除落库改造方案）；这里另加规则编号、上限、确认记录等明细。
  */
 import { computed } from "vue";
 
@@ -10,15 +10,16 @@ import RuleCard from "@/components/RuleCard.vue";
 const props = defineProps({
   criterion: { type: Object, required: true },
   rules: { type: Array, default: () => [] },
-  excluded: { type: Set, default: () => new Set() },
   busy: Boolean,
   editable: Boolean,
   deferConfirmation: Boolean,
 });
-defineEmits(["confirm", "confirm-all", "exclude"]);
-const pending = computed(() => props.rules.filter((r) =>
-  ["draft", "review"].includes(r.status) && !props.excluded.has(r.id)));
+defineEmits(["confirm", "confirm-all", "exclude", "restore"]);
+const pending = computed(() => props.rules.filter((r) => ["draft", "review"].includes(r.status)));
 const approved = computed(() => props.rules.filter((r) => r.status === "approved").length);
+const rejected = computed(() => props.rules.filter((r) => r.status === "rejected").length);
+/** 每个评分项至少保留 1 条参与评分的细则（后端同样拒绝）。 */
+const canExclude = computed(() => props.rules.length - rejected.value > 1);
 </script>
 
 <template>
@@ -36,17 +37,9 @@ const approved = computed(() => props.rules.filter((r) => r.status === "approved
       <p v-if="deferConfirmation" class="notice notice-warn" data-test="deferred-confirmation">
         请先应用或丢弃上方 AI 建议；形成最终规则集合后，再统一确认原文规则和 AI 规则。
       </p>
-      <p class="summary">{{ rules.length }} 条 · 已确认 {{ approved }}{{ pending.length ? ` · 待确认 ${pending.length}` : "" }}{{ excluded.size ? ` · 已排除 ${excluded.size}` : "" }}</p>
-      <RuleCard v-for="rule in rules" :key="rule.id" :rule="rule" :editable="editable" :busy="busy" :excluded="excluded.has(rule.id)">
-        <template #actions="{ pending: open }">
-          <template v-if="open">
-            <button class="text-btn is-muted" type="button" :disabled="busy || !editable || deferConfirmation" @click="$emit('exclude', rule)">
-              {{ excluded.has(rule.id) ? '撤销排除' : '排除' }}
-            </button>
-            <button class="btn btn-sm btn-outline confirm" type="button" :disabled="busy || !editable || deferConfirmation || excluded.has(rule.id)"
-                    @click="$emit('confirm', rule)">{{ busy ? '处理中…' : '确认' }}</button>
-          </template>
-        </template>
+      <p class="summary">{{ rules.length }} 条 · 已确认 {{ approved }}{{ pending.length ? ` · 待确认 ${pending.length}` : "" }}{{ rejected ? ` · 已排除 ${rejected}` : "" }}</p>
+      <RuleCard v-for="rule in rules" :key="rule.id" :rule="rule" :editable="editable" :busy="busy || deferConfirmation"
+                :can-exclude="canExclude" @confirm="$emit('confirm', $event)" @exclude="$emit('exclude', $event)" @restore="$emit('restore', $event)">
         <template #details>
           <details class="more">
             <summary>规则编号与明细</summary>
@@ -62,7 +55,7 @@ const approved = computed(() => props.rules.filter((r) => r.status === "approved
       <p v-if="!rules.length" class="empty">当前评分项没有可核对的规则，请补齐细则并保存重新校验。</p>
     </div>
     <div class="card-foot review-foot">
-      <div><p>{{ deferConfirmation ? '当前规则集合尚未定稿，暂不记录确认。' : '未确认规则不会进入可执行评分版本。批量仅处理当前评分项，排除项保留待确认。' }}</p>
+      <div><p>{{ deferConfirmation ? '当前规则集合尚未定稿，暂不记录确认。' : '未确认规则不会进入可执行评分版本。批量仅处理当前评分项；已排除的细则不参与评分，可随时恢复。' }}</p>
         <p v-if="!editable" class="faint">当前版本不可编辑或你没有确认权限。</p></div>
       <button class="btn btn-primary" :disabled="busy || !editable || deferConfirmation || !pending.length" @click="$emit('confirm-all', pending)">
         {{ busy ? '确认中…' : `统一确认最终规则（${pending.length}）` }}

@@ -759,7 +759,6 @@ const workspace = ref(null);
 const reviewBusy = ref(false);
 const reviewNotice = ref(null);
 const reviewError = ref(null);
-const excluded = ref(new Set());
 const editForm = ref(null);
 const editBaseline = ref("");
 const saveBusy = ref(false);
@@ -791,6 +790,8 @@ const structuralMessages = {
   none_rule_invalid: '不计分规则不能保留分档或计分参数，请核对并清除不适用的字段。',
   global_policy_unsupported: '全局评分政策与当前总分或配置不一致，请核对后保存。',
   weight_policy_invalid: '评分项满分或权重与总分不一致，请在第 1 步核对。',
+  rule_rejection_audit_missing: '已排除的细则缺少排除记录，请恢复后重新排除。',
+  rule_rejection_audit_mismatch: '已排除的细则与排除记录不一致，请恢复后重新排除。',
 };
 const activeIssues = computed(() => [...(draft.value?.active_compilation?.blockers || []),
   ...(workspace.value?.structural_blockers || []).map(issue => ({ ...issue, message: structuralMessages[issue.code] || issue.message, criterion_code: issue.identity?.criterion_code }))]);
@@ -808,7 +809,8 @@ const generationCandidates = computed(() => (editForm.value?.criteria || []).fil
     (draft.value?.active_compilation?.blockers || []).some((issue) => issue.criterion_code === criterion.code && ['MISSING_EXECUTABLE_SCORING_MODE', 'SEVERITY_CONFIRMATION_REQUIRED', 'DEDUCTION_RULES_MISSING', 'MISSING_DEDUCTION_RULES'].includes(issue.code)))));
 const reviewReady = computed(() => !dirty.value && !scoreFormError.value && !activeIssues.value.length && !blocking.value.length && canEdit.value && canSubmitReview(current.value?.status, draft.value));
 const editableCriterion = computed(() => editForm.value?.criteria.find((c) => c.code === activeCriterion.value?.code));
-const pendingRules = computed(() => (workspace.value?.rules || []).filter(r => r.status !== 'approved'));
+// 已排除（rejected）的细则不参与评分，不算待确认。
+const pendingRules = computed(() => (workspace.value?.rules || []).filter(r => ["draft", "review"].includes(r.status)));
 const pendingMappings = computed(() => (workspace.value?.template_links || []).filter(link => link.review_status !== 'confirmed'));
 // 第 2 步底部阻断项：与「保存规则，下一步」的禁用条件逐项对应，点击直接打开能处理它的位置。
 function revealStepDetail() { nextTick(() => stepDetail.value?.scrollIntoView?.({ block: "start", behavior: "smooth" })); }
@@ -928,10 +930,27 @@ function addDeduction() {
   editableCriterion.value.scoring_mode = "deductive";
   editableCriterion.value.deduction_rules_structured.push({ trigger: "", points: null, severity: "", source: "user_text", confirmed: true });
 }
-function toggleExcluded(rule) {
-  const next = new Set(excluded.value);
-  next.has(rule.id) ? next.delete(rule.id) : next.add(rule.id);
-  excluded.value = next;
+/** 排除 / 恢复一条细则：即时保存，排除的不参与发布与评分（排除落库改造方案 §5）。 */
+async function setRuleExcluded(rule, exclude) {
+  if (operationBusy.value || !editable.value) return;
+  const id = selected.value;
+  reviewBusy.value = true;
+  reviewError.value = null;
+  reviewNotice.value = null;
+  try {
+    const code = encodeURIComponent(rule.rule_code);
+    const body = { compilation_id: workspace.value?.compilation_id, rule_id: rule.id, content_token: rule.content_token,
+      reason: exclude ? "用户核对条款后排除，不参与评分" : "用户恢复已排除的条款，重新核对" };
+    // 两条路径分开写字面量：test_frontend_api_contract 要能逐条核对端点存在。
+    if (exclude) await api.post(`/rubrics/${id}/rules/${code}/exclude`, body);
+    else await api.post(`/rubrics/${id}/rules/${code}/restore`, body);
+    reviewNotice.value = exclude ? "已排除，已保存；这条细则不参与评分，可随时恢复。" : "已恢复为待确认，已保存。";
+  } catch (err) {
+    reviewError.value = `${exclude ? "排除" : "恢复"}没有成功：${err?.message || "操作失败"}。请核对刷新后的状态再重试。`;
+  } finally {
+    await refreshDetail(id);
+    reviewBusy.value = false;
+  }
 }
 async function confirmRules(rules) {
   if (operationBusy.value || !editable.value) return;
@@ -943,7 +962,7 @@ async function confirmRules(rules) {
   let completed = 0;
   try {
     for (const rule of rules) {
-      if (rule.status === "approved" || excluded.value.has(rule.id)) continue;
+      if (!["draft", "review"].includes(rule.status)) continue;
       await api.post(`/rubrics/${id}/rules/${encodeURIComponent(rule.rule_code)}/confirm`, {
         compilation_id: compilationId, rule_id: rule.id, content_token: rule.content_token,
         reason: "用户核对条款内容与来源后确认",
@@ -1010,7 +1029,6 @@ async function saveAndValidate() {
         ...payload, supersedes_compilation_id: draft.value?.active_compilation?.id,
         reason: "用户修改评分标准并保存重新校验",
       });
-      excluded.value = new Set();
       store.lastDraft = { items: [] };
     }
     if (!(await refreshDetail())) return false;
@@ -1024,7 +1042,7 @@ watch(selected, async (id) => {
   structureTracker.stop(); reviewTracker.stop(); store.structureTask = null; store.ruleReviewTask = null;
   workspace.value = null; coverage.value = null; draft.value = null;
   selectedCriterion.value = null; sourceMode.value = true; sourceFilter.value = "pending"; chosenVisibility.value = null;
-  excluded.value = new Set(); editForm.value = null; reviewError.value = null; reviewNotice.value = null;
+  editForm.value = null; reviewError.value = null; reviewNotice.value = null;
   store.lastDraft = { items: [] }; applyNotice.value = null; applyError.value = null;
   draftPoller.stop(); store.forgetDraftTasks(); draftError.value = null;
   parseState.value = null; structureEstimate.value = null; ruleEstimate.value = null; parseError.value = null;
@@ -1241,8 +1259,9 @@ onUnmounted(() => {
             </section>
             <section class="card card-pad coverage-panel"><h2 class="card-title">扣分细则</h2><p class="faint">AI 连接：{{ connections.find(c => c.id === draftConnection)?.name || '未启用，请到账户与连接配置' }}。AI 建议须人工核对后应用与确认。</p><div class="actions"><button class="btn" :disabled="operationBusy || currentDraftTaskActive || !draftConnection || !editable || !editableCriterion || hasPendingAiDraft" @click="generateMissingRules([editableCriterion])">{{ draftBusy ? '提交中…' : currentDraftTaskActive ? '起草中…' : 'AI 根据规则来源起草' }}</button><button v-if="currentDraftTask?.status === 'succeeded' && !hasPendingAiDraft && editableCriterion" class="btn" data-test="regenerate-draft" :disabled="operationBusy || !draftConnection || !editable" @click="generateMissingRules([editableCriterion], { regenerate: true })">重新生成</button><button v-if="generationCandidates.length" class="btn" :disabled="operationBusy || !draftConnection || !editable" @click="generateMissingRules()">生成全部缺失细则（{{ generationCandidates.length }}）</button></div><div v-if="currentDraftTask" class="draft-task" data-test="draft-task-status" role="status"><span :class="{ danger: currentDraftTask.status === 'failed' }">{{ draftTaskProgress(currentDraftTask) }}</span><button v-if="currentDraftTaskActive" class="btn btn-sm" :disabled="draftTaskBusy" @click="draftTaskAction('cancel')">取消起草</button><button v-if="canRetryAiTask(currentDraftTask)" class="btn btn-sm" :disabled="draftTaskBusy || !editable" @click="draftTaskAction('retry')">重试失败的批次</button></div><p v-if="draftError" class="notice notice-danger" role="alert">{{ draftError }}</p></section>
             <AiRuleDraftPanel :items="currentDraftItems" :busy="operationBusy || !editable" @apply="applyDraft" @discard="discardDraft" />
-            <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :excluded="excluded" :busy="operationBusy" :editable="editable"
-              :defer-confirmation="hasPendingAiDraft" @confirm="confirmRules([$event])" @confirm-all="confirmRules" @exclude="toggleExcluded" />
+            <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :busy="operationBusy" :editable="editable"
+              :defer-confirmation="hasPendingAiDraft" @confirm="confirmRules([$event])" @confirm-all="confirmRules"
+              @exclude="setRuleExcluded($event, true)" @restore="setRuleExcluded($event, false)" />
             <AtomicRuleEditor v-if="editForm?.atomic_rules && current.status === 'draft'" :rules="editForm.atomic_rules.filter(r => r.criterion_id === selectedCriterion)" :disabled="!canEdit || operationBusy" />
             <details v-else-if="editableCriterion && current.status === 'draft'" class="card card-pad">
               <summary>修改 {{ activeCriterion?.code }} 的评分细则</summary>

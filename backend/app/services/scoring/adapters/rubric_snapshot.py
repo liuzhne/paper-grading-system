@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from backend.app.db import models
 from backend.app.services.rubrics import lifecycle
+from backend.app.services.rubrics.rule_status import participates
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import CompiledRubricSnapshot
 from backend.app.services.scoring.core.contracts import M4_ATOMIC_RULE_SCHEMAS
@@ -323,11 +324,16 @@ class CompiledRubricSnapshotLoader:
                 models.RubricCriterion.rubric_id == rubric.id
             )
         ).all()
-        rule_rows = session.scalars(
-            select(models.AtomicRule).where(
-                models.AtomicRule.rubric_version_id == version.id
-            )
-        ).all()
+        # 老师排除的细则不进快照，与版本内容哈希同一口径（排除落库改造方案 §3.2）。
+        rule_rows = [
+            item
+            for item in session.scalars(
+                select(models.AtomicRule).where(
+                    models.AtomicRule.rubric_version_id == version.id
+                )
+            ).all()
+            if participates(item)
+        ]
         criteria = [
             {
                 "criterion_code": item.code,

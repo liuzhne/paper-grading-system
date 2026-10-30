@@ -1,7 +1,8 @@
 <script setup>
 /**
- * 一条扣分细则（评分助手 v2 设计稿）：问题 + 严重度 + 扣分 + 触发条件 + 来源 + 确认。
+ * 一条扣分细则（评分助手 v2 设计稿）：问题 + 严重度 + 扣分 + 触发条件 + 来源 + 确认 / 排除。
  * 评分助手的“核对评分规则”与评分标准页的核对步共用（v2 界面改造方案 §5）。
+ * 排除即时落库（状态 rejected），不参与发布与评分；“恢复”回到待确认（排除落库改造方案 §2）。
  */
 import { computed } from "vue";
 
@@ -9,15 +10,16 @@ const props = defineProps({
   rule: { type: Object, required: true },
   editable: Boolean,
   busy: Boolean,
-  /** 评分标准页的“排除”（只在本页、不落库）：变淡、划掉。 */
-  excluded: Boolean,
+  /** 每个评分项至少保留 1 条细则：本项只剩这一条未排除时不能再排除。 */
+  canExclude: { type: Boolean, default: true },
 });
-defineEmits(["confirm"]);
+defineEmits(["confirm", "exclude", "restore"]);
 
 const SEVERITIES = { minor: ["轻微", "tag-muted"], moderate: ["中等", "tag-warn"], severe: ["严重", "tag-danger"] };
 const DIRECTIONS = { deduct: "扣分", band: "分档", bonus: "加分", none: "人工复核" };
 
 const pending = computed(() => ["draft", "review"].includes(props.rule.status));
+const excluded = computed(() => props.rule.status === "rejected");
 const severity = computed(() => SEVERITIES[props.rule.origin?.severity] || [DIRECTIONS[props.rule.direction] || "", "tag-muted"]);
 const points = computed(() => {
   const rule = props.rule;
@@ -46,7 +48,7 @@ const source = computed(() => {
 </script>
 
 <template>
-  <article class="rule-card" :class="{ pending, rejected: rule.status === 'rejected' || excluded }" :data-rule-code="rule.rule_code">
+  <article class="rule-card" :class="{ pending, rejected: excluded }" :data-rule-code="rule.rule_code">
     <div class="top">
       <div class="main">
         <div class="title-line">
@@ -67,13 +69,15 @@ const source = computed(() => {
         <p v-for="(item, index) in rule.sources" :key="index">{{ item.text }}</p>
       </details>
       <div class="actions">
-        <!-- 评分标准页在这里放“排除”与它自己的确认按钮；助手工作区用默认的确认按钮。 -->
-        <slot name="actions" :pending="pending">
-          <button v-if="pending && editable" class="btn btn-sm btn-outline" type="button" :disabled="busy" @click="$emit('confirm', rule)">确认</button>
-        </slot>
+        <template v-if="pending && editable">
+          <button class="text-btn is-muted" type="button" data-test="exclude" :disabled="busy || !canExclude"
+                  :title="canExclude ? '不参与评分，可随时恢复' : '每个评分项至少保留 1 条细则'" @click="$emit('exclude', rule)">排除</button>
+          <button class="btn btn-sm btn-outline confirm" type="button" :disabled="busy" @click="$emit('confirm', rule)">确认</button>
+        </template>
         <span v-if="rule.status === 'approved'" class="state ok">已确认</span>
-        <span v-else-if="rule.status === 'rejected'" class="state">已驳回</span>
-        <span v-else-if="pending && !editable && !$slots.actions" class="state warn">待确认</span>
+        <span v-else-if="excluded" class="state" data-test="excluded">已排除<template v-if="editable"> ·
+          <button class="text-btn" type="button" data-test="restore" :disabled="busy" @click="$emit('restore', rule)">恢复</button></template></span>
+        <span v-else-if="pending && !editable" class="state warn">待确认</span>
       </div>
     </div>
     <slot name="details" />
@@ -83,7 +87,8 @@ const source = computed(() => {
 <style scoped>
 .rule-card { padding: 12px 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--surface); }
 .rule-card.pending { border-color: #ecdcbc; background: #fffcf5; }
-.rule-card.rejected { opacity: 0.55; }
+/* 已排除：内容变淡、标题划线，“恢复”保持清晰可点。 */
+.rule-card.rejected .top, .rule-card.rejected .bottom > :not(.actions) { opacity: 0.55; }
 .rule-card.rejected .issue { text-decoration: line-through; }
 .top { display: flex; align-items: flex-start; gap: 10px; }
 .main { flex: 1; min-width: 0; }

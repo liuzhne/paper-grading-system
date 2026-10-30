@@ -16,13 +16,14 @@ afterEach(() => {
 });
 
 /** 按“方法 路径”路由的假服务器；规则状态随确认、发布而变。 */
-function fakeServer() {
+function fakeServer(extra = {}) {
   const state = { rubricStatus: "draft", rules: {
     a: { id: "a", criterion_id: "c1", rule_code: "r.a", name: "未说明课题来源", status: "draft", content_token: "ta",
       direction: "deduct", max_points: "4", origin: { severity: "moderate", trigger: "绪论缺少课题来源" },
       sources: [{ sheet: "评分细则", row: 3, text: "绪论需阐明课题来源。" }] },
     b: { id: "b", criterion_id: "c2", rule_code: "r.b", name: "图表无编号", status: "approved", content_token: "tb",
       direction: "deduct", max_points: "1", origin: { severity: "minor" }, sources: [] },
+    ...extra,
   } };
   const calls = [];
   vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url, init = {}) => {
@@ -37,6 +38,11 @@ function fakeServer() {
     ] });
     if (path === "/rubrics/r1/review-workspace") return json({ compilation_id: "comp1", structural_blockers: [], rules: Object.values(state.rules) });
     if (path === "/rubrics/r1/rules/r.a/confirm") { state.rules.a.status = "approved"; return json({}); }
+    const exclusion = path.match(/^\/rubrics\/r1\/rules\/r\.(\w+)\/(exclude|restore)$/);
+    if (exclusion) {
+      state.rules[exclusion[1]].status = exclusion[2] === "exclude" ? "rejected" : "draft";
+      return json({ body: JSON.parse(init.body) });
+    }
     if (path === "/rubrics/r1/submit-review") { state.rubricStatus = "review"; return json({}); }
     if (path === "/rubrics/r1/publish") { state.rubricStatus = "published"; return json({}); }
     if (path === "/assistant/conversations/c1/runs") return json({ messages: [], pending: null, conversation: { id: "c1", title: "t", focus: {} } });
@@ -78,5 +84,37 @@ it("核对评分规则：逐项确认后发布，确认与发布走评分标准�
     "POST /assistant/conversations/c1/runs"]);
   expect(wrapper.find('[data-test="review-primary"]').exists()).toBe(false);
   expect(wrapper.text()).toContain("v1.0 已发布");
+  wrapper.unmount();
+});
+
+it("排除即时保存：排除后显示“已排除 · 恢复”、不算待确认；每个评分项至少保留 1 条", async () => {
+  const calls = fakeServer({
+    c: { id: "c", criterion_id: "c1", rule_code: "r.c", name: "AI 补充的细则", status: "draft", content_token: "tc",
+      direction: "deduct", max_points: "2", ai_origin: true, origin: { source: "ai_inferred" }, sources: [] },
+  });
+  const store = useAssistantStore();
+  store.conversation = { id: "c1", title: "t", focus: {} };
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/:any(.*)", component: { template: "<div />" } }] });
+  const wrapper = mount(ReviewStep, {
+    props: { context: { importSessionId: "s1", cards: {} }, head: { title: "核对评分规则" }, wide: true },
+    global: { plugins: [router] },
+  });
+  await flushPromises();
+  const card = (code) => wrapper.get(`[data-rule-code="${code}"]`);
+  expect(wrapper.get('[data-test="review-primary"]').text()).toBe("确认本项 2 条");
+
+  await card("r.c").get('[data-test="exclude"]').trigger("click");
+  await flushPromises();
+  expect(calls).toContain("POST /rubrics/r1/rules/r.c/exclude");
+  expect(card("r.c").text()).toContain("已排除");
+  expect(wrapper.get(".sec-head").text()).toContain("已排除 1");
+  expect(wrapper.get('[data-test="review-primary"]').text()).toBe("确认本项 1 条");
+  // 本项只剩 r.a 参与评分：不能再排除。
+  expect(card("r.a").get('[data-test="exclude"]').attributes("disabled")).toBeDefined();
+
+  await card("r.c").get('[data-test="restore"]').trigger("click");
+  await flushPromises();
+  expect(calls).toContain("POST /rubrics/r1/rules/r.c/restore");
+  expect(wrapper.get('[data-test="review-primary"]').text()).toBe("确认本项 2 条");
   wrapper.unmount();
 });

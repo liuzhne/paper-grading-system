@@ -19,6 +19,7 @@ from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricCriterion
 from backend.app.db.models import RubricVersion
 from backend.app.services.rubrics.rule_origin import is_ai_rule
+from backend.app.services.rubrics.rule_status import participates
 
 
 #: 视为「用户提供」的规则来源。legacy_upgrade 是历史数据的原样搬迁，
@@ -57,7 +58,9 @@ def build_rule_coverage(session, rubric):
     entries = []
     complete = blocking = pending = 0
     for criterion in criteria:
-        rules = rules_by_criterion.get(criterion.id, [])
+        # 老师排除的细则不算待确认，也不算这一项的细则；全部排除等于缺细则。
+        all_rules = rules_by_criterion.get(criterion.id, [])
+        rules = [r for r in all_rules if participates(r)]
         approved = [r for r in rules if r.status == APPROVED_STATUS]
         ai_pending = [
             r
@@ -91,6 +94,7 @@ def build_rule_coverage(session, rubric):
                 "status": status,
                 "rule_count": len(rules),
                 "approved_count": len(approved),
+                "rejected_count": len(all_rules) - len(rules),
                 "ai_pending_count": len(ai_pending),
                 "user_pending_count": len(user_pending),
                 "from_source_count": sum(

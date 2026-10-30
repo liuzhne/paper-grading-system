@@ -13,7 +13,6 @@ function mountPanel(props = {}) {
     props: {
       criterion: { code: "T01", name: "论证" },
       rules: RULES,
-      excluded: new Set(),
       busy: false,
       editable: true,
       ...props,
@@ -39,5 +38,30 @@ describe("最终规则统一确认", () => {
     expect(wrapper.emitted("confirm-all")[0][0].map((rule) => rule.id)).toEqual(["source-1", "ai-1"]);
     expect(wrapper.find(".review-foot .btn-primary").text()).toContain("统一确认最终规则（2）");
     expect(wrapper.text()).toContain("AI 解读原文");
+  });
+});
+
+describe("排除即时保存", () => {
+  it("排除与恢复交给调用方落库；排除的细则不算待确认，显示“已排除 · 恢复”", async () => {
+    const rules = [{ ...RULES[0] }, { ...RULES[1], status: "rejected" }];
+    const wrapper = mountPanel({ rules });
+
+    expect(wrapper.find(".summary").text()).toBe("2 条 · 已确认 0 · 待确认 1 · 已排除 1");
+    expect(wrapper.find('[data-test="excluded"]').text()).toContain("已排除");
+    expect(wrapper.find(".review-foot .btn-primary").text()).toContain("统一确认最终规则（1）");
+
+    await wrapper.find('[data-test="restore"]').trigger("click");
+    expect(wrapper.emitted("restore")[0][0].id).toBe("ai-1");
+    // 本项只剩 1 条参与评分的细则：不能再排除。
+    expect(wrapper.find('[data-test="exclude"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.find('[data-test="exclude"]').attributes("title")).toBe("每个评分项至少保留 1 条细则");
+  });
+
+  it("还有其它细则时可以排除", async () => {
+    const wrapper = mountPanel();
+
+    await wrapper.findAll('[data-test="exclude"]')[1].trigger("click");
+
+    expect(wrapper.emitted("exclude")[0][0].id).toBe("ai-1");
   });
 });

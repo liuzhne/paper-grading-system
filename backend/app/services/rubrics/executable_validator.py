@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.db import models
+from backend.app.services.rubrics.rule_status import participates
 from backend.app.services.scoring.core.policy import compile_scoring_policy
 from backend.app.services.scoring.core.policy import validate_weight_configuration
 from backend.app.services.scoring.profiles.general_document import (
@@ -257,13 +258,18 @@ def validate_publishable_rubric(
         .where(models.RubricCriterion.rubric_id == rubric_id)
         .order_by(models.RubricCriterion.code)
     ).all()
-    rules = []
+    version_rules = []
     if version is not None:
-        rules = session.scalars(
+        version_rules = session.scalars(
             select(models.AtomicRule)
             .where(models.AtomicRule.rubric_version_id == version.id)
             .order_by(models.AtomicRule.rule_code)
         ).all()
+    # 老师排除的细则不进入发布版本：可执行检查只看参与评分的细则，排除的
+    # 只核对驳回审计（评分细则排除落库改造方案 §3.1）。
+    rules = [item for item in version_rules if participates(item)]
+    excluded_rules = [item for item in version_rules if not participates(item)]
+    excluded_codes = {item.rule_code for item in excluded_rules}
     rule_ids = [item.id for item in rules]
     links = []
     if rule_ids:
@@ -645,7 +651,15 @@ def validate_publishable_rubric(
                 )
 
         for dependency in rule.depends_on_rule_codes or []:
-            if dependency not in rule_by_code:
+            if dependency in excluded_codes:
+                # 执行计划遇到快照里不存在的依赖会直接失败，必须在发布前挡住。
+                add(
+                    "dependency_rejected",
+                    path + "/depends_on_rule_codes",
+                    f"细则 {rule.rule_code} 依赖已排除的细则 {dependency}：请恢复 {dependency}，或一并排除 {rule.rule_code}。",
+                    **rule_entity,
+                )
+            elif dependency not in rule_by_code:
                 add(
                     "dependency_unknown",
                     path + "/depends_on_rule_codes",
@@ -666,14 +680,66 @@ def validate_publishable_rubric(
             rule_code=code,
         )
 
+    for rule in excluded_rules:
+        criterion = criterion_by_id.get(rule.criterion_id)
+        rule_entity = {
+            "criterion_code": criterion.code if criterion is not None else "__unknown__",
+            "rule_code": rule.rule_code,
+        }
+        path = f"/atomic_rules/{rule.rule_code}"
+        # 排除决定了“这条不算分”，与确认同等分量：只认经过接口留下的驳回审计。
+        if rule.reviewed_by is None or rule.reviewed_at is None:
+            add(
+                "rule_review_incomplete",
+                path + "/review",
+                "rejected rule must retain reviewer and review time",
+                **rule_entity,
+            )
+            continue
+        matches = [
+            event
+            for event in events
+            if isinstance(event, Mapping)
+            and event.get("rule_code") == rule.rule_code
+            and event.get("action") == "reject"
+        ]
+        if not matches:
+            add(
+                "rule_rejection_audit_missing",
+                path + "/audit",
+                "rejected rule is missing its immutable rejection event",
+                **rule_entity,
+            )
+        elif not any(
+            set(event) == _EVENT_FIELDS
+            and event.get("before") == "review"
+            and event.get("after") == "rejected"
+            and event.get("actor_id") == rule.reviewed_by
+            and event.get("occurred_at") == _naive_utc_iso(rule.reviewed_at)
+            and isinstance(event.get("reason"), str)
+            and event.get("reason").strip()
+            for event in matches
+        ):
+            add(
+                "rule_rejection_audit_mismatch",
+                path + "/audit",
+                "rejection event actor/time/schema does not match the rule review",
+                **rule_entity,
+            )
+
     mutex_groups = defaultdict(list)
     for rule in rules:
         if rule.mutex_group:
             mutex_groups[rule.mutex_group].append(rule)
     for group, members in mutex_groups.items():
         criterion_ids = {item.criterion_id for item in members}
+        # 只因排除剩下 1 条的组在执行器里是空操作（同组至少 2 条才合并判断、
+        # 才判互斥冲突）；本来就只有 1 条的组仍是定义写错了。
+        lone_after_exclusion = len(members) == 1 and any(
+            item.mutex_group == group for item in excluded_rules
+        )
         if (
-            len(members) < 2
+            (len(members) < 2 and not lone_after_exclusion)
             or len(criterion_ids) != 1
             or any(item.direction == "band" for item in members)
         ):

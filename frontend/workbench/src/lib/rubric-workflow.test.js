@@ -25,6 +25,15 @@ describe("评分标准审核与发布门控", () => {
     execution.active_compilation.template_links[0].review_status = "pending";
     expect(canPublishRubric("review", execution, "c1")).toBe(false);
   });
+  it("排除的细则不挡审核与发布，它的模板映射也不用再核对；但不能全部排除", () => {
+    const execution = ready();
+    execution.active_compilation.rules = [{ rule_code: "a", status: "approved" }, { rule_code: "b", status: "rejected" }];
+    execution.active_compilation.template_links = [{ rule_code: "a", review_status: "confirmed" }, { rule_code: "b", review_status: "pending" }];
+    expect(canSubmitReview("draft", execution)).toBe(true);
+    expect(canPublishRubric("review", execution, "c1")).toBe(true);
+    execution.active_compilation.rules[0].status = "rejected";
+    expect(canSubmitReview("draft", execution)).toBe(false);
+  });
   it("不允许无草稿、歧义或非当前版本通过门控", () => {
     expect(canPublishRubric("review", null, "c1")).toBe(false);
     expect(canPublishRubric("review", ready(), "old")).toBe(false);
