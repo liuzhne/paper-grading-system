@@ -2038,6 +2038,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/{rubric_id}/rules/{rule_code}/exclude": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Exclude Rubric Rule
+         * @description 排除一条待确认的细则：不参与发布与评分，审计与确认对称（排除落库改造方案 §5）。
+         */
+        post: operations["exclude_rubric_rule_api_rubrics__rubric_id__rules__rule_code__exclude_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/{rubric_id}/rules/{rule_code}/reject": {
         parameters: {
             query?: never;
@@ -2066,6 +2086,26 @@ export interface paths {
         put?: never;
         /** Reopen Atomic Rule Review */
         post: operations["reopen_atomic_rule_review_api_rubrics__rubric_id__rules__rule_code__reopen_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/{rubric_id}/rules/{rule_code}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore Rubric Rule
+         * @description 恢复一条已排除的细则：回到待确认。
+         */
+        post: operations["restore_rubric_rule_api_rubrics__rubric_id__rules__rule_code__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3394,7 +3434,7 @@ export interface components {
             /** Card Id */
             card_id?: string | null;
             /** Quick Action */
-            quick_action?: ("start_grading" | "import_rubric" | "query_progress" | "query_paper" | "query_review" | "query_overview") | null;
+            quick_action?: ("start_grading" | "import_rubric" | "query_progress" | "query_paper" | "query_review" | "query_overview" | "next_steps") | null;
             /** Text */
             text?: string | null;
             /**
@@ -3532,6 +3572,8 @@ export interface components {
             latest_grade?: string | null;
             /** Latest Need Manual Review */
             latest_need_manual_review?: boolean | null;
+            /** Latest Review Reasons */
+            latest_review_reasons?: string[];
             /** Latest Run Id */
             latest_run_id?: string | null;
             /** Latest Run Status */
@@ -10649,6 +10691,46 @@ export interface operations {
             };
         };
     };
+    exclude_rubric_rule_api_rubrics__rubric_id__rules__rule_code__exclude_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+                rule_code: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AtomicRuleConfirmRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     reject_atomic_rule_review_api_rubrics__rubric_id__rules__rule_code__reject_post: {
         parameters: {
             query?: never;
@@ -10706,6 +10788,46 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RubricLifecycleReason"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restore_rubric_rule_api_rubrics__rubric_id__rules__rule_code__restore_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                rubric_id: string;
+                rule_code: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AtomicRuleConfirmRequest"];
             };
         };
         responses: {

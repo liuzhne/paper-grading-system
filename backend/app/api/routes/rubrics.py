@@ -86,6 +86,7 @@ from backend.app.services.ai_tasks.service import delete_rubric_ai_tasks
 from backend.app.services.scoring.profiles.registry import LEGACY_PROFILE_KEY
 from backend.app.services.scoring.profiles.registry import WORKBENCH_PROFILE_KEYS
 from backend.app.services.rubrics.review_workspace import read_review_workspace, confirm_rule
+from backend.app.services.rubrics.review_workspace import exclude_rule, restore_rule
 
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
@@ -1213,6 +1214,52 @@ def confirm_rubric_rule(
     require_organization_role(principal, "org_admin", "teacher")
     try:
         rule = confirm_rule(db, rubric_id, rule_code, user_id, payload)
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
+@router.post("/{rubric_id}/rules/{rule_code}/exclude")
+def exclude_rubric_rule(
+    rubric_id: str,
+    rule_code: str,
+    payload: AtomicRuleConfirmRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """排除一条待确认的细则：不参与发布与评分，审计与确认对称（排除落库改造方案 §5）。"""
+
+    ensure_dev_user(db)
+    _visible_rubric(db, rubric_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        rule = exclude_rule(db, rubric_id, rule_code, user_id, payload)
+        db.commit()
+    except rubric_lifecycle.RubricLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _rule_response(rule)
+
+
+@router.post("/{rubric_id}/rules/{rule_code}/restore")
+def restore_rubric_rule(
+    rubric_id: str,
+    rule_code: str,
+    payload: AtomicRuleConfirmRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """恢复一条已排除的细则：回到待确认。"""
+
+    ensure_dev_user(db)
+    _visible_rubric(db, rubric_id, principal)
+    require_organization_role(principal, "org_admin", "teacher")
+    try:
+        rule = restore_rule(db, rubric_id, rule_code, user_id, payload)
         db.commit()
     except rubric_lifecycle.RubricLifecycleError as exc:
         db.rollback()

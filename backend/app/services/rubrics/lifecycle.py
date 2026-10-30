@@ -29,6 +29,8 @@ from backend.app.db import models
 from backend.app.services.rubrics.executable_validator import (
     validate_publishable_rubric,
 )
+from backend.app.services.rubrics.rule_status import EXCLUDED_STATUS
+from backend.app.services.rubrics.rule_status import participates
 from backend.app.services.scoring.core.policy import build_corrected_thesis_policy
 
 
@@ -160,8 +162,13 @@ def _canonical_version_hash(
     templates = [
         item for item in graph.templates if item.source_artifact_id in artifact_ids
     ]
+    # 版本内容只含参与评分的细则：老师排除的细则不执行，也不进哈希
+    # （评分细则排除落库改造方案 §3.2）。门禁保证已发布版本里没有排除的
+    # 细则时，过滤前后集合相同，历史哈希逐字节不变。
     rules = [
-        item for item in graph.rules if item.rubric_version_id == version.id
+        item
+        for item in graph.rules
+        if item.rubric_version_id == version.id and participates(item)
     ]
     rule_ids = {item.id for item in rules}
     source_by_id = {
@@ -565,6 +572,19 @@ def _require_rule_context(
     if len(matches) != 1:
         raise RubricLifecycleError("原子规则不存在或版本归属不唯一")
     return matches[0]
+
+
+def criterion_keeps_rule(session: Session, rule: models.AtomicRule) -> bool:
+    """排除 ``rule`` 之后，它所在的评分项是否还有参与评分的细则。"""
+
+    others = session.scalars(
+        select(models.AtomicRule.status).where(
+            models.AtomicRule.rubric_version_id == rule.rubric_version_id,
+            models.AtomicRule.criterion_id == rule.criterion_id,
+            models.AtomicRule.id != rule.id,
+        )
+    ).all()
+    return any(status != EXCLUDED_STATUS for status in others)
 
 
 def _project_deduction_rules(
@@ -1604,6 +1624,18 @@ def clone_published_rubric(
             session.flush()
     except IntegrityError as exc:
         raise RubricLifecycleError("深克隆评分标准失败：数据约束冲突") from exc
+
+    # 原版本里排除的细则在克隆里保持排除：回到草稿的话，老师点“统一确认”
+    # 会把它一并确认、悄悄重新参与评分（排除落库改造方案 §7）。
+    reason = f"克隆自已发布版本 {source.version}：沿用原版本的排除"
+    for original in active_rules:
+        if participates(original):
+            continue
+        copied = rule_map[original.id]
+        if not criterion_keeps_rule(session, copied):
+            continue
+        submit_atomic_rule_for_review(session, cloned.id, copied.rule_code, actor_id, reason)
+        reject_atomic_rule(session, cloned.id, copied.rule_code, actor_id, reason)
     return cloned
 
 

@@ -71,6 +71,15 @@
   /* 中性标签 */
   --neutral-bg: #eeede8;
   --neutral-ink: #6f716a;
+  --chip-bg: #efeee9;
+
+  /* 评分助手 v2（设计稿「评分助手 v2.dc.html」）补充：解释类标签蓝、当前步骤琥珀、禁用主按钮、文件类型色块 */
+  --info-bg: #e7edf6;
+  --info-ink: #2f4f86;
+  --amber: #c9953f;
+  --accent-disabled: #a9c2bb;
+  --excel-bg: #e6f0ea;
+  --excel-ink: #2f6b45;
 
   /* 排版 */
   --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC",
@@ -84,6 +93,7 @@
   /* 圆角与阴影 */
   --radius-sm: 5px;
   --radius: 8px;
+  --radius-md: 10px;
   --radius-lg: 12px;
   --shadow-page: 0 1px 3px rgba(26, 27, 25, 0.06);
 

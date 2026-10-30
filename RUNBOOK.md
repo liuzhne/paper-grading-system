@@ -1218,6 +1218,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无新命令；排错：导入的评分标准发布被 `global_policy_unsupported` 挡住（报错指向政策，真正原因是改了总分没重算 hash）。 |
+| 2026-10-30 | 评分细则排除落库 | 无迁移、无新命令；新增接口 `…/rules/{code}/exclude`、`…/restore`；契约版本 → `2026-10-30.rule-exclusion`。上线前只读 SQL 核对已发布版本里没有非 approved 的细则；排错：排除按钮灰着、排除 409、旧页面统一确认 409、`dependency_rejected`、回滚后评分哈希不一致。 |
+| 2026-10-29 | 评分助手 v2 界面（原生工作区） | 无新命令、无迁移；契约版本 → `2026-10-29.assistant-v2`。排错：旧页面的确认按钮 422、放弃后多出草稿任务、核对发布按钮不出现、进展快照不更新、工作区宽度复原。iframe 安全头那一条改为只适用于旧版本。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询（#67 复审） | 排错条目补充：进保存点前先 `db.flush()`，写入失败照常抛出。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询 | 无新命令；排错：刷新后老师刚发的消息不见了。 |
 | 2026-10-28 | 评分助手计划卡片 | 无新命令；排错：计划卡片显示“已结束”。 |
@@ -2374,7 +2376,7 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
 打开 `http://localhost:8000/workbench/assistant`。改了前端要重新组装：`python scripts/build_web_static.py --with-workbench`。不要设置 `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`：LangGraph 会连带安装 `langsmith`，开了追踪就会把流程数据发到外部服务。
 
 排错：
-- **现象**：右侧工作区空白，浏览器控制台报 `Refused to display ... in a frame because it set 'X-Frame-Options' to 'deny'`。
+- **现象**（2026-10-29 之前的版本）：右侧工作区空白，浏览器控制台报 `Refused to display ... in a frame because it set 'X-Frame-Options' to 'deny'`。v2 起工作区是原生面板，不再嵌入页面，这一条只在回滚到旧版本时有用。
   - 报错指向：页面本身坏了。
   - 真正原因：部署层的安全头还是 `DENY`。工作区以同源 iframe 嵌入现有页面，需要 `X-Frame-Options: SAMEORIGIN` 与 `frame-ancestors 'self'`（`vercel.json`、`deploy/Caddyfile`）；自建反向代理要同步修改。
 - **现象**：点了“开始评分”，进度一直是“等待执行”。
@@ -2384,8 +2386,21 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   - 真正原因：汇报由对话页的进度轮询触发，页面隐藏时暂停；回到页面或重新打开会话就会继续。是否评完以服务器上的作业状态为准。
 - **现象**：`runs` 返回 409 `ASSISTANT_RUN_IN_PROGRESS` 或 `ASSISTANT_CARD_STALE`。
   - 真正原因：前者是同一会话有另一个请求在推进流程（运行锁 120 秒自动过期）；后者是点了旧卡片、双击或另一个标签页已推进。刷新会话看最新消息即可。
-- **现象**：确认卡片提示“内存里的文件已失效”。
-  - 真正原因：待评文件只在页面内存里，刷新后丢失。属预期行为，重新选择文件即可。
+- **现象**：工作区“待评分文件”提示“页面刷新后，本页内存里的文件已失效”。
+  - 真正原因：待评文件只在页面内存里，刷新后丢失。v2 选完文件就建好了任务，重新选择同一批文件后接着上传即可，不用重新开始。
+- **现象**（v2 上线后）：点确认卡片上的“换评分标准”或“重新选择文件”返回 422“恢复数据不合规”。
+  - 报错指向：后端校验坏了。
+  - 真正原因：页面是上线前打开的旧版本。v2 的确认只剩“开始评分 / 不评了”，换评分标准挪到选文件之前；契约版本已升为 `2026-10-29.assistant-v2`，旧页面在下一次写操作前会自动刷新，手动刷新也行。
+- **现象**：老师在确认那一步点了“不评了”，评分任务列表里多了一个“助手评分 · 月-日 时:分 · N 份”的草稿。
+  - 报错指向：放弃没有生效。
+  - 真正原因：v2 选完文件就建草稿任务并上传（这样确认时才看得到预检结果），放弃时任务留作草稿，回复里写了任务名。属预期行为，可在评分任务页归档。
+- **现象**：助手工作区“核对评分规则”里一直没有“发布”按钮，只有“在评分标准页处理”。
+  - 报错指向：发布入口坏了。
+  - 真正原因：发布门禁要求参与评分的细则都已确认（排除的不算）、每个评分项至少一条参与评分的细则、没有结构阻断项。缺细则的项在评分标准页补齐或让 AI 起草，结构阻断（如 `dependency_rejected`）也在那里处理，回到助手点“刷新”。2026-10-30 起助手与评分标准页都能“排除 / 恢复”，排除即时保存。
+- **现象**：问“现在进展到哪了？”，右侧“任务进展”标签不随评分推进变化。
+  - 真正原因：那是提问时的快照，按设计不自动更新；点标签上的“刷新”按当前计划重算（只在本页，刷新页面后回到提问时那份），实时进度看“任务”标签。
+- **现象**：工作区宽度拖不到想要的宽度，或刷新后变回默认。
+  - 真正原因：宽度限制在 400px 到“总宽 − 400px”（对话区至少留 400px）；宽度存在浏览器本机，隐私模式或禁用站点数据时存不住，每次回到 560px。双击分隔条恢复默认。
 - **现象**：开发或测试中报 `Session is already flushing`，指向 `assistant/checkpointer.py` 或 `context.py`。
   - 报错指向：数据库会话用法错了。
   - 真正原因：LangGraph 在后台线程保存快照；状态存储若在 `put` / `put_writes` 里直接写会话，会与节点同时使用同一个会话。状态存储必须只写内存缓冲，由运行器在主线程 `persist()`。
@@ -2565,6 +2580,51 @@ uv run python -m backend.app.scripts.verify_postgres_ops
 发布与回滚：无新迁移，head 保持 `0038_assistant_conversations`。先更新初始化入口，再接收真实凭据并运行；随后按 §9.4 核对数据库、私有桶及运行角色，再开启部署。若回滚业务版本，保留安全初始化脚本用于运维，不恢复会输出凭据的旧初始化入口；无需数据库降级或业务数据回滚。
 
 维护记录：2026-10-13 · 初始化连接串编码与凭据保护：新增安全错误诊断、隐藏输入、合成凭据回归与无迁移发布/回滚步骤。
+
+### 2026-10-30 评分细则排除落库
+
+方案见 `docs/评分细则排除落库改造方案.md`。排除的细则状态为 `rejected`，不参与发布与评分；“恢复”回到待确认。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_rubric_rule_exclusion.py backend/app/tests/test_m4_recovery_hardening.py backend/app/tests/test_m4_publish_validation.py
+npm --prefix frontend/workbench run test:unit -- src/components/RuleReviewPanel.test.js src/components/assistant/ws/ReviewStep.test.js src/lib/rubric-workflow.test.js
+```
+
+上线前在生产只读核对（应为 0；不为 0 时不发布，这些版本的哈希重算会变、评分会 fail closed）：
+
+```sql
+begin read only;
+select count(*)
+  from atomic_rules r
+  join rubric_versions v on v.id = r.rubric_version_id
+  join rubric_compilations c on c.id = v.compilation_id
+ where c.published_at is not null and r.status <> 'approved';
+rollback;
+```
+
+发布与回滚：无迁移，head 不变。回滚到本版之前的代码前，先用同一查询把 `<> 'approved'` 换成 `= 'rejected'` 看本版上线期间有没有发布过含排除的版本：有的话旧代码重算哈希会不一致，这些版本要克隆重发。
+
+排错：
+- **现象**：“排除”按钮是灰的，悬停提示“每个评分项至少保留 1 条细则”。
+  - 真正原因：这一项只剩这一条参与评分的细则。先补一条新细则（或恢复一条已排除的），再排除这条。后端同样拒绝（409）。
+- **现象**：点“排除”或“恢复”返回 409“条款或执行草稿已变化，请重新加载并核对后再操作”。
+  - 报错指向：排除接口坏了。
+  - 真正原因：页面上的那一版条款已被修改或重新编译（`content_token` / `compilation_id` 对不上），刷新后再操作。
+- **现象**（上线后）：评分标准页点“统一确认最终规则”报 409“只有 review 原子规则可以完成审核”。
+  - 报错指向：确认接口坏了。
+  - 真正原因：页面是上线前打开的旧版本，把已排除的细则当成待确认去调 `/confirm`。契约版本已升为 `2026-10-30.rule-exclusion`，旧页面在下一次写操作前会自动刷新，手动刷新也行。
+- **现象**：发布被挡，阻断项 `dependency_rejected`。
+  - 真正原因：一条参与评分的细则在 `depends_on_rule_codes` 里依赖了已排除的细则；执行计划遇到快照里不存在的依赖会直接失败。恢复被依赖的细则，或把依赖它的细则一并排除 / 去掉依赖。
+- **现象**：发布被挡，阻断项 `rule_rejection_audit_missing` 或 `rule_rejection_audit_mismatch`。
+  - 报错指向：审计数据坏了。
+  - 真正原因：有人绕过接口直接改了库里的细则状态或审计。恢复后重新排除，会补上完整的驳回审计。
+- **现象**：回滚代码后，部分已发布的评分标准评分失败，报 `rubric version hash does not match full provenance graph`。
+  - 报错指向：版本数据被篡改。
+  - 真正原因：这些版本是在本版代码下发布的、含排除的版本；本版的版本哈希不含排除的细则，旧代码重算时把它们算了进去。数据没坏：重新部署本版，或克隆这些版本重新发布。
+
+维护记录：2026-10-30 · 评分细则排除落库：新增验证命令、上线前只读核对、回滚注意与排错条目；无迁移。
 
 ### 2026-10-30 导入的评分标准发布被 `global_policy_unsupported` 挡住
 

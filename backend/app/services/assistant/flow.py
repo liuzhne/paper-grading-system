@@ -1,8 +1,9 @@
 """评分助手的流程图（LangGraph，有状态，方案 §7.3–§7.5）。
 
 三种流程共用一张图：
-- grading：查前提（已发布的评分标准、评分模型）→ 选文件 → 确认开始 → 建任务 → 等浏览器上传 → 预检 →
-  （是否移除）→ 开评 → 等评分结束 → 汇报；
+- grading：查前提（已发布的评分标准、评分模型）→ 选文件（之前可以换评分标准）→ 建草稿任务 → 等浏览器上传 →
+  预检 → 确认开始（无法评分的文件在这一步一起移除）→ 开评 → 等评分结束 → 汇报
+  （docs/评分助手v2界面改造方案.md §4.1）；
 - import：等浏览器建导入草稿 → 等用户在工作区确认并发布 → 转 grading；
 - watch：手动重试后观察一次已存在的作业，评完汇报。
 
@@ -12,7 +13,8 @@
 - 中断返回给浏览器的只有卡片编号与“需要浏览器做的事”，可 JSON 序列化；
 - 状态里只放编号与标志位，不放对话全文、分数或引文（方案 §9）；
 - grading 与 import 开始时发一张计划卡片（docs/评分助手计划卡片方案.md），各节点走完一步就在原卡片上
-  更新，编号记在状态的 `plan` 里，并随每个中断带给运行器（放弃、过期时由它更新卡片）。
+  更新，编号记在状态的 `plan` 里，并随每个中断带给运行器（放弃、过期时由它更新卡片）；
+- 流程里的卡片带 `step`（计划步骤的键），前端把它显示成工作区那一步的入口。
 """
 
 from __future__ import annotations
@@ -69,11 +71,13 @@ class FlowState(TypedDict, total=False):
     rubric_id: str
     rubric_name: str
     rubric_version: str
+    business_profile_key: str
     connection_label: str
     batch_name: str
     batch_id: str
     paper_ids: list[str]
     removable: list[dict]
+    warnings: list[dict]
     job_id: str
     auto_retry_used: bool
     card: dict
@@ -140,18 +144,34 @@ def begin(state: FlowState, runtime: Runtime[RunContext]):
     if count:
         done["files"] = "%d 份" % count
     ref = plan.start(ctx, "grading", done=done)
-    return {"next": "propose_start" if count else "ask_files", "flow_started_at": _now_iso(), "plan": ref}
+    return {**_rubric_state(rubric), "connection_label": label, "flow_started_at": _now_iso(), "plan": ref,
+            "next": "create_batch" if count else "ask_files"}
 
 
-# --- 场景 A：选文件与关键确认 -----------------------------------------------------------
+# --- 场景 A：选文件 → 建任务与上传 → 预检 → 关键确认 -----------------------------------------------
+
+def _rubric_state(rubric: dict) -> dict:
+    return {"rubric_id": rubric["id"], "rubric_name": rubric["name"], "rubric_version": rubric["version"],
+            "business_profile_key": rubric.get("business_profile_key")}
+
+
+def _rubric_fields(state: FlowState) -> dict:
+    """卡片上的评分标准：工作区第 1 步按它显示“用哪份”，等选文件时可以换。"""
+
+    return {"rubric_id": state.get("rubric_id"), "rubric_name": state.get("rubric_name"),
+            "rubric_version": state.get("rubric_version"), "business_profile_key": state.get("business_profile_key"),
+            "rubric_preset": bool(state.get("preset_rubric_id"))}
+
 
 def ask_files(state: FlowState, runtime: Runtime[RunContext]):
     ctx = _ctx(runtime)
     card_id = new_card_id("files")
-    text = "请选择待评分的文件（.docx 或 .pdf，一次最多 %d 份）。" % MAX_FILES
+    text = "请选择待评分的文件（.docx 或 .pdf，一次最多 %d 份），选好后会自动上传并预检。" % MAX_FILES
     if state.get("rubric_name"):
-        text = "请选择待评分的文件，评分标准为《%s》%s。" % (state["rubric_name"], state.get("rubric_version") or "")
-    message = ctx.say(text, [{"id": card_id, "type": "pick_files", "status": "proposed", "max": MAX_FILES}],
+        text = "请选择待评分的文件，评分标准为《%s》%s。选好后会自动上传并预检。" % (
+            state["rubric_name"], state.get("rubric_version") or "")
+    message = ctx.say(text, [{"id": card_id, "type": "pick_files", "status": "proposed", "max": MAX_FILES,
+                              "step": "files", **_rubric_fields(state)}],
                       intent="start_grading")
     return {"card": _card_ref(message, card_id), "next": "wait_files"}
 
@@ -160,11 +180,24 @@ def wait_files(state: FlowState, runtime: Runtime[RunContext]):
     card = state["card"]
     value = interrupt(_pending(state, "pick_files", card, {"type": "pick_files", "max": MAX_FILES}))
     ctx = _ctx(runtime)
+    if value.get("action") == "change_rubric":
+        # 换评分标准只在选文件之前：上传后任务已经锁定了评分标准（v2 界面改造方案 §4.3）。
+        chosen = _resolve_rubric(ctx, value.get("rubric_id"))
+        if chosen is None:
+            ctx.say("这份评分标准不可用（未发布或无权访问），请换一份。")
+            return {"next": "wait_files"}
+        changed = {**_rubric_state(chosen), "preset_rubric_id": chosen["id"]}
+        ctx.patch_card(card["message_id"], card["card_id"], {
+            **_rubric_fields({**state, **changed}),
+        })
+        plan.update(ctx, state.get("plan"), {"rubric": ("done", _rubric_detail(chosen, preset=True))})
+        ctx.say("已换成《%s》%s，接着选择待评分的文件。" % (chosen["name"], chosen["version"]))
+        return {**changed, "next": "wait_files"}
     names = [str(name)[:200] for name in value.get("names", [])][:MAX_FILES]
     count = int(value["count"])
     ctx.update_card(card["message_id"], card["card_id"], "done", {"count": count, "names": names})
     plan.advance(ctx, state.get("plan"), "files", "%d 份" % count)
-    return {"file_count": count, "file_names": names, "next": "propose_start"}
+    return {"file_count": count, "file_names": names, "next": "create_batch"}
 
 
 def _resolve_rubric(ctx: RunContext, preset_id: str | None):
@@ -190,7 +223,7 @@ def _scoring_model_label(ctx: RunContext) -> str | None:
 
 def _rubric_detail(rubric: dict, *, preset: bool) -> str:
     detail = "《%s》%s" % (rubric["name"], rubric["version"])
-    return detail if preset else detail + "（最新发布，确认时可以换）"
+    return detail if preset else detail + "（最新发布，选文件前可以换）"
 
 
 def _grading_ready(ctx: RunContext, preset_id: str | None):
@@ -218,12 +251,14 @@ def _grading_ready(ctx: RunContext, preset_id: str | None):
     return None
 
 
-def propose_start(state: FlowState, runtime: Runtime[RunContext]):
+def create_batch(state: FlowState, runtime: Runtime[RunContext]):
+    """选完文件就建草稿任务：上传这批文件本身就是要评它们；开评仍要老师确认（v2 界面改造方案 §4.1）。"""
+
     ctx = _ctx(runtime)
-    rubric = _resolve_rubric(ctx, state.get("preset_rubric_id"))
+    rubric = _resolve_rubric(ctx, state.get("rubric_id"))
     if rubric is None:
         plan.fail(ctx, state.get("plan"), "评分标准已不可用")
-        ctx.say("还没有已发布的评分标准。可以上传你的评分规则和模板，我来帮你导入。",
+        ctx.say("这份评分标准已不可用（被撤回或无权访问）。可以上传你的评分规则和模板，我来帮你导入。",
                 [quick_actions_card(["import_rubric"]), {"type": "link", "label": "打开评分标准页", "path": "/rubrics"}])
         return {"next": END}
     label = _scoring_model_label(ctx)
@@ -232,70 +267,14 @@ def propose_start(state: FlowState, runtime: Runtime[RunContext]):
         ctx.say("还没有可用的评分模型，请先在账户页配置自己的模型连接。",
                 [{"type": "link", "label": "去配置模型连接", "path": "/account"}])
         return {"next": END}
-    # 换过评分标准、模型连接有变化时，计划上写实际用的那份。
-    plan.update(ctx, state.get("plan"), {
-        "rubric": ("done", _rubric_detail(rubric, preset=bool(state.get("preset_rubric_id")))),
-        "model": ("done", label),
-    })
     count = int(state.get("file_count") or 0)
     started = datetime.fromisoformat(state["flow_started_at"])
-    card_id = new_card_id("start")
-    source = "" if state.get("preset_rubric_id") else "（最新发布的评分标准，可以换）"
-    # 说明标准的文档类型：它决定评分页与导出显示学号还是文件名（通用文档评分改造方案 §3）。
-    kind = document_type_label(rubric.get("business_profile_key"))
-    message = ctx.say(
-        "用《%s》%s（%s）%s评这 %d 份文件，评分模型：%s。开始吗？"
-        % (rubric["name"], rubric["version"], kind, source, count, label),
-        [{
-            "id": card_id, "type": "confirm_start", "status": "proposed",
-            "rubric_id": rubric["id"], "rubric_name": rubric["name"], "rubric_version": rubric["version"],
-            "business_profile_key": rubric.get("business_profile_key"),
-            "file_count": count, "connection_label": label,
-        }],
-        intent="start_grading",
-    )
-    return {
-        "rubric_id": rubric["id"], "rubric_name": rubric["name"], "rubric_version": rubric["version"],
-        "connection_label": label, "batch_name": batch_name(started, count),
-        "card": _card_ref(message, card_id), "next": "wait_confirm",
-    }
-
-
-def wait_confirm(state: FlowState, runtime: Runtime[RunContext]):
-    card = state["card"]
-    value = interrupt(_pending(state, "confirm_start", card))
-    ctx = _ctx(runtime)
-    action = value["action"]
-    if action == "cancel":
-        ctx.update_card(card["message_id"], card["card_id"], "dismissed")
-        plan.close(ctx, state.get("plan"), "dismissed")
-        ctx.say("好的，这次不评了。", [quick_actions_card(["start_grading", "query_progress"])])
-        return {"next": END}
-    if action == "repick":
-        ctx.update_card(card["message_id"], card["card_id"], "dismissed")
-        plan.update(ctx, state.get("plan"), {"files": ("current", None), "confirm": ("todo", None)})
-        return {"next": "ask_files", "file_count": 0, "file_names": []}
-    if action == "change_rubric":
-        chosen = _resolve_rubric(ctx, value.get("rubric_id"))
-        if chosen is None:
-            ctx.say("这份评分标准不可用（未发布或无权访问），请换一份。")
-            return {"next": "wait_confirm"}
-        ctx.update_card(card["message_id"], card["card_id"], "dismissed")
-        return {"next": "propose_start", "preset_rubric_id": chosen["id"]}
-    ctx.update_card(card["message_id"], card["card_id"], "running")
-    plan.advance(ctx, state.get("plan"), "confirm")
-    return {"next": "create_batch"}
-
-
-def create_batch(state: FlowState, runtime: Runtime[RunContext]):
-    ctx = _ctx(runtime)
-    card = state["card"]
+    name = state.get("batch_name") or batch_name(started, count)
     # 幂等：节点重跑（例如上次运行在落库之后、写快照之前中断）时找回本流程建过的批次。
-    started = datetime.fromisoformat(state["flow_started_at"])
     existing = ctx.db.scalar(
         select(GradingBatch).where(
             GradingBatch.owner_id == ctx.user_id,
-            GradingBatch.name == state["batch_name"],
+            GradingBatch.name == name,
             GradingBatch.created_at >= started,
         )
     )
@@ -303,14 +282,19 @@ def create_batch(state: FlowState, runtime: Runtime[RunContext]):
         batch = {"id": existing.id, "name": existing.name}
     else:
         try:
-            batch = tools.call(ctx, "create_batch", allow_write=True,
-                               name=state["batch_name"], rubric_id=state["rubric_id"])
+            batch = tools.call(ctx, "create_batch", allow_write=True, name=name, rubric_id=rubric["id"])
         except HTTPException as exc:
-            return _fail(ctx, state, card, "建任务失败：%s" % _detail(exc))
-    ctx.set_focus(batch_id=batch["id"], batch_name=batch["name"], rubric_id=state["rubric_id"],
-                  rubric_name=state["rubric_name"], job_id=None, paper_id=None)
+            return _fail(ctx, state, None, "建任务失败：%s" % _detail(exc))
+    ctx.set_focus(batch_id=batch["id"], batch_name=batch["name"], rubric_id=rubric["id"],
+                  rubric_name=rubric["name"], job_id=None, paper_id=None)
     ctx.show_workspace("/tasks/new?batch=%s" % batch["id"])
-    return {"batch_id": batch["id"], "next": "wait_upload"}
+    card_id = new_card_id("upload")
+    message = ctx.say("已建好评分任务《%s》，正在上传这 %d 份文件并预检。" % (name, count), [{
+        "id": card_id, "type": "upload_papers", "status": "running", **_step(state, "upload"),
+        "batch_id": batch["id"], "file_count": count,
+    }])
+    return {**_rubric_state(rubric), "connection_label": label, "batch_name": name, "batch_id": batch["id"],
+            "card": _card_ref(message, card_id), "next": "wait_upload"}
 
 
 def wait_upload(state: FlowState, runtime: Runtime[RunContext]):
@@ -334,6 +318,10 @@ def wait_upload(state: FlowState, runtime: Runtime[RunContext]):
     return {"paper_ids": paper_ids, "next": "precheck"}
 
 
+def _finding_row(finding: dict) -> dict:
+    return {"paper_id": finding["paper_id"], "file_name": finding["file_name"], "message": finding["message"]}
+
+
 def precheck(state: FlowState, runtime: Runtime[RunContext]):
     ctx = _ctx(runtime)
     card = state["card"]
@@ -345,34 +333,92 @@ def precheck(state: FlowState, runtime: Runtime[RunContext]):
     removable, stuck = blocking_findings(result)
     if stuck:
         lines = "\n".join("· %s：%s" % (f["file_name"], f["message"]) for f in stuck)
-        ctx.update_card(card["message_id"], card["card_id"], "done", {"batch_id": state["batch_id"], "stage": "blocked"})
+        ctx.update_card(card["message_id"], card["card_id"], "failed", {"stuck": len(stuck)})
         plan.fail(ctx, state.get("plan"), "%d 份文件还没解析完" % len(stuck))
-        ctx.say("有 %d 份文件还没解析完，暂时不能开始评分：\n%s\n请稍后在右侧页面重试解析。" % (len(stuck), lines))
+        ctx.say("有 %d 份文件还没解析完，暂时不能开始评分：\n%s\n请稍后在评分任务页重试解析。" % (len(stuck), lines))
         return {"next": END}
+    warnings = [_finding_row(f) for f in (result.get("findings") or []) if f.get("severity") == "warning"]
+    total = len(state["paper_ids"])
+    detail = "%d 份可以评分" % (total - len(removable))
     if removable:
-        ctx.update_card(card["message_id"], card["card_id"], "done", {"batch_id": state["batch_id"], "stage": "blocked"})
-        plan.update(ctx, state.get("plan"), {"upload": ("blocked", "%d 份无法评分，等你决定是否移除" % len(removable))})
-        card_id = new_card_id("blocked")
+        detail += "，%d 份无法评分" % len(removable)
+    ctx.update_card(card["message_id"], card["card_id"], "done",
+                    {"ready": total - len(removable), "removable": len(removable), "warnings": len(warnings)})
+    plan.advance(ctx, state.get("plan"), "upload", detail)
+    return {"removable": [_finding_row(f) for f in removable], "warnings": warnings, "next": "propose_start"}
+
+
+def propose_start(state: FlowState, runtime: Runtime[RunContext]):
+    """关键确认：预检结果、评分标准与模型都写在卡片上；无法评分的文件在这一步一起决定（§4.1）。"""
+
+    ctx = _ctx(runtime)
+    removable = state.get("removable") or []
+    warnings = state.get("warnings") or []
+    total = len(state["paper_ids"])
+    ready = total - len(removable)
+    if not ready:
+        plan.fail(ctx, state.get("plan"), "没有可以评分的文件")
         lines = "\n".join("· %s：%s" % (f["file_name"], f["message"]) for f in removable)
-        message = ctx.say(
-            "有 %d 份文件无法评分：\n%s\n移除它们，评其余的文件吗？" % (len(removable), lines),
-            [{"id": card_id, "type": "blocked_files", "status": "proposed", "batch_id": state["batch_id"],
-              "papers": [{"paper_id": f["paper_id"], "file_name": f["file_name"]} for f in removable]}],
-        )
-        return {"removable": [{"paper_id": f["paper_id"], "file_name": f["file_name"]} for f in removable],
-                "card": _card_ref(message, card_id), "next": "wait_remove"}
-    plan.advance(ctx, state.get("plan"), "upload", "%d 份可以评分" % len(state["paper_ids"]))
-    return {"next": "start_scoring"}
+        ctx.say("这 %d 份文件都无法评分：\n%s\n任务已保存为草稿《%s》，可以换文字版文件后重新开始。"
+                % (total, lines, state["batch_name"]), [quick_actions_card(["start_grading"])])
+        return {"next": END}
+    parts = ["%d 份已上传并完成预检" % total]
+    if removable or warnings:
+        parts.append("%d 份可以评分" % ready)
+    if warnings:
+        parts.append("%d 份需注意（照常评分，结果建议复核）" % len(warnings))
+    if removable:
+        parts.append("%d 份无法评分，开始时会移除" % len(removable))
+    # 说明标准的文档类型：它决定评分页与导出显示学号还是文件名（通用文档评分改造方案 §3）。
+    kind = document_type_label(state.get("business_profile_key"))
+    text = "%s。评分标准《%s》%s（%s），评分模型：%s。确认后开始评分。" % (
+        "，".join(parts), state["rubric_name"], state["rubric_version"], kind, state["connection_label"])
+    card_id = new_card_id("start")
+    message = ctx.say(text, [{
+        "id": card_id, "type": "confirm_start", "status": "proposed", "step": "confirm",
+        "batch_id": state["batch_id"], "rubric_id": state["rubric_id"], "rubric_name": state["rubric_name"],
+        "rubric_version": state["rubric_version"], "business_profile_key": state.get("business_profile_key"),
+        "file_count": total, "ready_count": ready, "removable": removable, "warnings": warnings,
+        "connection_label": state["connection_label"],
+    }], intent="start_grading")
+    return {"card": _card_ref(message, card_id), "next": "wait_confirm"}
+
+
+def wait_confirm(state: FlowState, runtime: Runtime[RunContext]):
+    card = state["card"]
+    value = interrupt(_pending(state, "confirm_start", card))
+    ctx = _ctx(runtime)
+    if not state.get("batch_id"):
+        # 旧顺序（确认在上传之前）里等着的流程：任务还没建，接不上新顺序，作废后请老师重新开始。
+        ctx.update_card(card["message_id"], card["card_id"], "expired")
+        plan.close(ctx, state.get("plan"), "expired")
+        ctx.say("评分流程已更新，这张确认卡片不能再用了，请重新说“开始评分”。",
+                [quick_actions_card(["start_grading"])])
+        return {"next": END}
+    if value["action"] == "cancel":
+        ctx.update_card(card["message_id"], card["card_id"], "dismissed")
+        plan.close(ctx, state.get("plan"), "dismissed")
+        ctx.say("好的，这次不评了。任务已保存为草稿《%s》，可以在评分任务页继续或归档。" % state["batch_name"],
+                [quick_actions_card(["start_grading", "query_progress"])])
+        return {"next": END}
+    ctx.update_card(card["message_id"], card["card_id"], "running")
+    removable = state.get("removable") or []
+    ready = len(state["paper_ids"]) - len(removable)
+    detail = ("移除 %d 份，评 %d 份" % (len(removable), ready)) if removable else ("评 %d 份" % ready)
+    plan.advance(ctx, state.get("plan"), "confirm", detail)
+    return {"next": "remove_papers" if removable else "start_scoring"}
 
 
 def wait_remove(state: FlowState, runtime: Runtime[RunContext]):
+    """旧顺序的“是否移除解析失败的文件”：新流程并入确认开始，这里只为已经等在这一步的流程保留。"""
+
     card = state["card"]
     value = interrupt(_pending(state, "confirm_remove", card))
     ctx = _ctx(runtime)
     if value["action"] == "cancel":
         ctx.update_card(card["message_id"], card["card_id"], "dismissed")
         plan.close(ctx, state.get("plan"), "dismissed")
-        ctx.say("好的，先不评。任务已保存为草稿，可以在右侧页面处理后再开始。")
+        ctx.say("好的，先不评。任务已保存为草稿，可以在评分任务页处理后再开始。")
         return {"next": END}
     ctx.update_card(card["message_id"], card["card_id"], "running")
     return {"next": "remove_papers"}
@@ -399,10 +445,8 @@ def remove_papers(state: FlowState, runtime: Runtime[RunContext]):
     except HTTPException as exc:
         return _fail(ctx, state, card, "预检失败：%s" % _detail(exc))
     if not result.get("can_start"):
-        return _fail(ctx, state, card, "还有文件不能评分，请在右侧页面处理后再开始。")
+        return _fail(ctx, state, card, "还有文件不能评分，请在评分任务页处理后再开始。")
     ctx.show_workspace("/tasks/new?batch=%s" % state["batch_id"])
-    plan.advance(ctx, state.get("plan"), "upload",
-                 "移除 %d 份，评 %d 份" % (len(state.get("removable") or []), len(remaining)))
     return {"paper_ids": remaining, "next": "start_scoring"}
 
 
@@ -421,11 +465,17 @@ def start_scoring(state: FlowState, runtime: Runtime[RunContext]):
     plan.update(ctx, state.get("plan"), {"scoring": ("current", "共 %d 份" % len(state["paper_ids"]))})
     progress_id = new_card_id("job")
     message = ctx.say(
-        "已开始评分，共 %d 份。右侧是实时进度，评完我会告诉你结果。" % len(state["paper_ids"]),
-        [{"id": progress_id, "type": "job_progress", "status": "running",
+        "已开始评分，共 %d 份。每评完一份右侧都会更新，评完我会告诉你结果，期间可以继续提问。" % len(state["paper_ids"]),
+        [{"id": progress_id, "type": "job_progress", "status": "running", **_step(state, "scoring"),
           "batch_id": state["batch_id"], "job_id": job["id"]}],
     )
     return {"job_id": job["id"], "progress_card": _card_ref(message, progress_id), "next": "wait_job"}
+
+
+def _step(state: FlowState, key: str) -> dict:
+    """流程里的卡片标上对应的计划步骤，前端据此把它显示成工作区某一步的入口；没有计划（观察重试）时不标。"""
+
+    return {"step": key} if state.get("plan") else {}
 
 
 # --- 等评分结束、自动重试与汇报 --------------------------------------------------------------
@@ -500,7 +550,7 @@ def finish_job(state: FlowState, runtime: Runtime[RunContext]):
         progress_id = new_card_id("job")
         message = ctx.say(
             "有 %d 份因临时性错误（%s）没有评完，已自动重试一次。" % (diagnosis["failed_count"], labels),
-            [{"id": progress_id, "type": "job_progress", "status": "running",
+            [{"id": progress_id, "type": "job_progress", "status": "running", **_step(state, "scoring"),
               "batch_id": state["batch_id"], "job_id": state["job_id"]}],
         )
         return {"auto_retry_used": True, "progress_card": _card_ref(message, progress_id), "next": "wait_job"}
@@ -517,11 +567,11 @@ def finish_job(state: FlowState, runtime: Runtime[RunContext]):
     cards: list[dict] = []
     if diagnosis["failed_count"]:
         cards.append({
-            "type": "diagnosis", "status": "proposed" if retryable else "info",
+            "type": "diagnosis", "status": "proposed" if retryable else "info", **_step(state, "scoring"),
             "batch_id": state["batch_id"], "job_id": state["job_id"],
             "groups": diagnosis["groups"], "failed_count": diagnosis["failed_count"],
         })
-    cards.append({"type": "overview", "batch_id": state["batch_id"]})
+    cards.append({"type": "overview", "batch_id": state["batch_id"], **_step(state, "report")})
     cards.append(quick_actions_card(["query_paper", "query_review"]))
     head = ("评分结束，%d 份没有评完（原因见下）。" % diagnosis["failed_count"]) if diagnosis["failed_count"] else "评分完成。"
     ctx.say(head + overview_text(overview), cards)
@@ -537,7 +587,7 @@ def ask_rubric_files(state: FlowState, runtime: Runtime[RunContext]):
     message = ctx.say(
         "请选择评分规则文件和评分模板文件（Word 或 Excel，至少一份），并分别说明是哪一份。"
         "导入后在右侧核对并发布，发布后我会接着让你上传待评分文件。",
-        [{"id": card_id, "type": "pick_rubric_files", "status": "proposed"}],
+        [{"id": card_id, "type": "pick_rubric_files", "status": "proposed", "step": "import"}],
         intent="import_rubric",
     )
     return {"card": _card_ref(message, card_id), "next": "wait_import"}
@@ -566,7 +616,8 @@ def wait_import(state: FlowState, runtime: Runtime[RunContext]):
     message = ctx.say(
         "已解析《%s》，共 %d 个评分项。请在右侧核对评分项并确认，然后完成规则核对与发布。发布后我会继续。"
         % (session.name, len(import_sessions.serialize(session).get("criteria") or [])),
-        [{"id": wait_id, "type": "rubric_wait", "status": "running", "import_session_id": session.id}],
+        [{"id": wait_id, "type": "rubric_wait", "status": "running", "step": "publish",
+          "import_session_id": session.id}],
     )
     return {"import_session_id": session.id, "import_name": session.name,
             "card": _card_ref(message, wait_id), "next": "wait_publish"}
@@ -600,7 +651,8 @@ def wait_publish(state: FlowState, runtime: Runtime[RunContext]):
     if rubric.status != "published":
         return {"next": "wait_publish"}
     ctx.update_card(card["message_id"], card["card_id"], "done", {"rubric_id": rubric.id})
-    ctx.say("评分标准《%s》%s 已发布。" % (rubric.name, rubric.version))
+    # 发布是老师在工作区做的：记成一条事件，对话里显示为分隔线（v2 界面改造方案 §4.4）。
+    ctx.event("你发布了《%s》%s" % (rubric.name, rubric.version))
     plan.update(ctx, state.get("plan"), {"publish": ("done", "《%s》%s" % (rubric.name, rubric.version))})
     # 接着评分之前同样先查评分模型，不让老师选完文件才发现评不了。
     label = _scoring_model_label(ctx)
@@ -611,8 +663,9 @@ def wait_publish(state: FlowState, runtime: Runtime[RunContext]):
                 [{"type": "link", "label": "去配置模型连接", "path": "/account"}])
         return {"next": END}
     plan.advance(ctx, state.get("plan"), "model", label)
-    return {"preset_rubric_id": rubric.id, "rubric_name": rubric.name, "rubric_version": rubric.version,
-            "mode": "grading", "file_count": 0, "next": "ask_files"}
+    return {"preset_rubric_id": rubric.id, "rubric_id": rubric.id, "rubric_name": rubric.name,
+            "rubric_version": rubric.version, "business_profile_key": rubric.business_profile_key,
+            "connection_label": label, "mode": "grading", "file_count": 0, "next": "ask_files"}
 
 
 # --- 组装 ----------------------------------------------------------------------------------
@@ -639,14 +692,14 @@ NODES = {
 
 #: 每个节点可能去往的下一个节点（`next` 字段），供条件边声明与图校验。
 ROUTES = {
-    "begin": ["ask_files", "propose_start", "ask_rubric_files", "post_progress", END],
+    "begin": ["ask_files", "create_batch", "ask_rubric_files", "post_progress", END],
     "ask_files": ["wait_files"],
-    "wait_files": ["propose_start"],
-    "propose_start": ["wait_confirm", END],
-    "wait_confirm": ["create_batch", "propose_start", "ask_files", "wait_confirm", END],
+    "wait_files": ["create_batch", "wait_files"],
     "create_batch": ["wait_upload", END],
     "wait_upload": ["precheck", END],
-    "precheck": ["wait_remove", "start_scoring", END],
+    "precheck": ["propose_start", END],
+    "propose_start": ["wait_confirm", END],
+    "wait_confirm": ["remove_papers", "start_scoring", END],
     "wait_remove": ["remove_papers", END],
     "remove_papers": ["start_scoring", END],
     "start_scoring": ["wait_job", END],

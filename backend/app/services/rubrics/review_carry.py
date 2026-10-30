@@ -1,4 +1,8 @@
-"""Keep confirmed rules only when their content and scoring context match."""
+"""Keep review conclusions only when the rule content and scoring context match.
+
+确认（``approved``）与排除（``rejected``）都是老师的核对结论，重新编译时同样
+沿用；内容或评分上下文变了的回到草稿重新核对（评分细则排除落库改造方案 §7）。
+"""
 import json
 from decimal import Decimal
 
@@ -7,6 +11,9 @@ from sqlalchemy import select
 from backend.app.db import models
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.review_workspace import rule_content, number_text
+
+#: 重新编译时沿用的核对结论。
+CARRIED_STATUSES = ("approved", "rejected")
 
 
 def signature(rule):
@@ -33,9 +40,10 @@ def snapshot_confirmed_rows(session, predecessor):
         return {}
     rules = session.scalars(select(models.AtomicRule).join(models.RubricVersion).where(
         models.RubricVersion.compilation_id == predecessor.id,
-        models.AtomicRule.status == "approved",
+        models.AtomicRule.status.in_(CARRIED_STATUSES),
     )).all()
-    return {rule.rule_code: (signature(rule), rule.id) for rule in rules if signature(rule)}
+    return {rule.rule_code: (signature(rule), rule.id, rule.status)
+            for rule in rules if signature(rule)}
 
 
 def carry_confirmed_rows(session, rubric_id, rules, previous, predecessor_id, actor_id):
@@ -43,9 +51,16 @@ def carry_confirmed_rows(session, rubric_id, rules, previous, predecessor_id, ac
         accepted = previous.get(rule.rule_code)
         if not accepted or signature(rule) != accepted[0]:
             continue
-        reason = f"复用内容与评分上下文均未改变的既有确认；前序编译 {predecessor_id}，规则 {accepted[1]}"
+        status = accepted[2]
+        if status == "rejected" and not lifecycle.criterion_keeps_rule(session, rule):
+            continue  # 历史数据里整项都被驳回时，留一条草稿给老师处理
+        verb = "确认" if status == "approved" else "排除"
+        reason = f"复用内容与评分上下文均未改变的既有{verb}；前序编译 {predecessor_id}，规则 {accepted[1]}"
         lifecycle.submit_atomic_rule_for_review(session, rubric_id, rule.rule_code, actor_id, reason)
-        lifecycle.approve_atomic_rule(session, rubric_id, rule.rule_code, actor_id, reason)
+        if status == "approved":
+            lifecycle.approve_atomic_rule(session, rubric_id, rule.rule_code, actor_id, reason)
+        else:
+            lifecycle.reject_atomic_rule(session, rubric_id, rule.rule_code, actor_id, reason)
 
 
 def calculate_carry_diff(
@@ -54,8 +69,8 @@ def calculate_carry_diff(
     next_criteria: list,
     next_profile: str | None = None,
 ) -> tuple[int, int]:
-    """Calculate how many approved rules will be retained vs invalidated.
-    Returns (retained_count, invalidated_count)."""
+    """Calculate how many review conclusions (confirmed or excluded rules) will be
+    retained vs invalidated.  Returns (retained_count, invalidated_count)."""
     if predecessor is None:
         return 0, 0
     confirmed = snapshot_confirmed_rows(session, predecessor)
@@ -82,7 +97,7 @@ def calculate_carry_diff(
 
     rules = session.scalars(select(models.AtomicRule).join(models.RubricVersion).where(
         models.RubricVersion.compilation_id == predecessor.id,
-        models.AtomicRule.status == "approved",
+        models.AtomicRule.status.in_(CARRIED_STATUSES),
     )).all()
 
     retained = 0

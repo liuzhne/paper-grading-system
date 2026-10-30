@@ -402,3 +402,192 @@ textarea.input {
 .stack-sm > * + * {
   margin-top: 6px;
 }
+
+/* ---------- 列表与标签（评分助手 v2 设计稿；助手工作区与对应的独立页面共用） ---------- */
+
+/* 细边框圆角清单：每行上边一条浅线，第一行没有。 */
+.row-list {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.row-list > .row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-row);
+  font-size: 13.5px;
+}
+
+.row-list > .row:first-child {
+  border-top: 0;
+}
+
+.row-list > .row.is-active {
+  background: #f7faf9;
+}
+
+.row-list > .row.is-warn {
+  background: var(--warn-surface);
+}
+
+.row-idx {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.row-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.row-note {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--warn-ink);
+}
+
+/* 小色块标签：严重度、来源、类型、状态。 */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 400;
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.tag-accent { background: var(--accent-soft); color: var(--accent); }
+.tag-warn { background: var(--warn-bg); color: var(--warn-ink); }
+.tag-danger { background: var(--danger-bg); color: var(--danger); }
+.tag-info { background: var(--info-bg); color: var(--info-ink); }
+.tag-muted { background: var(--neutral-bg); color: var(--neutral-ink); }
+
+/* 圆角状态药丸：“本项已确认”“等你确认”。 */
+.pill {
+  display: inline-flex;
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+}
+
+.pill.tag-accent, .pill.tag-warn, .pill.tag-danger { border-radius: 20px; }
+
+/* 状态点 + 文字。 */
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 12px;
+}
+
+.status-dot::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* 进度条。 */
+.bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-light);
+  overflow: hidden;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+
+/* 文件类型色块。 */
+.ext {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+}
+
+.ext-word { background: var(--info-bg); color: var(--info-ink); }
+.ext-excel { background: var(--excel-bg); color: var(--excel-ink); }
+.ext-pdf { background: var(--danger-bg); color: var(--danger); }
+
+/* 无边框的文字按钮（“排除”“撤销”“刷新”）。 */
+.text-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.text-btn.is-muted { color: var(--text-muted); }
+.text-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* 描边主色按钮（“确认”“采纳”“去核对”）。 */
+.btn-outline {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 小节标题：“扣分细则 · 3 条”。 */
+.sec-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 22px 0 10px;
+}
+
+.sec-head > strong { font-size: 14px; font-weight: 650; }
+.sec-head > span { font-size: 12.5px; color: var(--text-muted); }
+
+/* 工作区底部操作条左边的那句状态。 */
+.foot-text {
+  flex: 1 1 200px;
+  min-width: 0;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--neutral-ink);
+}
