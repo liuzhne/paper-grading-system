@@ -589,6 +589,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-10-30 | 评分细则排除落库 | 新增 `services/rubrics/rule_status.py`（是否参与评分的唯一口径）与 `exclude_rule` / `restore_rule` 两个接口；门禁、版本内容哈希、评分快照只算参与评分的细则；`review_carry` 与克隆沿用排除；`rule-coverage` 加 `rejected_count`；`RuleCard` 自带排除 / 恢复。契约版本 → `2026-10-30.rule-exclusion`。无迁移。 |
 | 2026-10-29 | 评分助手 v2 界面（原生工作区） | 前端：工作区由 iframe 改为原生面板（`components/assistant/`、`lib/assistant-workspace.js`），任务标签按计划卡片、结果标签按结果卡片从消息算出；`RuleCard` 由助手与评分标准页共用。后端：流程改为选文件 → 建草稿任务并上传 → 预检 → 确认开始；`RunContext.event` / `set_progress`；`plan.answer_progress` / `answer_next_steps`；批次汇总加 `latest_review_reasons`；契约版本 → `2026-10-29.assistant-v2`。无迁移。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询（#67 复审） | 无模块变化：`platform_available` 进保存点前先写库。 |
 | 2026-10-29 | 评分助手：读平台配置失败只撤销这次查询 | 无模块变化：`assistant/model.platform_available` 改用保存点，不再回滚整个会话。 |
@@ -1364,6 +1365,27 @@ pending + 计划卡片 ──▶ taskBar / chipsFor / todoItems ──▶ 输入
 共用：`components/RuleCard.vue` 由助手的“核对评分规则”与评分标准页的 `RuleReviewPanel` 共用；`components.css` 新增 `row-list` / `tag` / `pill` / `status-dot` / `bar` / `ext` / `text-btn` / `btn-outline` / `sec-head` / `foot-text`，新建任务页的上传清单用同一套。
 
 维护记录：2026-10-29 · 评分助手 v2 界面：原生工作区、流程改序、事件消息、进展快照与待办、会话进度、复核原因；契约版本 → `2026-10-29.assistant-v2`；OpenAPI 与前端类型已重新生成，`public/` 已重新组装；无迁移。
+
+### 2026-10-30 评分细则排除落库
+
+方案见 [docs/评分细则排除落库改造方案.md](docs/评分细则排除落库改造方案.md)。老师排除的细则是状态 `rejected` 的 AtomicRule：行和审计都留在库里，但**不参与评分**。口径只有一处——`services/rubrics/rule_status.participates`，下面各处都用它：
+
+```
+排除 / 恢复 ──▶ review_workspace.exclude_rule / restore_rule（锁父行 + content_token，与 confirm_rule 并排）
+                 └─ 草稿：submit_review → reject；恢复：reopen（rejected → draft）
+发布 ──▶ executable_validator：可执行检查只看参与评分的细则；排除的只核对 reject 审计
+     └─▶ lifecycle._canonical_version_hash：版本内容只含参与评分的细则
+评分 ──▶ CompiledRubricSnapshotLoader.load_from_session：快照只含参与评分的细则（重算哈希同口径）
+     └─▶ 执行计划 / 规则决策账本 / 互斥组合并判断 / 报告都看不到排除的细则
+```
+
+- 门禁新增 `dependency_rejected`（参与评分的细则依赖了排除的细则，执行计划会直接失败）、`rule_rejection_audit_missing` / `rule_rejection_audit_mismatch`；因排除只剩 1 条的互斥组放行（执行器对它本来就是空操作）；排除的细则的模板映射不再要求核对。
+- “每个评分项至少保留 1 条”只在 `exclude_rule` 里拦；旧的 `/reject`、CLI 与“驳回 → 重新打开 → 修改”的返工流程不受影响，发布时由门禁的完整性检查兜底。
+- 核对结论的沿用：`review_carry` 重新编译时沿用确认与排除（`CARRIED_STATUSES`），`clone_published_rubric` 克隆时原版本排除的细则保持排除（克隆人重放 `submit_review` + `reject`）。
+- `RubricCriterion.deduction_rules_structured` 不过滤：它只给未版本化的兼容路径用，正式版本不读它；`rule_origin` 还按下标从中取显示信息。
+- 读模型：`rule-coverage` 的排除不算待确认，新增 `rejected_count`；前端 `rubric-workflow.rulesReviewed` 与 `RubricsView.pendingRules` 同口径。`RuleCard` 自带“排除 / 确认 / 已排除 · 恢复”，评分标准页的 `RuleReviewPanel` 与助手的 `ReviewStep` 共用。
+
+维护记录：2026-10-30 · 评分细则排除落库：新增 `rule_status`、`POST …/rules/{code}/exclude` 与 `…/restore`；门禁、版本哈希、评分快照、沿用与覆盖率按“参与评分”口径；契约版本 → `2026-10-30.rule-exclusion`；无迁移。
 
 ### 2026-10-11 通用文档评分（工作台按文档类型评分）
 

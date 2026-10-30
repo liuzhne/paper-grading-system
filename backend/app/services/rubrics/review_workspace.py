@@ -87,18 +87,24 @@ def read_review_workspace(session, rubric_id):
     }
 
 
-def confirm_rule(session, rubric_id, rule_code, actor_id, payload):
+def _lock_reviewed_rule(session, rubric_id, rule_code, payload, operation):
+    """Lock the rule the reviewer saw; any content or draft change is a conflict."""
     # The same parent lock serializes recompilation, editing and confirmation.
     rubric = session.scalar(select(models.Rubric).where(models.Rubric.id == rubric_id)
                             .with_for_update().execution_options(populate_existing=True))
     if rubric is None:
         raise lifecycle.RubricLifecycleError("评分标准不存在")
-    lifecycle._require_state(rubric, "draft", "confirm_rule")
+    lifecycle._require_state(rubric, "draft", operation)
     rule, _version, compilation, _criterion = lifecycle._require_rule_context(
         session, rubric_id, rule_code, for_update=True)
     if (compilation.id != payload.compilation_id or rule.id != payload.rule_id
             or content_token(rule) != payload.content_token):
-        raise lifecycle.RubricLifecycleError("条款或执行草稿已变化，请重新加载并核对后确认")
+        raise lifecycle.RubricLifecycleError("条款或执行草稿已变化，请重新加载并核对后再操作")
+    return rule
+
+
+def confirm_rule(session, rubric_id, rule_code, actor_id, payload):
+    rule = _lock_reviewed_rule(session, rubric_id, rule_code, payload, "confirm_rule")
     # A retry after a lost response is a no-op; it must not duplicate audit events.
     if rule.status == "approved":
         return rule
@@ -107,3 +113,30 @@ def confirm_rule(session, rubric_id, rule_code, actor_id, payload):
                                                actor_id, payload.reason)
     return lifecycle.approve_atomic_rule(session, rubric_id, rule_code,
                                          actor_id, payload.reason)
+
+
+def exclude_rule(session, rubric_id, rule_code, actor_id, payload):
+    """排除：与确认对称，草稿先提交审核再驳回，不改 reject 只收 review 的状态机。"""
+    rule = _lock_reviewed_rule(session, rubric_id, rule_code, payload, "exclude_rule")
+    if rule.status == "rejected":
+        return rule
+    if rule.status == "approved":
+        raise lifecycle.RubricLifecycleError("已确认的细则不能直接排除")
+    # 每个评分项至少保留 1 条参与评分的细则（排除落库改造方案 §4）。只拦排除：
+    # 旧的“驳回唯一一条 → 重新打开 → 修改 → 再审”返工流程照旧，发布由门禁兜底。
+    if not lifecycle.criterion_keeps_rule(session, rule):
+        raise lifecycle.RubricLifecycleError("每个评分项至少保留 1 条细则；要换掉这条，请先补充新细则再排除")
+    if rule.status == "draft":
+        lifecycle.submit_atomic_rule_for_review(session, rubric_id, rule_code,
+                                               actor_id, payload.reason)
+    return lifecycle.reject_atomic_rule(session, rubric_id, rule_code,
+                                        actor_id, payload.reason)
+
+
+def restore_rule(session, rubric_id, rule_code, actor_id, payload):
+    """恢复：已排除的回到草稿，需要重新确认（恢复不等于确认）。"""
+    rule = _lock_reviewed_rule(session, rubric_id, rule_code, payload, "restore_rule")
+    if rule.status == "draft":
+        return rule
+    return lifecycle.reopen_atomic_rule(session, rubric_id, rule_code,
+                                        actor_id, payload.reason)

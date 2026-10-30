@@ -1,7 +1,8 @@
 <script setup>
 /**
- * 核对评分规则（导入流程第 2 步）：逐项确认扣分细则，全部确认后发布。
- * 确认、提交审核、发布调用与评分标准页同一组接口；分享范围与有阻断项的处理留在评分标准页。
+ * 核对评分规则（导入流程第 2 步）：逐项确认或排除扣分细则，全部处理后发布。
+ * 确认、排除、恢复、提交审核、发布调用与评分标准页同一组接口；分享范围与有阻断项的处理留在评分标准页。
+ * 排除即时保存，排除的细则不参与发布与评分（排除落库改造方案）。
  * 导入的识别结果还没确认时（评分项、分值的结构核对），先引导到评分标准页确认。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -76,9 +77,11 @@ const criteria = computed(() => (rubric.value?.criteria || []).map((item) => {
   const own = rules.value.filter((rule) => rule.criterion_id === item.id);
   const pendingCount = own.filter((rule) => ["draft", "review"].includes(rule.status)).length;
   const approved = own.filter((rule) => rule.status === "approved").length;
-  return { ...item, rules: own, pendingCount, approved, pending: pendingCount > 0 || own.length === 0,
-    label: own.length === 0 ? "无细则" : pendingCount ? `${pendingCount} 待确认` : "已确认",
-    tone: own.length === 0 ? "danger" : pendingCount ? "warn" : "accent" };
+  const rejected = own.filter((rule) => rule.status === "rejected").length;
+  const active = own.length - rejected; // 参与评分的细则；至少保留 1 条
+  return { ...item, rules: own, pendingCount, approved, rejected, active, pending: pendingCount > 0 || active === 0,
+    label: active === 0 ? "无细则" : pendingCount ? `${pendingCount} 待确认` : "已确认",
+    tone: active === 0 ? "danger" : pendingCount ? "warn" : "accent" };
 }));
 const current = computed(() => criteria.value.find((item) => item.id === selected.value) || null);
 const pendingCriteria = computed(() => criteria.value.filter((item) => item.pending));
@@ -111,6 +114,25 @@ async function confirmRules(list) {
     }
   } catch (err) {
     actionError.value = `已确认 ${done} 条，后面的停下了：${err?.message || "确认失败"}。刷新后核对再试。`;
+  } finally {
+    await load();
+    busy.value = false;
+  }
+}
+
+/** 排除 / 恢复一条细则：即时保存；恢复后回到待确认。 */
+async function setExcluded(rule, exclude) {
+  busy.value = true;
+  actionError.value = null;
+  store.noteTaskEdit();
+  try {
+    const code = encodeURIComponent(rule.rule_code);
+    const body = { compilation_id: workspace.value.compilation_id, rule_id: rule.id, content_token: rule.content_token,
+      reason: exclude ? "在评分助手里核对后排除，不参与评分" : "在评分助手里恢复已排除的细则，重新核对" };
+    if (exclude) await api.post(`/rubrics/${rubricId.value}/rules/${code}/exclude`, body);
+    else await api.post(`/rubrics/${rubricId.value}/rules/${code}/restore`, body);
+  } catch (err) {
+    actionError.value = `${exclude ? "排除" : "恢复"}没有成功：${err?.message || "操作失败"}。刷新后核对再试。`;
   } finally {
     await load();
     busy.value = false;
@@ -154,7 +176,7 @@ const footer = computed(() => {
   if (current.value?.pendingCount) {
     return { text: head, primary: `确认本项 ${current.value.pendingCount} 条${nextPending.value ? "，下一项" : ""}`, act: confirmCurrent };
   }
-  if (nextPending.value && nextPending.value.rules.length) {
+  if (nextPending.value && nextPending.value.active) {
     return { text: head, primary: `下一项待确认：${nextPending.value.code}`, act: () => { selected.value = nextPending.value.id; } };
   }
   if (pendingCriteria.value.length) return { text: `${head}。有评分项还没有细则，请在评分标准页补齐。`, link: true };
@@ -183,7 +205,7 @@ const footer = computed(() => {
         <button v-for="item in criteria" :key="item.id" class="chip-btn" :class="{ on: item.id === selected }" type="button"
                 role="tab" :aria-selected="item.id === selected" :title="item.name" @click="selected = item.id">
           <span class="mono">{{ item.code }}</span>
-          <span class="mark" :class="`tone-${item.tone}`">{{ item.tone === "accent" ? "✓" : item.rules.length ? item.pendingCount : "!" }}</span>
+          <span class="mark" :class="`tone-${item.tone}`">{{ item.tone === "accent" ? "✓" : item.active ? item.pendingCount : "!" }}</span>
         </button>
       </div>
       <nav v-else class="nav" aria-label="评分项">
@@ -201,7 +223,7 @@ const footer = computed(() => {
             <div class="crit-name">{{ current.name }}</div>
           </div>
           <span class="pill" :class="published ? 'tag-accent' : `tag-${current.tone}`">
-            {{ published ? "已发布" : current.rules.length === 0 ? "至少保留 1 条细则" : current.pendingCount ? `${current.pendingCount} 条待确认` : "本项已确认" }}
+            {{ published ? "已发布" : current.active === 0 ? "至少保留 1 条细则" : current.pendingCount ? `${current.pendingCount} 条待确认` : "本项已确认" }}
           </span>
         </div>
 
@@ -226,14 +248,15 @@ const footer = computed(() => {
 
         <div class="sec-head">
           <strong>扣分细则</strong>
-          <span>{{ current.rules.length }} 条 · 已确认 {{ current.approved }}{{ current.pendingCount ? ` · 待确认 ${current.pendingCount}` : "" }}</span>
+          <span>{{ current.rules.length }} 条 · 已确认 {{ current.approved }}{{ current.pendingCount ? ` · 待确认 ${current.pendingCount}` : "" }}{{ current.rejected ? ` · 已排除 ${current.rejected}` : "" }}</span>
         </div>
         <div class="rules">
           <RuleCard v-for="rule in current.rules" :key="rule.id" :rule="rule" :editable="editable" :busy="busy"
-                    @confirm="confirmRules([rule])" />
+                    :can-exclude="current.active > 1" @confirm="confirmRules([rule])"
+                    @exclude="setExcluded(rule, true)" @restore="setExcluded(rule, false)" />
           <p v-if="!current.rules.length" class="empty">这一项还没有扣分细则。可以在评分标准页让 AI 起草或手动补齐。</p>
         </div>
-        <p v-if="hasAiPending" class="ai-note">标为“AI”的细则由模型起草，请核对内容与来源后确认；不保留的在评分标准页删除。</p>
+        <p v-if="hasAiPending" class="ai-note">标为“AI”的细则由模型起草，请核对内容与来源后确认；不保留的点“排除”，排除的不参与评分。</p>
       </div>
     </div>
     <p v-if="loadError" class="notice notice-danger pad">{{ loadError }}</p>

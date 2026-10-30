@@ -137,17 +137,59 @@ test("批量确认失败立即停止、保留成功条款并支持核对后重�
   await expect(panel.getByRole("button", { name: "确认", exact: true })).toHaveCount(0);
 });
 
-test("排除可撤销且不进入当前评分项批量确认", async ({ page, request }) => {
-  const { id } = await importTemplate(page);
+test("排除即时保存：刷新后仍为已排除、不进批量确认、可恢复；排除后能发布", async ({ page, request }) => {
+  const name = `排除回归合成模板-${Date.now()}`;
+  const created = await request.post("/api/rubrics", { data: {
+    name, version: "v1", total_score: 20,
+    criteria: [
+      { code: "T01", name: "论证", max_score: 10, scoring_mode: "deductive", deduction_rules_structured: [
+        { match: "缺少论证依据", points: 2, reason: "合成条款一" },
+        { match: "结论与数据不符", points: 3, reason: "合成条款二" },
+      ] },
+      { code: "T02", name: "规范", max_score: 10, scoring_mode: "deductive", deduction_rules_structured: [
+        { match: "引用格式不统一", points: 1, reason: "合成条款三" },
+      ] },
+    ],
+  } });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const { id } = await created.json();
+  await page.goto("/workbench/rubrics");
+  await reopen(page, name);
   const panel = page.locator("[data-test=rule-review-panel]");
+  await expect(panel.locator(".rule-card")).toHaveCount(2);
+  const excludedCode = await panel.locator(".rule-card").first().getAttribute("data-rule-code");
+  const excluding = page.waitForResponse((r) => r.url().endsWith(`/rules/${excludedCode}/exclude`) && r.request().method() === "POST");
   await panel.getByRole("button", { name: "排除", exact: true }).first().click();
+  expect((await excluding).ok()).toBeTruthy();
+  await expect(panel.locator('[data-test="excluded"]')).toContainText("已排除");
+  // 本项只剩 1 条参与评分的细则：不能再排除。
+  await expect(panel.getByRole("button", { name: "排除", exact: true })).toBeDisabled();
   await expect(panel.getByRole("button", { name: /统一确认最终规则/ })).toContainText("1");
   await panel.getByRole("button", { name: /统一确认最终规则/ }).click();
-  await expect(panel.getByRole("button", { name: "撤销排除" })).toBeVisible();
-  expect((await (await request.get(`/api/rubrics/${id}/review-workspace`)).json()).rules.filter((r) => r.status === "approved")).toHaveLength(1);
-  await panel.getByRole("button", { name: "撤销排除" }).click();
-  await panel.getByRole("button", { name: "确认", exact: true }).click();
   await expect(panel.getByRole("button", { name: "确认", exact: true })).toHaveCount(0);
+  let rules = (await (await request.get(`/api/rubrics/${id}/review-workspace`)).json()).rules;
+  expect(rules.find((r) => r.rule_code === excludedCode).status).toBe("rejected");
+
+  await reopen(page, name);
+  await expect(panel.locator(".summary")).toContainText("已排除 1");
+  await panel.getByRole("button", { name: "恢复", exact: true }).click();
+  await expect(panel.getByRole("button", { name: "确认", exact: true })).toHaveCount(1);
+  rules = (await (await request.get(`/api/rubrics/${id}/review-workspace`)).json()).rules;
+  expect(rules.find((r) => r.rule_code === excludedCode).status).toBe("draft");
+  await panel.getByRole("button", { name: "排除", exact: true }).first().click();
+  await expect(panel.locator('[data-test="excluded"]')).toBeVisible();
+
+  await page.locator(".criteria-nav .lib-item", { hasText: "T02" }).click();
+  await panel.getByRole("button", { name: /统一确认最终规则/ }).click();
+  await expect(panel.getByRole("button", { name: "确认", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "前往校验与发布" }).click();
+  const release = page.locator('[data-test="release-panel"]');
+  await expect(release).toContainText("下一步：提交模板审核");
+  await page.getByRole("button", { name: "提交模板审核" }).click();
+  await expect(release).toContainText("模板已提交审核");
+  await page.getByRole("button", { name: "发布", exact: true }).click();
+  await expect(release).toContainText("评分标准已发布");
+  expect((await (await request.get(`/api/rubrics/${id}`)).json()).status).toBe("published");
 });
 
 test("AI 补全保留原文输入，单条应用不覆盖前一条、不应用其它评分项", async ({ page, request }) => {
