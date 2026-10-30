@@ -1057,6 +1057,93 @@ def test_lean_schema_rejected_too_reports_the_format_constraint_not_content(capl
     assert "测试当前 AI 连接" not in caught.value.user_action
 
 
+_NO_REASON = [{"error": {
+    "code": 400, "status": "INVALID_ARGUMENT", "message": "Request contains an invalid argument.",
+}}]
+
+
+def _source_ref_enum(body):
+    schema = body["response_format"]["json_schema"]["schema"]
+    rule = schema["properties"]["rule_groups"]["items"]["properties"]["rules"]["items"]
+    return rule["properties"]["source_refs"]["items"].get("enum") or []
+
+
+def _assigned_analysis():
+    """生产上的形状：人工归入原文后第 1 批只有评分说明，从第 2 批起才带原文单元的编号。"""
+
+    from backend.app.services.rubric_import.ai_rule_drafter import _draft_batches
+
+    analysis = {
+        "input_state": "absent", "parsed_rules": [], "needs_ai_draft": True, "needs_severity_expansion": False,
+        "source_refs": ["xlsx:评分表!R3C2"],
+        "unresolved_segments": [
+            {"text": "需求分析应完整、明确并可验证。", "source_refs": ["/criterion/description"]},
+            {"text": "缺少验收标准扣 2 分", "source_refs": ["xlsx:评分表!R3C2"], "reason": "assigned_source"},
+        ],
+    }
+    return _draft_batches(_criterion(), analysis)
+
+
+def test_rejection_without_reason_is_resent_with_the_lean_schema(caplog):
+    from backend.app.services.rubric_import.ai_rule_drafter import _draft_deduction_rules_once
+
+    first, second = _assigned_analysis()
+    group = _VALID_GROUPS["rule_groups"][0]
+    output = {"rule_groups": [{**group, "rules": [{**group["rules"][0], "source_refs": ["xlsx:评分表!R3C2"]}]}]}
+    calls = []
+    scorer = _schema_fallback_scorer([(200, _VALID_GROUPS), (400, _NO_REASON), (200, output)], calls)
+    with caplog.at_level(logging.WARNING):
+        drafts = [
+            _draft_deduction_rules_once(criterion=_criterion(), input_analysis=batch, scorer=scorer,
+                                        business_profile_key="thesis")
+            for batch in (first, second)
+        ]
+
+    # 第 1 批的枚举里没有原文单元，完整 Schema 通过，一个字节都不变。
+    assert not any(ref.startswith("xlsx:") for ref in _source_ref_enum(calls[0]))
+    assert drafts[0]["generation_metadata"]["output_schema"] == "strict"
+    # 第 2 批多了一个原文单元被拒，改发没有来源枚举的精简 Schema，其余请求内容不变。
+    assert "xlsx:评分表!R3C2" in _source_ref_enum(calls[1]) and _source_ref_enum(calls[2]) == []
+    assert calls[1]["messages"] == calls[2]["messages"]
+    assert drafts[1]["generation_metadata"]["output_schema"] == "lean"
+    assert drafts[1]["rule_groups"][0]["rules"][0]["source_refs"] == ["xlsx:评分表!R3C2"]
+    # 日志记枚举的形状，方便判断拒绝与枚举是否有关；不记工作表名。
+    assert "reason=rejected_without_reason enum_values=" in caplog.text
+    assert "ledger_kinds=xlsx" in caplog.text
+    assert "评分表" not in caplog.text
+
+
+def test_lean_schema_output_after_rejection_without_reason_is_still_validated():
+    # 同样靠代码校验兜底：精简 Schema 不限来源，编造的编号修正一次后仍不被采纳。
+    group = _VALID_GROUPS["rule_groups"][0]
+    bad = {"rule_groups": [{**group, "rules": [{**group["rules"][0], "source_refs": ["xlsx:评分表!R9C9"]}]}]}
+    calls = []
+    scorer = _schema_fallback_scorer(
+        [(400, _NO_REASON), (200, bad), (400, _NO_REASON), (200, bad)], calls,
+    )
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                              business_profile_key="thesis")
+    assert caught.value.code == "AI_DRAFT_SOURCE_INVALID"
+    assert len(calls) == 4
+    # 修正那次执行同样先发完整 Schema，被拒后再发精简 Schema。
+    assert [bool(_source_ref_enum(call)) for call in calls] == [True, False, True, False]
+
+
+def test_lean_schema_rejected_without_reason_does_not_blame_the_schema():
+    # 精简版也被拒、厂商还是不说原因：不能断言“与原文内容无关”，走请求被拒的通用提示。
+    calls = []
+    scorer = _schema_fallback_scorer([(400, _NO_REASON), (400, _NO_REASON)], calls)
+    with pytest.raises(AIRuleDraftValidationError) as caught:
+        draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer,
+                              business_profile_key="thesis")
+    assert len(calls) == 2  # 只降级一次
+    assert caught.value.code == "AI_DRAFT_PROVIDER_REJECTED"
+    assert "输出格式约束" not in caught.value.message
+    assert "与原文内容和连接无关" not in caught.value.user_action
+    assert "参数、输出格式或内容" in caught.value.user_action
+
+
 def test_other_invalid_requests_are_not_resent():
     calls = []
     other = [{"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Invalid value at 'temperature'"}}]

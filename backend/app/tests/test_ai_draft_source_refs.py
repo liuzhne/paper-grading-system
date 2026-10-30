@@ -53,6 +53,31 @@ def test_fabricated_refs_are_rejected(refs):
     assert exc.value.code == "AI_DRAFT_SOURCE_INVALID"
 
 
+@pytest.mark.parametrize("ref", [
+    "/criterion/description/not-a-field",
+    "docx:p[3]/x",
+    "/criteria/T02/deduction_rules/0/x",
+    "/criterion/deduction_rules/0/x",
+])
+def test_children_of_listed_refs_are_rejected(ref):
+    # 列出的来源后面再接一段：以前按前缀放行，精简 Schema 没有枚举，要靠这里挡住。
+    draft = _draft([ref])
+    draft["input_assessment"]["source_refs"] = [
+        "/criterion/description", "docx:p[3]", "/criteria/T02/deduction_rules/0",
+    ]
+    with pytest.raises(AIRuleDraftValidationError) as exc:
+        validate_ai_rule_draft(draft, criterion={**CRITERION, "deduction_rules": ["需求边界表达不清"]})
+    assert exc.value.code == "AI_DRAFT_SOURCE_INVALID"
+
+
+def test_listed_refs_and_real_indexes_are_still_accepted():
+    draft = _draft(["/criterion/description", "docx:p[3]", "/criterion/deduction_rules/0", "/criterion/evidence_hints/0"])
+    draft["input_assessment"]["source_refs"] = [
+        "/criterion/description", "docx:p[3]", "/criteria/T02/deduction_rules/0",
+    ]
+    assert validate_ai_rule_draft(draft, criterion=CRITERION)
+
+
 def test_drafter_repairs_fabricated_source_once():
     from backend.app.services.rubric_import.ai_rule_drafter import draft_deduction_rules
 
