@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无新命令、无迁移；排错：`work_item_deferred` 与 `deferral_count` 对不上时的读法。 |
 | 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无新命令、无迁移；排错：每个任务第 1 批成功、第 2 批被拒，日志 `reason=rejected_without_reason` 的读法。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash（#70 复审） | 排错条目补充：可直接执行的只读核对命令；回滚说明分开导入规则与手动规则的草稿。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash | 无新命令；排错：导入的评分标准发布被 `global_policy_unsupported` 挡住（报错指向政策，真正原因是改了总分没重算 hash）。 |
@@ -2277,7 +2278,7 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
   - 真正原因：没有执行器在领取——本地只起了 uvicorn、内网 `worker` 没启动，或 Vercel 上叫醒与巡检链都断了（运维页“最近巡检”标红）。也可能是该连接的同时请求数被批量评分占满（AI 条目优先，但不抢已在跑的名额）。
   - 处理：启动 worker；Vercel 上打开任一评分进度页或起草页会补投巡检链。
 - **现象**：进度停在“模型限流，稍后自动继续”。
-  - 真正原因：厂商返回 429，条目按 Retry-After（默认 30 秒、5–300 秒之间）延后，最多延后 5 次后才判失败。不是卡住。长期如此请在账户页调低该连接的同时请求数。
+  - 真正原因：厂商返回 429，条目按 Retry-After（默认 30 秒、5–300 秒之间）延后，最多延后 5 次后才判失败（熔断造成的延后不占这 5 次，见“2026-10-30 AI 任务：熔断延后不占限流额度”）。不是卡住。长期如此请在账户页调低该连接的同时请求数。
 - **现象**：起草失败，提示“额度已用完”或“拒绝了请求”。
   - 真正原因：额度耗尽、鉴权失败、请求被拒（400/401/403/404）立即判失败且不重试，同任务剩余批次被取消；“重试失败的批次”在问题解决前会再次失败。
 - **现象**：起草失败，错误码 `AI_CONNECTION_KEY_CHANGED` / `AI_CONNECTION_CONFIG_CHANGED`。
@@ -2676,3 +2677,30 @@ rollback;
 发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；不改前端与评分逻辑，不需要 bump `PROMPT_VERSION`。回滚要一起回退 `policy.retarget_policy_total` 与它的三个调用点（`import_sessions.py`、`atomic_recompile.py`、`_manual_recompile_command`）。回滚后导入确认又会留下 hash 过期的草稿：这些草稿的规则来自导入，保存走原子编辑路径，仍按上面的“处理”保存一次恢复；回滚后的手动路径总分不变不重算，只有手动规则的草稿要先把总分改成别的值保存，再改回来保存。
 
 维护记录：2026-10-30 · 导入确认与重编译同步政策总分的 hash：新增排错条目（报错指向政策、真正原因是改了总分没重算 hash）。
+
+### 2026-10-30 AI 任务：熔断延后不占限流额度
+
+取舍见 DECISIONS 同日条目。熔断时请求没发到模型，这次延后不加 `deferral_count`，只在 `attempt_history` 里记 `circuit_open: true`。条目的上限是 5 次 429 和连续 5 次熔断。
+
+排错：
+- **现象**：同一 `item_id` 的 `work_item_deferred` 超过 5 行，或一批延后了很久才失败。
+  - 报错指向：延后计数像是漏记了，或条目卡住了。
+  - 真正原因：多出来的是熔断延后，属于正常情况。两种延后穿插出现时，总次数可能到三十多次，每次至少等 30 秒。判失败后点「重试失败的批次」，两个计数都重新开始。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_ai_tasks.py backend/app/tests/test_rubric_unit_classification_api.py
+```
+
+部署后，在同时生成多个评分项时看 worker 日志：
+
+```bash
+sudo docker compose -p pgs -f /opt/pgs/compose.yml logs worker | grep -E 'reason=circuit_open|work_item_deferred|work_item_failed kind=ai_task'
+```
+
+`reason=circuit_open` 之后的 `work_item_deferred` 照常出现，任务不再因为熔断占满额度而失败。
+
+发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；不改接口、前端与评分逻辑，不需要 bump `PROMPT_VERSION`。发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`。历史里已写入的 `circuit_open` 字段旧代码不读，不用清理。回滚后熔断延后重新占额度。
+
+维护记录：2026-10-30 · AI 任务：熔断延后不占限流额度：新增延后次数对不上时的排错与验证、发布、回滚步骤。

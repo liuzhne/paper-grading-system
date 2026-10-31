@@ -13,12 +13,14 @@ import re
 
 import pytest
 
+from backend.app.core.config import settings
 from backend.app.core.contract import API_CONTRACT_HEADER
 from backend.app.core.contract import API_CONTRACT_VERSION
 from backend.app.db import models
 from backend.app.db.models import utcnow
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.llm.errors import ProviderError
+from backend.app.services.llm.rate_limit import CircuitOpenError
 from backend.app.tests.test_template_ai_rule_refactor import _criterion
 
 
@@ -239,6 +241,115 @@ def test_rate_limit_defers_the_item_instead_of_waiting(client, drafter):
     assert runner.execute_next(client.session_factory) is None
     later = utcnow() + timedelta(seconds=8)
     assert claim.claim_next_item(client.session_factory, now=later) is not None
+
+
+def _single_batch_task(client):
+    # 只有评分说明一个单元，任务只有一个条目，延后次数都算在它头上。
+    params = {"criterion": _criterion(evidence_hints=[])}
+    task = _create(client, _rubric(client), params=params).json()
+    assert task["total_items"] == 1
+    return task
+
+
+def _run_when_due(client):
+    """不等 not_before，把下一个条目领出来执行。上限 300 秒的等待都已过期。"""
+
+    claimed = claim.claim_next_item(client.session_factory, now=utcnow() + timedelta(seconds=400))
+    assert claimed is not None
+    execution._execute(client.session_factory, claimed)
+
+
+def _item(client, item_id):
+    with client.session_factory() as session:
+        item = session.get(models.AITaskItem, item_id)
+        session.expunge(item)
+        return item
+
+
+def test_circuit_waits_do_not_use_up_the_rate_limit_budget(client, drafter):
+    # 2026-10-30 生产上失败的那一批就是这个顺序：两次没发到模型的熔断占了额度，第 6 次判失败。
+    limited = _provider_error("rate_limited")
+    drafter.script = [limited, CircuitOpenError(), CircuitOpenError(), limited, limited, limited,
+                      {"rule_groups": [_group()]}]
+    task = _single_batch_task(client)
+    item_id = task["items"][0]["id"]
+
+    for _ in range(7):
+        _run_when_due(client)
+
+    assert _task(client, task["id"])["status"] == "succeeded"
+    item = _item(client, item_id)
+    assert (item.attempt_count, item.deferral_count) == (7, 4)
+    assert [entry.get("circuit_open", False) for entry in item.attempt_history[:3]] == [False, True, True]
+
+
+def test_consecutive_circuit_waits_are_bounded(client, drafter):
+    # 连接一直不恢复（如鉴权失败后永久熔断）：条目不能无限延后。
+    drafter.script = [CircuitOpenError() for _ in range(execution.MAX_CONSECUTIVE_CIRCUIT_WAITS + 1)]
+    task = _single_batch_task(client)
+    item_id = task["items"][0]["id"]
+
+    for _ in range(execution.MAX_CONSECUTIVE_CIRCUIT_WAITS):
+        _run_when_due(client)
+        assert _item(client, item_id).status == "pending"
+    _run_when_due(client)
+
+    item = _item(client, item_id)
+    assert (item.status, item.deferral_count) == ("failed", 0)
+    assert _task(client, task["id"])["error_code"] == "AI_DRAFT_PROVIDER_ERROR"
+
+
+def test_retry_starts_a_new_circuit_streak(client, drafter):
+    drafter.script = [CircuitOpenError() for _ in range(execution.MAX_CONSECUTIVE_CIRCUIT_WAITS + 2)]
+    drafter.script.append({"rule_groups": [_group()]})
+    task = _single_batch_task(client)
+    item_id = task["items"][0]["id"]
+    for _ in range(execution.MAX_CONSECUTIVE_CIRCUIT_WAITS + 1):
+        _run_when_due(client)
+    assert _item(client, item_id).status == "failed"
+
+    assert client.post(f"/api/ai-tasks/{task['id']}/retry").status_code < 300
+    _run_when_due(client)
+    assert _item(client, item_id).status == "pending"  # 不会一上来就因旧的连续次数判失败
+    _run_when_due(client)
+    assert _task(client, task["id"])["status"] == "succeeded"
+
+
+def test_rate_limit_budget_is_still_enforced_between_circuit_waits(client, drafter):
+    # 熔断打断的只是连续熔断的计数；429 的额度照常累计，穿插熔断也不会无限延后。
+    limited = _provider_error("rate_limited")
+    drafter.script = [value for _ in range(execution.MAX_DEFERRALS) for value in (limited, CircuitOpenError())]
+    drafter.script.append(limited)
+    task = _single_batch_task(client)
+    item_id = task["items"][0]["id"]
+
+    for _ in range(execution.MAX_DEFERRALS * 2):
+        _run_when_due(client)
+        assert _item(client, item_id).status == "pending"
+    _run_when_due(client)
+
+    item = _item(client, item_id)
+    assert (item.status, item.deferral_count) == ("failed", execution.MAX_DEFERRALS)
+
+
+def test_each_circuit_wait_gets_its_own_delayed_wake(client, drafter, monkeypatch):
+    # 叫醒按 token 去重；熔断不增加 deferral_count，token 不能再用它，否则第二次叫醒被当成重放丢掉。
+    tokens = []
+    monkeypatch.setattr(
+        execution, "wake_source", lambda source, count, *, reason, token, delay: tokens.append((token, delay)),
+    )
+    drafter.script = [CircuitOpenError(), CircuitOpenError()]
+    _single_batch_task(client)
+    _run_when_due(client)
+    _run_when_due(client)
+    assert len(tokens) == 2 and tokens[0][0] != tokens[1][0]
+    assert all(delay == settings.PROVIDER_CIRCUIT_COOLDOWN_SECONDS for _, delay in tokens)
+
+
+def test_unit_classification_marks_circuit_waits_too():
+    classification = importlib.import_module("backend.app.services.ai_tasks.unit_classification")
+    assert classification._item_error({"code": "circuit_open"}).circuit_open is True
+    assert classification._item_error({"code": "rate_limited"}).circuit_open is False
 
 
 def test_invalid_output_is_repaired_once_as_the_next_execution(client, drafter):
