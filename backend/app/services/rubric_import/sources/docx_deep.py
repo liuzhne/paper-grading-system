@@ -174,38 +174,64 @@ def is_toc_paragraph(style_name: str, text: str) -> bool:
     return bool(_TOC_STYLE_RE.match((style_name or "").strip()) or _TOC_LEADER_RE.search(text))
 
 
-def _style_chain(style):
+def _is_on(node) -> bool:
+    return node.get(f"{_W}val") not in ("0", "false", "off")
+
+
+def _style_chain(element):
+    """样式和它继承的样式。直接读 XML：python-docx 遇到损坏的 ``basedOn`` 或样式类型会报错。"""
+
     for _ in range(_STYLE_DEPTH_MAX):  # 损坏的样式表可能循环继承
-        if style is None:
+        if element is None:
             return
-        yield style
-        style = style.base_style
+        yield element
+        based = element.find(f"{_W}basedOn")
+        style_id = based.get(f"{_W}val") if based is not None else None
+        if not style_id:
+            return
+        element = next(
+            (item for item in element.getparent().iterchildren(f"{_W}style") if item.get(f"{_W}styleId") == style_id),
+            None,
+        )
 
 
-def _chain_property(chain, tag):
-    for style in chain:
-        properties = style.element.find(f"{_W}pPr")
+def _chain_property(chain, group, tag):
+    for element in chain:
+        properties = element.find(f"{_W}{group}")
         node = properties.find(f"{_W}{tag}") if properties is not None else None
         if node is not None:
             return node
     return None
 
 
+def _style_and_name(paragraph) -> tuple:
+    try:
+        style = paragraph.style
+        return style, (style.name or "") if style is not None else ""
+    except Exception:  # 损坏的 pStyle、样式名或样式类型，python-docx 抛多种异常；按没有样式处理
+        return None, ""
+
+
 def style_info(paragraph, cache: dict) -> dict:
     """段落样式的名称、加粗、大纲级别和编号，含继承。
 
     ``paragraph.style`` 很慢：默认样式每次都要遍历整张样式表，3000 段的模板能多花 3 秒。按样式 ID 缓存。
+    损坏的引用单独一个键，不能和默认样式（``None``）混用。
     """
 
-    key = paragraph._p.style
+    properties = paragraph._p.pPr
+    node = properties.find(f"{_W}pStyle") if properties is not None else None
+    key = (node.get(f"{_W}val") or "") if node is not None else None
     info = cache.get(key)
     if info is None:
-        chain = list(_style_chain(paragraph.style))
+        style, name = _style_and_name(paragraph)
+        chain = list(_style_chain(style.element if style is not None else None))
+        bold = _chain_property(chain, "rPr", "b")
         info = {
-            "name": getattr(chain[0], "name", "") or "" if chain else "",
-            "bold": next((style.font.bold for style in chain if style.font.bold is not None), False),
-            "outlineLvl": _chain_property(chain, "outlineLvl"),
-            "numPr": _chain_property(chain, "numPr"),
+            "name": name,
+            "bold": bold is not None and _is_on(bold),
+            "outlineLvl": _chain_property(chain, "pPr", "outlineLvl"),
+            "numPr": _chain_property(chain, "pPr", "numPr"),
         }
         cache[key] = info
     return info
@@ -227,7 +253,7 @@ def outline_level(paragraph, info: dict) -> int | None:
         value = int(node.get(f"{_W}val"))
     except (TypeError, ValueError):
         return None
-    return None if value >= 9 else value + 1
+    return value + 1 if 0 <= value < 9 else None
 
 
 def numbering(paragraph, info: dict) -> list | None:
@@ -237,10 +263,23 @@ def numbering(paragraph, info: dict) -> list | None:
     if node is None:
         return None
     number = node.find(f"{_W}numId")
-    if number is None or number.get(f"{_W}val") == "0":
+    number_id = number.get(f"{_W}val") if number is not None else None
+    if not number_id or number_id == "0":
         return None
     level = node.find(f"{_W}ilvl")
-    return [number.get(f"{_W}val"), int(level.get(f"{_W}val")) if level is not None else 0]
+    try:
+        return [number_id, int(level.get(f"{_W}val")) if level is not None else 0]
+    except (TypeError, ValueError):
+        return [number_id, 0]
+
+
+def table_readable(table) -> bool:
+    """python-docx 能否读出每一行。损坏的合并单元格或跨列值会让 ``row.cells`` 报错。"""
+
+    try:
+        return all(row.cells is not None for row in table.rows)
+    except Exception:  # python-docx 抛多种异常
+        return False
 
 
 def is_bold(element, info: dict) -> bool:
@@ -252,7 +291,7 @@ def is_bold(element, info: dict) -> bool:
             continue
         properties = run.find(f"{_W}rPr")
         bold = properties.find(f"{_W}b") if properties is not None else None
-        value = info["bold"] if bold is None else bold.get(f"{_W}val") not in ("0", "false", "off")
+        value = info["bold"] if bold is None else _is_on(bold)
         if not value:
             return False
         seen = True

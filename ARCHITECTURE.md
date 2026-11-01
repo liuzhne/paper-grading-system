@@ -1635,7 +1635,10 @@ prepare_structure_reparse（只看草稿有没有条目，不看开关）
 
 - 边界：`outline` 和 `items` 是纯函数；条目只存单元 ID，不复制文字，`items.render_item` 从台账取。条目和章节的读写都收在 `requirements/state.py`。
 - `outline`、`requirement_items` 进了 `parse_state.LEDGER_KEYS`，不带台账的重新编译也会继承。
-- 这一期还没有任何代码消费这些数据，起草入口 `assigned_rule_sources` 不变。分期 B 才接判断任务、人工确认和按条目合并。
+- 这一期还没有 AI、页面或评分代码消费这些数据，起草入口 `assigned_rule_sources` 不变；只有 `prepare_structure_reparse` 通过 `reapply_requirements` 沿用条目、重算标记和预填。分期 B 才接判断任务、人工确认和按条目合并。
+- 深度读取比旧读取多碰到样式继承、空段的样式、嵌套表和内容控件里的表，这些地方的损坏不能让导入失败：样式和编号直接读 XML，值坏了按没有处理；python-docx 读不了的嵌套表和控件里的表整张跳过（`_Reader.deep_table`），文字进 `read_report`。
 - 只读脚本 `backend/app/scripts/inspect_requirement_items.py` 走同一套函数，不连数据库、不调模型。
 
 维护记录：2026-11-01 · Word 评分规范分期 A：新增 `docx_deep`、`requirements/`，记录深度读取和章节、条目的调用链与数据落点；开关默认关闭，评分链和迁移不变。
+
+维护记录：2026-11-01 · Word 评分规范分期 A 复审：写清谁在用条目（只有结构重新解析），记录损坏模板的读取边界。

@@ -2727,7 +2727,7 @@ sudo docker compose -p pgs -f /opt/pgs/compose.yml logs worker | grep -E 'reason
 排错：
 - **现象**：导入后警告 `TEMPLATE_READ_INCOMPLETE`，说正文有字符没有读到。
   - 报错指向：像是文件损坏或解析失败。
-  - 真正原因：文件里有读取器不认识的结构，导入本身是成功的。常见的是用内容控件包住表格行（`w:tbl/w:sdt/w:tr`）。警告里的样例是缺失的字符，不保证连续，用它在 Word 里搜索定位。这些内容不会进入评分规范，也不会被覆盖率门禁看到，要手动录入，并考虑在 `sources/docx_adapter.py` 补读。
+  - 真正原因：文件里有读取器不认识的结构，导入本身是成功的。常见的是用内容控件包住表格行（`w:tbl/w:sdt/w:tr`）；嵌套表或内容控件里的表，合并单元格或跨列值损坏时也会整张跳过。警告里的样例是缺失的字符，不保证连续，用它在 Word 里搜索定位。这些内容不会进入评分规范，也不会被覆盖率门禁看到，要手动录入，并考虑在 `sources/docx_adapter.py` 补读。
 - **现象**：同一条警告只说页眉、页脚、脚注字数或“图表或嵌入对象未读取”。
   - 报错指向：`missing_chars` 看起来有问题。
   - 真正原因：这些第一版就不读，只是统计，几乎每份带页眉的模板都有，不算故障。要确认里面有没有评分要求。
@@ -2744,8 +2744,19 @@ sudo docker compose -p pgs -f /opt/pgs/compose.yml logs worker | grep -E 'reason
 .venv/bin/python -m pytest -q backend/app/tests/test_requirement_items.py backend/app/tests/test_rubric_source_adapters.py backend/app/tests/test_rubric_source_units.py
 ```
 
-本地试开关：`REQUIREMENT_ITEMS_ENABLED=true` 起服务，用 Excel + Word 导入。这一期没有页面，只能看到台账里多出的单元和警告。
+本地试开关：
+
+```bash
+export REQUIREMENT_ITEMS_ENABLED=true
+export DATABASE_URL=sqlite+pysqlite:////tmp/dev.db
+uv run alembic upgrade head
+uv run uvicorn backend.app.main:app --port 8000
+```
+
+然后用 Excel + Word 导入。这一期没有页面，只能看到台账里多出的单元和警告。
 
 发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；不改接口、前端与评分逻辑，不需要 bump `PROMPT_VERSION`（没有提示词变化）。生产开关没有接，发布后行为不变。回滚按 9.4。
 
 维护记录：2026-11-01 · Word 评分规范分期 A：新增开关、只读脚本和核对清单，排错条目写明读取警告与新增阻断的真实原因。
+
+维护记录：2026-11-01 · Word 评分规范分期 A 复审：本地试开关改成可直接执行的命令，读取警告补上损坏表格整张跳过的原因。

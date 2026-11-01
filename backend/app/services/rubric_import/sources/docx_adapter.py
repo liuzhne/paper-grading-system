@@ -175,12 +175,22 @@ class _Reader:
             rows.append(structure_cells)
         return grid, {"type": "table", "table_id": table_id, "rows": rows}
 
+    def deep_table(self, element, table_id: str, heading_path: list[str]) -> list[dict]:
+        """只有深度读取才碰到的表（嵌套、内容控件里）。
+
+        读不了就整张跳过，文字由读取报告提示：打开开关不能让关闭时能导入的文件导入失败。
+        """
+
+        if not docx_deep.table_readable(Table(element, self.document)):
+            return []
+        return [self.table(element, table_id, table_id, heading_path)[1]]
+
     def cell_structure(self, tc, cell_id: str, text: str, heading_path: list[str], location: dict) -> dict:
         comment_ids = []
         image_ids = []
         boxes = []
         nested = []
-        paragraphs = 0
+        paragraphs = tables = 0
         for child in docx_deep.block_children(tc):
             if child.tag == docx_deep.W_P:
                 comment_ids.extend(docx_deep.comment_ids(child))
@@ -190,8 +200,8 @@ class _Reader:
                 image_ids.extend(new_images)
                 boxes.extend(new_boxes)
             else:
-                nested_id = f"{cell_id}/tbl[{len(nested)}]"
-                nested.append(self.table(child, nested_id, nested_id, heading_path)[1])
+                nested.extend(self.deep_table(child, f"{cell_id}/tbl[{tables}]", heading_path))
+                tables += 1
         return {
             "unit_id": cell_id if text else None,
             "text": text,
@@ -219,9 +229,8 @@ class _Reader:
                     self.register(unit_id, "paragraph", text, _unit_context(heading_path, toc))
                 blocks.extend(self.paragraph_structure(child, paragraph, unit_id, text, heading_path, toc=toc))
             elif child.tag == docx_deep.W_TBL:
-                table_id = f"{prefix}/tbl[{tables}]"
+                blocks.extend(self.deep_table(child, f"{prefix}/tbl[{tables}]", heading_path))
                 tables += 1
-                blocks.append(self.table(child, table_id, table_id, heading_path)[1])
             elif child.tag == docx_deep.W_SDT:
                 blocks.extend(self.sdt_structure(child, f"{prefix}/sdt[{controls}]", heading_path))
                 controls += 1

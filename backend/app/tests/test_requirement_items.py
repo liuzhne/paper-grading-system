@@ -6,6 +6,7 @@ from io import BytesIO
 
 import pytest
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 from docx.oxml.ns import qn
@@ -243,6 +244,198 @@ def test_shallow_mode_reads_nothing_new():
     assert not [unit for unit in ledger.units() if unit.kind == "image"]
     assert not [unit for unit in ledger.units() if "txbx" in unit.unit_id or "sdt" in unit.unit_id]
     assert not ledger.has("docx:p[17]")  # 整段修订插入：和现在一样读不到
+
+
+def _numbered(numbering_xml):
+    document = Document()
+    paragraph = document.add_paragraph("一段正文")
+    paragraph._p.get_or_add_pPr().append(parse_xml(f'<w:numPr {nsdecls("w")}>{numbering_xml}</w:numPr>'))
+    return docs.save(document)
+
+
+@pytest.mark.parametrize(
+    ("numbering_xml", "expected"),
+    [
+        ('<w:ilvl/><w:numId w:val="3"/>', ["3", 0]),
+        ('<w:ilvl w:val="abc"/><w:numId w:val="3"/>', ["3", 0]),
+        ('<w:ilvl w:val=""/><w:numId w:val="3"/>', ["3", 0]),
+        ('<w:ilvl w:val="2"/><w:numId w:val="3"/>', ["3", 2]),
+        ('<w:ilvl w:val="1"/><w:numId/>', None),
+        ('<w:ilvl w:val="1"/><w:numId w:val=""/>', None),
+    ],
+)
+def test_damaged_numbering_does_not_fail_the_read(numbering_xml, expected):
+    data = _numbered(numbering_xml)
+    _read(data, deep=False)
+    view, _ = _read(data)
+    assert view.structure[0]["text"] == "一段正文"
+    assert view.structure[0]["numbering"] == expected
+
+
+def _break_based_on(style, base):
+    style.element.find(qn("w:basedOn")).attrib.clear()
+
+
+def _quote_in_based_on(style, base):
+    style.element.find(qn("w:basedOn")).set(qn("w:val"), 'a"b')
+
+
+def _base_without_type(style, base):
+    del base.element.attrib[qn("w:type")]
+
+
+def _base_is_numbering_style(style, base):
+    base.element.set(qn("w:type"), "numbering")
+
+
+def _circular_inheritance(style, base):
+    base.base_style = style
+
+
+def _garbage_bold(style, base):
+    style.font.bold = True
+    style.element.rPr.find(qn("w:b")).set(qn("w:val"), "abc")
+
+
+def _garbage_level_in_style(style, base):
+    style.element.get_or_add_pPr().append(
+        parse_xml(f'<w:numPr {nsdecls("w")}><w:ilvl w:val="abc"/><w:numId w:val="4"/></w:numPr>')
+    )
+
+
+def _name_without_value(style, base):
+    style.element.find(qn("w:name")).attrib.clear()
+
+
+def _garbage_style_type(style, base):
+    style.element.set(qn("w:type"), "abc")
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        _break_based_on,
+        _quote_in_based_on,
+        _base_without_type,
+        _base_is_numbering_style,
+        _circular_inheritance,
+        _garbage_bold,
+        _garbage_level_in_style,
+        _name_without_value,
+        _garbage_style_type,
+    ],
+)
+def test_damaged_styles_do_not_fail_the_read(damage):
+    document = Document()
+    style = document.styles.add_style("自定义", WD_STYLE_TYPE.PARAGRAPH)
+    base = document.styles.add_style("被继承", WD_STYLE_TYPE.PARAGRAPH)
+    style.base_style = base
+    document.add_paragraph("一段正文", style=style)
+    damage(style, base)
+    view, ledger = _read(docs.save(document))
+    assert view.structure[0]["text"] == "一段正文"
+    assert ledger.unit("docx:p[0]").text == "一段正文"
+    assemble_requirements(view, ledger)
+
+
+def test_style_values_still_come_from_the_inheritance_chain():
+    document = Document()
+    style = document.styles.add_style("自定义", WD_STYLE_TYPE.PARAGRAPH)
+    base = document.styles.add_style("被继承", WD_STYLE_TYPE.PARAGRAPH)
+    style.base_style = base
+    base.font.bold = True
+    base.element.get_or_add_pPr().append(parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="1"/>'))
+    base.element.get_or_add_pPr().append(
+        parse_xml(f'<w:numPr {nsdecls("w")}><w:ilvl w:val="2"/><w:numId w:val="4"/></w:numPr>')
+    )
+    document.add_paragraph("一段正文", style=style)
+    block = _read(docs.save(document))[0].structure[0]
+    assert (block["style"], block["bold"], block["outline_level"], block["numbering"]) == ("自定义", True, 2, ["4", 2])
+
+
+def test_style_override_in_a_child_style_wins():
+    document = Document()
+    style = document.styles.add_style("自定义", WD_STYLE_TYPE.PARAGRAPH)
+    base = document.styles.add_style("被继承", WD_STYLE_TYPE.PARAGRAPH)
+    style.base_style = base
+    base.font.bold = True
+    style.font.bold = False
+    document.add_paragraph("一段正文", style=style)
+    assert _read(docs.save(document))[0].structure[0]["bold"] is False
+
+
+def test_negative_outline_level_is_ignored():
+    document = Document()
+    paragraph = document.add_paragraph("一段正文")
+    paragraph._p.get_or_add_pPr().append(parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="-1"/>'))
+    assert _read(docs.save(document))[0].structure[0]["outline_level"] is None
+
+
+def test_damaged_style_reference_keeps_the_default_style_for_other_paragraphs():
+    document = Document()
+    document.styles["Normal"].font.bold = True
+    damaged = document.add_paragraph()
+    damaged._p.get_or_add_pPr().append(parse_xml(f'<w:pStyle {nsdecls("w")}/>'))
+    document.add_paragraph("一段正文")
+    data = docs.save(document)
+    _read(data, deep=False)
+    assert _read(data)[0].structure[0]["bold"] is True
+
+
+def _damaged_table_xml(text):
+    """第二行的跨列值是坏的，python-docx 的 ``row.cells`` 读不了。"""
+
+    return (
+        f'<w:tbl {nsdecls("w")}><w:tblGrid><w:gridCol/></w:tblGrid>'
+        f"<w:tr><w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr>"
+        '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="abc"/></w:tcPr><w:p><w:r><w:t>坏行</w:t></w:r></w:p></w:tc></w:tr>'
+        "</w:tbl>"
+    )
+
+
+def test_unreadable_nested_table_is_skipped_and_reported():
+    document = _document("正文")
+    outer = document.add_table(rows=1, cols=2)
+    outer.cell(0, 0).text = "外层一"
+    outer.cell(0, 1).text = "外层二"
+    tc = outer.cell(0, 0)._tc
+    tc.insert(len(tc) - 1, parse_xml(_damaged_table_xml("嵌套内容")))
+    tc.insert(len(tc) - 1, parse_xml(
+        f'<w:tbl {nsdecls("w")}><w:tblGrid><w:gridCol/></w:tblGrid>'
+        "<w:tr><w:tc><w:p><w:r><w:t>好的嵌套表</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+    ))
+    data = docs.save(document)
+    _read(data, deep=False)
+    view, ledger = _read(data)
+    texts = _texts(ledger)
+    assert "嵌套内容" not in texts.values()  # 整张跳过，不留半张
+    assert texts["docx:tbl[0]/r0/c1"] == "外层二"
+    assert texts["docx:tbl[0]/r0/c0/tbl[1]/r0/c0"] == "好的嵌套表"  # 位置编号不受前一张影响
+    assert view.read_report["missing_chars"] == len("嵌套内容坏行")
+    assert [item["code"] for item in template_read_warnings(view.read_report)] == ["TEMPLATE_READ_INCOMPLETE"]
+    assemble_requirements(view, ledger)
+
+
+def test_unreadable_table_in_a_content_control_is_skipped_and_reported():
+    document = _document("正文")
+    sdt = docs.add_sdt(document, "控件前")
+    sdt.find(qn("w:sdtContent")).append(parse_xml(_damaged_table_xml("控件表格")))
+    data = docs.save(document)
+    _read(data, deep=False)
+    view, ledger = _read(data)
+    assert "控件表格" not in _texts(ledger).values()
+    assert _texts(ledger)["docx:sdt[0]/p[0]"] == "控件前"
+    assert view.read_report["missing_chars"] == len("控件表格坏行")
+    assemble_requirements(view, ledger)
+
+
+def test_damaged_paragraph_in_a_content_control_does_not_fail_the_read():
+    document = _document("正文")
+    sdt = docs.add_sdt(document, "控件里的段落")
+    sdt.find(qn("w:sdtContent"))[0].get_or_add_pPr().append(parse_xml(f'<w:pStyle {nsdecls("w")}/>'))
+    data = docs.save(document)
+    _read(data, deep=False)
+    assert _texts(_read(data)[1])["docx:sdt[0]/p[0]"] == "控件里的段落"
 
 
 @pytest.mark.parametrize("seed", range(40))
