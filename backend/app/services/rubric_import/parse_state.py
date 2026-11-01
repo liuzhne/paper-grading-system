@@ -25,6 +25,7 @@ from backend.app.services.rubric_import.sources.units import SourceLedger
 
 LEDGER_KEYS = (
     "source_ledger", "coverage", "extraction", "triggers", "template_summary", "business_profile_key", "source_conflicts",
+    "outline", "requirement_items",
 )
 MODEL_OUTPUT_KEYS = ("unit_classifications", "structure_suggestions", "rule_review")
 RESOLVE_ACTIONS = ("assign", "not_rule", "restore")

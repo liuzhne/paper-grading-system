@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增 `rubric_import/sources/docx_deep.py`、`rubric_import/requirements/`（`outline`、`items`、`state`）；`load_docx` 加 `deep`；`raw_parse_output` 新增 `outline`、`requirement_items`；台账单元新增 `image` 类型。开关 `REQUIREMENT_ITEMS_ENABLED` 默认关闭，关闭时调用链与数据不变。无迁移，head 仍为 `0041_assistant_agent_state`；评分链不变 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无模块变化：`ai_tasks/execution._finish` 对熔断延后不加 `deferral_count`，连续次数从 `attempt_history` 算（上限 5）；延迟叫醒的去重键改用执行次数。接口、数据库不变。 |
 | 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无模块变化：`_draft_deduction_rules_once` 的精简 Schema 退路多一个触发条件（`llm/errors.rejected_without_reason`）；接口、数据库、起草版本不变。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash（#70 复审） | `scoring/core/policy` 新增 `retarget_policy_total`；导入确认、原子重编译与路由的手动重编译命令共用，无调用链改向。 |
@@ -1610,3 +1611,31 @@ GitHub 工作流 pgs-assistant-eval（production 环境，手动）
 开关门槛（§12.5）：仓库变量 `ASSISTANT_AGENT_ENABLED=true` 时，部署流水线在构建镜像之后、送到实例之前，用这个镜像跑
 `python -m backend.app.scripts.assistant_eval_gate`（挂载 `docs/评测报告/评分助手/`，不联网）：按镜像里的 `context.prompt_fingerprint()`
 找一轮门槛全过、没有作废的评测报告，找不到就不部署。提示词指纹同时算进前缀标识（`context.prefix_identity`）。
+
+### 2026-11-01 Word 评分规范：读全内容、章节、条目（分期 A，开关默认关闭）
+
+方案见 [docs/Word评分规范抽取与对应方案.md](docs/Word评分规范抽取与对应方案.md)。这一期只做前三层，不调模型、不加迁移，也没有页面。只覆盖“Excel + Word”双文件导入里的模板文档；只传 Word 的导入不走这条路。
+
+```
+prepare_file_import（REQUIREMENT_ITEMS_ENABLED 打开时）
+  load_docx(deep=True)            ── 补读文本框、内容控件、嵌套表格、修订插入、图片；统计读取完整性
+    │  台账：已有单元 ID 不变，新增 docx:p[n]/txbx[i]、docx:sdt[n]/p[i]、…/tbl[i]/r/c、…/img[i]（kind=image）
+    │  view.structure：版式信息，不落库；view.blocks / view.tables 仍只有正文段落和顶层表格
+  _word_conflicts                 ── 不变，Word 佐证的认领先发生，预填才有依据
+  requirements.state.assemble_requirements
+    ├─ outline.build_outline      ── 标题样式 > 大纲级别 > 文字序号 > 整段加粗
+    ├─ items.build_items          ── 列表并入引导句、表格一行一条、批注和图片并入条目
+    └─ 台账标记                    ── 目录 structural；无阻断信号的标题、表头、图片 context；预填
+  mark_remaining_blocks           ── 不变，只处理还没有状态的单元
+  raw_parse_output.outline / requirement_items
+
+prepare_structure_reparse（只看草稿有没有条目，不看开关）
+  条目沿用，文件不再读一遍 ── reapply_requirements 重算标记和预填，读取警告从 read_report 补回
+```
+
+- 边界：`outline` 和 `items` 是纯函数；条目只存单元 ID，不复制文字，`items.render_item` 从台账取。条目和章节的读写都收在 `requirements/state.py`。
+- `outline`、`requirement_items` 进了 `parse_state.LEDGER_KEYS`，不带台账的重新编译也会继承。
+- 这一期还没有任何代码消费这些数据，起草入口 `assigned_rule_sources` 不变。分期 B 才接判断任务、人工确认和按条目合并。
+- 只读脚本 `backend/app/scripts/inspect_requirement_items.py` 走同一套函数，不连数据库、不调模型。
+
+维护记录：2026-11-01 · Word 评分规范分期 A：新增 `docx_deep`、`requirements/`，记录深度读取和章节、条目的调用链与数据落点；开关默认关闭，评分链和迁移不变。

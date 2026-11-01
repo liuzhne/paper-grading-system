@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     SITE_LEADS_PER_IP_HOURLY: int = 5
     SITE_LEADS_PER_IP_DAILY: int = 20
     SITE_LEADS_DAILY_LIMIT: int = 300
+    # Word 模板读全内容、识别章节、组评分规范条目（docs/Word评分规范抽取与对应方案.md）。默认关闭：
+    # 关闭时新导入和现在完全一样。只决定新导入走不走新流程，已有草稿按自己的数据显示。
+    REQUIREMENT_ITEMS_ENABLED: bool = False
     # 评分助手 Agent 回合（docs/评分助手Agent化方案.md）。默认关闭：关闭时助手的对外行为与一期
     # 完全一致（规则识别 + 固定流程）。A1 的真实模型评测达到上线门槛后，才在生产打开。
     ASSISTANT_AGENT_ENABLED: bool = False

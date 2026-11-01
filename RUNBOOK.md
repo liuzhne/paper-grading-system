@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增环境变量 `REQUIREMENT_ITEMS_ENABLED`（默认关，生产暂不接）、只读脚本 `inspect_requirement_items`；无迁移；排错：`TEMPLATE_READ_INCOMPLETE` 警告、开关打开后多出的发布阻断 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无新命令、无迁移；排错：`work_item_deferred` 与 `deferral_count` 对不上时的读法。 |
 | 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无新命令、无迁移；排错：每个任务第 1 批成功、第 2 批被拒，日志 `reason=rejected_without_reason` 的读法。 |
 | 2026-10-30 | 导入确认与重编译同步政策总分的 hash（#70 复审） | 排错条目补充：可直接执行的只读核对命令；回滚说明分开导入规则与手动规则的草稿。 |
@@ -2704,3 +2705,47 @@ sudo docker compose -p pgs -f /opt/pgs/compose.yml logs worker | grep -E 'reason
 发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；不改接口、前端与评分逻辑，不需要 bump `PROMPT_VERSION`。发布走 main CI 门禁自动部署；回滚按 9.4 的 `./deploy.sh <上一个 SHA>`。历史里已写入的 `circuit_open` 字段旧代码不读，不用清理。回滚后熔断延后重新占额度。
 
 维护记录：2026-10-30 · AI 任务：熔断延后不占限流额度：新增延后次数对不上时的排错与验证、发布、回滚步骤。
+
+### 2026-11-01 Word 评分规范：读全内容、章节、条目（分期 A）
+
+方案见 `docs/Word评分规范抽取与对应方案.md`。开关 `REQUIREMENT_ITEMS_ENABLED` 默认关闭，关闭时新导入和以前完全一样。**生产现在打不开**：这个变量分期 D 才接进 `scripts/production_env.py` 和部署流水线，因为还没有页面处理多出来的单元。
+
+用真实模板核对（只读本地文件，不连数据库、不调模型，开关关着也能跑）：
+
+```bash
+.venv/bin/python -m backend.app.scripts.inspect_requirement_items 模板.docx
+```
+
+```bash
+.venv/bin/python -m backend.app.scripts.inspect_requirement_items 模板.docx --rules 评分表.xlsx --profile technical_proposal
+```
+
+带 `--rules` 时走真实的导入流水线，能看到 Word 佐证预填和发布阻断。加 `--json` 输出 JSON。输出里有模板原文，**真实模板和结果都不要提交到仓库**。
+
+核对这些：章节树和目录是否一致；列表是否并进了引导句；表格行的表头对不对；批注是否在对的条目上；“排除”里有没有不该排除的；“读取情况”的 `missing_chars` 是否为 0。
+
+排错：
+- **现象**：导入后警告 `TEMPLATE_READ_INCOMPLETE`，说正文有字符没有读到。
+  - 报错指向：像是文件损坏或解析失败。
+  - 真正原因：文件里有读取器不认识的结构，导入本身是成功的。常见的是用内容控件包住表格行（`w:tbl/w:sdt/w:tr`）。警告里的样例是缺失的字符，不保证连续，用它在 Word 里搜索定位。这些内容不会进入评分规范，也不会被覆盖率门禁看到，要手动录入，并考虑在 `sources/docx_adapter.py` 补读。
+- **现象**：同一条警告只说页眉、页脚、脚注字数或“图表或嵌入对象未读取”。
+  - 报错指向：`missing_chars` 看起来有问题。
+  - 真正原因：这些第一版就不读，只是统计，几乎每份带页眉的模板都有，不算故障。要确认里面有没有评分要求。
+- **现象**：打开开关后，同一份模板多出发布阻断，指向 `docx:p[3]/txbx[0]`、`docx:sdt[0]/p[1]` 这种单元。
+  - 报错指向：像是开关把门禁改严了。
+  - 真正原因：这些内容以前没读进来。文本框或内容控件里写了分值、扣分动词，现在才被看到，这是应有的行为。图片不会造成这种阻断。
+- **现象**：某条规范在条目里找不到，或者一段正文显示成了章节标题。
+  - 报错指向：`requirements/items.py` 的组条目逻辑。
+  - 真正原因：多半是 `requirements/outline.py` 把它当成了标题（比如不超过 40 字、以“1.1”开头、没有句末标点）。标题只有带规则信号才有条目。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_requirement_items.py backend/app/tests/test_rubric_source_adapters.py backend/app/tests/test_rubric_source_units.py
+```
+
+本地试开关：`REQUIREMENT_ITEMS_ENABLED=true` 起服务，用 Excel + Word 导入。这一期没有页面，只能看到台账里多出的单元和警告。
+
+发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；不改接口、前端与评分逻辑，不需要 bump `PROMPT_VERSION`（没有提示词变化）。生产开关没有接，发布后行为不变。回滚按 9.4。
+
+维护记录：2026-11-01 · Word 评分规范分期 A：新增开关、只读脚本和核对清单，排错条目写明读取警告与新增阻断的真实原因。

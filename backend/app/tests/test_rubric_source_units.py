@@ -65,7 +65,7 @@ def test_register_rejects_duplicates_blank_text_and_bad_role_or_kind():
     with pytest.raises(ValueError):
         ledger.register(_unit(unit_id="x3", doc_role="other"))
     with pytest.raises(ValueError):
-        ledger.register(_unit(unit_id="x4", kind="image"))
+        ledger.register(_unit(unit_id="x4", kind="chart"))
 
 
 def test_unknown_unit_ids_raise_key_error():
