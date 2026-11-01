@@ -12,7 +12,7 @@ from types import MappingProxyType
 from typing import Iterator, Mapping
 
 DOC_ROLES = ("rules", "template", "reference")
-UNIT_KINDS = ("cell", "paragraph", "heading", "table_cell", "comment")
+UNIT_KINDS = ("cell", "paragraph", "heading", "table_cell", "comment", "image")
 STATUSES = ("consumed", "context", "structural", "ignored_by_rule", "unclaimed")
 _MARKABLE = ("context", "structural", "ignored_by_rule")
 _REASON_REQUIRED = ("structural", "ignored_by_rule")

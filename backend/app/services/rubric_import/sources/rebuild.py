@@ -57,6 +57,8 @@ def docx_view_from_ledger(ledger: SourceLedger, *, doc_id: str) -> DocxView:
     for unit in ledger.units(doc_id=doc_id):
         paragraph = _PARAGRAPH_RE.match(unit.unit_id)
         cell = _TABLE_CELL_RE.match(unit.unit_id)
+        if unit.context.get("toc"):  # 与 load_docx(deep=True) 一致：目录行不当评分项候选
+            continue
         if paragraph:
             block = {"type": unit.kind, "unit_id": unit.unit_id, "text": unit.text,
                      "level": unit.context.get("level")}

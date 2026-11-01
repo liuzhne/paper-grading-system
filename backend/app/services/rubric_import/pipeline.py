@@ -25,6 +25,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.core.config import settings
 from backend.app.db import models
 from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
 from backend.app.services.rubrics.rule_origin import entry_ai_model
@@ -44,6 +45,9 @@ from backend.app.services.rubric_import.extraction.table_extractor import extrac
 from backend.app.services.rubric_import.extraction.table_extractor import header_aliases_for
 from backend.app.services.rubric_import.extraction.triggers import detect_triggers
 from backend.app.services.rubric_import.parser import parse_word_template
+from backend.app.services.rubric_import.requirements.state import assemble_requirements
+from backend.app.services.rubric_import.requirements.state import reapply_requirements
+from backend.app.services.rubric_import.requirements.state import template_read_warnings
 from backend.app.services.rubric_import.sources.docx_adapter import load_docx
 from backend.app.services.rubric_import.sources.rebuild import docx_view_from_ledger
 from backend.app.services.rubric_import.sources.rebuild import sheets_from_ledger
@@ -747,6 +751,7 @@ def prepare_file_import(
     artifacts: list[dict] = []
     word_view = None
     source_conflicts: list[dict] = []
+    requirements: dict | None = None
     if rules_data is not None:
         sheet_name, records, warnings, extraction = _excel_rows(
             rules_data, ledger, profile_key, structure_override=structure_override
@@ -780,8 +785,12 @@ def prepare_file_import(
             }
         )
         if word_view is None:
-            word_view = load_docx(template_data, ledger, doc_id="word", doc_role="template")
+            deep = settings.REQUIREMENT_ITEMS_ENABLED
+            word_view = load_docx(template_data, ledger, doc_id="word", doc_role="template", deep=deep)
             source_conflicts, keep_unclaimed = _word_conflicts(word_view, ledger, records, profile_key)
+            if deep:
+                requirements = assemble_requirements(word_view, ledger, keep_unclaimed=keep_unclaimed)
+                warnings.extend(template_read_warnings(word_view.read_report))
             mark_remaining_blocks(word_view, ledger, profile_terms=profile_terms, keep_unclaimed=keep_unclaimed)
         for index, comment in enumerate(word_view.comments):
             section = _text(comment.get("section_title"))
@@ -830,6 +839,7 @@ def prepare_file_import(
         source_conflicts=source_conflicts,
         profile_terms=profile_terms,
         scorer=scorer,
+        requirements=requirements,
     )
 
 
@@ -886,9 +896,15 @@ def prepare_structure_reparse(
                     record["编号"] = kept
     template_items = deepcopy(raw.get("template_items") or [])
     template_summary = deepcopy(raw.get("template_summary") or {})
+    requirements: dict | None = None
     if documents.get("word") == "template":
         view = docx_view_from_ledger(ledger, doc_id="word")
         source_conflicts, keep_unclaimed = _word_conflicts(view, ledger, records, profile_key)
+        # 不看开关：已用新流程的草稿按自己的数据走。台账状态是重新生成的，要把目录、标题的标记补回去。
+        if raw.get("requirement_items"):
+            view.doc_id = "word"
+            requirements = reapply_requirements(raw, ledger, keep_unclaimed=keep_unclaimed)
+            warnings.extend(template_read_warnings(requirements["requirement_items"].get("read_report")))
         mark_remaining_blocks(view, ledger, profile_terms=profile_terms, keep_unclaimed=keep_unclaimed)
     for item in template_items:
         unit_id = f"docx:comment[{item['source_locator']['comment_id']}]"
@@ -924,6 +940,7 @@ def prepare_structure_reparse(
         source_conflicts=source_conflicts,
         profile_terms=profile_terms,
         scorer=scorer,
+        requirements=requirements,
     )
 
 
@@ -944,6 +961,7 @@ def _assemble_file_graph(
     source_conflicts,
     profile_terms,
     scorer=None,
+    requirements=None,
 ) -> PreparedRubricGraph:
     source_rules: list[dict] = []
     criteria: list[dict] = []
@@ -1189,6 +1207,7 @@ def _assemble_file_graph(
                 "structure_issues": deepcopy(extraction.structure_issues),
                 "records": [{"row_number": row.row_number, "name": row.criterion.name} for row in extraction.records],
             },
+            **(deepcopy(requirements) if requirements else {}),
         },
         raw_model_output=raw_model_output,
     )

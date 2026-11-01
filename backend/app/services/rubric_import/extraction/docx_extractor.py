@@ -67,6 +67,10 @@ def _paragraph_extraction(view: DocxView, ledger: SourceLedger) -> TableExtracti
     return result if result.records else None
 
 
+def is_total_statement(text: str) -> bool:
+    return bool(_TOTAL_STATEMENT_RE.match(text))
+
+
 def mark_remaining_blocks(view: DocxView, ledger: SourceLedger, *, profile_terms=(), keep_unclaimed=()) -> None:
     """标题 → context；“总分 N 分” → structural；无规则信号的正文与表格单元 → context。"""
 
@@ -79,13 +83,15 @@ def mark_remaining_blocks(view: DocxView, ledger: SourceLedger, *, profile_terms
             continue
         if unit.kind == "heading":
             ledger.mark(unit.unit_id, "context")
-        elif _TOTAL_STATEMENT_RE.match(unit.text):
+        elif is_total_statement(unit.text):
             ledger.mark(unit.unit_id, "structural", reason="总分说明")
         elif not unit_signals(unit, profile_terms):
             ledger.mark(unit.unit_id, "context")
 
 
 def _doc_id(view: DocxView, ledger: SourceLedger) -> str | None:
+    if view.doc_id:
+        return view.doc_id
     unit_id = next((b["unit_id"] for b in view.blocks if b.get("unit_id")), None)
     if unit_id is None:
         for grid in view.tables:
