@@ -32,6 +32,8 @@ from backend.app.services.llm.core_adapter import normalize_core_provider_respon
 from backend.app.services.scoring.core.rule_context import derive_context_needs
 from backend.app.services.scoring.retrieval.compression import COMPRESSOR_VERSION
 from backend.app.services.scoring.retrieval.compression import compress_evidence
+from backend.app.services.scoring.retrieval.judge_scope import scope_view
+from backend.app.services.scoring.retrieval.judge_scope import unit_target
 from backend.app.services.scoring.retrieval.selection import TokenBudgetError
 from backend.app.services.scoring.retrieval.selection import conservative_token_estimate
 
@@ -65,6 +67,69 @@ _GROUP_INSTRUCTIONS = _COMMON_INSTRUCTIONS + (
     "schema_version=semantic-group-response@1，group_code 原样复制，status；status=triggered 时 selected_rule_code "
     "为最符合的一档并给出 occurrences，否则 selected_rule_code 为 null、occurrences 为空数组。"
 )
+
+
+# 第二阶段改造（docs/论文评分第二阶段改造方案.md）：开关关闭时提示词与上面完全相同。
+_EVIDENCE_SENTENCE = "text 由原文连续片段组成，“…”表示省略。"
+_SCOPE_SENTENCE = (
+    "evidence 的 section 是该段落的完整标题路径；有 scope 时，scope.targets 列出规则要对照的章节及证据中"
+    "来自该章节的段落数，为 0 表示论文中没有找到该章节的段落，对应证据项的 target 标明所属章节。"
+)
+_NOT_TRIGGERED_SENTENCE = "not_triggered 表示证据显示不存在该缺陷，或现有证据不足以证明缺陷存在；"
+_REVIEW_STATUS_SENTENCE = (
+    "not_triggered 表示证据覆盖了规则要检查的内容且显示不存在该缺陷；判 triggered 前先检查证据中作者"
+    "是否已说明原因、限定范围或给出替代做法，若已说明则判 not_triggered；insufficient_evidence 表示给出的"
+    "证据没有覆盖规则要检查的内容，无法判断是否存在缺陷，此时 occurrences 为空数组；"
+)
+_BASE_STATUSES = ("triggered", "not_triggered", "not_applicable")
+INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+def _judge_scope_enabled() -> bool:
+    from backend.app.core.config import settings
+
+    return bool(settings.SCORING_JUDGE_SCOPE_ENABLED)
+
+
+def _insufficient_evidence_enabled() -> bool:
+    from backend.app.core.config import settings
+
+    return settings.SCORING_INSUFFICIENT_EVIDENCE_MODE == "review"
+
+
+def _common_instructions() -> str:
+    text = _COMMON_INSTRUCTIONS
+    if _judge_scope_enabled():
+        text = text.replace(_EVIDENCE_SENTENCE, _EVIDENCE_SENTENCE + _SCOPE_SENTENCE, 1)
+    if _insufficient_evidence_enabled():
+        text = text.replace(_NOT_TRIGGERED_SENTENCE, _REVIEW_STATUS_SENTENCE, 1)
+    return text
+
+
+def _single_instructions() -> str:
+    return _common_instructions() + _SINGLE_INSTRUCTIONS[len(_COMMON_INSTRUCTIONS):]
+
+
+def _group_instructions() -> str:
+    return _common_instructions() + _GROUP_INSTRUCTIONS[len(_COMMON_INSTRUCTIONS):]
+
+
+def _statuses() -> list[str]:
+    statuses = list(_BASE_STATUSES)
+    if _insufficient_evidence_enabled():
+        statuses.append(INSUFFICIENT_EVIDENCE)
+    return statuses
+
+
+def provider_prompt_suffix() -> str:
+    """Suffix for the provider prompt version; empty while both switches are off."""
+
+    parts = []
+    if _judge_scope_enabled():
+        parts.append("+judge-scope@1")
+    if _insufficient_evidence_enabled():
+        parts.append("+insufficient@1")
+    return "".join(parts)
 
 
 @dataclass(frozen=True)
@@ -169,11 +234,19 @@ def _view(value, rules, *, group_code=None):
     )
     alias_to_unit = {}
     evidence = []
+    full_path = _judge_scope_enabled()
+    scope = scope_view(rules, value.get("coverage_mode", ""), value["evidence_units"])
+    targets = [item["name"] for item in scope["targets"]] if scope else []
     for index, (unit, text) in enumerate(shown, start=1):
         alias = "E%d" % index
         alias_to_unit[alias] = unit["evidence_unit_id"]
         path = list(unit.get("section_path") or ())
-        evidence.append({"ref": alias, "section": path[-1] if path else "", "text": text})
+        section = " › ".join(path) if full_path else (path[-1] if path else "")
+        item = {"ref": alias, "section": section, "text": text}
+        target = unit_target(unit, targets) if targets else None
+        if target is not None:
+            item["target"] = target
+        evidence.append(item)
 
     view = {}
     digest = extensions.get("paper_digest")
@@ -187,6 +260,8 @@ def _view(value, rules, *, group_code=None):
     context = _context_view(extensions, needs)
     if context:
         view["context"] = context
+    if scope:
+        view["scope"] = scope
     view["evidence"] = evidence
     if group_code is None:
         view["rule"] = _rule_view(rules[0])
@@ -257,13 +332,13 @@ def build_core_request(envelope) -> CoreProviderRequest:
         "properties": {
             "schema_version": {"type": "string", "enum": ["semantic-rule-response@2"]},
             "rule_code": {"type": "string", "enum": [rule["rule_code"]]},
-            "status": {"type": "string", "enum": ["triggered", "not_triggered", "not_applicable"]},
+            "status": {"type": "string", "enum": _statuses()},
             "level_code": {"type": ["string", "null"], "enum": level_codes + [None]},
             "occurrences": _occurrences_schema(_allowed_finding_codes(rule), alias_to_unit),
         },
     }
     return CoreProviderRequest(
-        system=_SINGLE_INSTRUCTIONS,
+        system=_single_instructions(),
         user=_dumps(view),
         schema=schema,
         alias_to_unit=alias_to_unit,
@@ -298,7 +373,7 @@ def build_core_group_request(envelopes, *, group_code: str) -> CoreProviderReque
         "properties": {
             "schema_version": {"type": "string", "enum": [GROUP_RESPONSE_SCHEMA]},
             "group_code": {"type": "string", "enum": [group_code]},
-            "status": {"type": "string", "enum": ["triggered", "not_triggered", "not_applicable"]},
+            "status": {"type": "string", "enum": _statuses()},
             "selected_rule_code": {
                 "type": ["string", "null"],
                 "enum": [rule["rule_code"] for rule in rules] + [None],
@@ -307,7 +382,7 @@ def build_core_group_request(envelopes, *, group_code: str) -> CoreProviderReque
         },
     }
     return CoreProviderRequest(
-        system=_GROUP_INSTRUCTIONS,
+        system=_group_instructions(),
         user=_dumps(view),
         schema=schema,
         alias_to_unit=alias_to_unit,
@@ -323,6 +398,29 @@ def request_input_estimate(request: CoreProviderRequest) -> int:
     return (
         conservative_token_estimate(request.user)
         + conservative_token_estimate(request.system)
+        + _FRAMING_ALLOWANCE
+    )
+
+
+def estimate_view_input_tokens(value, rules) -> int:
+    """Estimate the request that ``rules`` will share, from an unvalidated V4 mapping.
+
+    Evidence selection calls this before the envelope is final, so it builds
+    the same view and instructions as ``build_core_request`` /
+    ``build_core_group_request`` and measures them like ``request_input_estimate``.
+    """
+
+    rules = list(rules)
+    if len(rules) > 1:
+        group_code = str(rules[0].get("mutex_group") or "group")
+        view, _aliases, _decisions = _view(value, rules, group_code=group_code)
+        system = _group_instructions()
+    else:
+        view, _aliases, _decisions = _view(value, rules)
+        system = _single_instructions()
+    return (
+        conservative_token_estimate(_dumps(view))
+        + conservative_token_estimate(system)
         + _FRAMING_ALLOWANCE
     )
 
@@ -355,9 +453,18 @@ def _map_evidence_refs(response, alias_to_unit):
     return mapped
 
 
+def _request_statuses(request: CoreProviderRequest) -> list:
+    return list(request.schema["properties"]["status"]["enum"])
+
+
 def decode_core_response(envelope, response, request: CoreProviderRequest) -> dict:
+    allowed = _request_statuses(request)
+    if isinstance(response, Mapping) and response.get("status") not in allowed:
+        raise ValueError("Core provider response status is invalid")
     return normalize_core_provider_response(
-        envelope, _map_evidence_refs(response, request.alias_to_unit)
+        envelope,
+        _map_evidence_refs(response, request.alias_to_unit),
+        allow_insufficient=INSUFFICIENT_EVIDENCE in allowed,
     )
 
 
@@ -374,7 +481,7 @@ def decode_core_group_response(envelopes, response, request: CoreProviderRequest
     if response["group_code"] != request.group_code:
         raise ValueError("Core group response named another group")
     status = response["status"]
-    if status not in {"triggered", "not_triggered", "not_applicable"}:
+    if status not in _request_statuses(request):
         raise ValueError("Core group response status is invalid")
     selected = response["selected_rule_code"]
     occurrences = response["occurrences"]
@@ -430,12 +537,15 @@ def compression_summary(request: CoreProviderRequest) -> dict:
 __all__ = [
     "CoreProviderRequest",
     "GROUP_RESPONSE_SCHEMA",
+    "INSUFFICIENT_EVIDENCE",
     "VIEW_VERSION",
     "build_core_group_request",
     "build_core_request",
     "compression_summary",
     "decode_core_group_response",
     "decode_core_response",
+    "estimate_view_input_tokens",
     "preflight_core_request",
+    "provider_prompt_suffix",
     "request_input_estimate",
 ]

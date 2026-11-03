@@ -249,3 +249,143 @@ def drift_monitor(db: Session, batch_id: str):
         "verdict": verdict,
         "criteria": drift["criteria"],
     }
+
+
+# ── 规则体检（docs/论文评分第二阶段改造方案.md 第 7 节）────────────────────
+# 只读 rule_scoring_tasks 与 review_logs，不调模型、不改分。阈值是初值，样本不够时
+# 只给计数、不下结论。
+RULE_HEALTH_MIN_DECIDED = 5
+RULE_HEALTH_PAIR_RATIO = 0.8
+RULE_HEALTH_PAIR_MIN_BOTH = 3
+
+
+def summarize_rule_health(runs, raised_score_item_ids=()) -> dict:
+    """``runs``：每篇论文最近一次评分的规则任务列表；``raised_score_item_ids``：人工改分后分数变高的评分项。
+
+    规则任务只用到 rule_code、criterion_code、status、score_item_id 与
+    result_snapshot["status"]（规则判定）。判定为未触发、任务却是 review_required，
+    就是“证据不足”转人工的那种。
+    """
+
+    raised = set(raised_score_item_ids)
+    rows = {}
+    triggered_sets = []
+    alone = {}
+    for tasks in runs:
+        triggered = set()
+        by_item = {}
+        for task in tasks:
+            row = rows.setdefault(
+                task.rule_code,
+                {
+                    "rule_code": task.rule_code,
+                    "criterion_code": task.criterion_code,
+                    "papers": 0,
+                    "triggered": 0,
+                    "not_triggered": 0,
+                    "insufficient": 0,
+                    "not_applicable": 0,
+                    "skipped": 0,
+                    "invalid": 0,
+                    "triggered_alone": 0,
+                    "raised_after_alone": 0,
+                },
+            )
+            row["papers"] += 1
+            decision = (task.result_snapshot or {}).get("status")
+            if decision == "triggered":
+                row["triggered"] += 1
+                triggered.add(task.rule_code)
+                by_item.setdefault(task.score_item_id, []).append(task.rule_code)
+            elif decision == "not_triggered" and task.status == "review_required":
+                row["insufficient"] += 1
+            elif decision in {"not_triggered", "not_applicable", "skipped", "invalid"}:
+                row[decision] += 1
+            else:
+                row["invalid"] += 1
+        triggered_sets.append(triggered)
+        for item_id, codes in by_item.items():
+            if item_id and len(codes) == 1:
+                alone[item_id] = codes[0]
+
+    for item_id, code in alone.items():
+        rows[code]["triggered_alone"] += 1
+        if item_id in raised:
+            rows[code]["raised_after_alone"] += 1
+
+    flagged = []
+    for row in rows.values():
+        decided = row["triggered"] + row["not_triggered"]
+        row["decided"] = decided
+        row["zero_discrimination"] = decided >= RULE_HEALTH_MIN_DECIDED and row["triggered"] in {0, decided}
+        row["insufficient_rate"] = round(row["insufficient"] / row["papers"], 3) if row["papers"] else 0.0
+        if row["zero_discrimination"]:
+            flagged.append(row["rule_code"])
+
+    counts = {}
+    for triggered in triggered_sets:
+        for code in triggered:
+            counts[code] = counts.get(code, 0) + 1
+    pairs = {}
+    for triggered in triggered_sets:
+        ordered = sorted(triggered)
+        for index, first in enumerate(ordered):
+            for second in ordered[index + 1 :]:
+                pairs[(first, second)] = pairs.get((first, second), 0) + 1
+    co_triggered = []
+    for (first, second), both in sorted(pairs.items()):
+        union = counts[first] + counts[second] - both
+        ratio = both / union if union else 0.0
+        if both >= RULE_HEALTH_PAIR_MIN_BOTH and ratio >= RULE_HEALTH_PAIR_RATIO:
+            co_triggered.append(
+                {
+                    "rule_codes": [first, second],
+                    "same_criterion": rows[first]["criterion_code"] == rows[second]["criterion_code"],
+                    "both": both,
+                    "ratio": round(ratio, 3),
+                }
+            )
+
+    return {
+        "papers": len(runs),
+        "thresholds": {
+            "min_decided": RULE_HEALTH_MIN_DECIDED,
+            "pair_ratio": RULE_HEALTH_PAIR_RATIO,
+            "pair_min_both": RULE_HEALTH_PAIR_MIN_BOTH,
+        },
+        "rules": sorted(rows.values(), key=lambda row: (row["criterion_code"], row["rule_code"])),
+        "zero_discrimination": sorted(flagged),
+        "co_triggered": co_triggered,
+    }
+
+
+def rule_health(db: Session, batch_id: str) -> dict:
+    """批次里每篇论文最近一次 Core 评分的规则体检（只读）。"""
+
+    batch = db.scalar(
+        select(GradingBatch)
+        .where(GradingBatch.id == batch_id)
+        .options(
+            selectinload(GradingBatch.papers)
+            .selectinload(Paper.scoring_runs)
+            .selectinload(ScoringRun.rule_tasks)
+        )
+    )
+    if batch is None:
+        raise ValueError("batch not found")
+    runs = []
+    for paper in batch.papers:
+        candidates = [run for run in paper.scoring_runs if run.rule_tasks]
+        if candidates:
+            runs.append(list(max(candidates, key=lambda run: run.created_at).rule_tasks))
+    item_ids = {task.score_item_id for tasks in runs for task in tasks if task.score_item_id}
+    raised = set()
+    if item_ids:
+        for log in db.scalars(select(ReviewLog).where(ReviewLog.score_item_id.in_(sorted(item_ids)))):
+            if (
+                log.before_score is not None
+                and log.after_score is not None
+                and float(log.after_score) > float(log.before_score)
+            ):
+                raised.add(log.score_item_id)
+    return {"batch_id": batch_id, **summarize_rule_health(runs, raised)}

@@ -274,8 +274,12 @@ def core_response_json_schema(envelope) -> dict:
     }
 
 
-def normalize_core_provider_response(envelope, response) -> dict:
-    """Fail closed and project provider output onto SemanticRuleResponseV2."""
+def normalize_core_provider_response(envelope, response, *, allow_insufficient=False) -> dict:
+    """Fail closed and project provider output onto SemanticRuleResponseV2.
+
+    ``allow_insufficient`` accepts ``insufficient_evidence`` (only when the
+    request offered it); RuleExecutor turns it into a review issue.
+    """
 
     value = _core_envelope(envelope).to_mapping()
     if not isinstance(response, Mapping):
@@ -296,7 +300,10 @@ def normalize_core_provider_response(envelope, response) -> dict:
     if response["rule_code"] != rule["rule_code"]:
         raise ValueError("Core provider response named an unauthorized rule")
     status = response["status"]
-    if status not in {"triggered", "not_triggered", "not_applicable"}:
+    allowed_statuses = {"triggered", "not_triggered", "not_applicable"}
+    if allow_insufficient:
+        allowed_statuses.add("insufficient_evidence")
+    if status not in allowed_statuses:
         raise ValueError("Core provider response status is invalid")
 
     raw_occurrences = response["occurrences"]

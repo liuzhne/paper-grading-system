@@ -559,6 +559,46 @@ def test_production_env_passes_the_site_leads_switch_through(tmp_path, monkeypat
     assert not output.exists()
 
 
+def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch, capsys):
+    """第二阶段的三个评分设置来自 GitHub 仓库变量；没设就不写，应用取默认值。"""
+    script = _env_script()
+    for name, value in {
+        "DATABASE_URL": "postgresql://pgs_app.ref:%s@pooler.supabase.com:6543/postgres" % _SECRET,
+        "AUTH_SECRET": _SECRET,
+        "AUTH_PASSWORD": _SECRET,
+        "BYOK_MASTER_KEY": _SECRET,
+        "SUPABASE_URL": "https://new.supabase.co",
+        "SUPABASE_SECRET_KEY": _SECRET,
+    }.items():
+        monkeypatch.setenv(name, value)
+    output = tmp_path / "pgs.env"
+    args = ["--from-environment", "--site-address", "pgs.duckdns.org", "--output", str(output)]
+
+    assert script.main(args) == 0
+    assert "SCORING_" not in output.read_text(encoding="utf-8")
+
+    output.unlink()
+    monkeypatch.setenv("SCORING_JUDGE_SCOPE_ENABLED", "true")
+    monkeypatch.setenv("SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
+    monkeypatch.setenv("SCORING_TOKEN_BUDGET_TARGET", "envelope")
+    assert script.main(args) == 0
+    text = output.read_text(encoding="utf-8")
+    assert "SCORING_JUDGE_SCOPE_ENABLED='true'" in text
+    assert "SCORING_INSUFFICIENT_EVIDENCE_MODE='review'" in text
+    assert "SCORING_TOKEN_BUDGET_TARGET='envelope'" in text
+
+    output.unlink()
+    monkeypatch.setenv("SCORING_INSUFFICIENT_EVIDENCE_MODE", "on")
+    assert script.main(args) == 1
+    assert "SCORING_INSUFFICIENT_EVIDENCE_MODE 只能是 off / review" in capsys.readouterr().err
+    assert not output.exists()
+
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
+    for name in ("SCORING_TOKEN_BUDGET_TARGET", "SCORING_JUDGE_SCOPE_ENABLED", "SCORING_INSUFFICIENT_EVIDENCE_MODE"):
+        assert "%s: ${{ vars.%s }}" % (name, name) in lightsail
+
+
 def test_lightsail_deploy_job_renders_the_site_leads_switch():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]

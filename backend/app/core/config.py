@@ -149,6 +149,13 @@ class Settings(BaseSettings):
     # 1200 → 2048 时同步 8192 → 9040，输入预算保持 5968，送给模型的证据（与请求体大小）不变。
     SCORING_CONTEXT_WINDOW_TOKENS: int = Field(default=9040, ge=1024)
     SCORING_CONTEXT_SAFETY_MARGIN_TOKENS: int = Field(default=1024, ge=0)
+    # 第二阶段改造（docs/论文评分第二阶段改造方案.md）。
+    # 预算检查量什么：provider_view = 实际发给模型的视图；envelope = 旧量法（带哈希的完整信封），只作回退。
+    SCORING_TOKEN_BUDGET_TARGET: Literal["provider_view", "envelope"] = "provider_view"
+    # 按判定范围（章节内 / 跨章节 / 全文）取证据。改变评分，QWK 评测后再打开。
+    SCORING_JUDGE_SCOPE_ENABLED: bool = False
+    # off = 证据不足并入 not_triggered（现状）；review = 模型可回 insufficient_evidence，评分项转人工。
+    SCORING_INSUFFICIENT_EVIDENCE_MODE: Literal["off", "review"] = "off"
     SCORING_RULE_TASKS_ENABLED: bool = True
     # Rule-level decision ledger: reuse a validated semantic decision whose full
     # decision identity is unchanged, so retries only pay for failed rules.

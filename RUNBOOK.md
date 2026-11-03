@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-03 | 论文评分第二阶段（分期 A–D） | 新增环境变量 `SCORING_TOKEN_BUDGET_TARGET`（默认 `provider_view`）、`SCORING_JUDGE_SCOPE_ENABLED`（默认关）、`SCORING_INSUFFICIENT_EVIDENCE_MODE`（默认 `off`），三者都接进生产部署；只读脚本 `rule_health_report`；无迁移；排错：`TOKEN_BUDGET_UNSATISFIABLE` 与评分项意外转人工 |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增环境变量 `REQUIREMENT_ITEMS_ENABLED`（默认关，生产暂不接）、只读脚本 `inspect_requirement_items`；无迁移；排错：`TEMPLATE_READ_INCOMPLETE` 警告、开关打开后多出的发布阻断 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无新命令、无迁移；排错：`work_item_deferred` 与 `deferral_count` 对不上时的读法。 |
 | 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无新命令、无迁移；排错：每个任务第 1 批成功、第 2 批被拒，日志 `reason=rejected_without_reason` 的读法。 |
@@ -2760,3 +2761,44 @@ uv run uvicorn backend.app.main:app --port 8000
 维护记录：2026-11-01 · Word 评分规范分期 A：新增开关、只读脚本和核对清单，排错条目写明读取警告与新增阻断的真实原因。
 
 维护记录：2026-11-01 · Word 评分规范分期 A 复审：本地试开关改成可直接执行的命令，读取警告补上损坏表格整张跳过的原因。
+
+### 2026-11-03 论文评分第二阶段（预算量实际视图、判定范围、证据不足）
+
+方案见 `docs/论文评分第二阶段改造方案.md`。三个设置都从 GitHub 仓库变量传进生产（`scripts/production_env.py` 的 `OPTIONAL_SWITCHES` / `OPTIONAL_CHOICES`），没设就取默认值：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `SCORING_TOKEN_BUDGET_TARGET` | `provider_view` | 预算量实际发给模型的视图；`envelope` 回到旧量法 |
+| `SCORING_JUDGE_SCOPE_ENABLED` | `false` | 跨章节规则在各目标章节里取证据；视图显示完整标题路径 |
+| `SCORING_INSUFFICIENT_EVIDENCE_MODE` | `off` | `review` 时模型可回“证据不足”，所属评分项转人工 |
+
+B、C 改变评分，打开前要用 QWK 留出集对比（真实模型调用需要维护者授权预算）。改仓库变量后要重新部署才生效。
+
+规则体检（只读，查完即回滚，不打印论文正文与学生信息）：
+
+```bash
+.venv/bin/python -m backend.app.scripts.rule_health_report <batch_id>
+```
+
+生产在 app 容器里跑同一条命令。看 `zero_discrimination`（全部触发或全部不触发，可能没在看论文）、`co_triggered`（经常一起触发，可能重复扣分）、每条规则的 `insufficient_rate` 和 `raised_after_alone`（只有它触发、人工改分后分数变高）。样本少于 5 篇时不下结论。
+
+排错：
+- **现象**：材料评分失败，页面显示 `TOKEN_BUDGET_UNSATISFIABLE`。
+  - 报错指向：像是论文太长、超过了模型上限。
+  - 真正原因：这是发请求前系统自己的预算检查，不是模型报的。`SCORING_TOKEN_BUDGET_TARGET=envelope`（旧量法）时，量的是带哈希和全部参考文献的完整信封，名称带“缺失/缺少”的规则还要求整篇放下，长论文很容易失败。先确认生产没有把这个变量设成 `envelope`；默认的 `provider_view` 下，视图里的证据本来就封顶 3000 字，再失败多半是规则正文或互斥组本身太长。
+- **现象**：打开 `SCORING_INSUFFICIENT_EVIDENCE_MODE=review` 后，很多论文停在“需人工复核”，总分为空。
+  - 报错指向：像是评分失败或总分算错了。
+  - 真正原因：有规则被模型判为证据不足，所属评分项转人工，总分等人工定。规则任务状态是 `review_required`、判定是 `not_triggered`。用 `rule_health_report` 看是哪些规则的 `insufficient_rate` 高：取证范围不对就先关 `SCORING_JUDGE_SCOPE_ENABLED` 对比，规则写得不可判定就改规则；全局都高就把模式切回 `off` 再部署。
+- **现象**：打开开关后，同一份论文重评没有复用以前的判定，费用变多。
+  - 报错指向：像是决策账本失效。
+  - 真正原因：开关改变了提示词版本或选证据身份，判定身份跟着变，账本按设计不复用旧判定。A 默认打开时也一样（预算身份从 `@1` 变成 `@2`）。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_scoring_stage2.py backend/app/tests/test_p1_evidence_selection.py backend/app/tests/test_m4_rule_executor.py
+```
+
+发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`。A 默认打开会改变新评分的证据与分数；回退设 `SCORING_TOKEN_BUDGET_TARGET=envelope` 后重新部署。B、C 默认关闭，部署后行为只有 A 的变化。`cache/llm_cache.PROMPT_VERSION` 不动（legacy 提示词没变；Core 提示词版本随开关进运行身份）。
+
+维护记录：2026-11-03 · 论文评分第二阶段：新增三个评分设置与只读体检脚本，排错写明预算失败、证据不足转人工、账本不复用的真实原因。

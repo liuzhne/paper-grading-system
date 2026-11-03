@@ -21,6 +21,10 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 # exhaustive (whole-paper) selection.
 SELECTOR_VERSION = "section-bm25-diverse@2"
 TOKEN_POLICY_VERSION = "provider-context-budget@1"
+# @2 measures the provider view that is actually sent (docs/论文评分第二阶段改造方案.md
+# 第 4 节); @1 measured the whole identity envelope and is kept only as a rollback.
+VIEW_TOKEN_POLICY_VERSION = "provider-context-budget@2"
+BUDGET_TARGETS = ("provider_view", "envelope")
 TOKEN_ESTIMATOR_VERSION = "utf8-conservative@1"
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u9fff]")
 _HIERARCHICAL_MARKERS = (
@@ -229,12 +233,12 @@ def _section_coverage(all_units, selected):
     ]
 
 
-def _build_mapping(base, selected, *, query, coverage_mode, context_window_tokens, reserved_output_tokens, safety_margin_tokens, estimated_input_tokens):
+def _build_mapping(base, selected, *, query, coverage_mode, context_window_tokens, reserved_output_tokens, safety_margin_tokens, estimated_input_tokens, selector_version=SELECTOR_VERSION, policy_version=TOKEN_POLICY_VERSION):
     criterion = base["criterion_snapshot"]
     rule = base["atomic_rule_snapshot"]
     selection_projection = {
         "schema_version": "evidence-selection-snapshot@1",
-        "selector_version": SELECTOR_VERSION,
+        "selector_version": selector_version,
         "criterion_code": criterion["criterion_code"],
         "rule_code": rule["rule_code"],
         "query_hash": canonical_sha256({"query": query}),
@@ -247,7 +251,7 @@ def _build_mapping(base, selected, *, query, coverage_mode, context_window_token
     total = estimated_input_tokens + reserved_output_tokens + safety_margin_tokens
     budget_projection = {
         "schema_version": "token-budget@1",
-        "policy_version": TOKEN_POLICY_VERSION,
+        "policy_version": policy_version,
         "estimator_version": TOKEN_ESTIMATOR_VERSION,
         "context_window_tokens": context_window_tokens,
         "reserved_output_tokens": reserved_output_tokens,
@@ -280,12 +284,20 @@ def build_v4_envelope(
     safety_margin_tokens: int,
     top_k: int,
     selection_rules=None,
+    request_rules=None,
+    budget_target: str = "envelope",
+    judge_scope: bool = False,
 ):
     """Select whole authoritative units and prove the final request fits.
 
     ``selection_rules`` ranks for several rules at once (all members of a
     mutex group, or every rule of a criterion) so their envelopes share the
     same evidence and a provider can serve them from one prompt prefix.
+
+    ``request_rules`` are the rules that will actually share one provider
+    request (the mutex group, else this rule); ``budget_target="provider_view"``
+    measures that request's view instead of the whole identity envelope.
+    ``judge_scope`` restricts section / cross-section rules to their sections.
     """
 
     base = PromptEnvelopeV3.from_mapping(envelope).to_mapping()
@@ -297,45 +309,86 @@ def build_v4_envelope(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f"{name} must be an integer >= {minimum}")
-    coverage_mode = _coverage_mode(base, _structural_query(base, selection_rules))
+    if budget_target not in BUDGET_TARGETS:
+        raise ValueError("budget_target is unsupported")
     query = _ranking_query(base, selection_rules)
-    ranked = _diversify(_rank(list(base["evidence_units"]), query))
-    selected = ranked if coverage_mode == "exhaustive" else ranked[:top_k]
+    scope = _judge_scope(base, selection_rules) if judge_scope else None
+    selector_version = SELECTOR_VERSION
+    if scope is not None:
+        from backend.app.services.scoring.retrieval.judge_scope import (
+            JUDGE_SCOPE_VERSION,
+            select_scoped_units,
+        )
+
+        coverage_mode = scope["scope"]
+        selector_version = SELECTOR_VERSION + "+" + JUDGE_SCOPE_VERSION
+        selected = select_scoped_units(
+            list(base["evidence_units"]),
+            scope,
+            rank=lambda units: _diversify(_rank(units, query)),
+            top_k=top_k,
+        )
+    else:
+        coverage_mode = _coverage_mode(base, _structural_query(base, selection_rules))
+        ranked = _diversify(_rank(list(base["evidence_units"]), query))
+        selected = ranked if coverage_mode == "exhaustive" else ranked[:top_k]
     if not selected:
         raise TokenBudgetError("no authorized evidence is available")
+    rules = list(request_rules or [base["atomic_rule_snapshot"]])
+    mapping_options = {
+        "query": query,
+        "coverage_mode": coverage_mode,
+        "context_window_tokens": context_window_tokens,
+        "reserved_output_tokens": reserved_output_tokens,
+        "safety_margin_tokens": safety_margin_tokens,
+        "selector_version": selector_version,
+    }
 
     while selected:
-        estimated = 1
-        candidate = None
-        # The recorded estimate is part of the JSON being estimated.  Iterate
-        # to a fixed point so the final identity describes the final payload.
-        for _ in range(4):
+        if budget_target == "provider_view":
+            from backend.app.services.llm.core_view import estimate_view_input_tokens
+
+            # The view never carries the budget identity, so one measurement
+            # describes the final payload; the adapter preflights it again.
+            probe = _build_mapping(
+                base,
+                selected,
+                estimated_input_tokens=1,
+                policy_version=VIEW_TOKEN_POLICY_VERSION,
+                **mapping_options,
+            )
+            estimated = estimate_view_input_tokens(probe, rules)
             candidate = _build_mapping(
                 base,
                 selected,
-                query=query,
-                coverage_mode=coverage_mode,
-                context_window_tokens=context_window_tokens,
-                reserved_output_tokens=reserved_output_tokens,
-                safety_margin_tokens=safety_margin_tokens,
                 estimated_input_tokens=estimated,
+                policy_version=VIEW_TOKEN_POLICY_VERSION,
+                **mapping_options,
             )
-            # Reserve conservative chat framing and system-instruction space.
-            # The adapter performs a second exact-payload preflight below.
-            measured = conservative_token_estimate(candidate) + 1024
-            if measured == estimated:
-                break
-            estimated = measured
-        candidate = _build_mapping(
-            base,
-            selected,
-            query=query,
-            coverage_mode=coverage_mode,
-            context_window_tokens=context_window_tokens,
-            reserved_output_tokens=reserved_output_tokens,
-            safety_margin_tokens=safety_margin_tokens,
-            estimated_input_tokens=estimated,
-        )
+        else:
+            estimated = 1
+            candidate = None
+            # The recorded estimate is part of the JSON being estimated.  Iterate
+            # to a fixed point so the final identity describes the final payload.
+            for _ in range(4):
+                candidate = _build_mapping(
+                    base,
+                    selected,
+                    estimated_input_tokens=estimated,
+                    **mapping_options,
+                )
+                # Reserve conservative chat framing and system-instruction space.
+                # The adapter performs a second exact-payload preflight below.
+                measured = conservative_token_estimate(candidate) + 1024
+                if measured == estimated:
+                    break
+                estimated = measured
+            candidate = _build_mapping(
+                base,
+                selected,
+                estimated_input_tokens=estimated,
+                **mapping_options,
+            )
         total = estimated + reserved_output_tokens + safety_margin_tokens
         if total <= context_window_tokens:
             return PromptEnvelopeV4.from_mapping(candidate)
@@ -343,6 +396,18 @@ def build_v4_envelope(
             break
         selected = selected[:-1]
     raise TokenBudgetError()
+
+
+def _judge_scope(base: dict, selection_rules=None):
+    """Scope of the rule (or of a shared selection's lowest rule code); None = document."""
+
+    from backend.app.services.scoring.retrieval.judge_scope import DOCUMENT
+    from backend.app.services.scoring.retrieval.judge_scope import infer_judge_scope
+
+    rules = list(selection_rules or [base["atomic_rule_snapshot"]])
+    rule = min(rules, key=lambda item: item["rule_code"])
+    scope = infer_judge_scope(rule)
+    return None if scope["scope"] == DOCUMENT else scope
 
 
 def preflight_v4_provider_payload(envelope, system_instructions: str) -> int:

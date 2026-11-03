@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-03 | 论文评分第二阶段：预算量实际视图、判定范围、证据不足（分期 A–D） | 新增 `scoring/retrieval/judge_scope.py`；`build_v4_envelope` 加 `request_rules`、`budget_target`、`judge_scope`，预算改由 `core_view.estimate_view_input_tokens` 量实际视图（默认）；`PromptEnvelopeV4.coverage_mode` 增加 `section`、`cross_section`；`rule_executor` 把 `insufficient_evidence` 记为未触发加 `RULE_EVIDENCE_INSUFFICIENT` 复核问题，评分项转 `review_required`；新增只读脚本 `rule_health_report`。B、C 开关默认关闭，关闭时视图与提示词不变。无迁移，head 仍为 `0041_assistant_agent_state` |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增 `rubric_import/sources/docx_deep.py`、`rubric_import/requirements/`（`outline`、`items`、`state`）；`load_docx` 加 `deep`；`raw_parse_output` 新增 `outline`、`requirement_items`；台账单元新增 `image` 类型。开关 `REQUIREMENT_ITEMS_ENABLED` 默认关闭，关闭时调用链与数据不变。无迁移，head 仍为 `0041_assistant_agent_state`；评分链不变 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无模块变化：`ai_tasks/execution._finish` 对熔断延后不加 `deferral_count`，连续次数从 `attempt_history` 算（上限 5）；延迟叫醒的去重键改用执行次数。接口、数据库不变。 |
 | 2026-10-30 | 起草被拒且厂商不说原因时也改用精简 Schema | 无模块变化：`_draft_deduction_rules_once` 的精简 Schema 退路多一个触发条件（`llm/errors.rejected_without_reason`）；接口、数据库、起草版本不变。 |
@@ -1642,3 +1643,35 @@ prepare_structure_reparse（只看草稿有没有条目，不看开关）
 维护记录：2026-11-01 · Word 评分规范分期 A：新增 `docx_deep`、`requirements/`，记录深度读取和章节、条目的调用链与数据落点；开关默认关闭，评分链和迁移不变。
 
 维护记录：2026-11-01 · Word 评分规范分期 A 复审：写清谁在用条目（只有结构重新解析），记录损坏模板的读取边界。
+
+### 2026-11-03 论文评分第二阶段：预算量实际视图、判定范围、证据不足（分期 A–D）
+
+方案见 [docs/论文评分第二阶段改造方案.md](docs/论文评分第二阶段改造方案.md)。只动 Core 路径上一条规则从取证据到出判定这一段；legacy v1、导入与起草、发布校验不变。
+
+```
+profile.build_provider_envelope（thesis / general_document / technical_proposal）
+  build_v4_envelope(selection_rules, request_rules, budget_target, judge_scope)
+    ├─ judge_scope=True 且 judge_scope.infer_judge_scope 认出 section / cross_section
+    │     select_scoped_units：每个目标章节内各自 BM25 + 多样化，交替取；一章都没找到就退回全文
+    │     coverage_mode = section / cross_section，selector_version 加 +judge-scope@1
+    ├─ 否则与以前相同（top_k / exhaustive / hierarchical）
+    └─ 预算：budget_target=provider_view（默认）时用 core_view.estimate_view_input_tokens
+          生成与实际请求相同的视图（单条或互斥组）来量；envelope 是旧量法，只作回退
+  适配器发送前 preflight_core_request 照旧再量一次
+
+core_view.build_core_request / build_core_group_request
+  SCORING_JUDGE_SCOPE_ENABLED：证据显示完整标题路径；section / cross_section 规则带 scope 与 target
+  SCORING_INSUFFICIENT_EVIDENCE_MODE=review：status 多一个 insufficient_evidence，提示词改判定含义
+  两个开关都关时，视图、提示词、输出结构与以前逐字相同；打开时 provider_prompt_suffix 进入运行身份
+
+rule_executor
+  insufficient_evidence → 判定 not_triggered（扣 0）+ review 级问题 RULE_EVIDENCE_INSUFFICIENT
+  → 规则任务 review_required；评分项 review_required（band 评分项自动分为空），论文总分等人工定
+```
+
+- 判定范围只从规则快照推断，不调模型；推断版本 `judge-scope@1` 记在选证据身份里。已发布快照（`atomic-rule-snapshot@1–3`）不带 `applies_to`，所以本期只认得出“跨章节”（规则文字里有“一致/呼应/回应”等词且提到两个章节角色）。
+- 证据不足不新增规则判定状态：判定契约闭合，牵动结果、持久化、报告、导出和前端；复用已有的复核问题与 `review_required` 链路。
+- 规则体检 `calibration/analytics.rule_health` 只读 `rule_scoring_tasks` 与 `review_logs`；脚本 `backend/app/scripts/rule_health_report.py`。
+- 费用估算 `usage_estimate` 本来就按实际视图量，不用改。
+
+维护记录：2026-11-03 · 论文评分第二阶段：记录选证据、预算、视图与证据不足的调用链和开关边界；无迁移。

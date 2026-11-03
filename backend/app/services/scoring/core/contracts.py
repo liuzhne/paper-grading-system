@@ -2227,7 +2227,8 @@ def _normalize_prompt_envelope_v4(value):
     coverage_mode = _assert_text(
         value["coverage_mode"], "PromptEnvelopeV4.coverage_mode"
     )
-    if coverage_mode not in {"top_k", "exhaustive", "hierarchical"}:
+    # section / cross_section: judge-scoped selection (docs/论文评分第二阶段改造方案.md).
+    if coverage_mode not in {"top_k", "exhaustive", "hierarchical", "section", "cross_section"}:
         raise ValueError("PromptEnvelopeV4 coverage_mode is unsupported")
 
     selection = value["evidence_selection_identity"]
