@@ -994,6 +994,8 @@ def _normalize_rule_evidence_policy(value, path, *, schema_version):
     base_fields = {"mode", "requirement", "minimum_coverage"}
     if schema_version == "atomic-rule-snapshot@1":
         fields = base_fields
+    elif schema_version == "atomic-rule-snapshot@4":
+        fields = base_fields | {"allowed_finding_codes", "judge_scope"}
     else:
         fields = base_fields | {"allowed_finding_codes"}
     _assert_closed_mapping(
@@ -1016,6 +1018,11 @@ def _normalize_rule_evidence_policy(value, path, *, schema_version):
         if len(codes) != len(set(codes)):
             raise ValueError(path + ".allowed_finding_codes must be unique")
         normalized["allowed_finding_codes"] = codes
+    if "judge_scope" in value:
+        scope = _assert_text(value["judge_scope"], path + ".judge_scope")
+        if scope not in JUDGE_SCOPES:
+            raise ValueError(path + ".judge_scope is unsupported")
+        normalized["judge_scope"] = scope
     return normalized
 
 
@@ -1041,7 +1048,14 @@ def _normalize_rule_level(value, path):
 
 # M4 semantics (closed finding-code authorization) apply from @2 on.  @3 adds
 # the rule's published wording so a semantic judge can see what it judges.
-M4_ATOMIC_RULE_SCHEMAS = frozenset({"atomic-rule-snapshot@2", "atomic-rule-snapshot@3"})
+# @4 adds ``applies_to`` and an optional ``evidence_policy.judge_scope`` so
+# evidence can be taken from the rule's sections (docs/论文评分第二阶段改造方案.md
+# 第 13 节); it is only produced while SCORING_JUDGE_SCOPE_ENABLED is on.
+M4_ATOMIC_RULE_SCHEMAS = frozenset(
+    {"atomic-rule-snapshot@2", "atomic-rule-snapshot@3", "atomic-rule-snapshot@4"}
+)
+WORDED_ATOMIC_RULE_SCHEMAS = frozenset({"atomic-rule-snapshot@3", "atomic-rule-snapshot@4"})
+JUDGE_SCOPES = ("section", "cross_section", "document")
 RULE_CONTEXT_NEEDS = ("coherence", "references", "structure")
 _ATOMIC_RULE_TEXT_FIELDS = {
     "name",
@@ -1072,14 +1086,17 @@ def _normalize_atomic_rule_snapshot(value):
         "mutex_group",
         "levels",
     }
-    if isinstance(value, Mapping) and value.get("schema_version") == "atomic-rule-snapshot@3":
+    if isinstance(value, Mapping) and value.get("schema_version") in WORDED_ATOMIC_RULE_SCHEMAS:
         fields = fields | _ATOMIC_RULE_TEXT_FIELDS
+    if isinstance(value, Mapping) and value.get("schema_version") == "atomic-rule-snapshot@4":
+        fields = fields | {"applies_to"}
     _assert_closed_mapping(value, fields=fields, path="AtomicRuleSnapshot")
     schema_version = value["schema_version"]
     if schema_version not in {
         "atomic-rule-snapshot@1",
         "atomic-rule-snapshot@2",
         "atomic-rule-snapshot@3",
+        "atomic-rule-snapshot@4",
     }:
         raise ValueError("unsupported AtomicRuleSnapshot schema_version")
     checker_params = _assert_json_value(
@@ -1140,7 +1157,11 @@ def _normalize_atomic_rule_snapshot(value):
         ),
         "levels": levels,
     }
-    if schema_version == "atomic-rule-snapshot@3":
+    if schema_version == "atomic-rule-snapshot@4":
+        result["applies_to"] = _assert_text(
+            value["applies_to"], "AtomicRuleSnapshot.applies_to", allow_empty=True
+        )
+    if schema_version in WORDED_ATOMIC_RULE_SCHEMAS:
         context_needs = _assert_text_array_preserving_order(
             value["context_needs"], "AtomicRuleSnapshot.context_needs"
         )

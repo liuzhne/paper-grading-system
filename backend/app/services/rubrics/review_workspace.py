@@ -56,6 +56,22 @@ def rule_content(rule):
     }
 
 
+def judge_scope_display(rule):
+    """规则审查页显示的判定范围（docs/论文评分第二阶段改造方案.md 13.3），由评分同一套推断给出。"""
+
+    from backend.app.services.scoring.retrieval.judge_scope import explain_judge_scope
+    from backend.app.services.scoring.retrieval.judge_scope import review_hint
+
+    value = {
+        "judge_type": rule.judge_type,
+        "applies_to": rule.applies_to,
+        "name": rule.name,
+        "rule_text": rule.rule_text,
+        "evidence_policy": rule.evidence_policy or {},
+    }
+    return {"judge_scope": explain_judge_scope(value), "judge_scope_hint": review_hint(value)}
+
+
 def content_token(rule):
     return hashlib.sha256(json.dumps(rule_content(rule), ensure_ascii=False,
                                      sort_keys=True).encode()).hexdigest()
@@ -77,7 +93,9 @@ def read_review_workspace(session, rubric_id):
         "atomic_editing": any(rule.creation_method != "manual" for rule in rules),
         "rules": [{**rule_content(rule), "content_token": content_token(rule),
                    "status": rule.status, "reviewed_by": rule.reviewed_by,
-                   "reviewed_at": rule.reviewed_at} for rule in rules],
+                   "reviewed_at": rule.reviewed_at,
+                   # 派生展示，不进 content_token：推断出的判定范围与缺失类提示。
+                   **judge_scope_display(rule)} for rule in rules],
         "template_links": [{"id": link.id, "rule_code": rule.rule_code,
                             "review_status": link.review_status,
                             "text": link.template_item.raw_text,

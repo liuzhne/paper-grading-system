@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 开关打开时 `rubric_snapshot.load_from_session` 生成 `atomic-rule-snapshot@4`（多 `applies_to`，`evidence_policy` 可带 `judge_scope`），关闭时仍是 `@3` 并去掉 `judge_scope`；`judge_scope.explain_judge_scope` / `review_hint` 供评分与 `read_review_workspace` 共用；band 规则的请求不提供 `insufficient_evidence`；Core 落库写 `score_items.review_reasons`（`review_reasons.from_core_issues`）；规则编辑器加判定范围下拉框。无迁移，接口与 OpenAPI 不变 |
 | 2026-11-03 | 论文评分第二阶段：预算量实际视图、判定范围、证据不足（分期 A–D） | 新增 `scoring/retrieval/judge_scope.py`；`build_v4_envelope` 加 `request_rules`、`budget_target`、`judge_scope`，预算改由 `core_view.estimate_view_input_tokens` 量实际视图（默认）；`PromptEnvelopeV4.coverage_mode` 增加 `section`、`cross_section`；`rule_executor` 把 `insufficient_evidence` 记为未触发加 `RULE_EVIDENCE_INSUFFICIENT` 复核问题，评分项转 `review_required`；新增只读脚本 `rule_health_report`。B、C 开关默认关闭，关闭时视图与提示词不变。无迁移，head 仍为 `0041_assistant_agent_state` |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增 `rubric_import/sources/docx_deep.py`、`rubric_import/requirements/`（`outline`、`items`、`state`）；`load_docx` 加 `deep`；`raw_parse_output` 新增 `outline`、`requirement_items`；台账单元新增 `image` 类型。开关 `REQUIREMENT_ITEMS_ENABLED` 默认关闭，关闭时调用链与数据不变。无迁移，head 仍为 `0041_assistant_agent_state`；评分链不变 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无模块变化：`ai_tasks/execution._finish` 对熔断延后不加 `deferral_count`，连续次数从 `attempt_history` 算（上限 5）；延迟叫醒的去重键改用执行次数。接口、数据库不变。 |
@@ -1675,3 +1676,30 @@ rule_executor
 - 费用估算 `usage_estimate` 本来就按实际视图量，不用改。
 
 维护记录：2026-11-03 · 论文评分第二阶段：记录选证据、预算、视图与证据不足的调用链和开关边界；无迁移。
+
+### 2026-11-04 论文评分第二阶段第二轮：B、C 补全
+
+方案见 [docs/论文评分第二阶段改造方案.md](docs/论文评分第二阶段改造方案.md) 第 13 节。
+
+```
+CompiledRubricSnapshotLoader.load_from_session（评分与 v2 提交都走这里）
+  SCORING_JUDGE_SCOPE_ENABLED 关：atomic-rule-snapshot@3，evidence_policy 里的 judge_scope 去掉（与以前逐字相同）
+  SCORING_JUDGE_SCOPE_ENABLED 开：atomic-rule-snapshot@4 = @3 + applies_to；evidence_policy 保留合法的 judge_scope
+  （load(version_graph) 只校验存下来的快照，仍按 @3）
+
+judge_scope.explain_judge_scope(rule)  ── 评分选证据与规则审查页共用
+  确定性 → document；人工指定 judge_scope 优先；再按 applies_to；再按规则文字；其余 document
+  review_hint：名称带缺失类词、范围为全文的语义规则 → 建议改用结构检查器
+
+read_review_workspace → rules[*].judge_scope / judge_scope_hint（派生，不进 content_token）
+AtomicRuleEditor → 判定范围下拉框写 evidence_policy.judge_scope；lifecycle 编辑时校验取值，null 即删除
+
+core_view：band 规则的 status 枚举不含 insufficient_evidence（band 评分项没有自动分时落库为 blocked，改不了分）
+persistence._score_items：outcome.review_issues 里的 RULE_EVIDENCE_INSUFFICIENT / REVIEW_REQUIRED
+  → review_reasons.from_core_issues → score_items.review_reasons、review_reason（复核队列与评分页直接显示）
+```
+
+- `applies_to` 本来就在版本内容哈希里（全部规则列都进哈希），`@4` 只是换一种投影，已发布版本的哈希不变；开关打开后快照哈希与判定身份变化，账本不复用。
+- `judge_scope` 存在 `evidence_policy` 而不是新列：新列会进版本内容哈希，已发布版本重算出的哈希会变。
+
+维护记录：2026-11-04 · 论文评分第二阶段第二轮：记录快照 @4 的生成条件、判定范围的共用推断、审查页派生字段与 Core 复核原因的数据落点；无迁移。

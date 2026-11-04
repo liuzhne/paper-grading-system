@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 无新命令、无新环境变量、无迁移；规则编辑器加“判定范围”；排错：开关打开后快照变 `@4`、band 评分项不会转人工、复核原因为空 |
 | 2026-11-03 | 论文评分第二阶段（分期 A–D） | 新增环境变量 `SCORING_TOKEN_BUDGET_TARGET`（默认 `provider_view`）、`SCORING_JUDGE_SCOPE_ENABLED`（默认关）、`SCORING_INSUFFICIENT_EVIDENCE_MODE`（默认 `off`），三者都接进生产部署；只读脚本 `rule_health_report`；无迁移；排错：`TOKEN_BUDGET_UNSATISFIABLE` 与评分项意外转人工 |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增环境变量 `REQUIREMENT_ITEMS_ENABLED`（默认关，生产暂不接）、只读脚本 `inspect_requirement_items`；无迁移；排错：`TEMPLATE_READ_INCOMPLETE` 警告、开关打开后多出的发布阻断 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无新命令、无迁移；排错：`work_item_deferred` 与 `deferral_count` 对不上时的读法。 |
@@ -2802,3 +2803,30 @@ B、C 改变评分，打开前要用 QWK 留出集对比（真实模型调用需
 发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`。A 默认打开会改变新评分的证据与分数；回退设 `SCORING_TOKEN_BUDGET_TARGET=envelope` 后重新部署。B、C 默认关闭，部署后行为只有 A 的变化。`cache/llm_cache.PROMPT_VERSION` 不动（legacy 提示词没变；Core 提示词版本随开关进运行身份）。
 
 维护记录：2026-11-03 · 论文评分第二阶段：新增三个评分设置与只读体检脚本，排错写明预算失败、证据不足转人工、账本不复用的真实原因。
+
+### 2026-11-04 论文评分第二阶段第二轮（B、C 补全）
+
+方案见 `docs/论文评分第二阶段改造方案.md` 第 13 节。仍由 `SCORING_JUDGE_SCOPE_ENABLED`、`SCORING_INSUFFICIENT_EVIDENCE_MODE` 控制，默认关闭；评测通过前不要在生产打开。
+
+页面：评分标准第 2 步“编辑当前评分项的原子规则”里，语义规则多了“判定范围”（自动 / 章节内 / 跨章节 / 全文），下方显示已保存规则的推断结果和依据。“适用范围”填章节名，多个用顿号分隔，全文填 `global`。
+
+排错：
+- **现象**：打开 `SCORING_JUDGE_SCOPE_ENABLED` 后，同一份论文重评没有复用以前的判定。
+  - 报错指向：像是决策账本失效。
+  - 真正原因：开关打开后规则快照从 `@3` 变成 `@4`（多了 `applies_to`），快照哈希和判定身份都变了，账本按设计不复用。
+- **现象**：打开 `SCORING_INSUFFICIENT_EVIDENCE_MODE=review` 后，分档（band）评分项从不转人工，证据看起来不够也照样给档。
+  - 报错指向：像是开关没生效。
+  - 真正原因：band 规则的请求按设计不提供“证据不足”。没有自动分的 band 评分项落库是 `blocked`，普通改分会被拒绝，转人工反而谁都改不了。要让 band 也能转人工，先得有“人工定分”方案。
+- **现象**：复核队列里某项标着需复核，原因栏是空的。
+  - 报错指向：像是复核原因没写。
+  - 真正原因：Core 评分项只给“证据不足”和“规则要求人工复核”写原因；评分政策触发的复核（总分低于阈值等）挂在整份论文上，不在评分项上。这一轮之前评的项也没有原因，不会回填。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_scoring_stage2.py backend/app/tests/test_scoring_stage2_bc.py
+```
+
+发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；接口与 OpenAPI 不变；开关默认关闭，部署后评分行为不变，只多了页面上的判定范围和 Core 评分项的复核原因。回滚按 9.4。
+
+维护记录：2026-11-04 · 论文评分第二阶段第二轮：页面新增判定范围的位置，排错写明快照 @4 导致账本不复用、band 评分项不转人工、复核原因为空的真实原因。

@@ -84,24 +84,70 @@ def _roles_in(wording: str) -> list[str]:
     return [role for _position, role in sorted(found)]
 
 
-def infer_judge_scope(rule) -> dict:
-    """``{"scope": ..., "targets": [...]}``；targets 是章节名或角色名。"""
+def _applies_targets(rule) -> list[str]:
+    applies = str(rule.get("applies_to") or "").strip()
+    if not applies or any(marker in applies.casefold() for marker in _GLOBAL_MARKERS):
+        return []
+    return _unique(part.strip() for part in _SPLIT_RE.split(applies) if part.strip())
+
+
+def _wording(rule) -> str:
+    return " ".join(str(rule.get(field) or "") for field in ("name", "rule_text"))
+
+
+def explain_judge_scope(rule) -> dict:
+    """推断结果加来源：``source`` 是 deterministic / explicit / applies_to / wording / default。
+
+    人工指定的 ``evidence_policy.judge_scope`` 优先；章节名只来自 ``applies_to``
+    或规则文字，指定了范围却一个章节也找不到时按全文处理。
+    """
 
     if rule.get("judge_type") == "deterministic":
-        return {"scope": DOCUMENT, "targets": []}
-    applies = str(rule.get("applies_to") or "").strip()
-    if applies and not any(marker in applies.casefold() for marker in _GLOBAL_MARKERS):
-        targets = _unique(part.strip() for part in _SPLIT_RE.split(applies) if part.strip())
-        if len(targets) == 1:
-            return {"scope": SECTION, "targets": targets}
-        if len(targets) > 1:
-            return {"scope": CROSS_SECTION, "targets": targets}
-    wording = " ".join(str(rule.get(field) or "") for field in ("name", "rule_text"))
+        return {"scope": DOCUMENT, "targets": [], "source": "deterministic"}
+    explicit = (rule.get("evidence_policy") or {}).get("judge_scope")
+    applies = _applies_targets(rule)
+    wording = _wording(rule)
+    if explicit == DOCUMENT:
+        return {"scope": DOCUMENT, "targets": [], "source": "explicit"}
+    if explicit in {SECTION, CROSS_SECTION}:
+        targets = applies or _roles_in(wording)
+        if targets:
+            return {"scope": explicit, "targets": targets, "source": "explicit"}
+        return {"scope": DOCUMENT, "targets": [], "source": "explicit"}
+    if len(applies) == 1:
+        return {"scope": SECTION, "targets": applies, "source": "applies_to"}
+    if len(applies) > 1:
+        return {"scope": CROSS_SECTION, "targets": applies, "source": "applies_to"}
     if any(marker in wording for marker in _CROSS_MARKERS):
         roles = _roles_in(wording)
         if len(roles) > 1:
-            return {"scope": CROSS_SECTION, "targets": roles}
-    return {"scope": DOCUMENT, "targets": []}
+            return {"scope": CROSS_SECTION, "targets": roles, "source": "wording"}
+    return {"scope": DOCUMENT, "targets": [], "source": "default"}
+
+
+def infer_judge_scope(rule) -> dict:
+    """``{"scope": ..., "targets": [...]}``；targets 是章节名或角色名。"""
+
+    explained = explain_judge_scope(rule)
+    return {"scope": explained["scope"], "targets": explained["targets"]}
+
+
+_ABSENCE_WORDS = ("缺失", "缺少", "不存在", "未包含", "没有")
+
+
+def review_hint(rule) -> str | None:
+    """规则审查页的提示：问“某一章有没有”的语义规则，更适合交给结构检查器。"""
+
+    if rule.get("judge_type") != "semantic":
+        return None
+    if explain_judge_scope(rule)["scope"] != DOCUMENT:
+        return None
+    wording = _wording(rule)
+    if any(word in wording for word in _ABSENCE_WORDS) and any(
+        term in wording for _role, headings, terms in _ROLES for term in (*headings, *terms)
+    ):
+        return "这条规则问的是某一章有没有，交给结构检查器（必备章节）更可靠；语义判断只能看到部分段落。"
+    return None
 
 
 def heading_matches(target: str, heading: str) -> bool:
@@ -187,8 +233,10 @@ __all__ = [
     "DOCUMENT",
     "JUDGE_SCOPE_VERSION",
     "SECTION",
+    "explain_judge_scope",
     "heading_matches",
     "infer_judge_scope",
+    "review_hint",
     "scope_view",
     "select_scoped_units",
     "unit_target",
