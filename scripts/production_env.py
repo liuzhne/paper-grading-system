@@ -85,12 +85,20 @@ _DATABASE_PASSWORD = re.compile(r"^[A-Za-z0-9]{24,}$")
 #: 可选开关：GitHub 仓库变量没设时不写进 .env，应用取默认值（关闭）。
 #: ASSISTANT_AGENT_ENABLED：评分助手的 Agent 回合（docs/评分助手Agent化方案.md）。设为 true 时，部署流水线先用
 #: 新镜像跑 assistant_eval_gate：当前提示词指纹上没有达标的评测报告就不部署（§12.5）。
-OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED")
+#: SCORING_JUDGE_SCOPE_ENABLED：按判定范围取证据（docs/论文评分第二阶段改造方案.md），QWK 评测后再打开。
+OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED", "SCORING_JUDGE_SCOPE_ENABLED")
+#: 取值不是 true / false 的可选设置：没设时不写进 .env，应用取默认值。第一个取值是默认值。
+#: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”。
+OPTIONAL_CHOICES = {
+    "SCORING_TOKEN_BUDGET_TARGET": ("provider_view", "envelope"),
+    "SCORING_INSUFFICIENT_EVIDENCE_MODE": ("off", "review"),
+}
 # --from-environment 只取这些：部署任务的环境里还有 GITHUB_*、RUNNER_* 等无关变量。
 ENVIRONMENT_NAMES = (
     REQUIRED
     + ("AUTH_USERNAME", "SUPABASE_STORAGE_BUCKET")
     + OPTIONAL_SWITCHES
+    + tuple(OPTIONAL_CHOICES)
     + DATABASE_PASSWORDS
     + ("MIGRATION_DATABASE_URL", "RUNTIME_DATABASE_URL")
 )
@@ -191,6 +199,10 @@ def _switch_problems(selected: dict) -> list[str]:
         value = selected.get(name)
         if value is not None and value not in ("true", "false"):
             found.append(f"{name} 只能是 true 或 false")
+    for name, choices in OPTIONAL_CHOICES.items():
+        value = selected.get(name)
+        if value is not None and value not in choices:
+            found.append(f"{name} 只能是 {' / '.join(choices)}")
     return found
 
 

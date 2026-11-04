@@ -49,6 +49,12 @@ def _decimal_text(value: Decimal | str | int) -> str:
     return format(decimal.normalize(), "f")
 
 
+# 模型回 insufficient_evidence 时，判定记为 not_triggered 并带这条 review 级问题，
+# 所属评分项转人工（docs/论文评分第二阶段改造方案.md 第 6 节）。
+EVIDENCE_INSUFFICIENT_CODE = "RULE_EVIDENCE_INSUFFICIENT"
+_EVIDENCE_INSUFFICIENT_MARK = "_evidence_insufficient"
+
+
 def _issue(code, severity, criterion_code, rule_code, message):
     return {
         "code": code,
@@ -677,9 +683,14 @@ def _semantic_decision_from_response(*, request, rule, response, occurrence_payl
     if response.get("rule_code") != rule["rule_code"]:
         return decision, "UNKNOWN_RULE", "semantic response named an unauthorized rule"
     status = response.get("status")
-    if status not in {"triggered", "not_triggered", "not_applicable"}:
+    if status not in {"triggered", "not_triggered", "not_applicable", "insufficient_evidence"}:
         return decision, "RULE_DECISION_INVALID", "semantic decision status is invalid"
     if status != "triggered":
+        if status == "insufficient_evidence":
+            if response.get("occurrences") or response.get("level_code") is not None:
+                return decision, "RULE_DECISION_INVALID", "insufficient evidence must not contain a decision"
+            status = "not_triggered"
+            decision[_EVIDENCE_INSUFFICIENT_MARK] = True
         decision["status"] = status
         decision["calculated_effect"] = (
             None if rule["direction"] == "none" else "0"
@@ -965,7 +976,14 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
             continue
 
         mode = criterion["assessment_mode"]
-        review_triggered = any(
+        rule_codes = {rule["rule_code"] for rule in rules}
+        insufficient_rules = {
+            issue["rule_code"]
+            for issue in issues
+            if issue["code"] == EVIDENCE_INSUFFICIENT_CODE
+            and issue["rule_code"] in rule_codes
+        }
+        review_triggered = bool(insufficient_rules) or any(
             rule["effect_type"] == "review"
             and decision_by_code[rule["rule_code"]]["status"] == "triggered"
             for rule in rules
@@ -989,6 +1007,18 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
                 raise ValueError("band criterion requires exactly one band rule")
             rule = band_rules[0]
             decision = decision_by_code[rule["rule_code"]]
+            if rule["rule_code"] in insufficient_rules:
+                # No level can be chosen without evidence: a person picks it.
+                outcomes.append(
+                    {
+                        "criterion_code": criterion_code,
+                        "status": "review_required",
+                        "auto_score": None,
+                        "final_score": None,
+                        "max_score": criterion["max_score"],
+                    }
+                )
+                continue
             if decision["status"] != "triggered" or decision["selected_level_code"] is None:
                 outcomes.append(
                     {
@@ -1235,6 +1265,7 @@ def execute_rule_plan(
                 error,
                 type(exc).__name__,
             )
+        insufficient = bool(decision.pop(_EVIDENCE_INSUFFICIENT_MARK, False))
         if error:
             decision["status"] = "invalid"
             decision["evidence_refs"] = []
@@ -1242,6 +1273,16 @@ def execute_rule_plan(
             decision["calculated_effect"] = None
             issues.append(_issue(error, "block", criterion_code, code, message))
             blocking_rules.add(code)
+        elif insufficient:
+            issues.append(
+                _issue(
+                    EVIDENCE_INSUFFICIENT_CODE,
+                    "review",
+                    criterion_code,
+                    code,
+                    "evidence does not cover what the rule checks",
+                )
+            )
         elif decision["status"] == "triggered":
             if rule["effect_type"] == "review":
                 issues.append(

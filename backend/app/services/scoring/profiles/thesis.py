@@ -15,6 +15,7 @@ from types import MappingProxyType
 
 from backend.app.services.llm.base import LLMScoringError
 from backend.app.services.llm.core_adapter import CORE_PROVIDER_PROMPT_VERSION
+from backend.app.services.llm.core_view import provider_prompt_suffix
 from backend.app.services.llm.core_adapter import core_runtime_provider_contract
 from backend.app.services.checkers import run_deterministic_checker
 from backend.app.services.scoring.adapters.legacy_paper import LegacyPaperAdapter
@@ -768,6 +769,9 @@ class ThesisProfile:
                 safety_margin_tokens=settings.SCORING_CONTEXT_SAFETY_MARGIN_TOKENS,
                 top_k=top_k,
                 selection_rules=shared_rules,
+                request_rules=selection_rules,
+                budget_target=settings.SCORING_TOKEN_BUDGET_TARGET,
+                judge_scope=settings.SCORING_JUDGE_SCOPE_ENABLED,
             )
             selected = envelope.to_mapping()["evidence_selection_identity"]
             retrieval.update(
@@ -931,7 +935,7 @@ class ThesisProfile:
         }
         if provider_name != "mock":
             artifact_projection["provider_prompt_version"] = (
-                CORE_PROVIDER_PROMPT_VERSION
+                CORE_PROVIDER_PROMPT_VERSION + provider_prompt_suffix()
             )
             artifact_projection["service_tier"] = getattr(
                 scorer, "service_tier", None
