@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-04 | 评分证据与理由：#77 复审修正 | 无新命令、无迁移；变量文件里 `NAME=` 的可选设置等于没设；排错条目补快照的两种存储位置与 `cite` 的限度；评分页定位会先切回正文页签 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新环境变量 `SCORING_DECISION_BASIS_MODE`（off / cite，默认 off，经仓库变量进生产）；无迁移；评分页 Core 评分项改为逐条规则判定与证据充分度；排错：证据显示“上下文”、冻结正文读不到、证据充分度为“中” |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 无新命令、无新环境变量、无迁移；规则编辑器加“判定范围”；排错：开关打开后快照变 `@4`、band 评分项不会转人工、复核原因为空 |
 | 2026-11-03 | 论文评分第二阶段（分期 A–D） | 新增环境变量 `SCORING_TOKEN_BUDGET_TARGET`（默认 `provider_view`）、`SCORING_JUDGE_SCOPE_ENABLED`（默认关）、`SCORING_INSUFFICIENT_EVIDENCE_MODE`（默认 `off`），三者都接进生产部署；只读脚本 `rule_health_report`；无迁移；排错：`TOKEN_BUDGET_UNSATISFIABLE` 与评分项意外转人工 |
