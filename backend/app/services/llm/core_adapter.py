@@ -288,11 +288,13 @@ def _normalize_basis(raw, units) -> dict | None:
     rejected = 0
     items = raw.get("evidence")
     for item in items if isinstance(items, list) else ():
+        # 先判类型：列表等不可哈希的值查字典会抛 TypeError，应当只算一条丢弃的引文。
         unit = (
-            units.get(item.get("evidence_unit_id"))
+            units.get(item["evidence_unit_id"])
             if isinstance(item, Mapping)
             and set(item) == {"type", "evidence_unit_id", "quote"}
             and item.get("type") == "source_quote"
+            and isinstance(item["evidence_unit_id"], str)
             else None
         )
         quote = item.get("quote") if unit is not None else None

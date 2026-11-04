@@ -259,7 +259,10 @@ def _normalize_evidence_selection(value, path):
 
 def _normalize_decision_basis(value, path):
     fields = {"evidence_refs", "rationale", "rejected_quote_count"}
-    _assert_closed_mapping(value, fields=fields, path=path)
+    # ``group_code``: the basis came from one mutex-group call and is shared.
+    _assert_closed_mapping(
+        value, fields=fields | {"group_code"}, required=fields, path=path
+    )
     refs = _assert_mapping_array(
         value["evidence_refs"], path + ".evidence_refs", _normalize_evidence_ref
     )
@@ -270,6 +273,11 @@ def _normalize_decision_basis(value, path):
         "rationale": _assert_optional_text(value["rationale"], path + ".rationale"),
         "rejected_quote_count": _assert_nonnegative_integer(
             value["rejected_quote_count"], path + ".rejected_quote_count"
+        ),
+        **(
+            {"group_code": _assert_text(value["group_code"], path + ".group_code")}
+            if value.get("group_code") is not None
+            else {}
         ),
     }
 

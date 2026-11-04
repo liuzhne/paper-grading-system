@@ -250,7 +250,8 @@ def _decision_basis(*, request, response):
     refs = []
     rejected = int(basis.get("rejected_quote_count") or 0)
     for raw in basis.get("evidence") or ():
-        unit = units.get(raw.get("evidence_unit_id")) if isinstance(raw, Mapping) else None
+        unit_id = raw.get("evidence_unit_id") if isinstance(raw, Mapping) else None
+        unit = units.get(unit_id) if isinstance(unit_id, str) else None
         quote = raw.get("quote") if isinstance(raw, Mapping) else None
         if (
             unit is None
@@ -645,6 +646,10 @@ def _semantic_group_decisions(**kwargs):
     if results is not None:
         for rule_code, (decision, _error, _message) in results.items():
             _attach_selection(decision, reports.get(rule_code))
+            # One basis explains the whole group decision; mark it so the
+            # display shows it once as the group's, not as each tier's own.
+            if isinstance(decision.get("basis"), dict):
+                decision["basis"]["group_code"] = kwargs["group_code"]
     return results
 
 

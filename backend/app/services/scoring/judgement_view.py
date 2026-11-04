@@ -106,7 +106,38 @@ def _row(result, rule, *, insufficient, frozen, units):
         "has_basis": basis is not None,
         "rejected_quote_count": int((basis or {}).get("rejected_quote_count") or 0),
         "evidence_selection": result.get("evidence_selection"),
+        # 互斥组一次调用只有一个依据（见 _share_group_basis）。
+        "basis_scope": None,
+        "basis_shared_with": None,
+        "_group_code": (basis or {}).get("group_code"),
     }
+
+
+_UNCHOSEN = {"not_triggered", "not_applicable", "skipped", "insufficient"}
+
+
+def _share_group_basis(rows):
+    """互斥组的依据只显示一次：挂在被选中的那一档（都没选中时挂在第一档）。
+
+    组内其它档照常显示自己的判定，但不再把组的理由当成自己的理由——否则
+    “未发现问题”的那一档下面会出现“缺陷在哪里”的说明。
+    """
+
+    groups = {}
+    for row in rows:
+        code = row.pop("_group_code")
+        if code:
+            groups.setdefault(code, []).append(row)
+    for members in groups.values():
+        owner = next((row for row in members if row["outcome"] not in _UNCHOSEN), members[0])
+        for row in members:
+            if row is owner:
+                row["basis_scope"] = "group"
+                continue
+            row["rationale"] = None
+            row["basis_evidence"] = []
+            row["rejected_quote_count"] = 0
+            row["basis_shared_with"] = owner["rule_name"]
 
 
 def _sufficiency(rows):
@@ -135,6 +166,7 @@ def _sufficiency(rows):
             )
         if (
             row["has_basis"]
+            and not row["basis_shared_with"]
             and row["outcome"] in {"not_triggered", "not_applicable"}
             and not row["basis_evidence"]
             and not row["evidence"]
@@ -174,6 +206,7 @@ def build_judgement_view(run, item, *, frozen, snapshots=None):
         )
         for result in results
     ]
+    _share_group_basis(rows)
     return {
         "schema_version": SCHEMA_VERSION,
         "rules": rows,

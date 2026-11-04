@@ -520,7 +520,7 @@ def _map_evidence_refs(response, alias_to_unit):
         for item in occurrence.get("evidence") or ():
             if isinstance(item, dict) and "evidence_ref" in item:
                 ref = item.pop("evidence_ref")
-                unit_id = alias_to_unit.get(ref)
+                unit_id = alias_to_unit.get(ref) if isinstance(ref, str) else None
                 if unit_id is None:
                     raise ValueError("Core provider response cited an unknown evidence ref")
                 item["evidence_unit_id"] = unit_id
@@ -528,9 +528,10 @@ def _map_evidence_refs(response, alias_to_unit):
     if isinstance(basis, dict) and isinstance(basis.get("evidence"), list):
         for item in basis["evidence"]:
             if isinstance(item, dict) and "evidence_ref" in item:
-                # An unknown ref only loses this basis quote (counted as
-                # rejected); the decision itself is unaffected.
-                item["evidence_unit_id"] = alias_to_unit.get(item.pop("evidence_ref"))
+                # An unknown (or non-string) ref only loses this basis quote
+                # (counted as rejected); the decision itself is unaffected.
+                ref = item.pop("evidence_ref")
+                item["evidence_unit_id"] = alias_to_unit.get(ref) if isinstance(ref, str) else None
     return mapped
 
 

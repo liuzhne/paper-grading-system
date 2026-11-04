@@ -336,12 +336,24 @@ _STATUS_LABELS = {
 }
 
 
-def core_item_reason(rule_results) -> str:
-    """评分项的一句话说明：按几条规则判定、各是什么结果（代码写，不是模型写）。"""
+def core_item_reason(rule_results, review_issues=None) -> str:
+    """评分项的一句话说明：按几条规则判定、各是什么结果（代码写，不是模型写）。
 
+    “证据不足”在判定里记为 not_triggered 并另加一条复核问题，这里按复核问题
+    单独计数，不能算进“未发现问题”。
+    """
+
+    insufficient = {
+        issue.get("rule_code")
+        for issue in review_issues or ()
+        if issue.get("code") == "RULE_EVIDENCE_INSUFFICIENT"
+    }
     counts = {}
     for result in rule_results or ():
-        label = _STATUS_LABELS.get(result.get("status"), result.get("status"))
+        if result.get("status") == "not_triggered" and result.get("rule_code") in insufficient:
+            label = "证据不足"
+        else:
+            label = _STATUS_LABELS.get(result.get("status"), result.get("status"))
         counts[label] = counts.get(label, 0) + 1
     if not counts:
         return "没有可执行的规则。"
@@ -432,7 +444,9 @@ def _score_items(
                     else Decimal(criterion["final_score"])
                 ),
                 evidence_sufficient=status == "calculated",
-                reason=core_item_reason(rule_results.get(code, [])),
+                reason=core_item_reason(
+                    rule_results.get(code, []), issues_by_criterion.get(code)
+                ),
                 deductions=deductions,
                 deduction_items=[
                     {

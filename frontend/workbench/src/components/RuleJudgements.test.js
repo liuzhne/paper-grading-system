@@ -26,3 +26,15 @@ it("引文按钮点击后发出定位；依据引文标“依据”；定位不�
   expect(missing.attributes("title")).toBe("冻结正文读不到");
   expect(missing.text()).toBe("冻结正文中找不到");
 });
+
+it("互斥组的依据只在被选中的那一档显示（标“同组判定”），其余档注明依据见同组", () => {
+  const view = { rules: [
+    { rule_code: "A", rule_name: "轻微", outcome: "not_triggered", label: "未发现问题", effect: null,
+      rationale: null, evidence: [], basis_evidence: [], basis_scope: null, basis_shared_with: "严重" },
+    { rule_code: "B", rule_name: "严重", outcome: "deducted", label: "扣分", effect: "扣 5 分",
+      rationale: "第 3 章没有给出样本来源。", evidence: [], basis_evidence: [], basis_scope: "group", basis_shared_with: null },
+  ] };
+  const wrapper = mount(RuleJudgements, { props: { view } });
+  expect(wrapper.get('[data-test="rule-rationale"]').text()).toBe("同组判定：第 3 章没有给出样本来源。");
+  expect(wrapper.get('[data-test="rule-basis-shared"]').text()).toBe("依据见同组「严重」");
+});

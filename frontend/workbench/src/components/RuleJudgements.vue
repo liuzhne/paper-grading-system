@@ -12,7 +12,8 @@
  *   unlocatable_reason?: string | null, anchor_id?: string | null }} EvidenceView
  * @typedef {{ rule_code: string, rule_name: string, outcome: string, label: string,
  *   effect?: string | null, rationale?: string | null, evidence: EvidenceView[],
- *   basis_evidence: EvidenceView[] }} RuleRow
+ *   basis_evidence: EvidenceView[], basis_scope?: string | null,
+ *   basis_shared_with?: string | null }} RuleRow
  */
 
 defineProps({
@@ -67,7 +68,12 @@ function evidenceOf(row) {
         <span class="rule-name">{{ row.rule_name }}</span>
         <span v-if="row.effect" class="mono rule-effect">{{ row.effect }}</span>
       </div>
-      <p v-if="row.rationale" class="rule-rationale" data-test="rule-rationale">{{ row.rationale }}</p>
+      <p v-if="row.rationale" class="rule-rationale" data-test="rule-rationale">
+        <span v-if="row.basis_scope === 'group'" class="faint">同组判定：</span>{{ row.rationale }}
+      </p>
+      <p v-else-if="row.basis_shared_with" class="rule-rationale faint" data-test="rule-basis-shared">
+        依据见同组「{{ row.basis_shared_with }}」
+      </p>
       <div v-if="evidenceOf(row).length" class="rule-evidence">
         <button
           v-for="(entry, index) in evidenceOf(row)"

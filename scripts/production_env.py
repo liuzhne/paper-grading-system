@@ -233,10 +233,19 @@ def from_environment(environ) -> dict:
     return {name: environ[name] for name in ENVIRONMENT_NAMES if environ.get(name)}
 
 
+OPTIONAL_NAMES = OPTIONAL_SWITCHES + tuple(OPTIONAL_CHOICES)
+
+
 def from_file(path: Path) -> dict:
     from dotenv import dotenv_values
 
-    return {name: value for name, value in dotenv_values(path).items() if value is not None}
+    # 与 from_environment 一致：可选设置写成 `NAME=` 等于没设，应用取默认值，
+    # 不能因为空字符串不在可选值里就挡住生成。
+    return {
+        name: value
+        for name, value in dotenv_values(path).items()
+        if value is not None and not (value == "" and name in OPTIONAL_NAMES)
+    }
 
 
 def _quote(value: str) -> str:

@@ -455,3 +455,119 @@ def test_unreadable_frozen_document_is_reported_not_replaced_by_the_reparse():
 
     legacy = SimpleNamespace(id="run-3", submission_id=None, document_snapshot_ref=None)
     assert resolve_frozen_document(legacy).kind == "legacy"
+
+
+# ── 复审补充（PR #77）────────────────────────────────────────────────
+
+
+def test_unhashable_basis_refs_are_counted_not_raised(monkeypatch):
+    monkeypatch.setattr(settings, "SCORING_DECISION_BASIS_MODE", "cite")
+    envelope = _v4()
+    request = core_view.build_core_request(envelope)
+    rule_code = envelope.to_mapping()["atomic_rule_snapshot"]["rule_code"]
+    response = {
+        "schema_version": "semantic-rule-response@2",
+        "rule_code": rule_code,
+        "status": "not_triggered",
+        "level_code": None,
+        "occurrences": [],
+        "basis": {
+            "evidence": [{"type": "source_quote", "evidence_ref": ["E1"], "quote": "x"}],
+            "rationale": "理由",
+        },
+    }
+    decoded = core_view.decode_core_response(envelope, response, request)
+    assert decoded["basis"]["evidence"] == [] and decoded["basis"]["rejected_quote_count"] == 1
+
+    # 直接给归一化函数一个不可哈希的单元编号，也只算一条丢弃的引文。
+    response["basis"]["evidence"] = [{"type": "source_quote", "evidence_unit_id": ["u"], "quote": "x"}]
+    normalized = normalize_core_provider_response(envelope, response, allow_basis=True)
+    assert normalized["basis"]["rejected_quote_count"] == 1
+
+    # 执行器再核对时同样不抛。
+    rule = _deduct_rule()
+    req = _request_for((_criterion(), rule))
+    outcome = _outcome(req, {rule["rule_code"]: _semantic_response(
+        rule["rule_code"], status="not_triggered",
+        basis={"evidence": [{"type": "source_quote", "evidence_unit_id": {"a": 1}, "quote": "x"}],
+               "rationale": "r", "rejected_quote_count": 0},
+    )})
+    assert _decision(outcome, rule["rule_code"])["basis"]["rejected_quote_count"] == 1
+
+
+def test_unhashable_occurrence_ref_fails_closed_as_a_value_error():
+    envelope = _v4()
+    request = core_view.build_core_request(envelope)
+    rule_code = envelope.to_mapping()["atomic_rule_snapshot"]["rule_code"]
+    with pytest.raises(ValueError, match="unknown evidence ref"):
+        core_view.decode_core_response(envelope, {
+            "schema_version": "semantic-rule-response@2",
+            "rule_code": rule_code,
+            "status": "triggered",
+            "level_code": None,
+            "occurrences": [{"finding_code": "GAP", "evidence": [
+                {"type": "source_quote", "evidence_ref": ["E1"], "quote": "x"}]}],
+        }, request)
+
+
+def test_group_basis_is_shown_once_on_the_chosen_tier():
+    from backend.app.services.scoring.judgement_view import _share_group_basis
+
+    def row(code, outcome, rationale):
+        return {
+            "rule_code": code, "rule_name": "档位" + code, "judge_type": "semantic", "outcome": outcome,
+            "label": "", "effect": None, "rationale": rationale, "evidence": [],
+            "basis_evidence": [{"quote": "q"}], "has_basis": True, "rejected_quote_count": 1,
+            "evidence_selection": None, "basis_scope": None, "basis_shared_with": None,
+            "_group_code": "G1",
+        }
+
+    rows = [row("A", "not_triggered", "缺陷在第 3 章"), row("B", "deducted", "缺陷在第 3 章")]
+    _share_group_basis(rows)
+    unchosen, chosen = rows
+    assert chosen["basis_scope"] == "group" and chosen["rationale"] == "缺陷在第 3 章"
+    # 没选中的那一档不再把组的理由当成自己的：它显示“未发现问题”，下面不能写“缺陷在哪里”。
+    assert unchosen["rationale"] is None and unchosen["basis_evidence"] == []
+    assert unchosen["basis_shared_with"] == "档位B"
+    assert unchosen["rejected_quote_count"] == 0
+
+
+def test_group_decision_basis_is_marked_with_its_group():
+    from backend.app.services.scoring.core.results import _normalize_decision_basis
+
+    value = {"evidence_refs": [], "rationale": "r", "rejected_quote_count": 0, "group_code": "G1"}
+    assert _normalize_decision_basis(value, "basis")["group_code"] == "G1"
+    assert "group_code" not in _normalize_decision_basis({**value, "group_code": None}, "basis")
+
+
+def test_item_summary_counts_insufficient_evidence_separately():
+    from backend.app.services.scoring.adapters.persistence import core_item_reason
+
+    results = [
+        {"rule_code": "R1", "status": "not_triggered"},
+        {"rule_code": "R2", "status": "not_triggered"},
+        {"rule_code": "R3", "status": "triggered"},
+    ]
+    issues = [{"code": "RULE_EVIDENCE_INSUFFICIENT", "rule_code": "R2"}]
+    assert core_item_reason(results, issues) == "按 3 条规则判定：未发现问题 1 条、证据不足 1 条、命中 1 条。"
+    assert core_item_reason(results) == "按 3 条规则判定：未发现问题 2 条、命中 1 条。"
+
+
+def test_one_group_call_marks_every_tier_basis_with_its_group():
+    from backend.app.tests.test_token_compression_pipeline import _GroupRuntime
+    from backend.app.tests.test_token_compression_pipeline import _execute
+    from backend.app.tests.test_token_compression_pipeline import _request as group_request
+    from backend.app.tests.test_token_compression_pipeline import _tiers
+
+    class _BasisGroupRuntime(_GroupRuntime):
+        def score_group(self, *, envelopes, group_code):
+            responses = super().score_group(envelopes=envelopes, group_code=group_code)
+            for response in responses.values():
+                response["basis"] = {"evidence": [], "rationale": "第二档最符合。", "rejected_quote_count": 0}
+            return responses
+
+    request = group_request(*_tiers())
+    result = _execute(request, _BasisGroupRuntime(request))
+    bases = {code: _decision(result, code)["basis"] for code in ("T.1", "T.2", "T.3")}
+    assert {basis["rationale"] for basis in bases.values()} == {"第二档最符合。"}
+    assert len({basis["group_code"] for basis in bases.values()}) == 1

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import RuleJudgements from "@/components/RuleJudgements.vue";
@@ -76,6 +76,11 @@ async function onLocate(view) {
   if (!locatable(view)) return;
   store.locate({ anchor_id: view.anchor_id, quote: view.quote });
   if (view.anchor_id) await store.loadAnchorPage(view.anchor_id);
+  // 停在“篇章结构 / 格式发现”时正文块没有渲染：先切回正文，等它渲染完再滚动。
+  if (docTab.value !== "text") {
+    docTab.value = "text";
+    await nextTick();
+  }
   const el = document.querySelector(`[data-anchor="${view.anchor_id}"]`);
   el?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
@@ -394,8 +399,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
                 {{ item.judgement_view.evidence_sufficiency.label }}
               </span>
             </div>
-            <ul v-if="item.judgement_view.evidence_sufficiency.reasons.length" class="faint sufficiency-reasons">
-              <li v-for="(line, index) in item.judgement_view.evidence_sufficiency.reasons" :key="index">{{ line }}</li>
+            <!-- 原因与说明（如“旧评分未记录选证”）都直接列出：只放在悬停提示里，键盘和触屏看不到。 -->
+            <ul
+              v-if="item.judgement_view.evidence_sufficiency.reasons.length || item.judgement_view.evidence_sufficiency.notes?.length"
+              class="faint sufficiency-reasons"
+              data-test="sufficiency-reasons"
+            >
+              <li v-for="(line, index) in item.judgement_view.evidence_sufficiency.reasons" :key="'r' + index">{{ line }}</li>
+              <li v-for="(line, index) in item.judgement_view.evidence_sufficiency.notes || []" :key="'n' + index">{{ line }}</li>
             </ul>
           </template>
           <div v-else class="conf">

@@ -261,3 +261,26 @@ it("旧评分路径的评分项照旧显示模型置信度和扣分理由", asyn
   expect(item.get('[data-test="item-deductions"]').text()).toContain("未说明研究方法");
   wrapper.unmount();
 });
+
+it("证据充分度的说明（如旧评分没有选证记录）直接列出，不只放在悬停提示里", async () => {
+  const view = { ...JUDGEMENT, evidence_sufficiency: { level: "high", label: "高", reasons: [], notes: ["规则「研究方法描述不清」是旧评分，没有记录选了多少证据。"] } };
+  withRun([{ ...ITEMS[1], id: "i7", confidence: null, judgement_view: view }]);
+  const wrapper = await mountGrade();
+  await flushPromises();
+  expect(wrapper.get('[data-test="sufficiency-reasons"]').text()).toContain("旧评分，没有记录选了多少证据");
+  wrapper.unmount();
+});
+
+it("停在“篇章结构”页签时点引文，先切回正文再定位", async () => {
+  withRun([{ ...ITEMS[1], id: "i8", confidence: null, judgement_view: JUDGEMENT }]);
+  const wrapper = await mountGrade();
+  await flushPromises();
+  const tabs = wrapper.findAll('[role="tab"]');
+  await tabs[1].trigger("click");
+  expect(tabs[1].attributes("aria-selected")).toBe("true");
+
+  await wrapper.get('[data-test="rule-quote"]').trigger("click");
+  await flushPromises();
+  expect(wrapper.findAll('[role="tab"]')[0].attributes("aria-selected")).toBe("true");
+  wrapper.unmount();
+});
