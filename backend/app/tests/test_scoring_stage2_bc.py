@@ -201,9 +201,11 @@ def test_rule_edit_validates_and_clears_judge_scope(client):
     rule = _workspace(client, rubric["id"])["rules"][0]
     policy = dict(rule["evidence_policy"] or {})
 
-    bad = client.patch(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}",
-                       json={"changes": {"evidence_policy": {**policy, "judge_scope": "chapter"}}, "reason": "合成修改"})
-    assert bad.status_code == 400 and "judge_scope" in bad.json()["detail"]
+    # 不可哈希的值（列表、对象）也要回 400，不能在成员判断时抛 TypeError 变成 500。
+    for value in ("chapter", ["section"], {"scope": "section"}):
+        bad = client.patch(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}",
+                           json={"changes": {"evidence_policy": {**policy, "judge_scope": value}}, "reason": "合成修改"})
+        assert bad.status_code == 400 and "judge_scope" in bad.json()["detail"], (value, bad.text)
 
     ok = client.patch(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}",
                       json={"changes": {"evidence_policy": {**policy, "judge_scope": "section"}}, "reason": "合成修改"})

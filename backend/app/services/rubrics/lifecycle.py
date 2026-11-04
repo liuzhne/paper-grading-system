@@ -426,7 +426,7 @@ def _normalize_rule_changes(rule_code: str, changes: dict) -> dict:
                 scope = normalized[key]["judge_scope"]
                 if scope is None:
                     normalized[key].pop("judge_scope")
-                elif scope not in {"section", "cross_section", "document"}:
+                elif not isinstance(scope, str) or scope not in {"section", "cross_section", "document"}:
                     raise RubricLifecycleError(
                         "evidence_policy.judge_scope 只能是 section、cross_section 或 document"
                     )
