@@ -85,6 +85,21 @@ _REVIEW_STATUS_SENTENCE = (
 _BASE_STATUSES = ("triggered", "not_triggered", "not_applicable")
 INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
+# 评分证据与理由改造（docs/评分证据与理由改造方案.md G5）：开关关闭时上面的提示词不变。
+_NO_EXPLANATION_SENTENCE = "不得输出分值、扣分、解释文字、Markdown 或未声明字段。"
+_BASIS_SENTENCE_HEAD = (
+    "每个回复还必须包含 basis：basis.evidence 列出 0 到 2 条最能支持本判定的证据，格式与 occurrences 中的 "
+    "evidence 相同（只能取 evidence 中的 ref，quote 逐字摘录）；basis.rationale 用一句话说明判定理由，不超过 80 字，"
+    "使用论文正文的语言：triggered 时说明缺陷在哪里，not_triggered 时说明为什么不构成该缺陷，"
+    "not_applicable 时说明适用前提为何不成立"
+)
+_BASIS_INSUFFICIENT_CLAUSE = "，insufficient_evidence 时说明证据缺少哪部分内容"
+_BASIS_SENTENCE_TAIL = (
+    "。找不到能直接说明判定的段落时 basis.evidence 为空数组，但 basis.rationale 不能为空。"
+    "除 basis.rationale 外不得输出分值、扣分、解释文字、Markdown 或未声明字段。"
+)
+BASIS_MODES = ("off", "cite")
+
 
 def _judge_scope_enabled() -> bool:
     from backend.app.core.config import settings
@@ -98,12 +113,25 @@ def _insufficient_evidence_enabled() -> bool:
     return settings.SCORING_INSUFFICIENT_EVIDENCE_MODE == "review"
 
 
+def basis_enabled() -> bool:
+    from backend.app.core.config import settings
+
+    return settings.SCORING_DECISION_BASIS_MODE == "cite"
+
+
+def _basis_sentence() -> str:
+    clause = _BASIS_INSUFFICIENT_CLAUSE if _insufficient_evidence_enabled() else ""
+    return _BASIS_SENTENCE_HEAD + clause + _BASIS_SENTENCE_TAIL
+
+
 def _common_instructions() -> str:
     text = _COMMON_INSTRUCTIONS
     if _judge_scope_enabled():
         text = text.replace(_EVIDENCE_SENTENCE, _EVIDENCE_SENTENCE + _SCOPE_SENTENCE, 1)
     if _insufficient_evidence_enabled():
         text = text.replace(_NOT_TRIGGERED_SENTENCE, _REVIEW_STATUS_SENTENCE, 1)
+    if basis_enabled():
+        text = text.replace(_NO_EXPLANATION_SENTENCE, _basis_sentence(), 1)
     return text
 
 
@@ -134,6 +162,8 @@ def provider_prompt_suffix() -> str:
         parts.append("+judge-scope@1")
     if _insufficient_evidence_enabled():
         parts.append("+insufficient@1")
+    if basis_enabled():
+        parts.append("+basis@1")
     return "".join(parts)
 
 
@@ -289,6 +319,43 @@ def _evidence_item_schema(aliases) -> dict:
     }
 
 
+def _empty_array_schema() -> dict:
+    # Strict-mode compatible schema for an array that must stay empty.
+    return {
+        "type": "array",
+        "maxItems": 0,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+            "required": [],
+        },
+    }
+
+
+def _basis_schema(aliases) -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["evidence", "rationale"],
+        "properties": {
+            "evidence": (
+                {"type": "array", "maxItems": 2, "items": _evidence_item_schema(aliases)}
+                if aliases
+                else _empty_array_schema()
+            ),
+            "rationale": {"type": "string", "minLength": 1},
+        },
+    }
+
+
+def _with_basis(schema, aliases) -> dict:
+    if basis_enabled():
+        schema["required"].append("basis")
+        schema["properties"]["basis"] = _basis_schema(aliases)
+    return schema
+
+
 def _occurrences_schema(finding_codes, aliases) -> dict:
     if not aliases:
         # Nothing citable is visible: a triggered decision cannot be evidenced.
@@ -342,6 +409,7 @@ def build_core_request(envelope) -> CoreProviderRequest:
             "occurrences": _occurrences_schema(_allowed_finding_codes(rule), alias_to_unit),
         },
     }
+    _with_basis(schema, alias_to_unit)
     return CoreProviderRequest(
         system=_single_instructions(),
         user=_dumps(view),
@@ -386,6 +454,7 @@ def build_core_group_request(envelopes, *, group_code: str) -> CoreProviderReque
             "occurrences": _occurrences_schema(finding_codes, alias_to_unit),
         },
     }
+    _with_basis(schema, alias_to_unit)
     return CoreProviderRequest(
         system=_group_instructions(),
         user=_dumps(view),
@@ -455,11 +524,22 @@ def _map_evidence_refs(response, alias_to_unit):
                 if unit_id is None:
                     raise ValueError("Core provider response cited an unknown evidence ref")
                 item["evidence_unit_id"] = unit_id
+    basis = mapped.get("basis")
+    if isinstance(basis, dict) and isinstance(basis.get("evidence"), list):
+        for item in basis["evidence"]:
+            if isinstance(item, dict) and "evidence_ref" in item:
+                # An unknown ref only loses this basis quote (counted as
+                # rejected); the decision itself is unaffected.
+                item["evidence_unit_id"] = alias_to_unit.get(item.pop("evidence_ref"))
     return mapped
 
 
 def _request_statuses(request: CoreProviderRequest) -> list:
     return list(request.schema["properties"]["status"]["enum"])
+
+
+def _request_allows_basis(request: CoreProviderRequest) -> bool:
+    return "basis" in request.schema["properties"]
 
 
 def decode_core_response(envelope, response, request: CoreProviderRequest) -> dict:
@@ -470,6 +550,7 @@ def decode_core_response(envelope, response, request: CoreProviderRequest) -> di
         envelope,
         _map_evidence_refs(response, request.alias_to_unit),
         allow_insufficient=INSUFFICIENT_EVIDENCE in allowed,
+        allow_basis=_request_allows_basis(request),
     )
 
 
@@ -479,7 +560,11 @@ def decode_core_group_response(envelopes, response, request: CoreProviderRequest
     if not isinstance(response, Mapping):
         raise TypeError("Core group response must be an object")
     required = {"schema_version", "group_code", "status", "selected_rule_code", "occurrences"}
-    if set(response) != required:
+    keys = set(response)
+    allow_basis = _request_allows_basis(request)
+    if allow_basis:
+        keys.discard("basis")
+    if keys != required:
         raise ValueError("Core group response has invalid fields")
     if response["schema_version"] != GROUP_RESPONSE_SCHEMA:
         raise ValueError("Core group response schema_version is unsupported")
@@ -508,17 +593,17 @@ def decode_core_group_response(envelopes, response, request: CoreProviderRequest
                 member_occurrences = deepcopy(occurrences)
             else:
                 member_status = "not_triggered"
-        decoded[rule_code] = decode_core_response(
-            envelope,
-            {
-                "schema_version": "semantic-rule-response@2",
-                "rule_code": rule_code,
-                "status": member_status,
-                "level_code": None,
-                "occurrences": member_occurrences,
-            },
-            request,
-        )
+        member = {
+            "schema_version": "semantic-rule-response@2",
+            "rule_code": rule_code,
+            "status": member_status,
+            "level_code": None,
+            "occurrences": member_occurrences,
+        }
+        if allow_basis and "basis" in response:
+            # The group decision has one basis; every tier shows it.
+            member["basis"] = deepcopy(response["basis"])
+        decoded[rule_code] = decode_core_response(envelope, member, request)
     return decoded
 
 

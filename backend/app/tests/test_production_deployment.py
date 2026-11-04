@@ -581,11 +581,13 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
     monkeypatch.setenv("SCORING_JUDGE_SCOPE_ENABLED", "true")
     monkeypatch.setenv("SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
     monkeypatch.setenv("SCORING_TOKEN_BUDGET_TARGET", "envelope")
+    monkeypatch.setenv("SCORING_DECISION_BASIS_MODE", "cite")
     assert script.main(args) == 0
     text = output.read_text(encoding="utf-8")
     assert "SCORING_JUDGE_SCOPE_ENABLED='true'" in text
     assert "SCORING_INSUFFICIENT_EVIDENCE_MODE='review'" in text
     assert "SCORING_TOKEN_BUDGET_TARGET='envelope'" in text
+    assert "SCORING_DECISION_BASIS_MODE='cite'" in text
 
     output.unlink()
     monkeypatch.setenv("SCORING_INSUFFICIENT_EVIDENCE_MODE", "on")
@@ -595,7 +597,12 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
-    for name in ("SCORING_TOKEN_BUDGET_TARGET", "SCORING_JUDGE_SCOPE_ENABLED", "SCORING_INSUFFICIENT_EVIDENCE_MODE"):
+    for name in (
+        "SCORING_TOKEN_BUDGET_TARGET",
+        "SCORING_JUDGE_SCOPE_ENABLED",
+        "SCORING_INSUFFICIENT_EVIDENCE_MODE",
+        "SCORING_DECISION_BASIS_MODE",
+    ):
         assert "%s: ${{ vars.%s }}" % (name, name) in lightsail
 
 

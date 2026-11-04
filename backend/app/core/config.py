@@ -156,6 +156,9 @@ class Settings(BaseSettings):
     SCORING_JUDGE_SCOPE_ENABLED: bool = False
     # off = 证据不足并入 not_triggered（现状）；review = 模型可回 insufficient_evidence，评分项转人工。
     SCORING_INSUFFICIENT_EVIDENCE_MODE: Literal["off", "review"] = "off"
+    # off = 提示词不变；cite = 每条判定都给依据引文与一句理由（docs/评分证据与理由改造方案.md G5）。
+    # 改提示词、进入判定身份，可能改分；统一评测后再打开。
+    SCORING_DECISION_BASIS_MODE: Literal["off", "cite"] = "off"
     SCORING_RULE_TASKS_ENABLED: bool = True
     # Rule-level decision ledger: reuse a validated semantic decision whose full
     # decision identity is unchanged, so retries only pay for failed rules.

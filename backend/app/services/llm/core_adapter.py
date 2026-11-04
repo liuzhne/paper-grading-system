@@ -274,11 +274,62 @@ def core_response_json_schema(envelope) -> dict:
     }
 
 
-def normalize_core_provider_response(envelope, response, *, allow_insufficient=False) -> dict:
+#: Basis quotes kept per decision (docs/评分证据与理由改造方案.md G5).
+BASIS_MAX_QUOTES = 2
+BASIS_RATIONALE_CHAR_CAP = 200
+
+
+def _normalize_basis(raw, units) -> dict | None:
+    """Display-only basis: keep verified quotes, count (not fail on) the rest."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    evidence = []
+    rejected = 0
+    items = raw.get("evidence")
+    for item in items if isinstance(items, list) else ():
+        unit = (
+            units.get(item.get("evidence_unit_id"))
+            if isinstance(item, Mapping)
+            and set(item) == {"type", "evidence_unit_id", "quote"}
+            and item.get("type") == "source_quote"
+            else None
+        )
+        quote = item.get("quote") if unit is not None else None
+        if (
+            unit is None
+            or not isinstance(quote, str)
+            or not quote.strip()
+            or quote.strip() not in unit["normalized_text"]
+            or len(evidence) >= BASIS_MAX_QUOTES
+        ):
+            rejected += 1
+            continue
+        evidence.append(
+            {
+                "type": "source_quote",
+                "evidence_unit_id": unit["evidence_unit_id"],
+                "quote": quote.strip(),
+            }
+        )
+    rationale = raw.get("rationale")
+    rationale = (
+        " ".join(rationale.split())[:BASIS_RATIONALE_CHAR_CAP] or None
+        if isinstance(rationale, str)
+        else None
+    )
+    return {"evidence": evidence, "rationale": rationale, "rejected_quote_count": rejected}
+
+
+def normalize_core_provider_response(
+    envelope, response, *, allow_insufficient=False, allow_basis=False
+) -> dict:
     """Fail closed and project provider output onto SemanticRuleResponseV2.
 
     ``allow_insufficient`` accepts ``insufficient_evidence`` (only when the
     request offered it); RuleExecutor turns it into a review issue.
+    ``allow_basis`` accepts the display-only ``basis`` (quotes + rationale);
+    bad basis quotes are dropped and counted, never failing the decision.
     """
 
     value = _core_envelope(envelope).to_mapping()
@@ -291,10 +342,18 @@ def normalize_core_provider_response(envelope, response, *, allow_insufficient=F
         "level_code",
         "occurrences",
     }
-    if set(response) != required:
+    keys = set(response)
+    if allow_basis:
+        keys.discard("basis")
+    if keys != required:
         raise ValueError("Core provider response has invalid fields")
     if response["schema_version"] != "semantic-rule-response@2":
         raise ValueError("Core provider response schema_version is unsupported")
+    units = {
+        item["evidence_unit_id"]: item for item in value["evidence_units"]
+    }
+    basis = _normalize_basis(response.get("basis"), units) if allow_basis else None
+    extras = {} if basis is None else {"basis": basis}
 
     rule = value["atomic_rule_snapshot"]
     if response["rule_code"] != rule["rule_code"]:
@@ -319,6 +378,7 @@ def normalize_core_provider_response(envelope, response, *, allow_insufficient=F
             "status": status,
             "level_code": None,
             "occurrences": [],
+            **extras,
         }
     if not raw_occurrences:
         raise ValueError("triggered Core response must contain evidence")
@@ -332,9 +392,6 @@ def normalize_core_provider_response(envelope, response, *, allow_insufficient=F
     elif level_code is not None:
         raise ValueError("non-band Core response must not select a level")
 
-    units = {
-        item["evidence_unit_id"]: item for item in value["evidence_units"]
-    }
     allowed_codes = set(_allowed_finding_codes(rule))
     occurrences = []
     for occurrence in raw_occurrences:
@@ -393,6 +450,7 @@ def normalize_core_provider_response(envelope, response, *, allow_insufficient=F
         "status": status,
         "level_code": level_code,
         "occurrences": occurrences,
+        **extras,
     }
 
 

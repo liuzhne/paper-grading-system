@@ -205,3 +205,59 @@ it("每个评分项下显示扣分理由与修改建议：助手按这些说“�
   expect(withoutAdvice.find('[data-test="item-suggestion"]').exists()).toBe(false);
   wrapper.unmount();
 });
+
+// ---------- Core 评分项：逐条规则判定与证据充分度（docs/评分证据与理由改造方案.md）----------
+
+const JUDGEMENT = {
+  schema_version: "judgement-view@1",
+  rules: [
+    { rule_code: "R1", rule_name: "研究方法描述不清", judge_type: "semantic", outcome: "deducted", label: "扣分",
+      effect: "扣 2 分", rationale: "方法部分没有说明抽样过程。",
+      evidence: [{ quote: "本文采用问卷调查", section_title: "第3章 研究方法", location_status: "verified", anchor_id: "u1" }],
+      basis_evidence: [] },
+    { rule_code: "R2", rule_name: "结论未回应研究问题", judge_type: "semantic", outcome: "not_triggered", label: "未发现问题",
+      effect: null, rationale: null,
+      evidence: [], basis_evidence: [{ quote: null, section_title: "第6章 结论", location_status: "unit_context", anchor_id: "u2" }] },
+  ],
+  evidence_sufficiency: { level: "medium", label: "中", reasons: ["规则「研究方法描述不清」的证据受长度上限限制，少放了 3 段。"], notes: [] },
+};
+
+it("Core 评分项显示证据充分度和逐条规则判定，未扣分的规则也有说明，不再显示“未提供”的置信度", async () => {
+  withRun([
+    { ...ITEMS[1], id: "i5", confidence: null, judgement_view: JUDGEMENT,
+      deduction_items: [{ reason: "规则「研究方法描述不清」扣 2 分", points: "2" }], evidence_view: [] },
+  ]);
+  const wrapper = await mountGrade();
+  await flushPromises();
+
+  const item = wrapper.get(".item");
+  expect(item.get('[data-test="evidence-sufficiency"]').text()).toContain("证据充分度");
+  expect(item.get('[data-test="evidence-sufficiency"]').text()).toContain("中");
+  expect(item.text()).toContain("少放了 3 段");
+  expect(item.text()).not.toContain("未提供");
+  expect(item.text()).not.toContain("该项没有记录证据");
+  // 扣分理由由判定清单承担，不再重复一份扣分列表。
+  expect(item.find('[data-test="item-deductions"]').exists()).toBe(false);
+
+  const rules = item.get('[data-test="rule-judgements"]');
+  expect(rules.text()).toContain("研究方法描述不清");
+  expect(rules.text()).toContain("扣 2 分");
+  expect(rules.text()).toContain("方法部分没有说明抽样过程。");
+  expect(rules.text()).toContain("结论未回应研究问题");
+  expect(rules.text()).toContain("未发现问题");
+  expect(rules.get('[data-test="rule-quote"]').text()).toContain("“本文采用问卷调查”");
+  expect(rules.get('[data-test="rule-context"]').text()).toContain("第6章 结论 · 上下文");
+  wrapper.unmount();
+});
+
+it("旧评分路径的评分项照旧显示模型置信度和扣分理由", async () => {
+  withRun([{ ...ITEMS[1], id: "i6", judgement_view: null, deduction_items: [{ reason: "未说明研究方法", points: 2 }] }]);
+  const wrapper = await mountGrade();
+  await flushPromises();
+  const item = wrapper.get(".item");
+  expect(item.text()).toContain("置信度");
+  expect(item.text()).toContain("80%");
+  expect(item.find('[data-test="rule-judgements"]').exists()).toBe(false);
+  expect(item.get('[data-test="item-deductions"]').text()).toContain("未说明研究方法");
+  wrapper.unmount();
+});

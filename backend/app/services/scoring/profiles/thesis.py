@@ -732,7 +732,8 @@ class ThesisProfile:
         }
 
     def build_provider_envelope(
-        self, *, base_envelope, selection_rules=None, criterion_rules=None
+        self, *, base_envelope, selection_rules=None, criterion_rules=None,
+        selection_report=None,
     ):
         from backend.app.core.config import settings
         from backend.app.services.llm_observability import observation
@@ -772,6 +773,7 @@ class ThesisProfile:
                 request_rules=selection_rules,
                 budget_target=settings.SCORING_TOKEN_BUDGET_TARGET,
                 judge_scope=settings.SCORING_JUDGE_SCOPE_ENABLED,
+                selection_report=selection_report,
             )
             selected = envelope.to_mapping()["evidence_selection_identity"]
             retrieval.update(

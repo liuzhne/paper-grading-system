@@ -708,7 +708,7 @@ class TechnicalProposalProfile:
             ),
         }
 
-    def build_provider_envelope(self, *, base_envelope):
+    def build_provider_envelope(self, *, base_envelope, selection_report=None):
         from backend.app.core.config import settings
         from backend.app.services.llm_observability import observation
         from backend.app.services.scoring.retrieval.selection import build_v4_envelope
@@ -737,6 +737,7 @@ class TechnicalProposalProfile:
                 top_k=top_k,
                 budget_target=settings.SCORING_TOKEN_BUDGET_TARGET,
                 judge_scope=settings.SCORING_JUDGE_SCOPE_ENABLED,
+                selection_report=selection_report,
             )
             selected = envelope.to_mapping()["evidence_selection_identity"]
             retrieval.update(

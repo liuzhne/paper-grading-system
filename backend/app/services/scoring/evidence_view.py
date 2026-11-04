@@ -7,10 +7,15 @@
 
     **不能从 ``payload_hash`` 反推模型原句。**
 
-Core 的证据引用只留 ``evidence_unit_id`` + ``payload_hash``，拿不回模型当初
-写下的那句引文。能显示的只有对应证据单元的**上下文**，而且必须标成上下文。
-把上下文冒充成引文，会让复核者以为自己核对的就是模型引用的那句话——这正是
-「每个扣分都要带证据」想要防住的事情。
+2026-11-04 之前的 Core 证据引用只留 ``evidence_unit_id`` + ``payload_hash``，
+拿不回模型当初写下的那句引文。能显示的只有对应证据单元的**上下文**，而且必须
+标成上下文。把上下文冒充成引文，会让复核者以为自己核对的就是模型引用的那句
+话——这正是「每个扣分都要带证据」想要防住的事情。之后的引用多存一个核对过的
+``quote``（docs/评分证据与理由改造方案.md G3），在冻结正文里再核对一次才作为
+引文显示。
+
+Core 运行的正文从 ``frozen_document`` 取：v2 提交与论文 Core 评分都算，
+只有两者都没有的才是旧评分路径。
 
 ``location_status`` 取值：
 
@@ -33,6 +38,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from backend.app.db.models import PaperChunk
+from backend.app.services.scoring.frozen_document import resolve_frozen_document
 
 
 #: 视为「引用了原文」的证据类型；其余按检查事实展示。
@@ -128,15 +134,11 @@ def _legacy_view(session, run, entries):
     return views
 
 
-def _core_view(run, entries):
-    snapshot = run.document_snapshot
-    payload = (snapshot.snapshot_payload if snapshot else None) or {}
-    units = {
-        unit.get("evidence_unit_id"): unit
-        for unit in (payload.get("evidence_units") or [])
-        if isinstance(unit, dict)
-    }
-    snapshot_hash = snapshot.snapshot_hash if snapshot else None
+def project_core_refs(frozen, entries, *, units=None):
+    """把 Core 证据引用投影成证据视图；``frozen`` 来自 ``resolve_frozen_document``。"""
+
+    units = frozen.units() if units is None else units
+    snapshot_hash = frozen.snapshot_hash
 
     views = []
     for entry in entries:
@@ -164,15 +166,20 @@ def _core_view(run, entries):
                     snapshot_hash=snapshot_hash,
                     anchor_id=unit_id,
                     evidence_type=evidence_type,
+                    quote=None,
                     location_status="anchor_missing",
                     unlocatable_reason=(
-                        "冻结快照中找不到该证据单元，无法回到判分时的原文。"
+                        frozen.unavailable_reason
+                        or "冻结快照中找不到该证据单元，无法回到判分时的原文。"
                     ),
                 )
             )
             continue
 
         section_path = unit.get("section_path") or []
+        text = unit.get("normalized_text") or ""
+        quote = entry.get("quote")
+        verified = isinstance(quote, str) and bool(quote.strip()) and quote.strip() in text
         views.append(
             _blank(
                 source_kind="core_snapshot",
@@ -180,23 +187,27 @@ def _core_view(run, entries):
                 anchor_id=unit_id,
                 evidence_type=evidence_type,
                 # 只留哈希时拿不回模型原句：给上下文，且不冒充引文。
-                quote=None,
-                context_text=unit.get("normalized_text"),
-                section_title=".".join(str(part) for part in section_path) or None,
-                location_status="unit_context",
+                quote=quote.strip() if verified else None,
+                context_text=text,
+                section_title=" › ".join(str(part) for part in section_path) or None,
+                location_status="verified" if verified else "unit_context",
             )
         )
     return views
 
 
-def build_evidence_view(session, run, item):
-    """把一个评分项的证据投影成可展示、可定位、可解释的形状。"""
+def build_evidence_view(session, run, item, *, frozen=None):
+    """把一个评分项的证据投影成可展示、可定位、可解释的形状。
+
+    ``frozen`` 可由调用方对整次运行只解析一次后传入。
+    """
     entries = [entry for entry in (item.evidence or []) if isinstance(entry, dict)]
     if not entries:
         return []
-    if getattr(run, "submission_id", None) is not None:
-        return _core_view(run, entries)
+    frozen = resolve_frozen_document(run) if frozen is None else frozen
+    if frozen.kind == "core":
+        return project_core_refs(frozen, entries)
     return _legacy_view(session, run, entries)
 
 
-__all__ = ["build_evidence_view", "QUOTE_EVIDENCE_TYPES"]
+__all__ = ["build_evidence_view", "project_core_refs", "QUOTE_EVIDENCE_TYPES"]

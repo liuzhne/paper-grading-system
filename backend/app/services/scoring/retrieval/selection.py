@@ -287,6 +287,7 @@ def build_v4_envelope(
     request_rules=None,
     budget_target: str = "envelope",
     judge_scope: bool = False,
+    selection_report: dict | None = None,
 ):
     """Select whole authoritative units and prove the final request fits.
 
@@ -298,6 +299,10 @@ def build_v4_envelope(
     request (the mutex group, else this rule); ``budget_target="provider_view"``
     measures that request's view instead of the whole identity envelope.
     ``judge_scope`` restricts section / cross-section rules to their sections.
+
+    ``selection_report`` (a dict, optional) receives how many units the
+    document had, how many the ranking asked for and how many fit the budget.
+    It is display-only (evidence sufficiency) and never enters the identity.
     """
 
     base = PromptEnvelopeV3.from_mapping(envelope).to_mapping()
@@ -334,6 +339,7 @@ def build_v4_envelope(
         selected = ranked if coverage_mode == "exhaustive" else ranked[:top_k]
     if not selected:
         raise TokenBudgetError("no authorized evidence is available")
+    requested_count = len(selected)
     rules = list(request_rules or [base["atomic_rule_snapshot"]])
     mapping_options = {
         "query": query,
@@ -391,6 +397,14 @@ def build_v4_envelope(
             )
         total = estimated + reserved_output_tokens + safety_margin_tokens
         if total <= context_window_tokens:
+            if selection_report is not None:
+                selection_report.update(
+                    {
+                        "candidate_count": len(base["evidence_units"]),
+                        "requested_count": requested_count,
+                        "selected_count": len(selected),
+                    }
+                )
             return PromptEnvelopeV4.from_mapping(candidate)
         if coverage_mode == "exhaustive":
             break

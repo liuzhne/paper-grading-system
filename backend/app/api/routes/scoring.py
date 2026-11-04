@@ -21,6 +21,9 @@ from backend.app.db.models import ScoringRun
 from backend.app.db.session import get_db
 from backend.app.services.scoring import document_view
 from backend.app.services.scoring.evidence_view import build_evidence_view
+from backend.app.services.scoring.frozen_document import resolve_frozen_document
+from backend.app.services.scoring.judgement_view import build_judgement_view
+from backend.app.services.scoring.judgement_view import rule_snapshots
 from backend.app.schemas.scoring import ReviewLogRead
 from backend.app.schemas.scoring import ReviewSubmit
 from backend.app.schemas.scoring import ScoreItemRead
@@ -176,7 +179,8 @@ def list_score_items(
 ):
     """评分项列表。
 
-    ``include_view=true`` 附加 ``evidence_view`` 展示投影（计划 §5-A）。
+    ``include_view=true`` 附加 ``evidence_view`` 展示投影（计划 §5-A），以及 Core
+    评分项的 ``judgement_view``（逐条规则判定与证据充分度，旧评分路径为 null）。
     默认响应形状保持不变——原始 ``evidence`` 承载审计语义，不就地改写，
     旧客户端与 golden 不受影响。
 
@@ -196,8 +200,14 @@ def list_score_items(
         ScoreItemRead.model_validate(item).model_dump(mode="json") for item in items
     ]
     if include_view:
+        # 冻结正文与规则快照每次运行只解析一次（docs/评分证据与理由改造方案.md）。
+        frozen = resolve_frozen_document(run)
+        snapshots = rule_snapshots(run)
         for item, projected in zip(items, payload):
-            projected["evidence_view"] = build_evidence_view(db, run, item)
+            projected["evidence_view"] = build_evidence_view(db, run, item, frozen=frozen)
+            projected["judgement_view"] = build_judgement_view(
+                run, item, frozen=frozen, snapshots=snapshots
+            )
     return payload
 
 

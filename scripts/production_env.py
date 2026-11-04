@@ -88,10 +88,12 @@ _DATABASE_PASSWORD = re.compile(r"^[A-Za-z0-9]{24,}$")
 #: SCORING_JUDGE_SCOPE_ENABLED：按判定范围取证据（docs/论文评分第二阶段改造方案.md），QWK 评测后再打开。
 OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED", "SCORING_JUDGE_SCOPE_ENABLED")
 #: 取值不是 true / false 的可选设置：没设时不写进 .env，应用取默认值。第一个取值是默认值。
-#: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”。
+#: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”；
+#: SCORING_DECISION_BASIS_MODE=cite 让每条判定都给依据（docs/评分证据与理由改造方案.md）。
 OPTIONAL_CHOICES = {
     "SCORING_TOKEN_BUDGET_TARGET": ("provider_view", "envelope"),
     "SCORING_INSUFFICIENT_EVIDENCE_MODE": ("off", "review"),
+    "SCORING_DECISION_BASIS_MODE": ("off", "cite"),
 }
 # --from-environment 只取这些：部署任务的环境里还有 GITHUB_*、RUNNER_* 等无关变量。
 ENVIRONMENT_NAMES = (
