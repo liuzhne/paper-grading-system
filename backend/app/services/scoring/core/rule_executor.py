@@ -687,6 +687,10 @@ def _semantic_decision_from_response(*, request, rule, response, occurrence_payl
         return decision, "RULE_DECISION_INVALID", "semantic decision status is invalid"
     if status != "triggered":
         if status == "insufficient_evidence":
+            if rule["direction"] == "band":
+                # The request never offers it: a band criterion without an
+                # automatic score is stored blocked and cannot be overridden.
+                return decision, "RULE_DECISION_INVALID", "band rule must choose a level"
             if response.get("occurrences") or response.get("level_code") is not None:
                 return decision, "RULE_DECISION_INVALID", "insufficient evidence must not contain a decision"
             status = "not_triggered"
@@ -1007,18 +1011,6 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
                 raise ValueError("band criterion requires exactly one band rule")
             rule = band_rules[0]
             decision = decision_by_code[rule["rule_code"]]
-            if rule["rule_code"] in insufficient_rules:
-                # No level can be chosen without evidence: a person picks it.
-                outcomes.append(
-                    {
-                        "criterion_code": criterion_code,
-                        "status": "review_required",
-                        "auto_score": None,
-                        "final_score": None,
-                        "max_score": criterion["max_score"],
-                    }
-                )
-                continue
             if decision["status"] != "triggered" or decision["selected_level_code"] is None:
                 outcomes.append(
                     {

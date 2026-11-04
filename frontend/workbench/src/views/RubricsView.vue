@@ -896,7 +896,8 @@ async function refreshDetail(id = selected.value) {
       total_score: full.total_score, criteria: structuredClone(full.criteria || []) };
     if (nextWorkspace.atomic_editing) editForm.value.atomic_rules = nextWorkspace.rules.map((rule) => ({
       id: rule.id, content_token: rule.content_token, criterion_id: rule.criterion_id,
-      rule_code: rule.rule_code, changes: Object.fromEntries([
+      rule_code: rule.rule_code, judge_scope: rule.judge_scope, judge_scope_hint: rule.judge_scope_hint,
+      changes: Object.fromEntries([
         'name','rule_text','direction','effect_type','max_points','repeat_policy','cap_points',
         'judge_type','checker_key','checker_params','evidence_policy','positive_example',
         'negative_example','boundary_example','strictness','applies_to','mutex_group',

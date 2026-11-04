@@ -29,6 +29,7 @@ import re
 from backend.app.services.llm.core_adapter import _allowed_finding_codes
 from backend.app.services.llm.core_adapter import _core_envelope
 from backend.app.services.llm.core_adapter import normalize_core_provider_response
+from backend.app.services.scoring.core.contracts import WORDED_ATOMIC_RULE_SCHEMAS
 from backend.app.services.scoring.core.rule_context import derive_context_needs
 from backend.app.services.scoring.retrieval.compression import COMPRESSOR_VERSION
 from backend.app.services.scoring.retrieval.compression import compress_evidence
@@ -114,9 +115,13 @@ def _group_instructions() -> str:
     return _common_instructions() + _GROUP_INSTRUCTIONS[len(_COMMON_INSTRUCTIONS):]
 
 
-def _statuses() -> list[str]:
+def _statuses(*, band: bool = False) -> list[str]:
+    """Allowed decision statuses.  A band rule must pick a level, so it never
+    gets ``insufficient_evidence``: a band criterion without an automatic score
+    is stored as ``blocked`` and could not be scored by a person."""
+
     statuses = list(_BASE_STATUSES)
-    if _insufficient_evidence_enabled():
+    if _insufficient_evidence_enabled() and not band:
         statuses.append(INSUFFICIENT_EVIDENCE)
     return statuses
 
@@ -152,7 +157,7 @@ def _rule_wording(rule) -> list[str]:
 
 
 def _context_needs(rule) -> set[str]:
-    if rule.get("schema_version") == "atomic-rule-snapshot@3":
+    if rule.get("schema_version") in WORDED_ATOMIC_RULE_SCHEMAS:
         return set(rule.get("context_needs") or ())
     # Wording-less legacy rules: derive from their level descriptors only.
     texts = [
@@ -169,7 +174,7 @@ def _rule_view(rule) -> dict:
         "direction": rule["direction"],
         "effect_type": rule["effect_type"],
     }
-    if rule.get("schema_version") == "atomic-rule-snapshot@3":
+    if rule.get("schema_version") in WORDED_ATOMIC_RULE_SCHEMAS:
         view["name"] = rule["name"]
         view["rule_text"] = rule["rule_text"]
         for name in ("positive_example", "negative_example", "boundary_example"):
@@ -332,7 +337,7 @@ def build_core_request(envelope) -> CoreProviderRequest:
         "properties": {
             "schema_version": {"type": "string", "enum": ["semantic-rule-response@2"]},
             "rule_code": {"type": "string", "enum": [rule["rule_code"]]},
-            "status": {"type": "string", "enum": _statuses()},
+            "status": {"type": "string", "enum": _statuses(band=rule["direction"] == "band")},
             "level_code": {"type": ["string", "null"], "enum": level_codes + [None]},
             "occurrences": _occurrences_schema(_allowed_finding_codes(rule), alias_to_unit),
         },

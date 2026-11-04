@@ -37,6 +37,8 @@ from backend.app.services.scoring.core.contracts import (
     ScoringRequest,
 )
 from backend.app.services.scoring.core.results import ScoringOutcome
+from backend.app.services.scoring.review_reasons import from_core_issues
+from backend.app.services.scoring.review_reasons import to_display_text as review_reason_text
 from backend.app.services.ai_connections import record_usage_ledger
 from backend.app.services.ai_connections import usage_connection_id
 
@@ -314,6 +316,14 @@ def _score_items(
     criterion_id_by_code: Mapping[str, str],
 ) -> list[ScoreItem]:
     rule_results = _group_rule_results(request, outcome)
+    issues_by_criterion: dict[str, list[dict]] = {}
+    for issue in outcome.get("review_issues") or ():
+        issues_by_criterion.setdefault(issue.get("criterion_code"), []).append(issue)
+    rule_names = {
+        node["rule_code"]: node["atomic_rule_snapshot"].get("name")
+        for node in request["plan"]["nodes"]
+        if node.get("atomic_rule_snapshot")
+    }
     contributions_by_criterion: dict[str, list[dict]] = {}
     for contribution in outcome["score_contributions"]:
         contributions_by_criterion.setdefault(
@@ -363,6 +373,9 @@ def _score_items(
             "status": status,
             "contributions": contributions_by_criterion.get(code, []),
         }
+        review_reasons = from_core_issues(
+            issues_by_criterion.get(code), rule_names=rule_names
+        )
         items.append(
             ScoreItem(
                 criterion_id=criterion_id,
@@ -393,6 +406,8 @@ def _score_items(
                 suggestion=None,
                 confidence=None,
                 need_manual_review=status != "calculated",
+                review_reasons=review_reasons or None,
+                review_reason=review_reason_text(review_reasons) or None,
                 raw_model_output={
                     "criterion_outcome": deepcopy(criterion),
                     "rule_results": deepcopy(rule_results.get(code, [])),

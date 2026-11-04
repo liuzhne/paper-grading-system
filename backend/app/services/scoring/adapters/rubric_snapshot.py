@@ -12,7 +12,9 @@ from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.rule_status import participates
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import CompiledRubricSnapshot
+from backend.app.services.scoring.core.contracts import JUDGE_SCOPES
 from backend.app.services.scoring.core.contracts import M4_ATOMIC_RULE_SCHEMAS
+from backend.app.services.scoring.core.contracts import WORDED_ATOMIC_RULE_SCHEMAS
 from backend.app.services.scoring.core.rule_context import derive_context_needs
 
 
@@ -61,20 +63,28 @@ def _assessment_mode(scoring_mode: object) -> object:
     }.get(scoring_mode, scoring_mode)
 
 
-def _atomic_rule_schema_version(compiler_version: object) -> str:
+def _atomic_rule_schema_version(compiler_version: object, *, judge_scope: bool = False) -> str:
     # @3 = @2 + the rule's published wording.  Without it the semantic judge
     # only saw a rule code and answered "not_applicable" for every rule.
+    # @4 = @3 + applies_to, only while judge scope is switched on: producing it
+    # always would change every decision identity and orphan the ledger.
     if compiler_version in _M4_COMPILER_VERSIONS:
-        return "atomic-rule-snapshot@3"
+        return "atomic-rule-snapshot@4" if judge_scope else "atomic-rule-snapshot@3"
     return "atomic-rule-snapshot@1"
 
 
+def _judge_scope_enabled() -> bool:
+    from backend.app.core.config import settings
+
+    return bool(settings.SCORING_JUDGE_SCOPE_ENABLED)
+
+
 def _rule_text_fields(source: Mapping[str, object], schema_version: str) -> dict:
-    if schema_version != "atomic-rule-snapshot@3":
+    if schema_version not in WORDED_ATOMIC_RULE_SCHEMAS:
         return {}
     name = str(source.get("name") or source["rule_code"])
     rule_text = str(source.get("rule_text") or name)
-    return {
+    fields = {
         "name": name,
         "rule_text": rule_text,
         "positive_example": source.get("positive_example") or None,
@@ -82,10 +92,18 @@ def _rule_text_fields(source: Mapping[str, object], schema_version: str) -> dict
         "boundary_example": source.get("boundary_example") or None,
         "context_needs": derive_context_needs(name, rule_text),
     }
+    if schema_version == "atomic-rule-snapshot@4":
+        fields["applies_to"] = str(source.get("applies_to") or "global")
+    return fields
 
 
 def _rule_evidence_policy(source: Mapping[str, object], schema_version: str) -> dict:
     policy = deepcopy(source["evidence_policy"])
+    # judge_scope is an editable hint stored with the rule; only @4 carries it
+    # (the edit endpoint validates it, an unknown value is ignored here).
+    scope = policy.pop("judge_scope", None)
+    if schema_version == "atomic-rule-snapshot@4" and scope in JUDGE_SCOPES:
+        policy["judge_scope"] = scope
     if (
         schema_version in M4_ATOMIC_RULE_SCHEMAS
         and source["judge_type"] == "semantic"
@@ -346,7 +364,7 @@ class CompiledRubricSnapshotLoader:
         ]
         rules = []
         atomic_rule_schema_version = _atomic_rule_schema_version(
-            compilation.compiler_version
+            compilation.compiler_version, judge_scope=_judge_scope_enabled()
         )
         for item in rule_rows:
             criterion = next(
@@ -392,6 +410,7 @@ class CompiledRubricSnapshotLoader:
                             "positive_example": item.positive_example,
                             "negative_example": item.negative_example,
                             "boundary_example": item.boundary_example,
+                            "applies_to": item.applies_to,
                         },
                         atomic_rule_schema_version,
                     ),

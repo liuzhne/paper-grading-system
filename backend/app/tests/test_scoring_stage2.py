@@ -295,9 +295,19 @@ def test_insufficient_evidence_is_rejected_while_the_mode_is_off():
         core_view.decode_core_response(envelope, _insufficient_response(), request)
 
 
+DEDUCT_RULE = {
+    "direction": "deduct",
+    "levels": [],
+    "max_points": "2",
+    "repeat_policy": "once",
+    "name": "研究方法描述不清",
+    "rule_text": "没有说明数据来源与分析步骤",
+}
+
+
 def test_review_mode_offers_and_decodes_insufficient_evidence(monkeypatch):
     monkeypatch.setattr(settings, "SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
-    envelope = build_v4_envelope(_envelope(), top_k=3, **BUDGET)
+    envelope = build_v4_envelope(_envelope(rule=DEDUCT_RULE), top_k=3, **BUDGET)
     request = core_view.build_core_request(envelope)
 
     assert "insufficient_evidence" in request.schema["properties"]["status"]["enum"]
@@ -338,19 +348,24 @@ def test_insufficient_evidence_scores_zero_and_routes_the_criterion_to_review():
     ]
 
 
-def test_insufficient_band_evidence_leaves_the_level_to_a_person():
+def test_band_rules_must_choose_a_level_even_in_review_mode(monkeypatch):
+    # A band criterion without an automatic score is stored blocked, which a
+    # person cannot override; so band requests never offer the status.
+    monkeypatch.setattr(settings, "SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
+    envelope = build_v4_envelope(_envelope(), top_k=3, **BUDGET)
+    request = core_view.build_core_request(envelope)
+    assert "insufficient_evidence" not in request.schema["properties"]["status"]["enum"]
+    with pytest.raises(ValueError, match="status is invalid"):
+        core_view.decode_core_response(envelope, _insufficient_response(), request)
+
     criterion = _criterion(mode="band")
     rule = _band_rule()
-    request = _request_for((criterion, rule))
-    result, _registry, _runtime = _execute(
-        request,
+    executed, _registry, _runtime = _execute(
+        _request_for((criterion, rule)),
         semantic_responses={rule["rule_code"]: _semantic_response(rule["rule_code"], status="insufficient_evidence")},
     )
-
-    outcome = _criterion_outcome(result)
-    assert outcome["status"] == "review_required"
-    assert outcome["auto_score"] is None
-    assert outcome["final_score"] is None
+    assert _decision(executed)["status"] == "invalid"
+    assert _criterion_outcome(executed)["status"] == "invalid"
 
 
 def test_insufficient_evidence_with_a_finding_is_invalid():

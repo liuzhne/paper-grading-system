@@ -33,6 +33,7 @@ _PRIORITY = {
     "prompt_injection_suspected": 0,
     "evidence_verification_failed": 1,
     "evidence_insufficient": 2,
+    "rule_requires_review": 3,
     "confidence_unavailable": 3,
     "low_confidence": 4,
     "reason_not_recorded": 90,
@@ -136,6 +137,34 @@ def recover_for_legacy_item(item):
     ]
 
 
+#: Core 规则执行的复核问题 -> 结构化原因（docs/论文评分第二阶段改造方案.md 13.4）。
+_CORE_ISSUE_MESSAGES = {
+    "RULE_EVIDENCE_INSUFFICIENT": (
+        "evidence_insufficient",
+        "规则「%s」：给出的证据没有覆盖它要检查的内容，需人工核对原文。",
+    ),
+    "REVIEW_REQUIRED": ("rule_requires_review", "规则「%s」要求人工复核。"),
+}
+
+
+def from_core_issues(issues, *, rule_names=None):
+    """Core 一个评分项的复核问题转成原因列表；其它问题（阻断、仅报告）不在这里。"""
+
+    names = rule_names or {}
+    reasons = []
+    for issue in issues or ():
+        known = _CORE_ISSUE_MESSAGES.get(issue.get("code"))
+        if known is None:
+            continue
+        code, template = known
+        rule_code = issue.get("rule_code")
+        reasons.append(
+            _entry(code, template % (names.get(rule_code) or rule_code), rule_code=rule_code)
+        )
+    reasons.sort(key=lambda entry: _PRIORITY.get(entry["code"], 99))
+    return reasons
+
+
 def to_display_text(reasons):
     """派生的展示文本。
 
@@ -145,4 +174,4 @@ def to_display_text(reasons):
     return " ".join(entry["message"] for entry in reasons or ())
 
 
-__all__ = ["derive", "to_display_text", "LOW_CONFIDENCE_THRESHOLD"]
+__all__ = ["derive", "from_core_issues", "to_display_text", "LOW_CONFIDENCE_THRESHOLD"]

@@ -421,6 +421,15 @@ def _normalize_rule_changes(rule_code: str, changes: dict) -> dict:
             normalized[key] = number
         elif key in {"checker_params", "evidence_policy"}:
             normalized[key] = _json_mapping(value, field=key)
+            # 判定范围（docs/论文评分第二阶段改造方案.md 第 13 节）：不填即自动推断。
+            if key == "evidence_policy" and "judge_scope" in normalized[key]:
+                scope = normalized[key]["judge_scope"]
+                if scope is None:
+                    normalized[key].pop("judge_scope")
+                elif not isinstance(scope, str) or scope not in {"section", "cross_section", "document"}:
+                    raise RubricLifecycleError(
+                        "evidence_policy.judge_scope 只能是 section、cross_section 或 document"
+                    )
         elif key == "depends_on_rule_codes":
             if not isinstance(value, list):
                 raise RubricLifecycleError("depends_on_rule_codes 必须是字符串列表")
