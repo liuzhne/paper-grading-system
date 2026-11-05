@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-05 | 评分助手：列表不能只剩引导句 | 无新命令、无新环境变量、无迁移；Agent 回复的 `meta` 多了 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`，日志 `assistant_turn` 多了 `reply_retries`、`dropped`；排错：回复只有“……有：”、后面是空的 |
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 无新命令、无迁移；变量文件里 `NAME=` 的可选设置等于没设；排错条目补快照的两种存储位置与 `cite` 的限度；评分页定位会先切回正文页签 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新环境变量 `SCORING_DECISION_BASIS_MODE`（off / cite，默认 off，经仓库变量进生产）；无迁移；评分页 Core 评分项改为逐条规则判定与证据充分度；排错：证据显示“上下文”、冻结正文读不到、证据充分度为“中” |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 无新命令、无新环境变量、无迁移；规则编辑器加“判定范围”；排错：开关打开后快照变 `@4`、band 评分项不会转人工、复核原因为空 |
@@ -2430,7 +2431,10 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
   - 真正原因：有意为之。工具不给模型分数数字，分数由卡片现取显示（Agent 化方案底线 2）。
 - **现象**：Agent 回复“这个问题我一时没处理好……”。
   - 报错指向：模型坏了。
-  - 真正原因：确定性兜底，常见三种——回复两次不合格（编造了编号、只有分数）、工具调用超过 8 次、回合超过 60 秒。原因记在这条助手消息的 `meta.reason`（`reply_invalid` / `too_many_tool_calls` / `turn_timeout`），日志 `assistant_turn ... outcome=fallback`。
+  - 真正原因：确定性兜底，常见三种——回复两次不合格（编造了编号、只有分数、以冒号结尾后面却没有内容、`cards` 里的编号显示不出来）、工具调用超过 8 次、回合超过 60 秒。原因记在这条助手消息的 `meta.reason`（`reply_invalid` / `too_many_tool_calls` / `turn_timeout`），日志 `assistant_turn ... outcome=fallback`。
+- **现象**：Agent 的回复只有一句“目前已发布的评分标准有：”这类引导句，冒号后面什么都没有（2026-11-05 生产，11-05 修复）。
+  - 报错指向：像是列表查空了，或者前端没把卡片渲染出来。
+  - 真正原因：列表在回复校验这一步丢了，工具和前端都没错。模型把没有卡片的编号（评分标准 `r1`、评分项 `i1`）放进 `cards` 会被静默丢掉；模型写在正文里的 Markdown 列表会被整行删掉。修复后由代码列出名称，冒号收尾会退回给模型重写。还遇到时看这条助手消息的 `meta`：`tools_called` 有没有查列表的工具，`dropped_sentences` 大于 0 说明有句子被清理删掉，`cards_requested` 大于 `cards_shown` 加 `listed` 说明有编号没显示出来，`reply_retries` 是被退回重写的次数。
 - **现象**：长对话里 Agent 忘了老师早先的要求，或者一轮特别慢。
   - 真正原因：压缩。12 轮或 8,000 token（或距上一轮超过 30 分钟）时，较早的轮次被压缩进 `assistant_conversations.compaction`；压缩那一轮多一次摘要请求。日志 `assistant_compaction mode=summary|facts_only|deferred`：`deferred` 是摘要失败、这轮先不压缩，连续两轮失败变成 `facts_only`（只有事实要点，老师的要求沿用上一份）。
 - **现象**：说了“开始评分”或“导入评分标准”，助手却回“××这一步还没完成。要放弃它，改为××吗？”（2026-10-22 起）。
@@ -2853,3 +2857,31 @@ B、C 改变评分，打开前要用 QWK 留出集对比（真实模型调用需
 发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`；评分项接口多一个只读字段 `judgement_view`（无响应模型，OpenAPI 只改了说明文字）；G1–G4 部署后即生效，不改分；G5 默认关闭。回滚按 9.4。
 
 维护记录：2026-11-04 · 评分证据与理由：新增依据开关、评分页证据充分度的位置，排错写明“上下文”、冻结正文读不到、证据充分度为“中”与账本不复用的真实原因。
+
+### 2026-11-05 评分助手：列表不能只剩引导句
+
+方案见 `docs/评分助手Agent化方案.md` 第 14.2 节。无新命令、无新环境变量、无迁移；提示词指纹不变（`assistant-agent@6`），部署门槛不用重新评测。
+
+查一条线上回复为什么少了一截（在实例的 `/opt/pgs` 里，只读事务，查完回滚；`DATA_PLANE=local` 时库在 db 容器里）：
+
+```bash
+docker compose -p pgs -f compose.yml exec -T db psql -U postgres -d pgs -X <<'SQL'
+begin read only;
+select created_at, text, meta->'tools_called' as tools, meta->'text_replies' as text_replies,
+       meta->'dropped_sentences' as dropped, meta->'cards_requested' as requested,
+       meta->'cards_shown' as shown, meta->'listed' as listed, meta->'reply_retries' as retries
+from assistant_messages where role = 'assistant' and meta->>'mode' = 'agent'
+order by created_at desc limit 20;
+rollback;
+SQL
+```
+
+11-05 之前的回复没有后五个字段，只能看 `tools_called` 与 `text_replies`（为 1 说明模型没调用 `reply`、直接给了文字，多半是 Markdown 列表被删）。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_assistant_agent.py backend/app/tests/test_assistant_agent_tools.py
+```
+
+维护记录：2026-11-05 · 评分助手：列表不能只剩引导句：新增回复观测字段与排错条目，写明引导句后面为空时真正的原因在回复校验。

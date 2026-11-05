@@ -14,6 +14,7 @@ from backend.app.tests.test_assistant import _run_job
 from backend.app.tests.test_assistant import _say
 from backend.app.tests.test_assistant import _seed_published_rubric
 from backend.app.tests.test_assistant import _start_until_waiting_job
+from backend.app.tests.test_assistant_agent import _agent_messages
 from backend.app.tests.test_assistant_agent import _texts
 from backend.app.tests.test_assistant_agent import agent  # noqa: F401  (pytest fixture)
 from backend.app.tests.test_assistant_agent import reply
@@ -512,3 +513,96 @@ def test_task_list_does_not_let_a_finished_job_pass_for_all_papers_scored(client
     task = next(entry for entry in _last_tool_result(model)["tasks"] if entry["name"] == name)
     assert task["已评分"] == 1 and task["还没有评分结果"] == 1
     assert "completed" not in task["评分状态"] and task["评分状态"].startswith("评分作业已结束")
+
+
+# --- 回复引用了没有卡片的对象：由代码列出（§14.2） --------------------------------------------------
+# 11-05 生产：流程等选文件时老师问“有其他的评分标准吗？”，模型回“目前已发布的评分标准有：”并把 r1 放进 cards，
+# 评分标准没有卡片，编号被静默丢掉，冒号后面什么都没有。
+
+def _wait_for_files(client):
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "开始评分")  # 快速通道，不调用模型
+    assert body["pending"]["kind"] == "pick_files"
+    return conversation_id
+
+
+def _list_rubrics_then(*steps):
+    return (step(("tool_search", {"query": "select:rubric_list"})),
+            step(("call_tool", {"name": "rubric_list", "arguments_json": "{}"})), *steps)
+
+
+def _published_rubrics(monkeypatch, extra):
+    """在真实的已发布评分标准后面加几份（只在助手的工具结果里出现，不进数据库）。"""
+
+    from backend.app.services.assistant import tools as assistant_tools
+
+    real_call = assistant_tools.call
+
+    def call(run, name, **kwargs):
+        found = real_call(run, name, **kwargs)
+        return [*found, *extra] if name == "list_published_rubrics" else found
+
+    monkeypatch.setattr(assistant_tools, "call", call)
+
+
+def test_rubric_refs_are_listed_by_code_while_waiting_for_files(client, agent):  # noqa: F811
+    rubric_id, rubric_name = _seed_published_rubric(client)
+    with client.session_factory() as session:
+        version = session.get(models.Rubric, rubric_id).version
+    conversation_id = _wait_for_files(client)
+    agent(*_list_rubrics_then(reply("目前已发布的评分标准有：", cards=["r1"], next_steps=["start_grading", "import_rubric"])))
+    body = _say(client, conversation_id, "有其他的评分标准吗？")
+
+    assert _texts(body)[-1] == ("目前已发布的评分标准有：\n· 《%s》%s（毕业论文）\n"
+                                "目前只有这一份已发布的评分标准；要用别的标准，可以先导入你的评分规则和模板。"
+                                % (rubric_name, version))
+    assert [card["type"] for card in body["messages"][-1]["cards"]] == ["quick_actions"]
+    assert body["pending"]["kind"] == "pick_files"  # 插话不打断等待中的选文件
+    stored = _agent_messages(client, conversation_id)[-1]
+    assert stored.meta["tools_called"] == ["rubric_list"]
+    assert (stored.meta["cards_requested"], stored.meta["cards_shown"], stored.meta["listed"]) == (1, 0, 2)
+    assert stored.meta["dropped_sentences"] == 0 and stored.meta["reply_retries"] == 0
+
+
+def test_several_rubrics_while_waiting_for_files_say_where_to_switch(client, agent, monkeypatch):  # noqa: F811
+    _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [{"id": "rubric-report", "name": "课程报告评分标准", "version": "v2.0",
+                                      "business_profile_key": "general_document"}])
+    conversation_id = _wait_for_files(client)
+    agent(*_list_rubrics_then(reply("可以用的评分标准有：", cards=["r1", "r2"])))
+    text = _texts(_say(client, conversation_id, "有其他的评分标准吗？"))[-1]
+    assert text.splitlines()[2:] == ["· 《课程报告评分标准》v2.0（通用文档）",
+                                     "选文件之前可以在右侧的“评分标准”里换一份；上传后任务就锁定这份评分标准。"]
+
+    # 不在等选文件：只列出，不提换。
+    agent(*_list_rubrics_then(reply("可以用的评分标准有：", cards=["r1", "r2"])))
+    text = _texts(_say(client, _conversation(client), "有哪些评分标准"))[-1]
+    assert len(text.splitlines()) == 3 and "换一份" not in text
+
+
+def test_no_published_rubric_is_said_plainly_never_left_after_a_colon(client, agent, monkeypatch):  # noqa: F811
+    from backend.app.services.assistant import tools as assistant_tools
+
+    real_call = assistant_tools.call
+    monkeypatch.setattr(assistant_tools, "call", lambda run, name, **kwargs: [] if name == "list_published_rubrics"
+                        else real_call(run, name, **kwargs))
+    model = agent(*_list_rubrics_then(reply("目前已发布的评分标准有："),
+                                      reply("目前还没有已发布的评分标准，可以先导入你的评分规则和模板。",
+                                            next_steps=["import_rubric"])))
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "有哪些评分标准")
+
+    result = json.loads(model.requests[2]["messages"][-1]["content"])
+    assert result["rubrics"] == [] and "没有已发布的评分标准" in result["提示"]
+    fix = _last_tool_result(model)
+    assert "冒号结尾" in fix["错误"]  # 第一次回复冒号后面是空的：退回给模型修正一次
+    assert _texts(body)[-1] == "目前还没有已发布的评分标准，可以先导入你的评分规则和模板。"
+    assert _agent_messages(client, conversation_id)[-1].meta["reply_retries"] == 1
+
+
+def test_item_refs_are_listed_by_name(client, agent):  # noqa: F811
+    conversation_id, _batch_id = _scored_task(client)
+    model = agent(step(("paper_result", {"ordinal": 1})), reply("这一份失分较多的评分项：", cards=["i1", "i2"]))
+    body = _say(client, conversation_id, "第一份哪些项扣得多")
+    items = _last_tool_result(model)["评分项"]
+    assert _texts(body)[-1] == "\n".join(["这一份失分较多的评分项：", "· %s" % items[0]["评分项"], "· %s" % items[1]["评分项"]])

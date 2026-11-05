@@ -3,12 +3,15 @@
 模型以调用 `reply` 结束一个回合。代码校验之后才显示，三种处理：
 
 - **整体作废**（重试一次，仍不合格就给确定性兜底）：参数不合 schema；出现本回合工具结果里没有的
-  引用编号或不在清单里的下一步（视为编造）；命中注入检测；说自己做了写动作、说出了确认卡片却没有、
-  说出工具没返回过的任务状态（`claims`，§14.1）；
-- **单句丢弃**：含分数样式的数字、改分建议、链接、邮箱或标记语言的句子去掉；
+  引用编号或不在清单里的下一步（视为编造）；`cards` 里的编号界面上显示不出任何东西；命中注入检测；
+  说自己做了写动作、说出了确认卡片却没有、说出工具没返回过的任务状态（`claims`，§14.1）；
+  清理后的 `text` 以冒号结尾、后面却没有卡片、代码列表或帮助条目（§14.2）；
+- **去掉记号**：Markdown 的加粗、反引号、标题井号去掉，行首的 `*`、`+` 换成“·”，文字保留；
+- **单句丢弃**：含分数样式的数字、改分建议、链接、邮箱或 HTML 标签的句子去掉；
 - **超长截断**：`text` 最多 300 字。
 
-前端一律按纯文本显示。分数不经模型转述：要展示数据就把引用编号放进 `cards`，卡片由界面现取。
+前端一律按纯文本显示。分数不经模型转述：要展示数据就把引用编号放进 `cards`，卡片由界面现取；
+没有卡片的对象（评分标准、评分项）由代码按工具结果列出名称（`turn.attachments`）。
 """
 
 from __future__ import annotations
@@ -65,13 +68,29 @@ _SCORE = SCORE_PATTERN
 # 与分数有关的建议才拦：“改为 8 分”“建议给 3 分”“加 2 分”“应得 6 分”“得分调到 7”“将总分改为 8”。A1.1 起论文的
 # 修改建议（“建议把研究方法一节改为分步骤说明”“把引用数量改为 8 条”）要能说出来（§31.3）。与评分侧共用一份。
 _SUGGESTION = SCORE_CHANGE_PATTERN
-_LINK = re.compile(r"https?://|www\.|[\w.+-]+@[\w-]+\.[\w.]+|<[a-zA-Z/][^>]*>|\*\*|__|`|^#+\s", re.MULTILINE)
+_LINK = re.compile(r"https?://|www\.|[\w.+-]+@[\w-]+\.[\w.]+|<[a-zA-Z/][^>]*>")
 _SENTENCE = SENTENCE_PATTERN
+#: Markdown 记号只去掉记号、保留文字（§14.2）。原来整句丢弃：模型把列表写成“**名称**”时，列表整行没了，
+#: 只剩“……有：”（11-05 生产）。行内的单个 `*`、`_` 不动：“a_b.docx”这类文件名里会出现。
+_MARKUP = (
+    (re.compile(r"\*\*|`"), ""),
+    (re.compile(r"__(?=\S)(.+?)(?<=\S)__"), r"\1"),
+    (re.compile(r"^[ \t]*#{1,6}[ \t]+", re.MULTILINE), ""),
+    (re.compile(r"^([ \t]*)[*+][ \t]+", re.MULTILINE), r"\1· "),
+)
+#: 以冒号结尾：后面本该有内容（“目前已发布的评分标准有：”）。
+_TRAILING_COLON = ("：", ":")
+
+
+def _strip_markup(text: str) -> str:
+    for pattern, replacement in _MARKUP:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def _clean_text(text: str) -> tuple[str, int]:
     kept, dropped = [], 0
-    for piece in _SENTENCE.findall(text):
+    for piece in _SENTENCE.findall(_strip_markup(text)):
         if piece == "\n":
             kept.append(piece)
             continue
@@ -122,6 +141,9 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     for ref in params.cards:
         if refs.object_of(ref) is None:
             raise ReplyInvalid("cards 里的编号“%s”不在本回合的工具结果里" % ref)
+        if not refs.displayable(ref):
+            # 以前静默丢掉：回复的引导句后面什么都没有（§14.2）。
+            raise ReplyInvalid("cards 里的“%s”在界面上显示不出来：先用工具查到它，或把名称直接写进 text" % ref)
         if ref not in cards:
             cards.append(ref)
     unknown = [step for step in params.next_steps if step not in NEXT_STEPS]
@@ -130,9 +152,13 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     text, dropped = _clean_text(params.text)
     if not text:
         raise ReplyInvalid("回复去掉分数、改分建议与链接后没有剩下内容；分数请用 cards 展示")
-    return ValidReply(text=text, cards=tuple(cards[:MAX_CARDS]),
+    if allow_cards and text.endswith(_TRAILING_COLON) and not cards and not params.help_refs:
+        # 快捷按钮不算：“目前已发布的评分标准有：”后面跟两个按钮，老师看到的仍是空列表（11-05 生产）。
+        raise ReplyInvalid("text 以冒号结尾，后面却没有内容：要列出的名称直接写进 text，或把工具结果里的编号放进 cards")
+    # 卡片数上限在显示时处理（turn.attachments）：超出的用名称补一行，不再静默截掉。
+    return ValidReply(text=text, cards=tuple(cards),
                       next_steps=tuple(dict.fromkeys(params.next_steps)), dropped_sentences=dropped,
                       help_refs=tuple(dict.fromkeys(params.help_refs)))
 
 
-__all__ = ["MAX_TEXT_CHARS", "NEXT_STEPS", "ReplyInvalid", "ReplyParams", "ValidReply", "parse_arguments", "validate_reply"]
+__all__ = ["MAX_CARDS", "MAX_TEXT_CHARS", "NEXT_STEPS", "ReplyInvalid", "ReplyParams", "ValidReply", "parse_arguments", "validate_reply"]

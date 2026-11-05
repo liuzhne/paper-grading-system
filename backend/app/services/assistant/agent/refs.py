@@ -26,6 +26,10 @@ class TurnRefs:
     _counters: dict[str, int] = field(default_factory=dict)
     #: 编号 → 回复里引用它时显示的数据卡片（卡片只有类型与 ID，分数由界面现取）。
     _cards: dict[str, dict] = field(default_factory=dict)
+    #: 编号 → 没有卡片时由代码列出的一行文字（评分标准、评分项，§14.2）。名称来自工具结果，不经模型转述。
+    _labels: dict[str, str] = field(default_factory=dict)
+    #: 回复里引用了某类对象时，代码在列表后附加的说明：种类 → [(回复里已有这个词就不加, 说明)]。
+    notes: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     #: 本回合 `help_lookup` 返回过的帮助条目：回复的 help_refs 只能引用这些。
     help_seen: set[str] = field(default_factory=set)
     #: 本回合工具返回过的状态：(种类, 对象 ID, 类别)。回复里的状态说法要对得上它说的那个对象（claims）。
@@ -55,7 +59,7 @@ class TurnRefs:
         if category:
             self.evidence.add((kind, str(object_id), category))
 
-    def add(self, kind: str, object_id: str, *, card: dict | None = None) -> str:
+    def add(self, kind: str, object_id: str, *, card: dict | None = None, label: str | None = None) -> str:
         key = (kind, str(object_id))
         if key in self._by_object:
             ref = self._by_object[key]
@@ -66,11 +70,32 @@ class TurnRefs:
             self._by_object[key] = ref
         if card is not None:
             self._cards[ref] = card
+        if label:
+            self._labels[ref] = label
         return ref
 
     def card_of(self, ref: str) -> dict | None:
         card = self._cards.get(str(ref or "").strip())
         return dict(card) if card else None
+
+    def label_of(self, ref: str) -> str | None:
+        """代码列出这个对象时用的文字：登记过的一行文字，没有就用工具结果里的名称（任务名、材料名）。"""
+
+        ref = str(ref or "").strip()
+        if ref in self._labels:
+            return self._labels[ref]
+        key = self._by_ref.get(ref)
+        if key is None:
+            return None
+        return next((name for name, found in self.names.items() if found == key), None)
+
+    def displayable(self, ref: str) -> bool:
+        """放进 reply.cards 之后界面上能看到东西：有卡片（任务总有概况卡片），或者代码能列出它的名称。"""
+
+        return self.card_of(ref) is not None or self.kind_of(ref) == "t" or self.label_of(ref) is not None
+
+    def note(self, kind: str, marker: str, text: str) -> None:
+        self.notes.setdefault(kind, []).append((marker, text))
 
     def pin(self, ref: str, kind: str, object_id: str) -> None:
         """焦点里的对象用固定编号（`t0`、`p0`），每回合开头登记。"""
