@@ -71,7 +71,7 @@ flowchart LR
 ## 4. 推荐项目结构
 
 ```text
-paper-grading-system/
+rubric-audit-engine/
   backend/
     app/
       api/

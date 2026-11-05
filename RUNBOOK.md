@@ -1170,7 +1170,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 发布后核对健康接口、静态资源和合成模板确认流程；发生异常停止后续写操作，按既有
 生产回滚流程恢复先前部署，保留确认审计。此节不构成测试或发布已完成的证据。
 
-发布证据：[主线 CI 34746064881](https://github.com/liuzhne/paper-grading-system/actions/runs/34746064881)
+发布证据：[主线 CI 34746064881](https://github.com/liuzhne/rubric-audit-engine/actions/runs/34746064881)
 对提交 `95d189f95ed079d2f90787965859441ab5ba4e0e` 的后端、前端、Postgres、Docker 与
 production 部署均成功。线上 `/`、`/workbench/rubrics`、`/api/system/integrations` 为 200；
 未登录请求 `/api/rubrics/synthetic-release-check/review-workspace` 为 401。入口
@@ -1218,6 +1218,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-05 | GitHub 仓库改名为 rubric-audit-engine | 各处克隆把 `origin` 改成新地址；文档链接改新名字；镜像标签不变；排错：绑定 PR 被拒、推送时提示新地址 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | 无新命令、无迁移；回复里加粗的状态说法（“已经\*\*完成\*\*”）同样会被核对并退回重写；卡片超出上限时可能出现“另外还有 N 个没有显示” |
 | 2026-11-05 | 评分助手：列表不能只剩引导句 | 无新命令、无新环境变量、无迁移；Agent 回复的 `meta` 多了 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`，日志 `assistant_turn` 多了 `reply_retries`、`dropped`；排错：回复只有“……有：”、后面是空的 |
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 无新命令、无迁移；变量文件里 `NAME=` 的可选设置等于没设；排错条目补快照的两种存储位置与 `cite` 的限度；评分页定位会先切回正文页签 |
@@ -2886,3 +2887,20 @@ SQL
 ```
 
 维护记录：2026-11-05 · 评分助手：列表不能只剩引导句：新增回复观测字段与排错条目，写明引导句后面为空时真正的原因在回复校验。
+
+### 2026-11-05 GitHub 仓库改名
+
+仓库从 `liuzhne/paper-grading-system` 改名为 `liuzhne/rubric-audit-engine`。每一处克隆（每台电脑一次；同一个克隆下的 worktree 共用这份配置）把 `origin` 改成新地址：
+
+```bash
+git remote set-url origin https://github.com/liuzhne/rubric-audit-engine.git
+```
+
+`gh` 命令的 `--repo` 用新名字。实例、镜像标签（`paper-grading-system:current` 等）、GitHub 上的密钥、变量与 `production` 环境都不用动。不要再新建一个叫 `paper-grading-system` 的仓库：GitHub 会因此停止旧地址的跳转，旧 PR 链接全部失效。
+
+排错：
+- **现象**：Claude 应用绑定新开的 PR 被拒，或推送时远端提示 “Create a pull request for … on GitHub by visiting: https://github.com/liuzhne/rubric-audit-engine/…”。
+  - 报错指向：像是权限问题。
+  - 真正原因：本机 `origin` 还是旧仓库名。推送靠跳转能成功，但应用只认与 `origin` 同一个仓库的 PR。按上面的命令改 `origin` 后再绑定。
+
+维护记录：2026-11-05 · GitHub 仓库改名：新增改 `origin` 的命令，排错写明绑定 PR 被拒的真实原因。
