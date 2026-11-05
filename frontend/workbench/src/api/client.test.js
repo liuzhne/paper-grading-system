@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, contractIsStale, reloadIfStale, request, resetContext, resetContractGuard, ApiError, StaleContextError } from "./client.js";
+import {
+  api, contractIsStale, parseEvents, postStream, reloadIfStale, request, resetContext, resetContractGuard, ApiError,
+  StaleContextError, StreamInterruptedError,
+} from "./client.js";
 import { API_CONTRACT_HEADER, API_CONTRACT_VERSION } from "./contract.js";
 
 /** 组织隔离合同（计划 §2.1）的回归测试。 */
@@ -206,5 +209,83 @@ describe("api 方法齐全", () => {
     expect(init.method).toBe("PUT");
     expect(init.headers["Content-Type"]).toBe("application/json");
     expect(JSON.parse(init.body)).toEqual({ model_source: "platform" });
+  });
+});
+
+describe("流式请求（评分助手的过程流式）", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    resetContractGuard();
+    globalThis.__PGS_CONFIG__ = undefined;
+  });
+
+  /** 按给定的块依次吐出 SSE 文本：块边界可以落在事件中间。 */
+  function sseResponse(chunks, init = {}) {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" }, ...init });
+  }
+
+  it("解析事件：跨块、同块多条、心跳注释、CRLF", () => {
+    const [first, rest] = parseEvents('event: accepted\ndata: {}\n\n: ping\n\nevent: progress\ndata: {"label":"正在');
+    expect(first).toEqual([{ event: "accepted", data: {} }]);
+    const [second, tail] = parseEvents(`${rest}查"}\r\n\r\nevent: done\r\ndata: {"messages":[]}\r\n\r\n`);
+    expect(second).toEqual([{ event: "progress", data: { label: "正在查" } }, { event: "done", data: { messages: [] } }]);
+    expect(tail).toBe("");
+  });
+
+  it("进度逐条交给 onEvent，返回 done 的数据；请求带 JSON 正文与 SSE 的 Accept", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(sseResponse([
+      "event: accepted\ndata: {}\n\nevent: prog", 'ress\ndata: {"label":"正在理解你的问题…","step":1}\n\n',
+      ': ping\n\nevent: done\ndata: {"messages":[{"id":"u1"}],"pending":null}\n\n',
+    ]));
+    const seen = [];
+
+    const result = await postStream("/assistant/conversations/c1/runs/stream", { type: "message", text: "你好" }, {
+      onEvent: (event, data) => seen.push([event, data]),
+    });
+
+    expect(result).toEqual({ messages: [{ id: "u1" }], pending: null });
+    expect(seen).toEqual([["accepted", {}], ["progress", { label: "正在理解你的问题…", step: 1 }]]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/assistant/conversations/c1/runs/stream");
+    expect(init.method).toBe("POST");
+    expect(init.headers.Accept).toBe("text/event-stream");
+    expect(JSON.parse(init.body)).toEqual({ type: "message", text: "你好" });
+  });
+
+  it("开始推送之前的拒绝与推送中的 error 事件都是 ApiError", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
+      JSON.stringify({ detail: { code: "ASSISTANT_RUN_IN_PROGRESS", message: "上一步还在处理，请稍候。" } }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ));
+    await expect(postStream("/x", {})).rejects.toMatchObject({ name: "ApiError", status: 409, detail: "上一步还在处理，请稍候。" });
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(sseResponse([
+      'event: accepted\ndata: {}\n\nevent: error\ndata: {"status":500,"detail":"助手处理失败，请稍后再试。"}\n\n',
+    ]));
+    await expect(postStream("/x", {})).rejects.toMatchObject({ name: "ApiError", status: 500, detail: "助手处理失败，请稍后再试。" });
+  });
+
+  it("请求发出后断线、或推送结束却没有 done：StreamInterruptedError，调用方不能重发", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await expect(postStream("/x", {})).rejects.toBeInstanceOf(StreamInterruptedError);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(sseResponse(["event: accepted\ndata: {}\n\n"]));
+    await expect(postStream("/x", {})).rejects.toBeInstanceOf(StreamInterruptedError);
+  });
+
+  it("切换组织：在途的流式请求作废", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }));
+    const pending = postStream("/x", {});
+    resetContext();
+    await expect(pending).rejects.toBeInstanceOf(StaleContextError);
   });
 });

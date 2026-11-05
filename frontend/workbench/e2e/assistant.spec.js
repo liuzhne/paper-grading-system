@@ -116,4 +116,17 @@ test.describe("评分助手", () => {
     await expect(reply).toContainText("没理解");
     await expect(reply.getByRole("button", { name: "开始评分" })).toBeVisible();
   });
+
+  test("说话走流式接口（验收后端打开了开关）：老师的话先显示，回复到了换成后端存下的那条", async ({ page }) => {
+    await openAssistant(page);
+    const streamed = page.waitForResponse((response) => response.url().includes("/runs/stream"));
+    await ask(page, "你好");
+    // 先显示，不等回复；回复到了以后只有一条“你好”（本地那条被后端存下的那条换掉）。
+    await expect(page.locator(".message.from-user .bubble", { hasText: "你好" })).toHaveCount(1);
+    const response = await streamed;
+    expect(response.headers()["content-type"]).toContain("text/event-stream");
+    await expect(page.locator(".message").last()).toContainText("没理解");
+    await expect(page.locator(".message.from-user .bubble", { hasText: "你好" })).toHaveCount(1);
+    await expect(page.locator(".unsent")).toHaveCount(0);
+  });
 });

@@ -246,7 +246,8 @@ def test_production_caddyfile_keeps_vercel_headers_and_cache_rules():
         'Referrer-Policy "same-origin"',
         '"public, max-age=31536000, immutable"',
         '"public, max-age=0, must-revalidate"',
-        "encode zstd gzip",
+        # 除评分助手的流式接口外整站压缩（docs/评分助手过程流式方案.md §6）。
+        "encode @compressible zstd gzip",
         "lb_try_duration",
         "reverse_proxy app:8000",
     ):
@@ -619,6 +620,22 @@ def test_lightsail_deploy_job_renders_the_site_leads_switch():
     lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
 
     assert "SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}" in lightsail
+
+
+def test_lightsail_deploy_job_renders_the_assistant_stream_switch():
+    # 评分助手的过程流式（docs/评分助手过程流式方案.md）：经仓库变量进 .env，没设即关闭。
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
+    assert "ASSISTANT_STREAM_ENABLED: ${{ vars.ASSISTANT_STREAM_ENABLED }}" in lightsail
+
+
+def test_both_caddy_files_keep_the_assistant_stream_out_of_compression():
+    # 压缩器会攒够一段才发：SSE 的进度会攒到最后一起到（docs/评分助手过程流式方案.md §6）。
+    for path in (ROOT / "deploy" / "production" / "caddy" / "Caddyfile", ROOT / "deploy" / "Caddyfile"):
+        text = path.read_text(encoding="utf-8")
+        assert "@compressible not path */runs/stream" in text, path
+        assert "encode @compressible zstd gzip" in text, path
+        assert "\n\tencode zstd gzip" not in text and "\n    encode zstd gzip" not in text, path
 
 
 def test_lightsail_deploy_checks_the_assistant_eval_gate_only_when_the_agent_is_on():

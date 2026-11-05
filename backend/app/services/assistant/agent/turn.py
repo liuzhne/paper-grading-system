@@ -37,6 +37,7 @@ from backend.app.db.models import AssistantMessage
 from backend.app.services.assistant.agent import budget
 from backend.app.services.assistant.agent import catalog
 from backend.app.services.assistant.agent import compaction
+from backend.app.services.assistant.agent import progress
 from backend.app.services.assistant.agent.context import Prefix
 from backend.app.services.assistant.agent.context import build_prefix
 from backend.app.services.assistant.agent.context import state_message
@@ -238,6 +239,7 @@ def _tools_node(state: _State, runtime: Runtime[_Runtime]):
                 if retries >= 1 or state.get("synthetic"):
                     return {"outcome": {"kind": "fallback", "reason": "reply_invalid"}}
                 retries += 1
+                rt.turn.run.progress(progress.CHECKING)
                 steps.append(_tool_message(call, {"错误": exc.reason, "提示": "请修正后重新调用 reply"}))
                 continue
             return {"outcome": {"kind": "reply", "reply": reply}}
@@ -314,6 +316,7 @@ def _run(tool, arguments_json, rt: _Runtime) -> tuple[dict, dict | None]:
         rt.param_errors[tool.name] = rt.param_errors.get(tool.name, 0) + 1
         detail = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else "参数不是合法的 JSON 对象"
         return {"错误": "参数不合格：%s" % detail, "参数": catalog.parameters_schema(tool.params, tool.param_notes)}, None
+    rt.turn.run.progress(progress.for_tool(tool))
     try:
         result = tool.run(rt.turn, params)
     except ToolError as exc:
@@ -384,10 +387,16 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
     prefix = build_prefix(messages, compaction=conversation.compaction, exclude_id=user_message_id, model_name=model_name)
     groups = turn_groups(messages, exclude_id=user_message_id, start_id=(conversation.compaction or {}).get("start_id"))
     last_identity = _last_identity(messages)
+
+    def summarize(request, deadline):
+        # 真的要发摘要请求时才说“正在整理”：多一次模型调用，老师会等得久一点（过程流式方案 §3）。
+        ctx.progress(progress.COMPACTING)
+        return step(request, prefix.tools, deadline)
+
     if compaction.maybe_compact(
         conversation, groups, prefix_messages=prefix.messages, history_tokens=prefix.history_tokens,
         loaded=len(prefix.loaded), identity_changed=bool(last_identity) and last_identity != prefix.identity,
-        summarize=lambda request, deadline: step(request, prefix.tools, deadline), model_name=model_name,
+        summarize=summarize, model_name=model_name,
     ):
         prefix = build_prefix(messages, compaction=conversation.compaction, exclude_id=user_message_id,
                               model_name=model_name)

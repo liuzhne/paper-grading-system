@@ -1218,6 +1218,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-05 | 评分助手：过程流式 | 新环境变量 `ASSISTANT_STREAM_ENABLED`（默认关，经仓库变量进生产）；新接口 `/runs/stream`；Caddy 对流式路径不压缩；无迁移；排错：进度攒到最后一起到、“连接中断，正在取回结果…”、测试里测不了读一半断开 |
+| 2026-11-05 | 评分助手：老师的话先显示 | 无新命令、无后端变化；`public/` 已重建；排错：老师的话下面出现“没有发出去” |
 | 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | 无新命令、无迁移；回复里加粗的状态说法（“已经\*\*完成\*\*”）同样会被核对并退回重写；卡片超出上限时可能出现“另外还有 N 个没有显示” |
 | 2026-11-05 | 评分助手：列表不能只剩引导句 | 无新命令、无新环境变量、无迁移；Agent 回复的 `meta` 多了 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`，日志 `assistant_turn` 多了 `reply_retries`、`dropped`；排错：回复只有“……有：”、后面是空的 |
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 无新命令、无迁移；变量文件里 `NAME=` 的可选设置等于没设；排错条目补快照的两种存储位置与 `cite` 的限度；评分页定位会先切回正文页签 |
@@ -2886,3 +2888,58 @@ SQL
 ```
 
 维护记录：2026-11-05 · 评分助手：列表不能只剩引导句：新增回复观测字段与排错条目，写明引导句后面为空时真正的原因在回复校验。
+
+### 2026-11-05 评分助手：老师的话先显示
+
+方案见 `docs/评分助手v2界面改造方案.md` 第 3.6 节。只改前端；改完按 `frontend-workbench` 门禁重建 `public/`。
+
+排错：
+- **现象**：老师的话下面出现“没有发出去 · 重新发送”。
+  - 报错指向：像是前端没把消息发出去。
+  - 真正原因：这次运行请求失败了，后端没有存下这句话。输入框上方显示具体原因：运行锁 409（上一步还在处理）、网络中断、5xx。点“重新发送”按原文再发（快捷按钮仍带意图键）。例外：网络中断时请求可能已经到了后端，刷新后能看到这句话已经在，就不要再重发。
+
+验证：
+
+```bash
+cd frontend/workbench && npx vitest run src/stores/assistant.test.js src/components/assistant/ChatThread.test.js
+```
+
+维护记录：2026-11-05 · 评分助手：老师的话先显示：排错写明“没有发出去”的真实原因与网络中断的例外。
+
+### 2026-11-05 评分助手：过程流式
+
+方案见 `docs/评分助手过程流式方案.md`。开关 `ASSISTANT_STREAM_ENABLED` 默认关；关闭时 `/runs/stream` 返回 404，前端照旧走 `/runs`。
+
+本地试（不用真实模型时只有 accepted 与 done；要看进度，用后端测试的脚本化模型）：
+
+```bash
+ASSISTANT_STREAM_ENABLED=true DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run uvicorn backend.app.main:app --port 8000
+```
+
+生产打开（S3）：发布含本改动的版本后，在 GitHub 仓库变量里设 `ASSISTANT_STREAM_ENABLED=true` 并重新部署；然后在浏览器打开评分助手，问一句要查数据的话（例如“有哪些评分标准”），开发者工具 Network 里 `runs/stream` 请求的 EventStream 页应该一条一条出现 `progress`，时间各不相同。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_assistant_stream.py
+```
+
+```bash
+cd frontend/workbench && npx vitest run src/api/client.test.js src/stores/assistant.test.js src/components/assistant/ChatThread.test.js
+```
+
+排错：
+- **现象**：打开开关后进度不是一步一步出来，而是和回复一起到。
+  - 报错指向：像是后端没有边跑边推。
+  - 真正原因：代理把推送攒住了。Caddy 的 `encode` 会攒够一段才发，所以两份 Caddyfile 都用 `@compressible not path */runs/stream` 排除了流式路径；改 Caddy 配置时别把它合并回 `encode zstd gzip`。另有代理（CDN、公司网关）时要关掉它对 `text/event-stream` 的缓冲，响应头已带 `X-Accel-Buffering: no`。
+- **现象**：对话里显示“连接中断，正在取回结果…”。
+  - 报错指向：像是回合失败了。
+  - 真正原因：浏览器和后端之间的连接断了（网络、代理超时、发版换容器）。后端的回合在后台线程里照样跑完；前端每 2 秒读一次会话，等 `running` 变成 false 再显示。超过 70 秒还在运行会提示刷新；发版时进程退出，回合没有提交，锁 120 秒后过期。
+- **现象**：写流式测试时，“读到第一条就断开”的用例里模型一直等到超时。
+  - 报错指向：像是后台线程卡住了。
+  - 真正原因：Starlette 的 TestClient 要等整个响应生成完才把内容交出来，测试里没法真的读一半断开。照 `test_assistant_stream.py` 的做法，把 `stream._events` 换成推出第一条就结束的生成器。
+- **现象**：流式测试里报 `StaleDataError: UPDATE statement on table 'assistant_messages' expected to update 1 row(s); 0 were matched`。
+  - 报错指向：像是消息被别人删了。
+  - 真正原因：测试库是单连接的内存库（`StaticPool`），后台回合进行中另一个请求结束时会回滚这条连接，把后台线程还没提交的写入一起回滚。测试里不要在回合进行中发请求；接口在起线程之前先关掉请求会话也是为了这个。
+
+维护记录：2026-11-05 · 评分助手：过程流式：新增开关与生产打开步骤，排错写明进度攒住、断线取回与两处测试陷阱的真实原因。

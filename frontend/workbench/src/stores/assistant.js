@@ -12,7 +12,7 @@
 import { defineStore } from "pinia";
 import { reactive, ref, watch } from "vue";
 
-import { api, ApiError, StaleContextError } from "@/api/client.js";
+import { api, ApiError, postStream, StaleContextError, StreamInterruptedError } from "@/api/client.js";
 import { MAX_FILES, TERMINAL_JOB_STATUSES, limitFiles } from "@/lib/assistant-flow.js";
 import { rememberDocumentType } from "@/lib/document-types.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
@@ -20,6 +20,10 @@ import { useUploadStore } from "@/stores/upload.js";
 
 const JOB_POLL_MS = 3000;
 const RUBRIC_POLL_MS = 5000;
+/** 流式断线后取回结果：每隔这么久读一次会话，最多等这么久（回合上限 60 秒加余量，过程流式方案 §5）。 */
+const RECOVER_POLL_MS = 2000;
+const RECOVER_WAIT_MS = 70000;
+const RECOVERING = "连接中断，正在取回结果…";
 const SETUP_DISMISSED_KEY = "pgs.assistant.setupDismissed";
 /** 老师在任务标签上操作后这么久之内，新结果不抢焦点，改为顶部提示（设计稿：60 秒）。 */
 const BUSY_MS = 60000;
@@ -46,6 +50,8 @@ export const useAssistantStore = defineStore("assistant", () => {
   const messages = ref([]);
   const pending = ref(null);
   const sending = ref(false);
+  /** 过程流式：回合进行时“现在在做哪一步”`{label, since}`，没有时为 null（docs/评分助手过程流式方案.md §3）。 */
+  const progress = ref(/** @type {{label: string, since: number} | null} */ (null));
   const uploading = ref(false);
   const error = ref(null);
   const setupOpen = ref(false);
@@ -217,6 +223,27 @@ export const useAssistantStore = defineStore("assistant", () => {
 
   // --- 运行 --------------------------------------------------------------------
 
+  /**
+   * 老师这句话先显示出来，不等后端返回（本地消息，编号以 `local-` 开头）。返回结果里带着后端存下的那一条，
+   * 收到后换掉；没发出去就留着并标“没有发出去”，老师可以重新发送，输入框已经清空了，不能让这句话丢掉。
+   */
+  let localSeq = 0;
+  function echo(text, quickAction) {
+    localSeq += 1;
+    const item = { id: `local-${localSeq}`, role: "user", text, cards: [], created_at: new Date().toISOString(),
+      local: "sending", quick_action: quickAction || null };
+    messages.value = [...messages.value, item];
+    return item;
+  }
+
+  function dropLocal(id) {
+    messages.value = messages.value.filter((item) => item.id !== id);
+  }
+
+  function markFailed(id) {
+    messages.value = messages.value.map((item) => (item.id === id ? { ...item, local: "failed" } : item));
+  }
+
   function mergeMessages(incoming) {
     const byId = new Map(messages.value.map((item) => [item.id, item]));
     for (const message of incoming || []) byId.set(message.id, message);
@@ -224,16 +251,65 @@ export const useAssistantStore = defineStore("assistant", () => {
       String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id)));
   }
 
-  async function run(body) {
+  async function run(body, local = null) {
     const target = conversation.value || (await create());
+    // 新会话：create() 清空了消息列表，把刚显示的这句话放回去。
+    if (local && !messages.value.some((item) => item.id === local.id)) messages.value = [...messages.value, local];
     stopWatchers();
-    const result = await api.post(`/assistant/conversations/${target.id}/runs`, body);
+    // 说一句话走流式（开关打开时），回合进行时能看到进度；卡片上的“确定”“选择”不调模型，照旧。
+    const result = body.type === "message" && settings.value?.stream_enabled
+      ? await runStream(target.id, body, local)
+      : await api.post(`/assistant/conversations/${target.id}/runs`, body);
+    if (local) dropLocal(local.id);
     const known = new Set(messages.value.map((item) => item.id));
     mergeMessages(result.messages);
     revealArtifacts((result.messages || []).filter((item) => !known.has(item.id)));
     pending.value = result.pending || null;
     applyConversation(result.conversation);
     return result;
+  }
+
+  async function runStream(conversationId, body, local) {
+    const known = new Set(messages.value.map((item) => item.id));
+    progress.value = null;
+    try {
+      return await postStream(`/assistant/conversations/${conversationId}/runs/stream`, body, {
+        onEvent(event, data) {
+          if (event === "progress" && typeof data?.label === "string") progress.value = { label: data.label, since: Date.now() };
+        },
+      });
+    } catch (err) {
+      if (!(err instanceof StreamInterruptedError)) throw err;
+      // 要 await：直接返回 promise 的话 finally 立刻执行，“正在取回结果”还没显示就被清掉了。
+      return await recoverRun(conversationId, local, known);
+    } finally {
+      progress.value = null;
+    }
+  }
+
+  /**
+   * 请求发出后连接断了：不重发（会多一条），读会话等这次运行结束，再用会话里的消息。
+   * 会话里找不到这句话，说明后端没收到，抛错让它标成“没有发出去”。
+   */
+  async function recoverRun(conversationId, local, known) {
+    progress.value = { label: RECOVERING, since: Date.now() };
+    const deadline = Date.now() + RECOVER_WAIT_MS;
+    for (;;) {
+      let detail = null;
+      try {
+        detail = await api.get(`/assistant/conversations/${conversationId}`);
+      } catch (err) {
+        if (err instanceof StaleContextError) throw err;
+      }
+      if (detail && !detail.running) {
+        const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
+        const delivered = !local || fresh.some((item) => item.role === "user" && item.text === local.text);
+        if (!delivered) throw new ApiError(0, "连接中断，这句话没有发出去。", null);
+        return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail };
+      }
+      if (Date.now() >= deadline) throw new ApiError(0, "连接中断，没有取回结果，请刷新页面看看。", null);
+      await new Promise((resolve) => { window.setTimeout(resolve, RECOVER_POLL_MS); });
+    }
   }
 
   /** 串行执行：同一会话同一时间只发一个运行请求（后端也有运行锁）。 */
@@ -258,11 +334,22 @@ export const useAssistantStore = defineStore("assistant", () => {
    * @param {string} text
    * @param {string} [quickAction]
    */
-  function send(text, quickAction) {
+  async function send(text, quickAction) {
     const cleaned = (text || "").trim();
-    if (!cleaned) return Promise.resolve(undefined);
+    if (!cleaned || sending.value) return undefined;
     const body = quickAction ? { type: "message", text: cleaned, quick_action: quickAction } : { type: "message", text: cleaned };
-    return guarded(() => run(body), "发送失败");
+    const local = echo(cleaned, quickAction);
+    const result = await guarded(() => run(body, local), "发送失败");
+    if (result === undefined) markFailed(local.id);
+    return result;
+  }
+
+  /** 重新发送一句没发出去的话：去掉那条本地消息，按原样再发一次（快捷按钮仍带意图键）。 */
+  function resend(localId) {
+    const item = messages.value.find((entry) => entry.id === localId && entry.local === "failed");
+    if (!item || sending.value) return Promise.resolve(undefined);
+    dropLocal(item.id);
+    return send(item.text, item.quick_action || undefined);
   }
 
   function resume(cardId, value) {
@@ -489,10 +576,10 @@ export const useAssistantStore = defineStore("assistant", () => {
   });
 
   return {
-    settings, conversations, conversation, messages, pending, sending, uploading, error, setupOpen,
+    settings, conversations, conversation, messages, pending, sending, progress, uploading, error, setupOpen,
     workspacePath, workspaceKey, jobs, filesByThread, ws,
     loadSettings, saveSettings, dismissSetup, loadConversations, open, create, remove, clearConversation,
-    showWorkspace, send, resume, select, switchFlow, isPending, filesForPending, attachFiles, pickFiles, replaceFiles,
+    showWorkspace, send, resend, resume, select, switchFlow, isPending, filesForPending, attachFiles, pickFiles, replaceFiles,
     importRubric, reportError, reset, stopWatchers,
     openStep, openArtifact, noteTaskEdit, answerConfirm, changeRubric,
   };

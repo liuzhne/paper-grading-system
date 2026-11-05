@@ -9,12 +9,15 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import require_organization_role
+from backend.app.core.config import settings
 from backend.app.db.models import AssistantConversation
 from backend.app.db.models import AssistantPreference
 from backend.app.db.models import utcnow
@@ -29,6 +32,7 @@ from backend.app.schemas.assistant import AssistantSettingsRead
 from backend.app.schemas.assistant import AssistantSettingsUpdate
 from backend.app.services.assistant import model as assistant_model
 from backend.app.services.assistant import runner
+from backend.app.services.assistant import stream
 from backend.app.services.dev_user import ensure_dev_user
 
 
@@ -87,6 +91,8 @@ def _settings_payload(db: Session, principal: CurrentPrincipal) -> dict:
             for item in connections
         ],
         "platform_available": assistant_model.platform_available(db),
+        # 前端据此选 `/runs/stream` 还是 `/runs`（docs/评分助手过程流式方案.md §4.5）。
+        "stream_enabled": settings.ASSISTANT_STREAM_ENABLED,
     }
 
 
@@ -187,6 +193,8 @@ def read_conversation(
     return {
         "id": conversation.id, "title": conversation.title, "focus": conversation.focus,
         "created_at": conversation.created_at, "updated_at": conversation.updated_at,
+        # 只用来算 `running`，不出现在返回里：流式断线后前端靠它判断还要不要等。
+        "run_locked_until": conversation.run_locked_until,
         "messages": conversation.messages, "pending": conversation.pending,
     }
 
@@ -235,10 +243,57 @@ def create_run(
 
     principal = _principal(db, principal)
     conversation = _owned_conversation(db, conversation_id, principal)
+    return runner.run(db, principal, conversation, _run_request(payload))
+
+
+def _run_request(payload: AssistantRunCreate) -> dict:
     request = payload.model_dump()
     if payload.type == "message":
         text = (payload.text or "").strip()
         if not text and payload.attachments is not None:
             text = "评分这 %d 份文件" % payload.attachments.count
         request["text"] = text
-    return runner.run(db, principal, conversation, request)
+    return request
+
+
+def _prepare_stream(db: Session, principal: CurrentPrincipal, conversation_id: str, payload: AssistantRunCreate):
+    """开始推送之前做完的事：鉴权、会话归属、请求整理、抢运行锁。不通过的照旧返回 404 / 409 / 422。"""
+
+    principal = _principal(db, principal)
+    conversation = _owned_conversation(db, conversation_id, principal)
+    request = _run_request(payload)
+    runner.acquire_lock(db, conversation)
+    bind = db.get_bind()
+    # 后台线程另开会话。请求的会话现在就关：它在请求结束时才会被依赖关闭，那时的回滚若落在同一条连接上
+    # （测试的单连接内存库），会把后台线程还没提交的事务一起回滚掉。
+    db.close()
+    return principal, conversation.id, request, bind
+
+
+@router.post(
+    "/conversations/{conversation_id}/runs/stream",
+    response_class=StreamingResponse,
+    responses={200: {
+        "description": "SSE：accepted → progress（零到多条）→ done（与 /runs 的返回体相同）或 error；空闲时有注释行心跳",
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    }},
+)
+async def create_run_stream(
+    conversation_id: str,
+    payload: AssistantRunCreate,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """与 `/runs` 相同的一次推进，过程中推送进度（docs/评分助手过程流式方案.md）。开关关闭时 404。"""
+
+    if not settings.ASSISTANT_STREAM_ENABLED:
+        raise HTTPException(status_code=404, detail="Not Found")
+    principal, conversation_id, request, bind = await run_in_threadpool(
+        _prepare_stream, db, principal, conversation_id, payload
+    )
+    return StreamingResponse(
+        stream.start(bind, principal, conversation_id, request),
+        media_type="text/event-stream",
+        # 直接返回 Response 时，路由依赖设置的响应头不会带上，这里自己写。
+        headers={"Cache-Control": "private, no-store", "X-Accel-Buffering": "no"},
+    )

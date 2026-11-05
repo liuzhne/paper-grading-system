@@ -6,7 +6,10 @@ from typing import Optional
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import computed_field
 from pydantic import model_validator
+
+from backend.app.db.models import utcnow
 
 MAX_FILES = 30
 
@@ -32,6 +35,7 @@ class AssistantSettingsRead(BaseModel):
     effective: AssistantModelRead
     connections: list[AssistantConnectionOption]
     platform_available: bool
+    stream_enabled: bool = False
 
 
 class AssistantSettingsUpdate(BaseModel):
@@ -71,6 +75,14 @@ class AssistantConversationRead(BaseModel):
     focus: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    run_locked_until: Optional[datetime] = Field(default=None, exclude=True)
+
+    @computed_field
+    @property
+    def running(self) -> bool:
+        """这一刻有运行在推进（运行锁没过期）。流式断线后前端靠它判断还要不要等（过程流式方案 §4.4）。"""
+
+        return self.run_locked_until is not None and self.run_locked_until > utcnow()
 
 
 class AssistantConversationDetail(AssistantConversationRead):

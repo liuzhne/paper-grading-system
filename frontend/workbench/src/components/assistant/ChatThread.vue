@@ -1,9 +1,9 @@
 <script setup>
 /**
- * 对话（评分助手 v2 设计稿）：老师的消息是深绿气泡；助手的消息带头像、名称与时间；“你发布了《…》”这类
- * 事件显示为分隔线。流程卡片与结果卡片显示成“在右侧查看”入口，对话本身的选择（选任务、重试、放弃上一步）仍在这里点。
+ * 对话（评分助手 v2 设计稿）：老师的消息是深绿气泡，发出时先显示，没发出去的标“没有发出去”并可重新发送；
+ * 助手的消息带头像、名称与时间；“你发布了《…》”这类事件显示为分隔线。流程卡片与结果卡片显示成“在右侧查看”入口，对话本身的选择（选任务、重试、放弃上一步）仍在这里点。
  */
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import AssistantCard from "@/components/AssistantCard.vue";
 import { QUICK_ACTIONS } from "@/lib/assistant-flow.js";
@@ -52,6 +52,22 @@ function scrollToEnd() {
   });
 }
 watch(() => [store.conversation?.id, store.messages.length, store.sending], scrollToEnd);
+
+/** 回合进行时显示当前这一步（过程流式），一步超过 5 秒加上已用秒数；没有进度时“正在整理…”。 */
+const now = ref(Date.now());
+let ticker = null;
+watch(() => store.sending, (busy) => {
+  if (ticker) window.clearInterval(ticker);
+  ticker = busy ? window.setInterval(() => { now.value = Date.now(); }, 1000) : null;
+  now.value = Date.now();
+}, { immediate: true });
+onBeforeUnmount(() => { if (ticker) window.clearInterval(ticker); });
+const typingText = computed(() => {
+  const current = store.progress;
+  if (!current) return "正在整理…";
+  const seconds = Math.floor((now.value - current.since) / 1000);
+  return seconds > 5 ? `${current.label} ${seconds} 秒` : current.label;
+});
 </script>
 
 <template>
@@ -75,6 +91,9 @@ watch(() => [store.conversation?.id, store.messages.length, store.sending], scro
         <article v-else-if="message.role === 'user'" class="message from-user">
           <time class="stamp" :datetime="message.created_at">{{ clockText(message.created_at) }}</time>
           <p class="bubble">{{ message.text }}</p>
+          <p v-if="message.local === 'failed'" class="unsent" role="alert">
+            没有发出去<button type="button" :disabled="store.sending" @click="store.resend(message.id)">重新发送</button>
+          </p>
         </article>
         <article v-else class="message from-assistant">
           <span class="avatar" aria-hidden="true">
@@ -101,7 +120,7 @@ watch(() => [store.conversation?.id, store.messages.length, store.sending], scro
             <path d="M4 8.6V4h4.6" /><path d="M20 15.4V20h-4.6" /><path d="M8.2 12.4l3 3 5.2-5.8" />
           </svg>
         </span>
-        <span>正在整理…</span>
+        <span data-test="typing">{{ typingText }}</span>
       </div>
     </div>
   </div>
@@ -123,6 +142,9 @@ watch(() => [store.conversation?.id, store.messages.length, store.sending], scro
 .stamp, .who time { font-size: 11.5px; color: var(--text-faint); }
 .bubble { margin: 0; max-width: min(80%, 520px); padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--accent);
   color: #fff; font-size: 14px; line-height: 1.7; white-space: pre-wrap; text-wrap: pretty; }
+.unsent { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--danger); }
+.unsent button { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
+.unsent button:disabled { color: var(--text-faint); cursor: default; }
 .from-assistant { display: flex; gap: 12px; align-items: flex-start; }
 .avatar { flex: none; width: 28px; height: 28px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; margin-top: 1px; }
 .body { flex: 1; min-width: 0; }

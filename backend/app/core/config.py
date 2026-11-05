@@ -123,6 +123,9 @@ class Settings(BaseSettings):
     ASSISTANT_AGENT_ENABLED: bool = False
     # 每人每天的 Agent 回合上限（防止误用耗尽额度），超出后当天只用规则模式。
     ASSISTANT_AGENT_DAILY_TURNS: int = 300
+    # 评分助手的过程流式（docs/评分助手过程流式方案.md）：回合进行时把“现在在做哪一步”推给前端。默认关闭：
+    # 关闭时 `/runs/stream` 返回 404，前端照旧走 `/runs`。在生产上核实代理不会攒住推送之后再打开。
+    ASSISTANT_STREAM_ENABLED: bool = False
     LLM_PROVIDER: str = "mock"
     # A protected multi-user deployment must not accidentally bill/expose work
     # through the deployment-wide key.  Set this only for a reviewed migration,
