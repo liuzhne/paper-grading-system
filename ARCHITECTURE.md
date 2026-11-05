@@ -591,6 +591,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | `TurnRefs` 另存对象 → 名称（同名对象各自保留，`names` 仍供状态核对）；`pin` 可带名称，`t0` 带焦点里的任务名；`reply.validate_reply` 的注入检测与说法核对改看去掉记号后的文字；超出卡片上限、没有名称的对象也计数。调用链与持久化边界不变 |
+| 2026-11-05 | 评分助手：列表不能只剩引导句 | `TurnRefs.add` 可带一行文字（评分标准“《名称》版本（文档类型）”、评分项名称），`TurnRefs.notes` 登记列出后的说明；`turn.cards_for` 改为 `turn.attachments`，返回卡片与代码列出的几行文字，运行器接在模型的引导句后面；卡片上限从校验移到显示，超出的用名称补一行。回复 `meta` 多记 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`（已有 JSON 列，无迁移）。提示词、工具定义与指纹不变，接口与 OpenAPI 不变 |
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 互斥组一次调用的依据由 `rule_executor._semantic_group_decisions` 标上 `basis.group_code`（结果合同可选字段），`judgement_view._share_group_basis` 只在被选中的那一档显示；依据与扣分证据的编号先判类型；`persistence.core_item_reason` 按 `RULE_EVIDENCE_INSUFFICIENT` 单列证据不足；`production_env.from_file` 把可选设置的空值当没设；评分页定位先切回正文页签。模块边界、调用链与持久化边界不变，无迁移 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新增 `scoring/frozen_document.py`（论文 Core 评分按 `document_snapshot_ref` 读判分时的冻结正文，证据视图与正文视图共用）与 `scoring/judgement_view.py`（读取时从 `rule_results` 算逐条规则判定与证据充分度，`items?include_view=true` 返回 `judgement_view`）；证据引用多存核对过的 `quote`，规则判定可带 `evidence_selection`（`build_v4_envelope(selection_report=)` 经 Profile 回填）与 `basis`（`SCORING_DECISION_BASIS_MODE=cite`）；结果合同只加可选字段、不升版本；落库扣分理由改中文。无迁移；开关关闭时判定身份与提示词不变 |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 开关打开时 `rubric_snapshot.load_from_session` 生成 `atomic-rule-snapshot@4`（多 `applies_to`，`evidence_policy` 可带 `judge_scope`），关闭时仍是 `@3` 并去掉 `judge_scope`；`judge_scope.explain_judge_scope` / `review_hint` 供评分与 `read_review_workspace` 共用；band 规则的请求不提供 `insufficient_evidence`；Core 落库写 `score_items.review_reasons`（`review_reasons.from_core_issues`）；规则编辑器加判定范围下拉框。无迁移，接口与 OpenAPI 不变 |
@@ -1579,7 +1581,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 - `evaluated.py`：评测达标过的助手模型名单（端点家族 + 模型名，现在只有 Google 端点上的 `gemini-2.5-flash`）；不在名单里的模型不走 Agent 回合。部署门槛 `assistant_eval_gate` 要求名单里每个模型都有当前提示词指纹上的达标评测。
 - `refs.py`：引用编号（`t1`、`p1`、`r1`、`i1`，焦点里的 `t0`、`p0`），模型看不到数据库 ID。
 - `context.py`：请求组装与确定性渲染；历史每轮是用户原话、加载记录（合成的 `tool_search(select:…)` 调用与结果）与回复文字，卡片只留占位；已加载名单从历史推出；系统指令版本 `assistant-agent@1`。
-- `reply.py`：输出契约（整体作废、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
+- `reply.py`：输出契约（整体作废、去 Markdown 记号、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
 - `compaction.py`：历史压缩（12 轮或 8,000 token，或缓存已冷），三部分：代码整理的事实要点、模型摘要的老师要求、仍在使用的工具。
 - `turn.py`：Agent 回合子图与入口。
 - `llm/tool_calls.py` + `openai_compatible_adapter.complete_with_tools`：原生工具调用一步；响应里的助手消息原样放回下一步（含 Gemini 的思考签名）。
@@ -1590,7 +1592,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 
 A1（听懂与帮助）：`agent/business.py` 补齐业务工具，`agent/help.py` 是代码维护的帮助条目。
 - 常驻 8 个：查询的 `help_lookup`、`task_list`、`task_overview`、`paper_result`（原方案的 `paper_find` 并入它），与 10-25 起常驻的提议工具 `action_start_grading` / `action_import_rubric` / `action_retry_failed` / `action_cancel`（提示词 @4；重试与取消可按 `task_name` 找任务，@5 起没说任务时按状态唯一定位；开始评分可按 `rubric_name` 找标准）；延迟：`review_list`、`rubric_list`。常驻工具经 `call_tool` 调用也照常执行（兼容旧对话的加载记录）。
-- 工具结果不含分数数字与学生原文（扣分理由疑似注入的不给）；编号带卡片（`TurnRefs.add(…, card=)`），回复 `cards` 里的编号由 `turn.cards_for` 换成卡片；`help_refs` 只能引用本回合 `help_lookup` 返回的条目，界面显示条目原文。
+- 工具结果不含分数数字与学生原文（扣分理由疑似注入的不给）；编号带卡片（`TurnRefs.add(…, card=)`），回复 `cards` 里的编号由 `turn.attachments` 换成卡片（11-05 起没有卡片的评分标准、评分项由代码按工具结果列出名称，见下文 2026-11-05 一节）；`help_refs` 只能引用本回合 `help_lookup` 返回的条目，界面显示条目原文。
 - 提议工具返回 `{"proposal": …}`：确认卡片沿用一期的 `confirm_retry` / `confirm_cancel`，开始评分与导入走 `runner._start_flow`（打断保护照常）；没有可执行的对象时返回普通提示，回合继续。
 - 涉及某个任务或材料时更新焦点（换任务时清掉旧材料）与右侧工作区；没有当前任务时，按姓名在最近 8 个任务里一起找，只给序号则返回任务列表请老师先选。
 - 搜索只返回得分不低于第一名 75% 的工具；系统指令升为 `assistant-agent@2`，等待中的步骤写明是哪张卡片、上面有什么。
@@ -1740,3 +1742,32 @@ persistence._score_items：outcome.review_issues 里的 RULE_EVIDENCE_INSUFFICIE
 核对范围：评分执行器、结果合同、判定视图、落库摘要、部署脚本与评分页；模块边界、核心调用链与持久化边界不变，无迁移。
 
 维护记录：2026-11-04 · 评分证据与理由 #77 复审修正：记录互斥组依据的标记与展示落点、证据编号的类型检查、证据不足单列与可选设置空值的处理；边界不变。
+
+### 2026-11-05 评分助手：列表不能只剩引导句
+
+方案见 [docs/评分助手Agent化方案.md](docs/评分助手Agent化方案.md) 第 14.2 节。生产上老师在等选文件时问“有其他的评分标准吗？”，回复只有“目前已发布的评分标准有：”：`rubric_list` 返回了列表，但评分标准的编号没有卡片，回复里的编号被静默丢掉（或模型写的 Markdown 列表被整行删掉）。
+
+```
+业务工具登记编号
+    TurnRefs.add(kind, id, card=…, label=…)    评分标准：label=“《名称》版本（文档类型）”；评分项：label=名称
+    TurnRefs.notes                              rubric_list：只有一份 / 等选文件时可以在右侧换
+reply → reply.validate_reply
+    去 Markdown 记号（** 反引号 成对 __ 行首 #，行首 * + 换成“·”）→ 整句丢分数句、链接、邮箱、HTML 标签
+    cards 里的编号要显示得出来（TurnRefs.displayable：有卡片、是任务、或列得出名称），否则作废修正一次
+    清理后以冒号结尾、却没有 cards 与 help_refs → 作废修正一次（快捷按钮不算）
+runner._try_agent_turn
+    turn.attachments(refs, reply) → (卡片 ≤3 张, 代码列出的几行)
+        有卡片：显示卡片，超出 3 张的用名称补“卡片只显示前 3 个，另外还有：……”
+        没有卡片：“· 《名称》版本（文档类型）”逐行列出；再附该类对象登记的说明（回复里已有“只有”“换”就不加）
+    文字 = 模型的 text + 代码列出的几行 + 帮助条目原文；meta 记 cards_shown、listed
+```
+
+- 名称来自工具结果（评分标准名、评分项名、任务名、材料名过注入检测后的名称），不经模型转述。
+- 规则模式（Agent 关闭或降级）不变：降级模式不加新意图（Agent 化方案第 16 节）。
+- 提示词、tools 数组与工具说明都没改，`assistant-agent@6` 的指纹不变，部署门槛用的评测报告仍有效。
+
+维护记录：2026-11-05 · 评分助手：列表不能只剩引导句：记录编号的文字登记、回复校验的两条新作废规则、去记号与代码列表的调用链；无迁移。
+
+#78 复审修正：`validate_reply` 先去记号，再做注入检测、说法核对（`claims`）与整句清理，三者看同一份文字；`TurnRefs._display_names` 记对象 → 名称，`label_of` 从这里取；`run_turn` 把焦点里的 `batch_name` 随 `t0` 登记。
+
+维护记录：2026-11-05 · 评分助手 #78 复审修正：记录校验顺序、名称的另一份映射与 `t0` 的名称来源。

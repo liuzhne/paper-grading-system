@@ -393,11 +393,15 @@ def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, messa
     message.intent = agent_budget.AGENT_INTENT
     message.model_name = model_name
     flow = None
+    shown = None
     if outcome.kind == "reply":
-        cards = agent_turn.cards_for(outcome.refs, outcome.reply)
+        # 没有卡片的对象（评分标准、评分项）由代码接在引导句后面列出（Agent 化方案 §14.2）。
+        cards, lines = agent_turn.attachments(outcome.refs, outcome.reply)
+        shown = {"cards_shown": len(cards), "listed": len(lines)}
         if outcome.reply.next_steps:
             cards.append(quick_actions_card(list(outcome.reply.next_steps)))
-        text_out = "\n\n".join([outcome.reply.text, *agent_turn.help_texts(outcome.reply)])
+        lead = "\n".join([outcome.reply.text, *lines])
+        text_out = "\n\n".join([lead, *agent_turn.help_texts(outcome.reply)])
         reply = ctx.say(text_out, cards, intent=agent_budget.AGENT_INTENT)
     elif outcome.kind == "proposal":
         proposal = outcome.proposal or {}
@@ -406,7 +410,7 @@ def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, messa
                         intent=agent_budget.AGENT_INTENT)
     else:
         reply = ctx.say(agent_turn.FALLBACK_TEXT, [quick_actions_card()], intent=agent_budget.AGENT_INTENT)
-    reply.meta = outcome.meta
+    reply.meta = {**outcome.meta, **(shown or {})}
     reply.model_name = model_name
     if flow:
         # 进入一期的流程（开始评分、导入）：打断保护、确认卡片都照常生效（方案 §17）。

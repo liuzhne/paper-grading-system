@@ -446,17 +446,19 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
             reason = str((deduction or {}).get("reason") or "").strip()[:80] if isinstance(deduction, dict) else ""
             if reason:
                 reasons.append("（该条疑似包含指令，未显示）" if detect_injection(reason) else reason)
+        # 评分项没有卡片：回复把编号放进 cards 时，由代码列出评分项名称（§14.2）。
+        ref = turn.refs.add("i", item.id, label=str(name or "")[:NAME_LIMIT])
         if _unresolved(item):
             # 没评出结果：不是失了分（#60 复审），不给评分理由与修改建议，说明状态，让老师去重试。
             items.append({
-                "ref": turn.refs.add("i", item.id), "评分项": name, "满分": False,
+                "ref": ref, "评分项": name, "满分": False,
                 "评分状态": "没有评出有效结果，不能据此说怎么改；可到评分进度页重试失败项",
                 "需要复核": bool(item.need_manual_review), "扣分理由": [], "证据条数": len(item.evidence or []),
             })
             continue
         lost = _loss_rate(item) > 0
         items.append({
-            "ref": turn.refs.add("i", item.id), "评分项": name, "满分": not lost,
+            "ref": ref, "评分项": name, "满分": not lost,
             "需要复核": bool(item.need_manual_review), "扣分理由": reasons, "证据条数": len(item.evidence or []),
             **(_improvement(item) if lost else {}),
         })
@@ -562,6 +564,9 @@ class RubricListParams(BaseModel):
 
 def _rubric_list(turn: TurnContext, _params: RubricListParams) -> dict:
     rubrics = tools.call(turn.run, "list_published_rubrics")
+    if not rubrics:
+        # 空列表要明说：模型写了“已发布的评分标准有：”却没有可列的，冒号后面就是空的（11-05 生产）。
+        return {"rubrics": [], "提示": "目前没有已发布的评分标准：直接告诉老师没有，建议导入评分规则和模板（next_steps 用 import_rubric）。"}
     shown = rubrics[:LIST_LIMIT]
     result = {
         "rubrics": [_rubric_entry(turn, item) for item in shown],
@@ -569,6 +574,11 @@ def _rubric_list(turn: TurnContext, _params: RubricListParams) -> dict:
     }
     if len(rubrics) > len(shown):
         result["还有"] = len(rubrics) - len(shown)
+    # 回复引用了评分标准时由代码附在列表后面（§14.2）：只有一份就明说，等选文件时告诉老师可以换。
+    if len(rubrics) == 1:
+        turn.refs.note("r", "只有", "目前只有这一份已发布的评分标准；要用别的标准，可以先导入你的评分规则和模板。")
+    elif (turn.run.conversation.pending or {}).get("kind") == "pick_files":
+        turn.refs.note("r", "换", "选文件之前可以在右侧的“评分标准”里换一份；上传后任务就锁定这份评分标准。")
     return result
 
 
@@ -592,9 +602,15 @@ class StartGradingParams(BaseModel):
     rubric_name: str | None = Field(default=None, max_length=50)
 
 
+RUBRIC_NAME_LIMIT = 60
+
+
 def _rubric_entry(turn: TurnContext, item: dict) -> dict:
-    return {"ref": turn.refs.add("r", item["id"]), "name": item["name"], "version": item["version"],
-            "文档类型": document_type_label(item["business_profile_key"])}
+    kind = document_type_label(item["business_profile_key"])
+    # 评分标准没有卡片：回复把编号放进 cards 时，由代码列出这一行（§14.2），不再静默丢掉。
+    label = "《%s》%s（%s）" % (str(item["name"])[:RUBRIC_NAME_LIMIT], item["version"], kind)
+    return {"ref": turn.refs.add("r", item["id"], label=label), "name": item["name"], "version": item["version"],
+            "文档类型": kind}
 
 
 def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict:

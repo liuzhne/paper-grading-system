@@ -43,6 +43,7 @@ from backend.app.services.assistant.agent.context import state_message
 from backend.app.services.assistant.agent.context import turn_groups
 from backend.app.services.assistant.agent.refs import ToolError
 from backend.app.services.assistant.agent.refs import TurnContext
+from backend.app.services.assistant.agent.reply import MAX_CARDS
 from backend.app.services.assistant.agent.reply import ReplyInvalid
 from backend.app.services.assistant.agent.reply import ValidReply
 from backend.app.services.assistant.agent.reply import validate_reply
@@ -394,7 +395,7 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
     turn = TurnContext(run=ctx)
     focus = dict(conversation.focus or {})
     if focus.get("batch_id"):
-        turn.refs.pin("t0", "t", focus["batch_id"])
+        turn.refs.pin("t0", "t", focus["batch_id"], label=focus.get("batch_name"))
     if focus.get("paper_id"):
         turn.refs.pin("p0", "p", focus["paper_id"])
     runtime = _Runtime(
@@ -412,34 +413,78 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
         "text_replies": runtime.text_replies, "thought_signatures": runtime.thought_signatures,
         "param_errors": sum(runtime.param_errors.values()),
         "help_refs": list(raw["reply"].help_refs) if raw.get("reply") is not None else [],
+        # 校验不合格后重写的次数：冒号收尾、显示不出的编号等（§14.2）。
+        "reply_retries": int(final.get("reply_retries") or 0),
     }
+    if raw.get("reply") is not None:
+        # 清理时整句删掉了几句、模型要显示几个编号：线上回复“少了一截”时靠它们分辨原因（11-05 生产查不出来）。
+        meta["dropped_sentences"] = raw["reply"].dropped_sentences
+        meta["cards_requested"] = len(raw["reply"].cards)
     if raw.get("reason"):
         meta["reason"] = raw["reason"]
     if raw.get("error_code"):
         meta["error_code"] = raw["error_code"]
     logger.info(
         "assistant_turn mode=agent protocol=%s outcome=%s steps=%d tools=%s searches=%d loaded=%s "
-        "tokens_in=%d tokens_cache_read=%d tokens_out=%d latency_ms=%d",
+        "reply_retries=%d dropped=%d tokens_in=%d tokens_cache_read=%d tokens_out=%d latency_ms=%d",
         protocol, raw["kind"], runtime.model_calls, ",".join(runtime.called) or "-", meta["searches"],
-        ",".join(tools_loaded) or "-", runtime.usage["prompt_tokens"], runtime.usage["cached_tokens"],
+        ",".join(tools_loaded) or "-", meta["reply_retries"], int(meta.get("dropped_sentences") or 0),
+        runtime.usage["prompt_tokens"], runtime.usage["cached_tokens"],
         runtime.usage["completion_tokens"], int((time.monotonic() - started) * 1000),
     )
     return TurnOutcome(kind=raw["kind"], reply=raw.get("reply"), proposal=raw.get("proposal"),
                        reason=raw.get("reason"), meta=meta, refs=turn.refs)
 
 
-def cards_for(refs, reply: ValidReply) -> list[dict]:
-    """回复里的引用编号 → 数据卡片（分数由卡片现取）。没有卡片的对象（评分标准、评分项）不显示。"""
+def attachments(refs, reply: ValidReply) -> tuple[list[dict], list[str]]:
+    """回复里的引用编号 → 数据卡片，以及由代码列出的几行文字（§14、§14.2）。
 
-    cards = []
+    - 有卡片的对象（任务、材料）显示卡片，分数由卡片现取；最多 `MAX_CARDS` 张，超出的用名称补一行“另外还有”；
+    - 没有卡片的对象（评分标准、评分项）由代码按工具结果逐行列出，模型的 text 只写引导句；
+    - 列出某类对象时，工具登记的说明（“目前只有这一份……”）附在后面，回复里已经说了就不重复。
+
+    以前没有卡片的编号一律不显示：模型写“目前已发布的评分标准有：”、把 r1 放进 cards，老师看到冒号后面是空的
+    （11-05 生产）。
+    """
+
+    cards: list[dict] = []
+    lines: list[str] = []
+    overflow: list[str] = []
+    kinds: list[str] = []
     for ref in reply.cards:
+        kind = refs.kind_of(ref)
+        if kind and kind not in kinds:
+            kinds.append(kind)
         card = refs.card_of(ref)
-        if card is None:
-            found = refs.object_of(ref)
-            card = {"type": "overview", "batch_id": found[1]} if found and found[0] == "t" else None
-        if card and card not in cards:
-            cards.append(card)
-    return cards
+        if card is None and kind == "t":
+            card = {"type": "overview", "batch_id": refs.object_of(ref)[1]}
+        if card is not None:
+            if card in cards:
+                continue
+            if len(cards) < MAX_CARDS:
+                cards.append(card)
+                continue
+            overflow.append(refs.label_of(ref))
+            continue
+        label = refs.label_of(ref)
+        if label:
+            lines.append("· %s" % label)
+    if overflow:
+        lines.append(_overflow_line(overflow))
+    for kind in kinds:
+        lines.extend(note for marker, note in refs.notes.get(kind, []) if marker not in reply.text)
+    return cards, lines
+
+
+def _overflow_line(labels: list[str | None]) -> str:
+    """超出卡片上限的对象：有名称的列名称，没有名称的也计数，不静默丢掉（#78 复审）。"""
+
+    named = [label for label in labels if label]
+    if not named:
+        return "卡片只显示前 %d 个，另外还有 %d 个没有显示。" % (MAX_CARDS, len(labels))
+    if len(named) == len(labels):
+        return "卡片只显示前 %d 个，另外还有：%s。" % (MAX_CARDS, "、".join(named))
+    return "卡片只显示前 %d 个，另外还有 %d 个：%s 等。" % (MAX_CARDS, len(labels), "、".join(named))
 
 
 def help_texts(reply: ValidReply) -> list[str]:
@@ -450,4 +495,4 @@ def help_texts(reply: ValidReply) -> list[str]:
     return [help_entries.BY_KEY[key].text for key in reply.help_refs if key in help_entries.BY_KEY]
 
 
-__all__ = ["FALLBACK_TEXT", "TurnOutcome", "cards_for", "help_texts", "model_step", "run_turn"]
+__all__ = ["FALLBACK_TEXT", "TurnOutcome", "attachments", "help_texts", "model_step", "run_turn"]

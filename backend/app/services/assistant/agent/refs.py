@@ -26,12 +26,19 @@ class TurnRefs:
     _counters: dict[str, int] = field(default_factory=dict)
     #: 编号 → 回复里引用它时显示的数据卡片（卡片只有类型与 ID，分数由界面现取）。
     _cards: dict[str, dict] = field(default_factory=dict)
+    #: 编号 → 没有卡片时由代码列出的一行文字（评分标准、评分项，§14.2）。名称来自工具结果，不经模型转述。
+    _labels: dict[str, str] = field(default_factory=dict)
+    #: 回复里引用了某类对象时，代码在列表后附加的说明：种类 → [(回复里已有这个词就不加, 说明)]。
+    notes: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     #: 本回合 `help_lookup` 返回过的帮助条目：回复的 help_refs 只能引用这些。
     help_seen: set[str] = field(default_factory=set)
     #: 本回合工具返回过的状态：(种类, 对象 ID, 类别)。回复里的状态说法要对得上它说的那个对象（claims）。
     evidence: set[tuple[str, str, str]] = field(default_factory=set)
     #: 工具结果里出现过的名称（任务名、材料名）→ 对象：判断回复里的状态说的是谁。
     names: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: 对象 → 名称：代码列出它时用（§14.2）。与 `names` 分开存：两份材料同名时 `names` 只留后一个，
+    #: 前一个的名称不能跟着丢（#78 复审）。
+    _display_names: dict[tuple[str, str], str] = field(default_factory=dict)
     #: 材料 → 所属任务：任务评完了，其中每一份也就评完了。
     parents: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
     #: 本回合出过的确认卡片类型（提议工具）。
@@ -45,6 +52,7 @@ class TurnRefs:
         key = (kind, str(object_id))
         if name:
             self.names[str(name)] = key
+            self._display_names.setdefault(key, str(name))
         if parent is not None:
             self.parents[key] = (parent[0], str(parent[1]))
 
@@ -55,7 +63,7 @@ class TurnRefs:
         if category:
             self.evidence.add((kind, str(object_id), category))
 
-    def add(self, kind: str, object_id: str, *, card: dict | None = None) -> str:
+    def add(self, kind: str, object_id: str, *, card: dict | None = None, label: str | None = None) -> str:
         key = (kind, str(object_id))
         if key in self._by_object:
             ref = self._by_object[key]
@@ -66,18 +74,43 @@ class TurnRefs:
             self._by_object[key] = ref
         if card is not None:
             self._cards[ref] = card
+        if label:
+            self._labels[ref] = label
         return ref
 
     def card_of(self, ref: str) -> dict | None:
         card = self._cards.get(str(ref or "").strip())
         return dict(card) if card else None
 
-    def pin(self, ref: str, kind: str, object_id: str) -> None:
-        """焦点里的对象用固定编号（`t0`、`p0`），每回合开头登记。"""
+    def label_of(self, ref: str) -> str | None:
+        """代码列出这个对象时用的文字：登记过的一行文字，没有就用工具结果里的名称（任务名、材料名）。"""
+
+        ref = str(ref or "").strip()
+        if ref in self._labels:
+            return self._labels[ref]
+        key = self._by_ref.get(ref)
+        return self._display_names.get(key) if key is not None else None
+
+    def displayable(self, ref: str) -> bool:
+        """放进 reply.cards 之后界面上能看到东西：有卡片（任务总有概况卡片），或者代码能列出它的名称。"""
+
+        return self.card_of(ref) is not None or self.kind_of(ref) == "t" or self.label_of(ref) is not None
+
+    def note(self, kind: str, marker: str, text: str) -> None:
+        self.notes.setdefault(kind, []).append((marker, text))
+
+    def pin(self, ref: str, kind: str, object_id: str, *, label: str | None = None) -> None:
+        """焦点里的对象用固定编号（`t0`、`p0`），每回合开头登记。
+
+        `label` 是焦点里记着的名称（当前任务名）：卡片超出上限时用它补“另外还有”（#78 复审）。只供显示，
+        不进 `names`，不改变状态说法的核对。
+        """
 
         key = (kind, str(object_id))
         self._by_ref[ref] = key
         self._by_object.setdefault(key, ref)
+        if label:
+            self._labels[ref] = label
 
     def resolve(self, ref: str | None, kind: str) -> str:
         found = self._by_ref.get(str(ref or "").strip())

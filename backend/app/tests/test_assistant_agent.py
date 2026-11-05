@@ -27,6 +27,7 @@ from backend.app.services.assistant.agent import catalog
 from backend.app.services.assistant.agent import claims
 from backend.app.services.assistant.agent import compaction
 from backend.app.services.assistant.agent import context as agent_context
+from backend.app.services.assistant.agent import turn as agent_turn
 from backend.app.services.assistant.agent.reply import ReplyInvalid
 from backend.app.services.assistant.agent.reply import validate_reply
 from backend.app.services.assistant.agent.refs import TurnRefs
@@ -195,6 +196,113 @@ def test_score_numbers_and_change_suggestions_never_reach_the_teacher(client, ag
 def test_reply_contract_rejects_injection_unknown_steps_and_empty_text(arguments):
     with pytest.raises(ReplyInvalid):
         validate_reply(json.dumps(arguments, ensure_ascii=False), TurnRefs())
+
+
+# --- 回复后面不能是空的（§14.2，11-05 生产：“目前已发布的评分标准有：”冒号后面什么都没有） -----------------
+
+def _rubric_refs():
+    refs = TurnRefs()
+    refs.add("r", "rubric-1", label="《毕业论文评分标准-V1》v1.0（毕业论文）")
+    refs.help_seen.add("rubric.import")
+    return refs
+
+
+@pytest.mark.parametrize(("arguments", "accepted"), [
+    ({"text": "目前已发布的评分标准有："}, False),
+    ({"text": "目前已发布的评分标准有:", "next_steps": ["start_grading"]}, False),  # 快捷按钮不算列表
+    ({"text": "目前已发布的评分标准有：\n**毕业论文评分标准-V1**（v1.0）"}, True),  # 去掉记号，列表还在
+    ({"text": "目前已发布的评分标准有：", "cards": ["r1"]}, True),  # 由代码列出
+    ({"text": "可以这样导入：", "help_refs": ["rubric.import"]}, True),  # 后面接帮助条目原文
+])
+def test_text_ending_with_a_colon_needs_something_after_it(arguments, accepted):
+    def check():
+        return validate_reply(json.dumps(arguments, ensure_ascii=False), _rubric_refs())
+
+    if accepted:
+        assert check().text
+    else:
+        with pytest.raises(ReplyInvalid, match="冒号结尾"):
+            check()
+
+
+def test_markdown_markers_are_stripped_instead_of_dropping_the_line():
+    text = "目前已发布的评分标准有：\n* **毕业论文评分标准-V1**（v1.0）\n## 说明\n用 `通用文档` 的标准评报告，__不用__改。"
+    found = validate_reply(json.dumps({"text": text}, ensure_ascii=False), TurnRefs())
+    assert found.text == "目前已发布的评分标准有：\n· 毕业论文评分标准-V1（v1.0）\n说明\n用 通用文档 的标准评报告，不用改。"
+    assert found.dropped_sentences == 0
+    # 链接、邮箱、HTML 标签仍整句丢；文件名里的单个下划线不动。
+    found = validate_reply(json.dumps({"text": "详见 https://example.com。发到 a@b.cn。<b>粗</b>。看 a_b.docx。"},
+                                      ensure_ascii=False), TurnRefs())
+    assert found.text == "看 a_b.docx。" and found.dropped_sentences == 3
+
+
+def test_a_ref_that_would_show_nothing_is_rejected_instead_of_dropped():
+    refs = TurnRefs()
+    refs.pin("p0", "p", "paper-1")  # 当前材料：本回合没查过，没有卡片也没有名称
+    with pytest.raises(ReplyInvalid, match="显示不出来"):
+        validate_reply(json.dumps({"text": "这一份在下面。", "cards": ["p0"]}, ensure_ascii=False), refs)
+
+
+def test_rubric_and_item_refs_are_listed_and_cards_beyond_the_limit_are_named():
+    refs = TurnRefs()
+    tasks = []
+    for index in range(5):
+        refs.name("t", "b%d" % index, "任务%d" % index)
+        tasks.append(refs.add("t", "b%d" % index, card={"type": "overview", "batch_id": "b%d" % index}))
+    rubric = refs.add("r", "rubric-1", label="《毕业论文评分标准-V1》v1.0（毕业论文）")
+    item = refs.add("i", "item-1", label="研究方法")
+    refs.note("r", "只有", "目前只有这一份已发布的评分标准。")
+    found = validate_reply(json.dumps({"text": "最近的任务和评分标准：", "cards": [*tasks, rubric, item]},
+                                      ensure_ascii=False), refs)
+    assert found.cards == (*tasks, rubric, item)  # 不在校验时截断
+
+    cards, lines = agent_turn.attachments(refs, found)
+    assert [card["batch_id"] for card in cards] == ["b0", "b1", "b2"]
+    assert lines == ["· 《毕业论文评分标准-V1》v1.0（毕业论文）", "· 研究方法", "卡片只显示前 3 个，另外还有：任务3、任务4。",
+                     "目前只有这一份已发布的评分标准。"]
+    # 回复里已经说了“只有”，说明不再重复。
+    said = validate_reply(json.dumps({"text": "只有这一份：", "cards": [rubric]}, ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, said) == ([], ["· 《毕业论文评分标准-V1》v1.0（毕业论文）"])
+
+
+def test_claims_are_checked_on_the_text_after_markers_are_stripped():
+    # 只看原文时“已经**完成**”对不上“已经完成”，去掉记号后却原样显示（#78 复审）。
+    for text in ("课程报告评分已经**完成**。", "课程报告评分已经`完成`。"):
+        with pytest.raises(ReplyInvalid, match="评分已经完成"):
+            validate_reply(json.dumps({"text": text}, ensure_ascii=False), TurnRefs())
+
+
+def test_papers_with_the_same_name_both_keep_their_label():
+    refs = TurnRefs()
+    first, second = [], []
+    for object_id, bucket in (("paper-a", first), ("paper-b", second)):
+        refs.name("p", object_id, "张三", parent=("t", "batch-1"))
+        bucket.append(refs.add("p", object_id))
+    assert refs.names["张三"] == ("p", "paper-b")  # 状态核对仍按名称找最后一个
+    assert refs.label_of(first[0]) == refs.label_of(second[0]) == "张三"
+    found = validate_reply(json.dumps({"text": "这两份还没有评分结果：", "cards": [first[0], second[0]]},
+                                      ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found) == ([], ["· 张三", "· 张三"])
+
+
+def test_cards_beyond_the_limit_are_counted_even_without_a_name():
+    refs = TurnRefs()
+    tasks = [refs.add("t", "b%d" % index, card={"type": "overview", "batch_id": "b%d" % index}) for index in range(3)]
+    refs.pin("t0", "t", "focus", label="课程报告评分")  # 当前任务：名称来自会话焦点
+    refs.pin("t9", "t", "unnamed")
+    found = validate_reply(json.dumps({"text": "最近的任务：", "cards": [*tasks, "t0"]}, ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found)[1] == ["卡片只显示前 3 个，另外还有：课程报告评分。"]
+    found = validate_reply(json.dumps({"text": "最近的任务：", "cards": [*tasks, "t0", "t9"]}, ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found)[1] == ["卡片只显示前 3 个，另外还有 2 个：课程报告评分 等。"]
+    found = validate_reply(json.dumps({"text": "最近的任务：", "cards": [*tasks, "t9"]}, ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found)[1] == ["卡片只显示前 3 个，另外还有 1 个没有显示。"]
+
+
+def test_a_bare_text_reply_ending_with_a_colon_falls_back_without_a_retry(client, agent):
+    model = agent(step(content="目前已发布的评分标准有："))
+    body = _say(client, _conversation(client), "有哪些评分标准")
+    assert "一时没处理好" in _texts(body)[-1]
+    assert len(model.requests) == 1
 
 
 def test_model_error_degrades_to_rules_without_a_second_model_call(client, agent):
