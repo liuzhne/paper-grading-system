@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | `TurnRefs` 另存对象 → 名称（同名对象各自保留，`names` 仍供状态核对）；`pin` 可带名称，`t0` 带焦点里的任务名；`reply.validate_reply` 的注入检测与说法核对改看去掉记号后的文字；超出卡片上限、没有名称的对象也计数。调用链与持久化边界不变 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句 | `TurnRefs.add` 可带一行文字（评分标准“《名称》版本（文档类型）”、评分项名称），`TurnRefs.notes` 登记列出后的说明；`turn.cards_for` 改为 `turn.attachments`，返回卡片与代码列出的几行文字，运行器接在模型的引导句后面；卡片上限从校验移到显示，超出的用名称补一行。回复 `meta` 多记 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`（已有 JSON 列，无迁移）。提示词、工具定义与指纹不变，接口与 OpenAPI 不变 |
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 互斥组一次调用的依据由 `rule_executor._semantic_group_decisions` 标上 `basis.group_code`（结果合同可选字段），`judgement_view._share_group_basis` 只在被选中的那一档显示；依据与扣分证据的编号先判类型；`persistence.core_item_reason` 按 `RULE_EVIDENCE_INSUFFICIENT` 单列证据不足；`production_env.from_file` 把可选设置的空值当没设；评分页定位先切回正文页签。模块边界、调用链与持久化边界不变，无迁移 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新增 `scoring/frozen_document.py`（论文 Core 评分按 `document_snapshot_ref` 读判分时的冻结正文，证据视图与正文视图共用）与 `scoring/judgement_view.py`（读取时从 `rule_results` 算逐条规则判定与证据充分度，`items?include_view=true` 返回 `judgement_view`）；证据引用多存核对过的 `quote`，规则判定可带 `evidence_selection`（`build_v4_envelope(selection_report=)` 经 Profile 回填）与 `basis`（`SCORING_DECISION_BASIS_MODE=cite`）；结果合同只加可选字段、不升版本；落库扣分理由改中文。无迁移；开关关闭时判定身份与提示词不变 |
@@ -1766,3 +1767,7 @@ runner._try_agent_turn
 - 提示词、tools 数组与工具说明都没改，`assistant-agent@6` 的指纹不变，部署门槛用的评测报告仍有效。
 
 维护记录：2026-11-05 · 评分助手：列表不能只剩引导句：记录编号的文字登记、回复校验的两条新作废规则、去记号与代码列表的调用链；无迁移。
+
+#78 复审修正：`validate_reply` 先去记号，再做注入检测、说法核对（`claims`）与整句清理，三者看同一份文字；`TurnRefs._display_names` 记对象 → 名称，`label_of` 从这里取；`run_turn` 把焦点里的 `batch_name` 随 `t0` 登记。
+
+维护记录：2026-11-05 · 评分助手 #78 复审修正：记录校验顺序、名称的另一份映射与 `t0` 的名称来源。

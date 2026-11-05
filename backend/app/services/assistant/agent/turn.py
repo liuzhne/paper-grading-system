@@ -395,7 +395,7 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
     turn = TurnContext(run=ctx)
     focus = dict(conversation.focus or {})
     if focus.get("batch_id"):
-        turn.refs.pin("t0", "t", focus["batch_id"])
+        turn.refs.pin("t0", "t", focus["batch_id"], label=focus.get("batch_name"))
     if focus.get("paper_id"):
         turn.refs.pin("p0", "p", focus["paper_id"])
     runtime = _Runtime(
@@ -464,18 +464,27 @@ def attachments(refs, reply: ValidReply) -> tuple[list[dict], list[str]]:
             if len(cards) < MAX_CARDS:
                 cards.append(card)
                 continue
-            label = refs.label_of(ref)
-            if label:
-                overflow.append(label)
+            overflow.append(refs.label_of(ref))
             continue
         label = refs.label_of(ref)
         if label:
             lines.append("· %s" % label)
     if overflow:
-        lines.append("卡片只显示前 %d 个，另外还有：%s。" % (MAX_CARDS, "、".join(overflow)))
+        lines.append(_overflow_line(overflow))
     for kind in kinds:
         lines.extend(note for marker, note in refs.notes.get(kind, []) if marker not in reply.text)
     return cards, lines
+
+
+def _overflow_line(labels: list[str | None]) -> str:
+    """超出卡片上限的对象：有名称的列名称，没有名称的也计数，不静默丢掉（#78 复审）。"""
+
+    named = [label for label in labels if label]
+    if not named:
+        return "卡片只显示前 %d 个，另外还有 %d 个没有显示。" % (MAX_CARDS, len(labels))
+    if len(named) == len(labels):
+        return "卡片只显示前 %d 个，另外还有：%s。" % (MAX_CARDS, "、".join(named))
+    return "卡片只显示前 %d 个，另外还有 %d 个：%s 等。" % (MAX_CARDS, len(labels), "、".join(named))
 
 
 def help_texts(reply: ValidReply) -> list[str]:

@@ -265,6 +265,39 @@ def test_rubric_and_item_refs_are_listed_and_cards_beyond_the_limit_are_named():
     assert agent_turn.attachments(refs, said) == ([], ["· 《毕业论文评分标准-V1》v1.0（毕业论文）"])
 
 
+def test_claims_are_checked_on_the_text_after_markers_are_stripped():
+    # 只看原文时“已经**完成**”对不上“已经完成”，去掉记号后却原样显示（#78 复审）。
+    for text in ("课程报告评分已经**完成**。", "课程报告评分已经`完成`。"):
+        with pytest.raises(ReplyInvalid, match="评分已经完成"):
+            validate_reply(json.dumps({"text": text}, ensure_ascii=False), TurnRefs())
+
+
+def test_papers_with_the_same_name_both_keep_their_label():
+    refs = TurnRefs()
+    first, second = [], []
+    for object_id, bucket in (("paper-a", first), ("paper-b", second)):
+        refs.name("p", object_id, "张三", parent=("t", "batch-1"))
+        bucket.append(refs.add("p", object_id))
+    assert refs.names["张三"] == ("p", "paper-b")  # 状态核对仍按名称找最后一个
+    assert refs.label_of(first[0]) == refs.label_of(second[0]) == "张三"
+    found = validate_reply(json.dumps({"text": "这两份还没有评分结果：", "cards": [first[0], second[0]]},
+                                      ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found) == ([], ["· 张三", "· 张三"])
+
+
+def test_cards_beyond_the_limit_are_counted_even_without_a_name():
+    refs = TurnRefs()
+    tasks = [refs.add("t", "b%d" % index, card={"type": "overview", "batch_id": "b%d" % index}) for index in range(3)]
+    refs.pin("t0", "t", "focus", label="课程报告评分")  # 当前任务：名称来自会话焦点
+    refs.pin("t9", "t", "unnamed")
+    found = validate_reply(json.dumps({"text": "最近的任务：", "cards": [*tasks, "t0"]}, ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found)[1] == ["卡片只显示前 3 个，另外还有：课程报告评分。"]
+    found = validate_reply(json.dumps({"text": "最近的任务：", "cards": [*tasks, "t0", "t9"]}, ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found)[1] == ["卡片只显示前 3 个，另外还有 2 个：课程报告评分 等。"]
+    found = validate_reply(json.dumps({"text": "最近的任务：", "cards": [*tasks, "t9"]}, ensure_ascii=False), refs)
+    assert agent_turn.attachments(refs, found)[1] == ["卡片只显示前 3 个，另外还有 1 个没有显示。"]
+
+
 def test_a_bare_text_reply_ending_with_a_colon_falls_back_without_a_retry(client, agent):
     model = agent(step(content="目前已发布的评分标准有："))
     body = _say(client, _conversation(client), "有哪些评分标准")

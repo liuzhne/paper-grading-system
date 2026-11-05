@@ -36,6 +36,9 @@ class TurnRefs:
     evidence: set[tuple[str, str, str]] = field(default_factory=set)
     #: 工具结果里出现过的名称（任务名、材料名）→ 对象：判断回复里的状态说的是谁。
     names: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: 对象 → 名称：代码列出它时用（§14.2）。与 `names` 分开存：两份材料同名时 `names` 只留后一个，
+    #: 前一个的名称不能跟着丢（#78 复审）。
+    _display_names: dict[tuple[str, str], str] = field(default_factory=dict)
     #: 材料 → 所属任务：任务评完了，其中每一份也就评完了。
     parents: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
     #: 本回合出过的确认卡片类型（提议工具）。
@@ -49,6 +52,7 @@ class TurnRefs:
         key = (kind, str(object_id))
         if name:
             self.names[str(name)] = key
+            self._display_names.setdefault(key, str(name))
         if parent is not None:
             self.parents[key] = (parent[0], str(parent[1]))
 
@@ -85,9 +89,7 @@ class TurnRefs:
         if ref in self._labels:
             return self._labels[ref]
         key = self._by_ref.get(ref)
-        if key is None:
-            return None
-        return next((name for name, found in self.names.items() if found == key), None)
+        return self._display_names.get(key) if key is not None else None
 
     def displayable(self, ref: str) -> bool:
         """放进 reply.cards 之后界面上能看到东西：有卡片（任务总有概况卡片），或者代码能列出它的名称。"""
@@ -97,12 +99,18 @@ class TurnRefs:
     def note(self, kind: str, marker: str, text: str) -> None:
         self.notes.setdefault(kind, []).append((marker, text))
 
-    def pin(self, ref: str, kind: str, object_id: str) -> None:
-        """焦点里的对象用固定编号（`t0`、`p0`），每回合开头登记。"""
+    def pin(self, ref: str, kind: str, object_id: str, *, label: str | None = None) -> None:
+        """焦点里的对象用固定编号（`t0`、`p0`），每回合开头登记。
+
+        `label` 是焦点里记着的名称（当前任务名）：卡片超出上限时用它补“另外还有”（#78 复审）。只供显示，
+        不进 `names`，不改变状态说法的核对。
+        """
 
         key = (kind, str(object_id))
         self._by_ref[ref] = key
         self._by_object.setdefault(key, ref)
+        if label:
+            self._labels[ref] = label
 
     def resolve(self, ref: str | None, kind: str) -> str:
         found = self._by_ref.get(str(ref or "").strip())

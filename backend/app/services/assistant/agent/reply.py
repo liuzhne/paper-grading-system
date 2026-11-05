@@ -89,8 +89,10 @@ def _strip_markup(text: str) -> str:
 
 
 def _clean_text(text: str) -> tuple[str, int]:
+    """整句丢分数句、改分建议、链接；传入的是已经去掉 Markdown 记号的文字（validate_reply 里先做）。"""
+
     kept, dropped = [], 0
-    for piece in _SENTENCE.findall(_strip_markup(text)):
+    for piece in _SENTENCE.findall(text):
         if piece == "\n":
             kept.append(piece)
             continue
@@ -126,10 +128,13 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
         params = ReplyParams.model_validate(parse_arguments(arguments))
     except ValidationError as exc:
         raise ReplyInvalid("参数不合格：%s" % exc.errors()[0]["msg"]) from exc
-    if detect_injection(params.text):
+    # 注入检测与说法核对看去掉记号之后的文字：老师看到的是它。只看原文时，“评分已经**完成**”
+    # 对不上“已经完成”，去掉记号后却原样显示（#78 复审）。
+    visible = _strip_markup(params.text)
+    if detect_injection(params.text) or detect_injection(visible):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
     if check_claims:
-        problem = claims.problem(params.text, refs)
+        problem = claims.problem(visible, refs)
         if problem:
             raise ReplyInvalid(problem)
     if not allow_cards and (params.cards or params.next_steps or params.help_refs):
@@ -149,7 +154,7 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     unknown = [step for step in params.next_steps if step not in NEXT_STEPS]
     if unknown:
         raise ReplyInvalid("next_steps 只能从这些里选：%s" % "、".join(NEXT_STEPS))
-    text, dropped = _clean_text(params.text)
+    text, dropped = _clean_text(visible)
     if not text:
         raise ReplyInvalid("回复去掉分数、改分建议与链接后没有剩下内容；分数请用 cards 展示")
     if allow_cards and text.endswith(_TRAILING_COLON) and not cards and not params.help_refs:
