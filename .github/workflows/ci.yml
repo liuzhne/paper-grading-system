@@ -686,6 +686,8 @@ jobs:
           SCORING_TOKEN_BUDGET_TARGET: ${{ vars.SCORING_TOKEN_BUDGET_TARGET }}
           SCORING_JUDGE_SCOPE_ENABLED: ${{ vars.SCORING_JUDGE_SCOPE_ENABLED }}
           SCORING_INSUFFICIENT_EVIDENCE_MODE: ${{ vars.SCORING_INSUFFICIENT_EVIDENCE_MODE }}
+          # 评分证据与理由（docs/评分证据与理由改造方案.md）；没设即 off，统一评测后再设。
+          SCORING_DECISION_BASIS_MODE: ${{ vars.SCORING_DECISION_BASIS_MODE }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

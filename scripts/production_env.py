@@ -88,10 +88,12 @@ _DATABASE_PASSWORD = re.compile(r"^[A-Za-z0-9]{24,}$")
 #: SCORING_JUDGE_SCOPE_ENABLED：按判定范围取证据（docs/论文评分第二阶段改造方案.md），QWK 评测后再打开。
 OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED", "SCORING_JUDGE_SCOPE_ENABLED")
 #: 取值不是 true / false 的可选设置：没设时不写进 .env，应用取默认值。第一个取值是默认值。
-#: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”。
+#: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”；
+#: SCORING_DECISION_BASIS_MODE=cite 让每条判定都给依据（docs/评分证据与理由改造方案.md）。
 OPTIONAL_CHOICES = {
     "SCORING_TOKEN_BUDGET_TARGET": ("provider_view", "envelope"),
     "SCORING_INSUFFICIENT_EVIDENCE_MODE": ("off", "review"),
+    "SCORING_DECISION_BASIS_MODE": ("off", "cite"),
 }
 # --from-environment 只取这些：部署任务的环境里还有 GITHUB_*、RUNNER_* 等无关变量。
 ENVIRONMENT_NAMES = (
@@ -231,10 +233,19 @@ def from_environment(environ) -> dict:
     return {name: environ[name] for name in ENVIRONMENT_NAMES if environ.get(name)}
 
 
+OPTIONAL_NAMES = OPTIONAL_SWITCHES + tuple(OPTIONAL_CHOICES)
+
+
 def from_file(path: Path) -> dict:
     from dotenv import dotenv_values
 
-    return {name: value for name, value in dotenv_values(path).items() if value is not None}
+    # 与 from_environment 一致：可选设置写成 `NAME=` 等于没设，应用取默认值，
+    # 不能因为空字符串不在可选值里就挡住生成。
+    return {
+        name: value
+        for name, value in dotenv_values(path).items()
+        if value is not None and not (value == "" and name in OPTIONAL_NAMES)
+    }
 
 
 def _quote(value: str) -> str:

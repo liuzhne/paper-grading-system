@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
+import RuleJudgements from "@/components/RuleJudgements.vue";
 import { materialIdentity } from "@/lib/document-types.js";
 import { deductionReasons } from "@/lib/score-items.js";
 import { useGradingStore } from "@/stores/grading.js";
@@ -31,6 +32,13 @@ const EMPTY_TEXT = {
 };
 
 const SEVERITY_LABEL = { error: "错误", warn: "提醒", info: "提示" };
+
+/** 证据充分度（Core 评分项，代码按证据情况给出；docs/评分证据与理由改造方案.md G4）。 */
+const SUFFICIENCY_TONE = { high: "chip-ok", medium: "chip-warn", low: "chip-danger" };
+
+function sufficiencyTitle(sufficiency) {
+  return [...(sufficiency.reasons || []), ...(sufficiency.notes || [])].join("\n") || "证据完整";
+}
 const SEVERITY_TONE = { error: "chip-danger", warn: "chip-warn" };
 
 const docTab = ref("text");
@@ -68,6 +76,11 @@ async function onLocate(view) {
   if (!locatable(view)) return;
   store.locate({ anchor_id: view.anchor_id, quote: view.quote });
   if (view.anchor_id) await store.loadAnchorPage(view.anchor_id);
+  // 停在“篇章结构 / 格式发现”时正文块没有渲染：先切回正文，等它渲染完再滚动。
+  if (docTab.value !== "text") {
+    docTab.value = "text";
+    await nextTick();
+  }
   const el = document.querySelector(`[data-anchor="${view.anchor_id}"]`);
   el?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
@@ -374,9 +387,31 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             </span>
           </div>
 
-          <div class="conf">
+          <!-- Core 评分项显示代码算的证据充分度（不编造百分比）；旧评分路径仍显示模型置信度。 -->
+          <template v-if="item.judgement_view">
+            <div class="conf" data-test="evidence-sufficiency">
+              <span class="faint">证据充分度</span>
+              <span
+                class="chip sufficiency"
+                :class="SUFFICIENCY_TONE[item.judgement_view.evidence_sufficiency.level]"
+                :title="sufficiencyTitle(item.judgement_view.evidence_sufficiency)"
+              >
+                {{ item.judgement_view.evidence_sufficiency.label }}
+              </span>
+            </div>
+            <!-- 原因与说明（如“旧评分未记录选证”）都直接列出：只放在悬停提示里，键盘和触屏看不到。 -->
+            <ul
+              v-if="item.judgement_view.evidence_sufficiency.reasons.length || item.judgement_view.evidence_sufficiency.notes?.length"
+              class="faint sufficiency-reasons"
+              data-test="sufficiency-reasons"
+            >
+              <li v-for="(line, index) in item.judgement_view.evidence_sufficiency.reasons" :key="'r' + index">{{ line }}</li>
+              <li v-for="(line, index) in item.judgement_view.evidence_sufficiency.notes || []" :key="'n' + index">{{ line }}</li>
+            </ul>
+          </template>
+          <div v-else class="conf">
             <span class="faint">置信度</span>
-            <!-- 缺失显示「未提供」：Core 不写该字段，0% 是另一回事。 -->
+            <!-- 缺失显示「未提供」：旧评分路径偶有不写该字段，0% 是另一回事。 -->
             <span class="mono" :class="{ faint: item.confidence == null }">
               {{ item.confidence === null || item.confidence === undefined ? "未提供" : Math.round(item.confidence * 100) + "%" }}
             </span>
@@ -384,8 +419,10 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
           <p v-if="item.review_reason" class="faint item-reason">{{ item.review_reason }}</p>
 
+          <!-- Core 评分项：逐条规则的判定、理由与原文引文（未扣分的规则也列出）。 -->
+          <RuleJudgements v-if="item.judgement_view" :view="item.judgement_view" @locate="onLocate" />
           <!-- 扣分理由与修改建议：评分助手按这些说“怎么改”，老师在这里核对依据（方案 §31.3）。 -->
-          <ul v-if="deductionReasons(item).length" class="item-deductions" data-test="item-deductions">
+          <ul v-else-if="deductionReasons(item).length" class="item-deductions" data-test="item-deductions">
             <li v-for="(line, index) in deductionReasons(item)" :key="index">{{ line }}</li>
           </ul>
           <p v-if="item.revision_suggestion" class="item-suggestion" data-test="item-suggestion">
@@ -429,7 +466,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             改分
           </button>
 
-          <div v-if="item.evidence_view?.length" class="evidence">
+          <div v-if="!item.judgement_view && item.evidence_view?.length" class="evidence">
             <button
               v-for="(view, index) in item.evidence_view"
               :key="index"
@@ -443,7 +480,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               {{ evidenceChipText(view) }}
             </button>
           </div>
-          <p v-else class="faint item-reason">该项没有记录证据。</p>
+          <p v-else-if="!item.judgement_view" class="faint item-reason">该项没有记录证据。</p>
         </div>
 
         <!-- 评语与确认动作跟着内容流走，不放进 sticky 区：sticky 区一旦变高就会
@@ -758,6 +795,18 @@ mark {
 .edit-error {
   margin: 8px 0 0;
   font-size: 13px;
+  line-height: 1.6;
+}
+
+.sufficiency {
+  padding: 1px 8px;
+  font-size: 11.5px;
+}
+
+.sufficiency-reasons {
+  margin: -4px 0 8px;
+  padding-left: 16px;
+  font-size: 11.5px;
   line-height: 1.6;
 }
 

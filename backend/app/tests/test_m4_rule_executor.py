@@ -1681,12 +1681,16 @@ def test_authorized_quote_is_bound_to_validated_unit_and_canonical_locator():
     decision = _decision(result)
     assert len(decision["evidence_refs"]) == 1
     evidence = decision["evidence_refs"][0]
+    # quote 是核对过的原文子串（docs/评分证据与理由改造方案.md G3）；它本来就参与
+    # payload_hash，保留下来不改任何身份或分数。
     assert set(evidence) == {
         "evidence_unit_id",
         "evidence_type",
         "locator",
         "payload_hash",
+        "quote",
     }
+    assert evidence["quote"] == unit["normalized_text"]
     assert evidence["evidence_unit_id"] == unit["evidence_unit_id"]
     assert evidence["evidence_type"] == "source_quote"
     assert evidence["locator"] == unit["locator"]

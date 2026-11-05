@@ -5,7 +5,8 @@
 
 两条来源的身份强度不同，界面必须能区分：
 
-* ``core_snapshot`` —— 运行绑定的 :class:`DocumentSnapshot`。不可变，
+* ``core_snapshot`` —— 运行判分时的冻结正文（v2 提交绑定的 :class:`DocumentSnapshot`，
+  或论文 Core 评分 ``document_snapshot_ref`` 指向的快照，见 ``frozen_document``）。不可变，
   ``evidence_unit_id`` 是硬锚点，能确凿地回答「当初判分时看到的就是这段」。
   但快照里**没有页码**，因此页码留空而不是编造。
 * ``legacy_chunks`` —— 当前的 :class:`PaperChunk`。这是**可变的解析结果**，
@@ -20,6 +21,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from backend.app.db.models import PaperChunk
+from backend.app.services.scoring.frozen_document import resolve_frozen_document
 
 
 #: 单页最大块数，避免整篇大文档一次性返回。
@@ -27,8 +29,8 @@ DEFAULT_LIMIT = 40
 MAX_LIMIT = 200
 
 
-def _core_blocks(snapshot):
-    payload = snapshot.snapshot_payload or {}
+def _core_blocks(payload):
+    payload = payload or {}
     units = {
         unit.get("evidence_unit_id"): unit
         for unit in (payload.get("evidence_units") or [])
@@ -115,30 +117,27 @@ def build_document_view(
     """
     limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
 
-    snapshot = run.document_snapshot
-    if run.submission_id is not None:
-        # 正式 Core：只认运行绑定的冻结快照。
-        if snapshot is None:
+    frozen = resolve_frozen_document(run)
+    if frozen.kind == "core":
+        # 正式 Core（含论文）：只认判分时的冻结正文。
+        if not frozen.available:
             return {
                 "run_id": run.id,
                 "source_kind": "unavailable",
                 "frozen": False,
                 "text_provenance": "unavailable",
                 "document_snapshot_hash": None,
-                "unavailable_reason": (
-                    "该评分运行没有绑定冻结文档快照，无法还原判分时的正文；"
-                    "不退回最新解析文本以免与当初的证据不一致。"
-                ),
+                "unavailable_reason": frozen.unavailable_reason,
                 "blocks": [],
                 "next_cursor": None,
                 "anchor_found": False,
             }
-        blocks = _core_blocks(snapshot)
+        blocks = _core_blocks(frozen.payload)
         meta = {
             "source_kind": "core_snapshot",
             "frozen": True,
             "text_provenance": "frozen_snapshot",
-            "document_snapshot_hash": snapshot.snapshot_hash,
+            "document_snapshot_hash": frozen.snapshot_hash,
             "unavailable_reason": None,
         }
     else:

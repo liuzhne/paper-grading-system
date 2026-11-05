@@ -571,6 +571,14 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
         "SUPABASE_SECRET_KEY": _SECRET,
     }.items():
         monkeypatch.setenv(name, value)
+    # 运行测试的机器上可能已经导出了这些设置：先清掉，再验证“没设就不写”。
+    for name in (
+        "SCORING_TOKEN_BUDGET_TARGET",
+        "SCORING_JUDGE_SCOPE_ENABLED",
+        "SCORING_INSUFFICIENT_EVIDENCE_MODE",
+        "SCORING_DECISION_BASIS_MODE",
+    ):
+        monkeypatch.delenv(name, raising=False)
     output = tmp_path / "pgs.env"
     args = ["--from-environment", "--site-address", "pgs.duckdns.org", "--output", str(output)]
 
@@ -581,11 +589,13 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
     monkeypatch.setenv("SCORING_JUDGE_SCOPE_ENABLED", "true")
     monkeypatch.setenv("SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
     monkeypatch.setenv("SCORING_TOKEN_BUDGET_TARGET", "envelope")
+    monkeypatch.setenv("SCORING_DECISION_BASIS_MODE", "cite")
     assert script.main(args) == 0
     text = output.read_text(encoding="utf-8")
     assert "SCORING_JUDGE_SCOPE_ENABLED='true'" in text
     assert "SCORING_INSUFFICIENT_EVIDENCE_MODE='review'" in text
     assert "SCORING_TOKEN_BUDGET_TARGET='envelope'" in text
+    assert "SCORING_DECISION_BASIS_MODE='cite'" in text
 
     output.unlink()
     monkeypatch.setenv("SCORING_INSUFFICIENT_EVIDENCE_MODE", "on")
@@ -595,7 +605,12 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
-    for name in ("SCORING_TOKEN_BUDGET_TARGET", "SCORING_JUDGE_SCOPE_ENABLED", "SCORING_INSUFFICIENT_EVIDENCE_MODE"):
+    for name in (
+        "SCORING_TOKEN_BUDGET_TARGET",
+        "SCORING_JUDGE_SCOPE_ENABLED",
+        "SCORING_INSUFFICIENT_EVIDENCE_MODE",
+        "SCORING_DECISION_BASIS_MODE",
+    ):
         assert "%s: ${{ vars.%s }}" % (name, name) in lightsail
 
 
@@ -767,3 +782,17 @@ def test_lightsail_deploy_renders_both_env_files_for_the_instance_data_plane():
     assert "/opt/pgs/db.env" in step
     assert "POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}" in step
     assert "ops.sh" in lightsail[lightsail.index("- name: Ship the image and deployment files"):write]
+
+
+def test_empty_optional_settings_in_a_source_file_count_as_unset(tmp_path):
+    """变量文件里写成 `NAME=` 的可选设置等于没设，与 --from-environment 一致，不挡住生成。"""
+    script = _env_script()
+    output = tmp_path / "pgs.env"
+    source = _source(
+        tmp_path, SCORING_DECISION_BASIS_MODE="", SCORING_JUDGE_SCOPE_ENABLED="", SITE_LEADS_ENABLED=""
+    )
+    assert script.main(["--source", str(source), "--site-address", "pgs.duckdns.org", "--output", str(output)]) == 0
+    text = output.read_text(encoding="utf-8")
+    assert "SCORING_DECISION_BASIS_MODE" not in text
+    assert "SCORING_JUDGE_SCOPE_ENABLED" not in text
+    assert "SITE_LEADS_ENABLED" not in text

@@ -94,7 +94,9 @@ def _validate_profile(profile, request):
         raise ValueError("profile version does not match scoring request")
 
 
-def _prompt_envelope(*, request, node, profile, selection_rules=None, criterion_rules=None):
+def _prompt_envelope(
+    *, request, node, profile, selection_rules=None, criterion_rules=None, selection_report=None
+):
     build_extensions = getattr(profile, "build_prompt_extensions", None)
     if not callable(build_extensions):
         raise TypeError("profile must implement build_prompt_extensions")
@@ -145,6 +147,8 @@ def _prompt_envelope(*, request, node, profile, selection_rules=None, criterion_
             kwargs["selection_rules"] = _plain(selection_rules)
         if criterion_rules is not None and "criterion_rules" in parameters:
             kwargs["criterion_rules"] = _plain(criterion_rules)
+        if selection_report is not None and "selection_report" in parameters:
+            kwargs["selection_report"] = selection_report
         return build_provider_envelope(base_envelope=envelope, **kwargs)
     return envelope
 
@@ -214,11 +218,63 @@ def _matrix_error(rule):
 
 
 def _evidence_ref(raw, unit):
+    # The quote is kept (docs/评分证据与理由改造方案.md G3): callers only pass a
+    # quote already verified as a substring of the frozen unit, and it was
+    # always part of payload_hash, so keeping it changes no identity or score.
     return {
         "evidence_unit_id": unit["evidence_unit_id"],
         "evidence_type": "source_quote",
         "locator": _plain(unit["locator"]),
         "payload_hash": canonical_sha256(_plain(raw)),
+        "quote": raw["quote"].strip(),
+    }
+
+
+#: Upper bound for a stored model rationale (display only; never scored).
+BASIS_RATIONALE_CHAR_CAP = 200
+
+
+def _decision_basis(*, request, response):
+    """Display-only basis of a decision (G5): verified quotes plus a rationale.
+
+    A quote that fails verification is dropped and counted instead of
+    invalidating the decision — the score still comes only from occurrences.
+    """
+
+    basis = response.get("basis")
+    if not isinstance(basis, Mapping):
+        return None
+    units = {
+        unit["evidence_unit_id"]: unit for unit in request["document"]["evidence_units"]
+    }
+    refs = []
+    rejected = int(basis.get("rejected_quote_count") or 0)
+    for raw in basis.get("evidence") or ():
+        unit_id = raw.get("evidence_unit_id") if isinstance(raw, Mapping) else None
+        unit = units.get(unit_id) if isinstance(unit_id, str) else None
+        quote = raw.get("quote") if isinstance(raw, Mapping) else None
+        if (
+            unit is None
+            or raw.get("type") != "source_quote"
+            or not isinstance(quote, str)
+            or not quote.strip()
+            or quote.strip() not in unit["normalized_text"]
+        ):
+            rejected += 1
+            continue
+        ref = _evidence_ref(raw, unit)
+        if ref not in refs:
+            refs.append(ref)
+    rationale = basis.get("rationale")
+    rationale = (
+        " ".join(rationale.split())[:BASIS_RATIONALE_CHAR_CAP] or None
+        if isinstance(rationale, str)
+        else None
+    )
+    return {
+        "evidence_refs": refs,
+        "rationale": rationale,
+        "rejected_quote_count": rejected,
     }
 
 
@@ -448,9 +504,47 @@ def _semantic_decision(
     criterion_rules=None,
 ):
     rule = node["atomic_rule_snapshot"]
+    report = {}
     envelope = _prompt_envelope(
-        request=request, node=node, profile=profile, criterion_rules=criterion_rules
+        request=request,
+        node=node,
+        profile=profile,
+        criterion_rules=criterion_rules,
+        selection_report=report,
     )
+    decision, error, message = _semantic_decision_for_envelope(
+        request=request,
+        rule=rule,
+        envelope=envelope,
+        llm_runtime=llm_runtime,
+        occurrence_payloads=occurrence_payloads,
+        decision_ledger=decision_ledger,
+        execution_journal=execution_journal,
+    )
+    _attach_selection(decision, report)
+    return decision, error, message
+
+
+def _attach_selection(decision, report):
+    """Record how much evidence the rule saw (display-only, never identity)."""
+
+    if report and isinstance(decision, dict):
+        decision["evidence_selection"] = {
+            key: int(report[key])
+            for key in ("candidate_count", "requested_count", "selected_count")
+        }
+
+
+def _semantic_decision_for_envelope(
+    *,
+    request,
+    rule,
+    envelope,
+    llm_runtime,
+    occurrence_payloads,
+    decision_ledger=None,
+    execution_journal=None,
+):
     identity = None
     response = None
     if decision_ledger is not None:
@@ -544,7 +638,22 @@ def _group_identity(group_code, member_identities):
     )
 
 
-def _semantic_group_decisions(
+def _semantic_group_decisions(**kwargs):
+    """Judge one mutex group; see :func:`_judge_semantic_group`."""
+
+    reports = {}
+    results = _judge_semantic_group(selection_reports=reports, **kwargs)
+    if results is not None:
+        for rule_code, (decision, _error, _message) in results.items():
+            _attach_selection(decision, reports.get(rule_code))
+            # One basis explains the whole group decision; mark it so the
+            # display shows it once as the group's, not as each tier's own.
+            if isinstance(decision.get("basis"), dict):
+                decision["basis"]["group_code"] = kwargs["group_code"]
+    return results
+
+
+def _judge_semantic_group(
     *,
     request,
     nodes,
@@ -552,6 +661,7 @@ def _semantic_group_decisions(
     llm_runtime,
     profile,
     occurrence_payloads,
+    selection_reports,
     decision_ledger=None,
     execution_journal=None,
     criterion_rules=None,
@@ -564,6 +674,7 @@ def _semantic_group_decisions(
     """
 
     rules = [node["atomic_rule_snapshot"] for node in nodes]
+    reports = [{} for _node in nodes]
     envelopes = [
         _prompt_envelope(
             request=request,
@@ -571,9 +682,13 @@ def _semantic_group_decisions(
             profile=profile,
             selection_rules=rules,
             criterion_rules=criterion_rules,
+            selection_report=report,
         )
-        for node in nodes
+        for node, report in zip(nodes, reports)
     ]
+    selection_reports.update(
+        {rule["rule_code"]: report for rule, report in zip(rules, reports)}
+    )
     first_units = envelopes[0].to_mapping()["evidence_units"]
     if any(envelope.to_mapping()["evidence_units"] != first_units for envelope in envelopes[1:]):
         return None
@@ -665,6 +780,20 @@ def _semantic_group_decisions(
 
 
 def _semantic_decision_from_response(*, request, rule, response, occurrence_payloads):
+    decision, error, message = _semantic_decision_core(
+        request=request,
+        rule=rule,
+        response=response,
+        occurrence_payloads=occurrence_payloads,
+    )
+    if error is None and isinstance(response, Mapping):
+        basis = _decision_basis(request=request, response=response)
+        if basis is not None:
+            decision["basis"] = basis
+    return decision, error, message
+
+
+def _semantic_decision_core(*, request, rule, response, occurrence_payloads):
     decision = _decision_skeleton(request["plan"], rule)
     if not isinstance(response, Mapping):
         return decision, "UNKNOWN_RULE", "semantic response must be an object"
@@ -1263,6 +1392,7 @@ def execute_rule_plan(
             decision["evidence_refs"] = []
             decision["occurrences"] = []
             decision["calculated_effect"] = None
+            decision.pop("basis", None)
             issues.append(_issue(error, "block", criterion_code, code, message))
             blocking_rules.add(code)
         elif insufficient:

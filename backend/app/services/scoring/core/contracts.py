@@ -1201,7 +1201,9 @@ def _normalize_semantic_rule_response_v2(value):
         "level_code",
         "occurrences",
     }
-    fields = required | {"points", "calculated_effect", "rule_ref"}
+    # ``basis`` (docs/评分证据与理由改造方案.md G5) is display-only; RuleExecutor
+    # re-verifies its quotes and never scores from it.
+    fields = required | {"points", "calculated_effect", "rule_ref", "basis"}
     _assert_closed_mapping(
         value,
         fields=fields,
@@ -1242,7 +1244,7 @@ def _normalize_semantic_rule_response_v2(value):
         ),
         "occurrences": occurrences,
     }
-    for field in ("points", "calculated_effect", "rule_ref"):
+    for field in ("points", "calculated_effect", "rule_ref", "basis"):
         if field in value:
             normalized[field] = _assert_json_value(
                 value[field], "SemanticRuleResponseV2." + field

@@ -295,6 +295,10 @@ def _group_rule_results(request: Mapping, outcome: Mapping) -> dict[str, list[di
                 "calculated_effect": decision["calculated_effect"],
                 "score_contributions": contributions_by_rule.get(rule_code, []),
             }
+            # Display-only extras (docs/评分证据与理由改造方案.md G4/G5).
+            for extra in ("evidence_selection", "basis"):
+                if decision.get(extra) is not None:
+                    result[extra] = deepcopy(decision[extra])
         else:
             result = {
                 "schema_version": "rule-result@1",
@@ -307,6 +311,54 @@ def _group_rule_results(request: Mapping, outcome: Mapping) -> dict[str, list[di
     for values in grouped.values():
         values.sort(key=lambda item: rule_order[item["rule_code"]])
     return grouped
+
+
+def _points_text(amount) -> str:
+    value = abs(Decimal(str(amount)))
+    text = format(value.normalize(), "f")
+    return text
+
+
+def core_deduction_reason(rule_name, amount) -> str:
+    """一条 Core 扣分的中文说明；评分页与评分助手都读它。"""
+
+    if rule_name:
+        return "规则「%s」扣 %s 分" % (rule_name, _points_text(amount))
+    return "扣 %s 分" % _points_text(amount)
+
+
+_STATUS_LABELS = {
+    "triggered": "命中",
+    "not_triggered": "未发现问题",
+    "not_applicable": "不适用",
+    "skipped": "未执行",
+    "invalid": "判定无效",
+}
+
+
+def core_item_reason(rule_results, review_issues=None) -> str:
+    """评分项的一句话说明：按几条规则判定、各是什么结果（代码写，不是模型写）。
+
+    “证据不足”在判定里记为 not_triggered 并另加一条复核问题，这里按复核问题
+    单独计数，不能算进“未发现问题”。
+    """
+
+    insufficient = {
+        issue.get("rule_code")
+        for issue in review_issues or ()
+        if issue.get("code") == "RULE_EVIDENCE_INSUFFICIENT"
+    }
+    counts = {}
+    for result in rule_results or ():
+        if result.get("status") == "not_triggered" and result.get("rule_code") in insufficient:
+            label = "证据不足"
+        else:
+            label = _STATUS_LABELS.get(result.get("status"), result.get("status"))
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return "没有可执行的规则。"
+    parts = "、".join("%s %d 条" % (label, count) for label, count in counts.items())
+    return "按 %d 条规则判定：%s。" % (sum(counts.values()), parts)
 
 
 def _score_items(
@@ -362,11 +414,12 @@ def _score_items(
             for result in rule_results.get(code, [])
             for ref in result["evidence_refs"]
         ]
-        deductions = [
-            entry["amount"]
+        deduction_entries = [
+            entry
             for entry in contributions_by_criterion.get(code, [])
             if entry["kind"] == "deduction"
         ]
+        deductions = [entry["amount"] for entry in deduction_entries]
         aggregation = {
             "schema_version": aggregation_schema,
             "criterion_code": code,
@@ -391,14 +444,19 @@ def _score_items(
                     else Decimal(criterion["final_score"])
                 ),
                 evidence_sufficient=status == "calculated",
-                reason=f"Core criterion outcome: {status}",
+                reason=core_item_reason(
+                    rule_results.get(code, []), issues_by_criterion.get(code)
+                ),
                 deductions=deductions,
                 deduction_items=[
                     {
-                        "points": str(abs(Decimal(value))),
-                        "reason": "Authorized Core rule deduction",
+                        "points": str(abs(Decimal(entry["amount"]))),
+                        "reason": core_deduction_reason(
+                            rule_names.get(entry.get("rule_code")) or entry.get("rule_code"),
+                            entry["amount"],
+                        ),
                     }
-                    for value in deductions
+                    for entry in deduction_entries
                 ],
                 evidence=evidence_refs,
                 band_selection=None,

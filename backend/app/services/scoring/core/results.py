@@ -215,8 +215,12 @@ def _normalize_criterion_outcome(value, path, *, v2=False):
 
 
 def _normalize_evidence_ref(value, path):
-    fields = {"evidence_unit_id", "evidence_type", "locator", "payload_hash"}
-    _assert_closed_mapping(value, fields=fields, path=path)
+    required = {"evidence_unit_id", "evidence_type", "locator", "payload_hash"}
+    # ``quote`` is optional (docs/评分证据与理由改造方案.md G3): results written
+    # before it existed keep only payload_hash and remain valid.
+    _assert_closed_mapping(
+        value, fields=required | {"quote"}, required=required, path=path
+    )
     evidence_unit_id = _assert_optional_text(
         value["evidence_unit_id"], path + ".evidence_unit_id"
     )
@@ -233,6 +237,48 @@ def _normalize_evidence_ref(value, path):
             evidence_unit_id=evidence_unit_id,
         ),
         "payload_hash": _assert_sha256(value["payload_hash"], path + ".payload_hash"),
+        **(
+            {"quote": _assert_text(value["quote"], path + ".quote")}
+            if "quote" in value
+            else {}
+        ),
+    }
+
+
+def _normalize_evidence_selection(value, path):
+    fields = {"candidate_count", "requested_count", "selected_count"}
+    _assert_closed_mapping(value, fields=fields, path=path)
+    result = {
+        name: _assert_nonnegative_integer(value[name], "%s.%s" % (path, name))
+        for name in sorted(fields)
+    }
+    if result["selected_count"] > result["requested_count"]:
+        raise ValueError("%s.selected_count exceeds requested_count" % path)
+    return result
+
+
+def _normalize_decision_basis(value, path):
+    fields = {"evidence_refs", "rationale", "rejected_quote_count"}
+    # ``group_code``: the basis came from one mutex-group call and is shared.
+    _assert_closed_mapping(
+        value, fields=fields | {"group_code"}, required=fields, path=path
+    )
+    refs = _assert_mapping_array(
+        value["evidence_refs"], path + ".evidence_refs", _normalize_evidence_ref
+    )
+    if any("quote" not in ref for ref in refs):
+        raise ValueError("%s.evidence_refs must carry verified quotes" % path)
+    return {
+        "evidence_refs": refs,
+        "rationale": _assert_optional_text(value["rationale"], path + ".rationale"),
+        "rejected_quote_count": _assert_nonnegative_integer(
+            value["rejected_quote_count"], path + ".rejected_quote_count"
+        ),
+        **(
+            {"group_code": _assert_text(value["group_code"], path + ".group_code")}
+            if value.get("group_code") is not None
+            else {}
+        ),
     }
 
 
@@ -289,8 +335,21 @@ def _normalize_rule_decision_v2(value, path):
         "occurrences",
         "calculated_effect",
     }
-    _assert_closed_mapping(value, fields=fields, path=path)
+    # Display-only extras (docs/评分证据与理由改造方案.md G4/G5); they never
+    # take part in scoring and older results simply lack them.
+    optional = {"evidence_selection", "basis"}
+    _assert_closed_mapping(
+        value, fields=fields | optional, required=fields, path=path
+    )
+    extras = {}
+    if value.get("evidence_selection") is not None:
+        extras["evidence_selection"] = _normalize_evidence_selection(
+            value["evidence_selection"], path + ".evidence_selection"
+        )
+    if value.get("basis") is not None:
+        extras["basis"] = _normalize_decision_basis(value["basis"], path + ".basis")
     return {
+        **extras,
         "version_hash": _assert_sha256(value["version_hash"], path + ".version_hash"),
         "rule_code": _assert_text(value["rule_code"], path + ".rule_code"),
         "criterion_code": _assert_text(

@@ -591,6 +591,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-04 | 评分证据与理由：#77 复审修正 | 互斥组一次调用的依据由 `rule_executor._semantic_group_decisions` 标上 `basis.group_code`（结果合同可选字段），`judgement_view._share_group_basis` 只在被选中的那一档显示；依据与扣分证据的编号先判类型；`persistence.core_item_reason` 按 `RULE_EVIDENCE_INSUFFICIENT` 单列证据不足；`production_env.from_file` 把可选设置的空值当没设；评分页定位先切回正文页签。模块边界、调用链与持久化边界不变，无迁移 |
+| 2026-11-04 | 评分证据与理由（G1–G5） | 新增 `scoring/frozen_document.py`（论文 Core 评分按 `document_snapshot_ref` 读判分时的冻结正文，证据视图与正文视图共用）与 `scoring/judgement_view.py`（读取时从 `rule_results` 算逐条规则判定与证据充分度，`items?include_view=true` 返回 `judgement_view`）；证据引用多存核对过的 `quote`，规则判定可带 `evidence_selection`（`build_v4_envelope(selection_report=)` 经 Profile 回填）与 `basis`（`SCORING_DECISION_BASIS_MODE=cite`）；结果合同只加可选字段、不升版本；落库扣分理由改中文。无迁移；开关关闭时判定身份与提示词不变 |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 开关打开时 `rubric_snapshot.load_from_session` 生成 `atomic-rule-snapshot@4`（多 `applies_to`，`evidence_policy` 可带 `judge_scope`），关闭时仍是 `@3` 并去掉 `judge_scope`；`judge_scope.explain_judge_scope` / `review_hint` 供评分与 `read_review_workspace` 共用；band 规则的请求不提供 `insufficient_evidence`；Core 落库写 `score_items.review_reasons`（`review_reasons.from_core_issues`）；规则编辑器加判定范围下拉框。无迁移，接口与 OpenAPI 不变 |
 | 2026-11-03 | 论文评分第二阶段：预算量实际视图、判定范围、证据不足（分期 A–D） | 新增 `scoring/retrieval/judge_scope.py`；`build_v4_envelope` 加 `request_rules`、`budget_target`、`judge_scope`，预算改由 `core_view.estimate_view_input_tokens` 量实际视图（默认）；`PromptEnvelopeV4.coverage_mode` 增加 `section`、`cross_section`；`rule_executor` 把 `insufficient_evidence` 记为未触发加 `RULE_EVIDENCE_INSUFFICIENT` 复核问题，评分项转 `review_required`；新增只读脚本 `rule_health_report`。B、C 开关默认关闭，关闭时视图与提示词不变。无迁移，head 仍为 `0041_assistant_agent_state` |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增 `rubric_import/sources/docx_deep.py`、`rubric_import/requirements/`（`outline`、`items`、`state`）；`load_docx` 加 `deep`；`raw_parse_output` 新增 `outline`、`requirement_items`；台账单元新增 `image` 类型。开关 `REQUIREMENT_ITEMS_ENABLED` 默认关闭，关闭时调用链与数据不变。无迁移，head 仍为 `0041_assistant_agent_state`；评分链不变 |
@@ -1703,3 +1705,38 @@ persistence._score_items：outcome.review_issues 里的 RULE_EVIDENCE_INSUFFICIE
 - `judge_scope` 存在 `evidence_policy` 而不是新列：新列会进版本内容哈希，已发布版本重算出的哈希会变。
 
 维护记录：2026-11-04 · 论文评分第二阶段第二轮：记录快照 @4 的生成条件、判定范围的共用推断、审查页派生字段与 Core 复核原因的数据落点；无迁移。
+
+### 2026-11-04 评分证据与理由（G1–G5）
+
+方案：`docs/评分证据与理由改造方案.md`。起因是 Core 评分的评分表：置信度都是“未提供”、未扣分项没有说明、扣分理由是英文固定句、证据全是“无锚点”。
+
+冻结正文的落点（G1）：
+- `frozen_document.resolve_frozen_document(run)` 是唯一入口：v2 提交读 `run.document_snapshot`；论文 Core 评分（只有 `paper_id`）按 `document_snapshot_ref` 从 `LocalDocumentSnapshotStore` 读；两者都没有才是旧评分路径（`PaperChunk`）。读不到时返回原因，不退回最新解析文本。
+- `evidence_view.build_evidence_view` 与 `document_view.build_document_view` 都按它分支；以前只看 `submission_id`，论文 Core 评分被当成旧路径。
+
+引文与选证记录的数据流（G3、G4）：
+- `rule_executor._evidence_ref` 保留已核对的 `quote`（它本来就参与 `payload_hash`）→ `results._normalize_evidence_ref` 的可选字段 → `ScoreItem.evidence` / `rule_results` → `evidence_view.project_core_refs` 在冻结正文里再核对一次，通过才显示为引文（`verified`），否则显示上下文。
+- `rule_executor._prompt_envelope(selection_report=)` → Profile `build_provider_envelope(selection_report=)` → `build_v4_envelope` 回填候选数、要取数、实际放下数 → 判定的 `evidence_selection`。只展示，不进判定身份。
+
+依据（G5，开关默认关）：
+- `core_view`：`cite` 时提示词把“不得输出解释文字”一句换成依据说明，输出结构加必填 `basis`，提示词版本加 `+basis@1`。分组调用的一个依据投到组内每一档。
+- `core_view._map_evidence_refs` 映射依据引文 → `core_adapter._normalize_basis`（核对失败的引文丢弃并计数，漏写 `basis` 不判失败）→ `SemanticRuleResponseV2.basis` → `rule_executor._decision_basis`（再核对一次）→ 判定的 `basis`。判定无效时去掉依据。依据不参与算分。
+
+展示（G2、G4）：
+- `judgement_view.build_judgement_view` 读取时计算，旧评分也适用：逐条规则的结果（扣分 / 选档 / 未发现问题 / 不适用 / 证据不足 / 无效）、模型理由、证据与依据视图，以及证据充分度（高 / 中 / 低 + 原因）。
+- 评分页 `GradeView` 的 Core 评分项改用 `RuleJudgements.vue`，“置信度”一行换成“证据充分度”；旧评分路径照旧。复核队列（`ReviewView`）的置信度列未改。
+- 落库时 `deduction_items[].reason` 写“规则「名称」扣 X 分”，`reason` 写“按 N 条规则判定：……”。
+
+维护记录：2026-11-04 · 评分证据与理由：记录冻结正文的唯一入口、引文与选证记录的数据流、依据开关的调用链与展示投影；无迁移。
+
+#### #77 复审修正（2026-11-04）
+
+- 互斥组：一次分组调用的依据仍投到组内每一档，`rule_executor._semantic_group_decisions` 给它加 `group_code`（`results._normalize_decision_basis` 的可选字段）；`judgement_view._share_group_basis` 把依据挂在被选中的那一档（都没选中时挂第一档，`basis_scope=group`），其余档清掉理由与依据引文，记 `basis_shared_with`，证据充分度也不再按“未扣分没引原文”给它们降档。
+- 输入类型：`core_adapter._normalize_basis`、`core_view._map_evidence_refs`、`rule_executor._decision_basis` 先判证据编号是不是字符串；依据里的不可哈希值算一条丢弃的引文，扣分证据里的按未知引用以 `ValueError` 判失败（与原来的未知引用同一条路）。
+- 落库摘要：`core_item_reason(rule_results, review_issues)` 把带 `RULE_EVIDENCE_INSUFFICIENT` 的未触发规则计为“证据不足”。
+- 部署脚本：`production_env.from_file` 与 `from_environment` 一致，可选设置的空值视为没设。
+- 页面：评分页同时列出证据充分度的 `reasons` 与 `notes`；停在“篇章结构 / 格式发现”时点证据，先切回正文、等渲染后再定位。
+
+核对范围：评分执行器、结果合同、判定视图、落库摘要、部署脚本与评分页；模块边界、核心调用链与持久化边界不变，无迁移。
+
+维护记录：2026-11-04 · 评分证据与理由 #77 复审修正：记录互斥组依据的标记与展示落点、证据编号的类型检查、证据不足单列与可选设置空值的处理；边界不变。

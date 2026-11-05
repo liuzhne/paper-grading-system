@@ -2405,7 +2405,8 @@ export interface paths {
          * List Score Items
          * @description 评分项列表。
          *
-         *     ``include_view=true`` 附加 ``evidence_view`` 展示投影（计划 §5-A）。
+         *     ``include_view=true`` 附加 ``evidence_view`` 展示投影（计划 §5-A），以及 Core
+         *     评分项的 ``judgement_view``（逐条规则判定与证据充分度，旧评分路径为 null）。
          *     默认响应形状保持不变——原始 ``evidence`` 承载审计语义，不就地改写，
          *     旧客户端与 golden 不受影响。
          *
