@@ -1,8 +1,13 @@
-# 模板驱动的通用评分系统
+# Grading-Core: 多租户文档合规审计与结构化评审 Agent 引擎
 
-系统实现“评分标准 -> 严格审核发布 -> 批次 -> 上传文档 -> 不可变快照 -> 证据/确定性检查 -> Core 逐项评分 -> 人工复核 -> 报告导出”的闭环；毕业论文是首个兼容业务 Profile，技术方案是第二个生产 Profile。
+面向高合规要求场景（企业技术标书评审、技术方案审计、学术论文规范评估）的模板驱动（Rubric-Driven）自动化评审内核。
 
-当前版本支持 Cookie 会话、多组织资源隔离、模板分级可见性及私有 BYOK；真实 LLM 与在线写表通过环境变量启用。旧 `.env` 模型仅保留给未绑定私有连接的兼容/演示路径，绝不会复制为用户 Key。迁移前备份与默认组织回填见 [docs/单租户基线与多租户迁移备份.md](docs/单租户基线与多租户迁移备份.md)。
+系统通过 **“不可变文档快照 -> 确定性规则检查 + 证据提取 -> LLM 原子规则评分 -> 人工复核闭环 -> QWK 量化门禁”**，解决非结构化长文档评估中的大模型幻觉与尺度漂移问题：
+
+- **通用多 Profile 文档审计内核**：内置企业技术方案评审（`technical_proposal`）、通用长文档合规审计（`general_document`）与学术论文评估（`thesis`）等多业务 Profile，底层统一抽象为内容寻址的 `RubricVersion`、`DocumentSnapshot` 与 `AtomicRule` 执行图；核心引擎已在高校真实生产环境中完成数千份长文档的规模化验证与 QWK 一致性门禁闭环。
+- **工程级安全与状态隔离**：基于 PostgreSQL RLS（行级安全策略）实现多组织租户隔离、模板分级可见性及私有 BYOK（Bring Your Own Key）加密托管；支持单规则级决策账本断点续跑、无锁并发推理与双前端（Web 操作台 + `pgs` 零服务 CLI）共享内核。
+
+> 真实 LLM 与在线写表通过环境变量启用；旧 `.env` 模型仅保留给未绑定私有连接的兼容/演示路径，绝不会复制为用户 Key。迁移前备份与默认组织回填见 [docs/单租户基线与多租户迁移备份.md](docs/单租户基线与多租户迁移备份.md)。
 
 ## 技术栈
 
@@ -94,7 +99,7 @@ uv run pgs eval --rubric <id> --papers-dir 论文夹/ --scores 成绩表.xlsx [-
 - 静态 Web 的“Rubric 严格审核与发布”面板与 CLI 共用上述 M4 lifecycle：导入后展示 warnings/template_summary 和 blocker，逐条完成规则/模板映射签核，并显式绑定活动 `compilation_id` 发布。
 - 正式标准的 batch 会锁定唯一已发布 `rubric_version_id`，评分时必然使用 AtomicRule Core；全局 `SCORING_ENGINE_MODE` 在 M8 前仍默认 `legacy`，只影响未版本化兼容路径。
 - 显式 `--profile` 走 v2 Submission→不可变 DocumentSnapshot→Core，Profile key/version 必须与数据库中唯一已发布 RubricVersion 的关联一致；用户在生产中建立关联，CLI 不猜测、不硬编码非论文默认。
-- 内置生产 Profile 包括 `thesis / thesis-legacy-profile@1`、`general_document / general-document-profile@1` 与 `technical_proposal / technical-proposal-profile@1`。工作台与评分助手评毕业论文和通用文档，类型在导入评分标准时选择（见 `docs/通用文档评分改造方案.md`）；通用文档复用论文 Profile 的解析、证据与检查器，身份字段为文件名与标题。技术方案元数据严格为 `proposal_id`、`vendor_name`、`project_name`，其章节/checker/等级/扣分仍由用户审核发布的 RubricVersion 和 ScoringPolicy 绑定，不随代码预置业务评分数据。
+- 内置生产 Profile 包括 `technical_proposal / technical-proposal-profile@1`、`general_document / general-document-profile@1` 与 `thesis / thesis-legacy-profile@1`。工作台与评分助手支持通用文档与学术论文评估，类型在导入评分标准时选择（见 `docs/通用文档评分改造方案.md`）；通用文档身份字段为文件名与标题。技术方案元数据严格为 `proposal_id`、`vendor_name`、`project_name`，其章节/checker/等级/扣分仍由用户审核发布的 RubricVersion 和 ScoringPolicy 绑定，不随代码预置业务评分数据。
 - `pgs eval` 对正式标准自动锁定唯一一致发布的 RubricVersion，按其 ScoringPolicy 中的 GradeScale、总分和舍入规则计算动态 QWK 档位，并输出 Profile/Policy/GradeScale 可复现身份。
 - `pgs core-cutover-audit` 对活跃 GradingBatch/EvaluationBatch 稳定去重，重算 published provenance hash、加载 snapshot 并用生产 registry 构建 plan；legacy 只接受显式 direct/composite compatibility。报告通过只代表 Rubric inventory scope，`production_default_switch_authorized` 始终为 false，不能替代 GATE-03 与维护者发布批准。
 - 闭环：`score` → 拿 run_id（或 `pgs runs`）→ `pgs show <run_id>` 看逐项明细 → `pgs review` 改分/提交（写 ReviewLog、重算总分）→ `pgs report` 出报告。
