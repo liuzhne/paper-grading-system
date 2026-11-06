@@ -31,13 +31,13 @@ flowchart TD
   AGG --> DB[("数据库<br/>SQLite(测试) / Postgres<br/>结构由 alembic/versions 管理")]
 
   %% ---------- 跳转源码 ----------
-  click ENG "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/services/scoring/engine.py" "engine.py"
-  click STEP1 "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/rubric_import" "rubric_import"
-  click STEP2 "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/document_parser" "document_parser"
-  click DET "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/checkers" "checkers"
-  click LLM "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/llm" "llm"
-  click COH "https://github.com/liuzhne/paper-grading-system/tree/main/backend/app/services/coherence" "coherence"
-  click AGG "https://github.com/liuzhne/paper-grading-system/blob/main/backend/app/db/models.py" "models.py"
+  click ENG "https://github.com/liuzhne/rubric-audit-engine/blob/main/backend/app/services/scoring/engine.py" "engine.py"
+  click STEP1 "https://github.com/liuzhne/rubric-audit-engine/tree/main/backend/app/services/rubric_import" "rubric_import"
+  click STEP2 "https://github.com/liuzhne/rubric-audit-engine/tree/main/backend/app/services/document_parser" "document_parser"
+  click DET "https://github.com/liuzhne/rubric-audit-engine/tree/main/backend/app/services/checkers" "checkers"
+  click LLM "https://github.com/liuzhne/rubric-audit-engine/tree/main/backend/app/services/llm" "llm"
+  click COH "https://github.com/liuzhne/rubric-audit-engine/tree/main/backend/app/services/coherence" "coherence"
+  click AGG "https://github.com/liuzhne/rubric-audit-engine/blob/main/backend/app/db/models.py" "models.py"
 
   %% ---------- 样式 ----------
   classDef core fill:#7c3aed,stroke:#4c1d95,color:#fff,font-weight:bold;

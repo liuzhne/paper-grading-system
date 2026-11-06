@@ -4,6 +4,8 @@
 
 ## 当前生产部署
 
+- GitHub 仓库：`liuzhne/rubric-audit-engine`（2026-11-05 前叫 `liuzhne/paper-grading-system`，旧地址由 GitHub 自动跳转；不要再新建同名的旧仓库，否则跳转失效）。
+
 - 公开入口：[https://paper-grading-system-kohl.vercel.app/](https://paper-grading-system-kohl.vercel.app/)
 - Vercel 团队/项目：`derrick-s-projects5/paper-grading-system`
 - 当前生产部署：`dpl_8GPV2quDdMnefVonhpUKSr3LcooL`，状态 `Ready`，于 2026-08-22 20:16（Asia/Shanghai）创建；区域 `iad1`；FastAPI 函数约 80 MB。
