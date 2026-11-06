@@ -416,14 +416,32 @@ describe("说不准有没有发出去（5xx、网络中断）：先核对会话�
     expect(store.error).toBe("助手处理失败，请稍后再试。");
     expect(Object.keys(store.filesByThread)).toEqual([]);
 
-    // 已经存下：照常显示，文件按会话里的流程线程归档。
+    // 已经存下：照常显示，但文件不归档（对应不准，可能是另一个标签页的同样份数），请老师在卡片里重新选择。
     detail = { ...conversation(), running: false, messages: [
       { id: "u1", role: "user", text: "评分这 1 份文件", cards: [], created_at: "2026-10-11T00:00:02.5" },
       message("m22", "用《标准》评这 1 份文件……开始吗？", [{ id: "start-1", type: "confirm_start", status: "proposed" }]),
     ], pending: { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: { type: "confirm" } } };
     await store.attachFiles(files);
-    expect(store.error).toBeNull();
-    expect(store.filesByThread["c1:1"]).toEqual(files);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+    expect(store.error).toBe("连接出了问题，这批文件没能交给评分流程，请在卡片里重新选择。");
+    expect(store.filesByThread).toEqual({});
+  });
+
+  it("跨标签页：另一个标签页发了同样份数的文件（文字一样），文件也不归到它的流程（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, { ...conversation(), running: false,
+        pending: { kind: "confirm_start", card_id: "s-9", thread_id: "c1:9", client: { type: "confirm" } },
+        messages: [{ id: "u9", role: "user", text: "评分这 1 份文件", cards: [], created_at: "2026-10-11T00:00:02.5" }] }],
+    });
+
+    await store.attachFiles(files);
+
+    expect(store.filesByThread).toEqual({});
+    expect(store.error).toContain("请在卡片里重新选择");
   });
 
   it("跨标签页：另一个标签页在同一会话说的话不算这次送达（#79 复审）", async () => {

@@ -337,7 +337,7 @@ export const useAssistantStore = defineStore("assistant", () => {
    * - 代理或网关的 5xx、请求发出后连接断了：等会话的 `running` 变成 false 再读，最多 70 秒。有这句话就照常显示；
    *   没有也不能说没收下——请求可能还没到后端、还没拿到运行锁（#79 复审），标“还不确定”，不给重发。
    * `running` 只看运行锁，锁过期不会停后台线程；回合的模型请求受 60 秒截止时间约束，实际在锁过期前结束。
-   * 另一个标签页恰好在同一会话说了同样的话时会对错，这种情况不处理（要按请求编号去重才能根治）。
+   * 另一个标签页恰好在同一会话说了同样的话时会对错，要按请求编号去重才能根治；附件因此核对后不归档文件。
    */
   async function recoverRun(conversationId, text, what, known, cause) {
     const finished = fromBackend(cause);
@@ -354,7 +354,10 @@ export const useAssistantStore = defineStore("assistant", () => {
         if (detail && (finished || !detail.running)) {
           const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
           const delivered = text !== null && fresh.some((item) => item.role === "user" && item.text === text);
-          if (delivered) return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail };
+          // `recovered`：结果是核对会话得来的，不是这次请求的返回。附件据此不归档文件（见 attachFiles）。
+          if (delivered) {
+            return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail, recovered: true };
+          }
           if (finished) throw cause; // 请求处理完了，会话里没有：确实没收下
           throw new DeliveryUnknownError(what);
         }
@@ -463,6 +466,12 @@ export const useAssistantStore = defineStore("assistant", () => {
       () => run({ type: "message", attachments: { count: accepted.length, names } }),
       "处理文件失败",
     );
+    if (result?.recovered) {
+      // 结果是核对会话得来的：另一个标签页在同一会话发了同样份数的文件时，文字一样、对应不准（#79 复审）。
+      // 不把文件归到可能是别人的流程里，请老师在卡片里重新选择（与刷新页面后相同）。
+      error.value = "连接出了问题，这批文件没能交给评分流程，请在卡片里重新选择。";
+      return;
+    }
     const thread = result?.pending?.thread_id;
     if (thread && thread !== before) {
       filesByThread[thread] = accepted;
