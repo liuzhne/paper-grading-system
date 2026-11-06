@@ -423,7 +423,7 @@ describe("说不准有没有发出去（5xx、网络中断）：先核对会话�
     ], pending: { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: { type: "confirm" } } };
     await store.attachFiles(files);
     expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
-    expect(store.error).toBe("连接出了问题，这批文件没能交给评分流程，请在卡片里重新选择。");
+    expect(store.error).toBe("连接出了问题，没法确认这批文件有没有交给评分流程：卡片在等文件就在卡片里重新选择，没有就重新添加附件。");
     expect(store.filesByThread).toEqual({});
   });
 
@@ -441,7 +441,7 @@ describe("说不准有没有发出去（5xx、网络中断）：先核对会话�
     await store.attachFiles(files);
 
     expect(store.filesByThread).toEqual({});
-    expect(store.error).toContain("请在卡片里重新选择");
+    expect(store.error).toContain("没法确认这批文件有没有交给评分流程");
   });
 
   it("跨标签页：另一个标签页在同一会话说的话不算这次送达（#79 复审）", async () => {
