@@ -1240,7 +1240,15 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 排错：发附件后提示“请在卡片里重新选择” |
+| 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（二） | “没有发出去”只在 4xx 与后端自己的 5xx 后出现；“还不确定”补上断线后会话里找不到的情况 |
+| 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正 | 日志只有能唯一对应本次回合时才能作为重发依据；附件的同类提示；本地试用的临时库改用 `/tmp` |
+| 2026-11-06 | 评分助手：说不准有没有发出去时先核对会话 | 无新命令、无后端变化；`public/` 已重建；排错：“没有发出去”现在只在确认没收下时出现，新增“还不确定有没有发出去” |
+| 2026-11-06 | 评分助手：过程流式与等待动效：#79 复审修正 | 本地试用补建表与示例数据；生产核实先确认 Agent 回合的前提；“没有发出去”与发版中断写明 5xx 也可能已经落库 |
+| 2026-11-06 | 评分助手：等待动效 | 无新命令、无后端变化；`public/` 已重建；验证 `cd frontend/workbench && npx vitest run src/components/assistant/ChatThread.test.js` |
 | 2026-11-06 | README 精简为项目首页 | 无迁移、无新环境变量；新增 `examples/`（合成论文与评分标准）与 `test_readme_examples.py`；CLI 全部命令移到 `docs/CLI.md`；§2.2 补手工起 worker 的命令，§2.4 补不建库的一次性评分；排错补文档契约与示例漂移两条 |
+| 2026-11-05 | 评分助手：过程流式 | 新环境变量 `ASSISTANT_STREAM_ENABLED`（默认关，经仓库变量进生产）；新接口 `/runs/stream`；Caddy 对流式路径不压缩；无迁移；排错：进度攒到最后一起到、“连接中断，正在取回结果…”、测试里测不了读一半断开 |
+| 2026-11-05 | 评分助手：老师的话先显示 | 无新命令、无后端变化；`public/` 已重建；排错：老师的话下面出现“没有发出去” |
 | 2026-11-05 | GitHub 仓库改名为 rubric-audit-engine | 各处克隆把 `origin` 改成新地址；文档链接改新名字；镜像标签不变；排错：绑定 PR 被拒、推送时提示新地址 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | 无新命令、无迁移；回复里加粗的状态说法（“已经\*\*完成\*\*”）同样会被核对并退回重写；卡片超出上限时可能出现“另外还有 N 个没有显示” |
 | 2026-11-05 | 评分助手：列表不能只剩引导句 | 无新命令、无新环境变量、无迁移；Agent 回复的 `meta` 多了 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`，日志 `assistant_turn` 多了 `reply_retries`、`dropped`；排错：回复只有“……有：”、后面是空的 |
@@ -2927,5 +2935,78 @@ git remote set-url origin https://github.com/liuzhne/rubric-audit-engine.git
   - 真正原因：本机 `origin` 还是旧仓库名。推送靠跳转能成功，但应用只认与 `origin` 同一个仓库的 PR。按上面的命令改 `origin` 后再绑定。
 
 维护记录：2026-11-05 · GitHub 仓库改名：新增改 `origin` 的命令，排错写明绑定 PR 被拒的真实原因。
+
+### 2026-11-05 评分助手：老师的话先显示
+
+方案见 `docs/评分助手v2界面改造方案.md` 第 3.6 节。只改前端；改完按 `frontend-workbench` 门禁重建 `public/`。
+
+排错：
+- **现象**：老师的话下面出现“没有发出去 · 重新发送”。
+  - 报错指向：像是前端没把消息发出去。
+  - 真正原因：后端确实没收下这句话，可以直接重发：要么是 4xx（运行锁 409“上一步还在处理”、校验 422），要么是后端自己返回的 5xx 之后，前端读了会话、里面没有这句话（请求已经处理完）。代理的 5xx 和网络中断不会出现这个提示，见下一条。
+- **现象**：发附件后输入框上方提示“连接出了问题，没法确认这批文件有没有交给评分流程……”。
+  - 报错指向：像是文件丢了或上传失败。
+  - 真正原因：附件请求遇到 5xx 或断线，前端核对会话时找到了“评分这 N 份文件”，但同一会话里另一个标签页发同样份数的文件时文字完全一样，无法确认找到的就是这一次请求，所以有意不把文件交给任何流程。对话里有等文件的卡片（显示“重新选择这批文件”），就在卡片里重新选择同一批文件，文件还没上传过；没有这样的卡片，说明这次可能没送达，重新添加附件。
+- **现象**：老师的话下面出现“还不确定有没有发出去，请稍后刷新页面看看”，没有重发按钮。
+  - 报错指向：像是前端卡住了。
+  - 真正原因：代理或网关的 5xx、网络中断之后，前端判断不了有没有收下，有意不给重发（重发可能多一条）。两种情况：等了 70 秒会话还显示这次运行没结束（`running` 为 true）；或者运行已经结束、会话里却没有这句话——请求可能还在路上、还没拿到运行锁，不能当成没收到。附件出现同样的情况时没有气泡，输入框上方显示“还没确认这批文件有没有发出去……”。后端是先提交消息、再释放锁和返回，所以 5xx 时消息可能已经存下了；代理或网关的 502、504 和网络中断时，回合可能还在跑。要人工判断时，以能唯一对应本次回合的依据为准：流式接口看服务日志里这个会话、发送时刻之后的 `assistant_stream_run conversation=<会话编号>`（回合结束时才写，带结果与耗时），`/runs` 看访问日志里这个会话、发送时刻之后的那条请求已经返回。日志里没有回合编号，同一会话的上一回合也可能在这次发送之后才结束，所以只有确定这个会话在发送前没有进行中的回合、发送之后也只有这一条时才能据此判断；之后重新读一次会话，里面有这句话就不要重发。附件出现同样的情况时没有气泡，输入框上方显示“还没确认……先别重新发送”。`running` 为 false 只说明运行锁不在了，锁过期并不会停止后台线程，不能单独作为依据。确认不了就不要重发。
+
+验证：
+
+```bash
+cd frontend/workbench && npx vitest run src/stores/assistant.test.js src/components/assistant/ChatThread.test.js
+```
+
+维护记录：2026-11-05 · 评分助手：老师的话先显示：排错写明“没有发出去”的真实原因与网络中断的例外。
+
+### 2026-11-05 评分助手：过程流式
+
+方案见 `docs/评分助手过程流式方案.md`。开关 `ASSISTANT_STREAM_ENABLED` 默认关；关闭时 `/runs/stream` 返回 404，前端照旧走 `/runs`。
+
+本地试（不用真实模型时只有 accepted 与 done；要看进度，用后端测试的脚本化模型）。新的 SQLite 库要先建表并造示例数据，与 §2.2 相同：
+
+```bash
+export DATABASE_URL=sqlite+pysqlite:////tmp/paper_grading_dev.db ASSISTANT_STREAM_ENABLED=true
+```
+
+```bash
+.venv/bin/alembic upgrade head
+```
+
+```bash
+.venv/bin/python -m backend.app.scripts.seed_dev
+```
+
+```bash
+.venv/bin/uvicorn backend.app.main:app --port 8000
+```
+
+生产打开（S3）：发布含本改动的版本后，在 GitHub 仓库变量里设 `ASSISTANT_STREAM_ENABLED=true` 并重新部署。进度只在 Agent 回合里才有，所以先确认三个前提：仓库变量 `ASSISTANT_AGENT_ENABLED=true`；用来核实的老师当前用的助手模型通过了评测（`agent/evaluated.py`，现在只有 Google 端点上的 `gemini-2.5-flash`）；当天的 Agent 回合数没用完。然后在浏览器打开评分助手，问一句要查数据的话（例如“有哪些评分标准”），开发者工具 Network 里 `runs/stream` 请求的 EventStream 页应该一条一条出现 `progress`，时间各不相同。只看到 `accepted` 和 `done` 时先查这次是不是 Agent 回合（服务日志 `assistant_turn mode=agent`，或这条助手消息的 `meta.mode`），是 Agent 回合却没有进度，再查代理缓冲。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_assistant_stream.py
+```
+
+```bash
+cd frontend/workbench && npx vitest run src/api/client.test.js src/stores/assistant.test.js src/components/assistant/ChatThread.test.js
+```
+
+排错：
+- **现象**：打开开关后进度不是一步一步出来，而是和回复一起到。
+  - 报错指向：像是后端没有边跑边推。
+  - 真正原因：代理把推送攒住了。Caddy 的 `encode` 会攒够一段才发，所以两份 Caddyfile 都用 `@compressible not path */runs/stream` 排除了流式路径；改 Caddy 配置时别把它合并回 `encode zstd gzip`。另有代理（CDN、公司网关）时要关掉它对 `text/event-stream` 的缓冲，响应头已带 `X-Accel-Buffering: no`。
+- **现象**：对话里显示“连接中断，正在取回结果…”。
+  - 报错指向：像是回合失败了。
+  - 真正原因：浏览器和后端之间的连接断了（网络、代理超时、发版换容器）。后端的回合在后台线程里照样跑完；前端每 2 秒读一次会话，等 `running` 变成 false 再显示。超过 70 秒还在运行会提示刷新。发版时进程退出：后台线程随进程结束，回合一定已经结束。退出前已经提交的，刷新能看到回复；还没提交的不会落库，锁 120 秒后过期。新进程起来以后重新读一次会话，会话里确实没有这句话才重新发送。
+- **现象**：写流式测试时，“读到第一条就断开”的用例里模型一直等到超时。
+  - 报错指向：像是后台线程卡住了。
+  - 真正原因：Starlette 的 TestClient 要等整个响应生成完才把内容交出来，测试里没法真的读一半断开。照 `test_assistant_stream.py` 的做法，把 `stream._events` 换成推出第一条就结束的生成器。
+- **现象**：流式测试里报 `StaleDataError: UPDATE statement on table 'assistant_messages' expected to update 1 row(s); 0 were matched`。
+  - 报错指向：像是消息被别人删了。
+  - 真正原因：测试库是单连接的内存库（`StaticPool`），后台回合进行中另一个请求结束时会回滚这条连接，把后台线程还没提交的写入一起回滚。测试里不要在回合进行中发请求；接口在起线程之前先关掉请求会话也是为了这个。
+
+维护记录：2026-11-05 · 评分助手：过程流式：新增开关与生产打开步骤，排错写明进度攒住、断线取回与两处测试陷阱的真实原因。
 
 维护记录：2026-11-06 · README 精简为项目首页：README 快速开始改用 `examples/`，CLI 全部命令见 `docs/CLI.md`；补手工起 worker 的命令与两条排错。

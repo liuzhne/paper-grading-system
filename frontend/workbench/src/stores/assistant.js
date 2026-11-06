@@ -12,7 +12,7 @@
 import { defineStore } from "pinia";
 import { reactive, ref, watch } from "vue";
 
-import { api, ApiError, StaleContextError } from "@/api/client.js";
+import { api, ApiError, postStream, StaleContextError, StreamInterruptedError } from "@/api/client.js";
 import { MAX_FILES, TERMINAL_JOB_STATUSES, limitFiles } from "@/lib/assistant-flow.js";
 import { rememberDocumentType } from "@/lib/document-types.js";
 import { useRubricsStore } from "@/stores/rubrics.js";
@@ -20,6 +20,49 @@ import { useUploadStore } from "@/stores/upload.js";
 
 const JOB_POLL_MS = 3000;
 const RUBRIC_POLL_MS = 5000;
+/** 流式断线后取回结果：每隔这么久读一次会话，最多等这么久（回合上限 60 秒加余量，过程流式方案 §5）。 */
+const RECOVER_POLL_MS = 2000;
+const RECOVER_WAIT_MS = 70000;
+const RECOVERING = "连接中断，正在取回结果…";
+const CHECKING = "出了点问题，正在核对这句话有没有发出去…";
+
+/**
+ * 确认不了这句话有没有被收下：不能让老师重发（可能多一条），本地消息标“还不确定”。
+ * 等不到这次运行结束、或者断线后会话里找不到它（请求可能还没到后端）时用。
+ */
+class DeliveryUnknownError extends ApiError {
+  constructor(what = "这句话") {
+    super(0, `还没确认${what}有没有发出去，请稍后刷新页面看看，先别重新发送。`, null);
+    this.name = "DeliveryUnknownError";
+  }
+}
+
+/**
+ * 后端存下的那条老师消息的文字：说一句话就是这句话；附件是后端拼的“评分这 N 份文件”
+ * （`api/routes/assistant._run_request`）。核对送达按文字对应，不按“会话里新出现了老师消息”：
+ * 另一个标签页在同一会话里说的话也会新出现（#79 复审）。
+ */
+function sentText(body, local) {
+  if (local) return local.text;
+  if (body.attachments) return `评分这 ${body.attachments.count} 份文件`;
+  return body.text || null;
+}
+
+/** 后端自己返回的错误（响应体是后端的 JSON，带 detail）：这次请求已经处理完。代理或网关的 502、504 不是。 */
+function fromBackend(err) {
+  return err instanceof ApiError && Boolean(err.payload) && typeof err.payload === "object" && "detail" in err.payload;
+}
+
+/**
+ * 这句话有没有被后端收下说不准：5xx（后端先提交消息再返回，返回前出错也是 5xx）、请求发出后连接断了。
+ * 4xx（运行锁 409、校验 422……）是确实没收下，可以直接重发。
+ */
+function deliveryUncertain(err) {
+  if (err instanceof StaleContextError) return false;
+  if (err instanceof StreamInterruptedError) return true;
+  if (err instanceof ApiError) return err.status >= 500;
+  return true; // fetch 本身失败（网络中断）：请求可能已经到了后端
+}
 const SETUP_DISMISSED_KEY = "pgs.assistant.setupDismissed";
 /** 老师在任务标签上操作后这么久之内，新结果不抢焦点，改为顶部提示（设计稿：60 秒）。 */
 const BUSY_MS = 60000;
@@ -46,6 +89,8 @@ export const useAssistantStore = defineStore("assistant", () => {
   const messages = ref([]);
   const pending = ref(null);
   const sending = ref(false);
+  /** 过程流式：回合进行时“现在在做哪一步”`{label, since}`，没有时为 null（docs/评分助手过程流式方案.md §3）。 */
+  const progress = ref(/** @type {{label: string, since: number} | null} */ (null));
   const uploading = ref(false);
   const error = ref(null);
   const setupOpen = ref(false);
@@ -217,6 +262,28 @@ export const useAssistantStore = defineStore("assistant", () => {
 
   // --- 运行 --------------------------------------------------------------------
 
+  /**
+   * 老师这句话先显示出来，不等后端返回（本地消息，编号以 `local-` 开头）。返回结果里带着后端存下的那一条，
+   * 收到后换掉；没发出去就留着并标“没有发出去”，老师可以重新发送，输入框已经清空了，不能让这句话丢掉。
+   */
+  let localSeq = 0;
+  function echo(text, quickAction) {
+    localSeq += 1;
+    const item = { id: `local-${localSeq}`, role: "user", text, cards: [], created_at: new Date().toISOString(),
+      local: "sending", quick_action: quickAction || null };
+    messages.value = [...messages.value, item];
+    return item;
+  }
+
+  function dropLocal(id) {
+    messages.value = messages.value.filter((item) => item.id !== id);
+  }
+
+  /** 本地消息的状态：`failed` 没有发出去，可以重新发送；`unknown` 还不确定有没有发出去，不给重发。 */
+  function markLocal(id, state) {
+    messages.value = messages.value.map((item) => (item.id === id ? { ...item, local: state } : item));
+  }
+
   function mergeMessages(incoming) {
     const byId = new Map(messages.value.map((item) => [item.id, item]));
     for (const message of incoming || []) byId.set(message.id, message);
@@ -224,16 +291,82 @@ export const useAssistantStore = defineStore("assistant", () => {
       String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id)));
   }
 
-  async function run(body) {
+  async function run(body, local = null) {
     const target = conversation.value || (await create());
+    // 新会话：create() 清空了消息列表，把刚显示的这句话放回去。
+    if (local && !messages.value.some((item) => item.id === local.id)) messages.value = [...messages.value, local];
     stopWatchers();
-    const result = await api.post(`/assistant/conversations/${target.id}/runs`, body);
     const known = new Set(messages.value.map((item) => item.id));
+    let result;
+    try {
+      // 说一句话走流式（开关打开时），回合进行时能看到进度；卡片上的“确定”“选择”不调模型，照旧。
+      result = body.type === "message" && settings.value?.stream_enabled
+        ? await runStream(target.id, body)
+        : await api.post(`/assistant/conversations/${target.id}/runs`, body);
+    } catch (err) {
+      // 说一句话时结果说不准（5xx、连接断了）：先核对会话，不让老师直接重发。卡片上的操作照旧报错。
+      if (body.type !== "message" || !deliveryUncertain(err)) throw err;
+      result = await recoverRun(target.id, sentText(body, local), local ? "这句话" : "这批文件", known, err);
+    }
+    if (local) dropLocal(local.id);
+    const before = new Set(messages.value.map((item) => item.id));
     mergeMessages(result.messages);
-    revealArtifacts((result.messages || []).filter((item) => !known.has(item.id)));
+    revealArtifacts((result.messages || []).filter((item) => !before.has(item.id)));
     pending.value = result.pending || null;
     applyConversation(result.conversation);
     return result;
+  }
+
+  async function runStream(conversationId, body) {
+    progress.value = null;
+    try {
+      return await postStream(`/assistant/conversations/${conversationId}/runs/stream`, body, {
+        onEvent(event, data) {
+          if (event === "progress" && typeof data?.label === "string") progress.value = { label: data.label, since: Date.now() };
+        },
+      });
+    } finally {
+      progress.value = null;
+    }
+  }
+
+  /**
+   * 这句话有没有被后端收下说不准时，不重发（会多一条），先核对会话。会话里的消息和这次请求只能按文字对应：
+   * - 后端自己返回的 5xx：这次请求已经处理完，读一次会话（不等 `running`）。有这句话就照常显示；没有就是没收下，
+   *   报后端的原因、标“没有发出去”。
+   * - 代理或网关的 5xx、请求发出后连接断了：等会话的 `running` 变成 false 再读，最多 70 秒。有这句话就照常显示；
+   *   没有也不能说没收下——请求可能还没到后端、还没拿到运行锁（#79 复审），标“还不确定”，不给重发。
+   * `running` 只看运行锁，锁过期不会停后台线程；回合的模型请求受 60 秒截止时间约束，实际在锁过期前结束。
+   * 另一个标签页恰好在同一会话说了同样的话时会对错，要按请求编号去重才能根治；附件因此核对后不归档文件。
+   */
+  async function recoverRun(conversationId, text, what, known, cause) {
+    const finished = fromBackend(cause);
+    progress.value = { label: finished ? CHECKING : RECOVERING, since: Date.now() };
+    const deadline = Date.now() + RECOVER_WAIT_MS;
+    try {
+      for (;;) {
+        let detail = null;
+        try {
+          detail = await api.get(`/assistant/conversations/${conversationId}`);
+        } catch (err) {
+          if (err instanceof StaleContextError) throw err;
+        }
+        if (detail && (finished || !detail.running)) {
+          const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
+          const delivered = text !== null && fresh.some((item) => item.role === "user" && item.text === text);
+          // `recovered`：结果是核对会话得来的，不是这次请求的返回。附件据此不归档文件（见 attachFiles）。
+          if (delivered) {
+            return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail, recovered: true };
+          }
+          if (finished) throw cause; // 请求处理完了，会话里没有：确实没收下
+          throw new DeliveryUnknownError(what);
+        }
+        if (Date.now() >= deadline) throw new DeliveryUnknownError(what);
+        await new Promise((resolve) => { window.setTimeout(resolve, RECOVER_POLL_MS); });
+      }
+    } finally {
+      progress.value = null;
+    }
   }
 
   /** 串行执行：同一会话同一时间只发一个运行请求（后端也有运行锁）。 */
@@ -258,11 +391,30 @@ export const useAssistantStore = defineStore("assistant", () => {
    * @param {string} text
    * @param {string} [quickAction]
    */
-  function send(text, quickAction) {
+  async function send(text, quickAction) {
     const cleaned = (text || "").trim();
-    if (!cleaned) return Promise.resolve(undefined);
+    if (!cleaned || sending.value) return undefined;
     const body = quickAction ? { type: "message", text: cleaned, quick_action: quickAction } : { type: "message", text: cleaned };
-    return guarded(() => run(body), "发送失败");
+    const local = echo(cleaned, quickAction);
+    let failure = null;
+    const result = await guarded(async () => {
+      try {
+        return await run(body, local);
+      } catch (err) {
+        failure = err;
+        throw err;
+      }
+    }, "发送失败");
+    if (result === undefined) markLocal(local.id, failure instanceof DeliveryUnknownError ? "unknown" : "failed");
+    return result;
+  }
+
+  /** 重新发送一句没发出去的话：去掉那条本地消息，按原样再发一次（快捷按钮仍带意图键）。 */
+  function resend(localId) {
+    const item = messages.value.find((entry) => entry.id === localId && entry.local === "failed");
+    if (!item || sending.value) return Promise.resolve(undefined);
+    dropLocal(item.id);
+    return send(item.text, item.quick_action || undefined);
   }
 
   function resume(cardId, value) {
@@ -314,6 +466,13 @@ export const useAssistantStore = defineStore("assistant", () => {
       () => run({ type: "message", attachments: { count: accepted.length, names } }),
       "处理文件失败",
     );
+    if (result?.recovered) {
+      // 结果是核对会话得来的：另一个标签页在同一会话发了同样份数的文件时，文字一样、对应不准（#79 复审）。
+      // 也就没法确认这次送达了没有。不把文件归到可能是别人的流程里：卡片在等文件就重新选择（与刷新页面后相同），
+      // 没有这样的卡片说明这次可能没送达，重新添加附件。
+      error.value = "连接出了问题，没法确认这批文件有没有交给评分流程：卡片在等文件就在卡片里重新选择，没有就重新添加附件。";
+      return;
+    }
     const thread = result?.pending?.thread_id;
     if (thread && thread !== before) {
       filesByThread[thread] = accepted;
@@ -489,10 +648,10 @@ export const useAssistantStore = defineStore("assistant", () => {
   });
 
   return {
-    settings, conversations, conversation, messages, pending, sending, uploading, error, setupOpen,
+    settings, conversations, conversation, messages, pending, sending, progress, uploading, error, setupOpen,
     workspacePath, workspaceKey, jobs, filesByThread, ws,
     loadSettings, saveSettings, dismissSetup, loadConversations, open, create, remove, clearConversation,
-    showWorkspace, send, resume, select, switchFlow, isPending, filesForPending, attachFiles, pickFiles, replaceFiles,
+    showWorkspace, send, resend, resume, select, switchFlow, isPending, filesForPending, attachFiles, pickFiles, replaceFiles,
     importRubric, reportError, reset, stopWatchers,
     openStep, openArtifact, noteTaskEdit, answerConfirm, changeRubric,
   };

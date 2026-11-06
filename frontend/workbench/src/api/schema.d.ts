@@ -262,6 +262,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/assistant/conversations/{conversation_id}/runs/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Run Stream
+         * @description 与 `/runs` 相同的一次推进，过程中推送进度（docs/评分助手过程流式方案.md）。开关关闭时 404。
+         */
+        post: operations["create_run_stream_api_assistant_conversations__conversation_id__runs_stream_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/assistant/settings": {
         parameters: {
             query?: never;
@@ -3337,6 +3357,11 @@ export interface components {
             /** Messages */
             messages: components["schemas"]["AssistantMessageRead"][];
             pending?: components["schemas"]["AssistantPendingRead"] | null;
+            /**
+             * Running
+             * @description 这一刻有运行在推进（运行锁没过期）。流式断线后前端靠它判断还要不要等（过程流式方案 §4.4）。
+             */
+            readonly running: boolean;
             /** Title */
             title: string;
             /**
@@ -3358,6 +3383,11 @@ export interface components {
             };
             /** Id */
             id: string;
+            /**
+             * Running
+             * @description 这一刻有运行在推进（运行锁没过期）。流式断线后前端靠它判断还要不要等（过程流式方案 §4.4）。
+             */
+            readonly running: boolean;
             /** Title */
             title: string;
             /**
@@ -3468,6 +3498,11 @@ export interface components {
             model_source?: ("connection" | "platform") | null;
             /** Platform Available */
             platform_available: boolean;
+            /**
+             * Stream Enabled
+             * @default false
+             */
+            stream_enabled: boolean;
         };
         /** AssistantSettingsUpdate */
         AssistantSettingsUpdate: {
@@ -6791,6 +6826,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssistantRunRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_run_stream_api_assistant_conversations__conversation_id__runs_stream_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                conversation_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantRunCreate"];
+            };
+        };
+        responses: {
+            /** @description SSE：accepted → progress（零到多条）→ done（与 /runs 的返回体相同）或 error；空闲时有注释行心跳 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
                 };
             };
             /** @description Validation Error */

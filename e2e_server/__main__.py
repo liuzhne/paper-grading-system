@@ -62,6 +62,9 @@ def main() -> None:
             # 官网申请表单只在鉴权后端打开：平台管理员要在运维页看到申请。默认后端
             # 保持关闭，等于 Vercel 那种没开开关的宿主——宣传页上不出现表单。
             "SITE_LEADS_ENABLED": "true" if with_auth else "false",
+            # 评分助手走流式接口（docs/评分助手过程流式方案.md）：浏览器验收经真实的 uvicorn 收发 SSE。
+            # Mock 模型下没有 Agent 回合，只有 accepted 与 done；进度由后端测试覆盖。
+            "ASSISTANT_STREAM_ENABLED": "true",
         }
     )
 

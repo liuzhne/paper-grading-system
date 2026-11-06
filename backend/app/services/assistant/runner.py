@@ -38,6 +38,7 @@ from backend.app.services.assistant import plan
 from backend.app.services.assistant import tools
 from backend.app.services.assistant.agent import budget as agent_budget
 from backend.app.services.assistant.agent import evaluated as agent_evaluated
+from backend.app.services.assistant.agent import progress as agent_progress
 from backend.app.services.assistant.agent import turn as agent_turn
 from backend.app.services.assistant.checkpointer import SqlCheckpointSaver
 from backend.app.services.assistant.context import RunContext
@@ -141,6 +142,16 @@ def _acquire_lock(db: Session, conversation: AssistantConversation) -> None:
     if result.rowcount == 0:
         _conflict("ASSISTANT_RUN_IN_PROGRESS", "上一步还在处理，请稍候。")
     db.refresh(conversation)
+
+
+def acquire_lock(db: Session, conversation: AssistantConversation) -> None:
+    """抢会话的运行锁；被占时 409。流式接口在开始推送之前调用，之后的 `run(..., locked=True)` 不再抢。"""
+
+    _acquire_lock(db, conversation)
+
+
+def release_lock(db: Session, conversation_id: str) -> None:
+    _release_lock(db, conversation_id)
 
 
 def _release_lock(db: Session, conversation_id: str) -> None:
@@ -378,6 +389,7 @@ def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, messa
     scorer = _agent_scorer(ctx)
     if scorer is None:
         return False, False
+    ctx.progress(agent_progress.UNDERSTANDING)
     outcome = agent_turn.run_turn(ctx, scorer, text=text, user_message_id=message.id)
     if outcome.kind == "degrade":
         message.meta = {"mode": "degraded", "reason": outcome.reason}
@@ -502,9 +514,13 @@ def _handle_select(ctx: RunContext, saver: SqlCheckpointSaver, card_id: str, val
     raise HTTPException(status_code=422, detail="这张卡片不能这样操作")
 
 
-def run(db: Session, principal: CurrentPrincipal, conversation: AssistantConversation, request: dict) -> dict:
-    _acquire_lock(db, conversation)
-    ctx = RunContext(db=db, principal=principal, conversation=conversation)
+def run(db: Session, principal: CurrentPrincipal, conversation: AssistantConversation, request: dict, *,
+        emit=None, locked: bool = False) -> dict:
+    """推进一次。`emit` 收进度事件（流式接口用）；`locked=True` 表示调用方已经抢到运行锁，这里只负责释放。"""
+
+    if not locked:
+        _acquire_lock(db, conversation)
+    ctx = RunContext(db=db, principal=principal, conversation=conversation, emit=emit)
     saver = SqlCheckpointSaver(db)
     try:
         _expire_stale_pending(ctx, saver)

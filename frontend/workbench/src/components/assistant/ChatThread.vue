@@ -1,9 +1,10 @@
 <script setup>
 /**
- * 对话（评分助手 v2 设计稿）：老师的消息是深绿气泡；助手的消息带头像、名称与时间；“你发布了《…》”这类
- * 事件显示为分隔线。流程卡片与结果卡片显示成“在右侧查看”入口，对话本身的选择（选任务、重试、放弃上一步）仍在这里点。
+ * 对话（评分助手 v2 设计稿）：老师的消息是深绿气泡，发出时先显示，没发出去的标“没有发出去”并可重新发送，
+ * 确认不了有没有被收下的标“还不确定”、不给重发；
+ * 助手的消息带头像、名称与时间；“你发布了《…》”这类事件显示为分隔线。流程卡片与结果卡片显示成“在右侧查看”入口，对话本身的选择（选任务、重试、放弃上一步）仍在这里点。
  */
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import AssistantCard from "@/components/AssistantCard.vue";
 import { QUICK_ACTIONS } from "@/lib/assistant-flow.js";
@@ -52,6 +53,27 @@ function scrollToEnd() {
   });
 }
 watch(() => [store.conversation?.id, store.messages.length, store.sending], scrollToEnd);
+
+/** 回合进行时显示当前这一步（过程流式），一步超过 5 秒加上已用秒数；没有进度时“正在整理…”。 */
+const now = ref(Date.now());
+let ticker = null;
+watch(() => store.sending, (busy) => {
+  if (ticker) window.clearInterval(ticker);
+  ticker = busy ? window.setInterval(() => { now.value = Date.now(); }, 1000) : null;
+  now.value = Date.now();
+}, { immediate: true });
+onBeforeUnmount(() => { if (ticker) window.clearInterval(ticker); });
+const typingLabel = computed(() => store.progress?.label || "正在整理…");
+/**
+ * 一步超过 5 秒时的“ N 秒”（带前导空格：写在模板里的空格会被编译去掉）。
+ * 只显示不读：它每秒都变，放进读屏区域会被反复朗读（#79 复审）。
+ */
+const typingSeconds = computed(() => {
+  const current = store.progress;
+  if (!current) return "";
+  const seconds = Math.floor((now.value - current.since) / 1000);
+  return seconds > 5 ? ` ${seconds} 秒` : "";
+});
 </script>
 
 <template>
@@ -75,6 +97,11 @@ watch(() => [store.conversation?.id, store.messages.length, store.sending], scro
         <article v-else-if="message.role === 'user'" class="message from-user">
           <time class="stamp" :datetime="message.created_at">{{ clockText(message.created_at) }}</time>
           <p class="bubble">{{ message.text }}</p>
+          <p v-if="message.local === 'failed'" class="unsent" role="alert">
+            没有发出去<button type="button" :disabled="store.sending" @click="store.resend(message.id)">重新发送</button>
+          </p>
+          <!-- 等不到这次运行结束、确认不了有没有被收下：不给重发，免得多一条。 -->
+          <p v-else-if="message.local === 'unknown'" class="unsent unsure" role="status">还不确定有没有发出去，请稍后刷新页面看看</p>
         </article>
         <article v-else class="message from-assistant">
           <span class="avatar" aria-hidden="true">
@@ -95,13 +122,17 @@ watch(() => [store.conversation?.id, store.messages.length, store.sending], scro
         </article>
       </template>
 
+      <!-- 等待动效（设计稿“评分助手 v2”）：取景框转动寻找依据，对勾随之确认；文字扫光。 -->
       <div v-if="store.sending" class="typing">
-        <span class="avatar" aria-hidden="true">
+        <span class="avatar yz-wait" aria-hidden="true">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 8.6V4h4.6" /><path d="M20 15.4V20h-4.6" /><path d="M8.2 12.4l3 3 5.2-5.8" />
+            <g class="yz-frame"><path d="M4 8.6V4h4.6" /><path d="M20 15.4V20h-4.6" /></g>
+            <path class="yz-check" d="M8.2 12.4l3 3 5.2-5.8" />
           </svg>
         </span>
-        <span>正在整理…</span>
+        <!-- 读屏只读步骤文字（role="status"：步骤变了才朗读）；秒数每秒都变，只显示不读。 -->
+        <span class="yz-wait-text" data-test="typing"><span role="status">{{ typingLabel }}</span><span
+          v-if="typingSeconds" aria-hidden="true">{{ typingSeconds }}</span></span>
       </div>
     </div>
   </div>
@@ -123,6 +154,10 @@ watch(() => [store.conversation?.id, store.messages.length, store.sending], scro
 .stamp, .who time { font-size: 11.5px; color: var(--text-faint); }
 .bubble { margin: 0; max-width: min(80%, 520px); padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--accent);
   color: #fff; font-size: 14px; line-height: 1.7; white-space: pre-wrap; text-wrap: pretty; }
+.unsent { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--danger); }
+.unsent button { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
+.unsent button:disabled { color: var(--text-faint); cursor: default; }
+.unsent.unsure { color: var(--text-muted); }
 .from-assistant { display: flex; gap: 12px; align-items: flex-start; }
 .avatar { flex: none; width: 28px; height: 28px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; margin-top: 1px; }
 .body { flex: 1; min-width: 0; }
@@ -130,4 +165,37 @@ watch(() => [store.conversation?.id, store.messages.length, store.sending], scro
 .who strong { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
 .text { margin: 0; font-size: 14px; line-height: 1.85; white-space: pre-wrap; text-wrap: pretty; }
 .typing { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-muted); }
+
+/* 有据智评 · 等待动效（设计稿“评分助手 v2”）：取景框转动寻找依据，对勾随之确认；外圈光晕与文字扫光。 */
+.yz-wait { position: relative; animation: yz-halo 1.2s ease-out infinite; }
+.yz-wait .yz-frame { transform-box: view-box; transform-origin: 12px 12px; animation: yz-turn 2.4s cubic-bezier(.65, 0, .35, 1) infinite; }
+.yz-wait .yz-check { stroke-dasharray: 13 13; animation: yz-tick 1.2s cubic-bezier(.4, 0, .2, 1) infinite; }
+.yz-wait-text {
+  background: linear-gradient(90deg, var(--text-muted) 0%, var(--text-muted) 40%, var(--accent) 50%, var(--text-muted) 60%, var(--text-muted) 100%);
+  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: yz-shine 2.4s linear infinite;
+}
+@keyframes yz-turn {
+  0%, 20% { transform: rotate(0deg) scale(1); }
+  35% { transform: rotate(45deg) scale(.76); }
+  50%, 70% { transform: rotate(90deg) scale(1); }
+  85% { transform: rotate(135deg) scale(.76); }
+  100% { transform: rotate(180deg) scale(1); }
+}
+@keyframes yz-tick {
+  0% { stroke-dashoffset: 13; }
+  22%, 40% { stroke-dashoffset: 0; }
+  66%, 100% { stroke-dashoffset: -13; }
+}
+@keyframes yz-halo {
+  0% { box-shadow: 0 0 0 0 rgba(23, 92, 80, .32); }
+  70% { box-shadow: 0 0 0 7px rgba(23, 92, 80, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(23, 92, 80, 0); }
+}
+@keyframes yz-shine { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+/* 系统设置了“减少动态效果”：取景框不转，其余放慢到 3.6 秒（与设计稿一致）。 */
+@media (prefers-reduced-motion: reduce) {
+  .yz-wait, .yz-wait .yz-check, .yz-wait-text { animation-duration: 3.6s; }
+  .yz-wait .yz-frame { animation: none; }
+}
 </style>

@@ -1,6 +1,8 @@
 {$PAPER_GRADING_SITE:https://localhost} {
     tls internal
-    encode zstd gzip
+    # 评分助手的流式接口（SSE）不压缩，与 deploy/production/caddy/Caddyfile 同一条规则。
+    @compressible not path */runs/stream
+    encode @compressible zstd gzip
 
     request_body {
         max_size {$CADDY_MAX_UPLOAD_SIZE:50MB}
