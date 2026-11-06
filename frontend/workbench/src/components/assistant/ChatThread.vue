@@ -62,11 +62,16 @@ watch(() => store.sending, (busy) => {
   now.value = Date.now();
 }, { immediate: true });
 onBeforeUnmount(() => { if (ticker) window.clearInterval(ticker); });
-const typingText = computed(() => {
+const typingLabel = computed(() => store.progress?.label || "正在整理…");
+/**
+ * 一步超过 5 秒时的“ N 秒”（带前导空格：写在模板里的空格会被编译去掉）。
+ * 只显示不读：它每秒都变，放进读屏区域会被反复朗读（#79 复审）。
+ */
+const typingSeconds = computed(() => {
   const current = store.progress;
-  if (!current) return "正在整理…";
+  if (!current) return "";
   const seconds = Math.floor((now.value - current.since) / 1000);
-  return seconds > 5 ? `${current.label} ${seconds} 秒` : current.label;
+  return seconds > 5 ? ` ${seconds} 秒` : "";
 });
 </script>
 
@@ -115,14 +120,16 @@ const typingText = computed(() => {
       </template>
 
       <!-- 等待动效（设计稿“评分助手 v2”）：取景框转动寻找依据，对勾随之确认；文字扫光。 -->
-      <div v-if="store.sending" class="typing" role="status">
+      <div v-if="store.sending" class="typing">
         <span class="avatar yz-wait" aria-hidden="true">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
             <g class="yz-frame"><path d="M4 8.6V4h4.6" /><path d="M20 15.4V20h-4.6" /></g>
             <path class="yz-check" d="M8.2 12.4l3 3 5.2-5.8" />
           </svg>
         </span>
-        <span class="yz-wait-text" data-test="typing">{{ typingText }}</span>
+        <!-- 读屏只读步骤文字（role="status"：步骤变了才朗读）；秒数每秒都变，只显示不读。 -->
+        <span class="yz-wait-text" data-test="typing"><span role="status">{{ typingLabel }}</span><span
+          v-if="typingSeconds" aria-hidden="true">{{ typingSeconds }}</span></span>
       </div>
     </div>
   </div>

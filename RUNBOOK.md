@@ -1240,6 +1240,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-06 | 评分助手：过程流式与等待动效：#79 复审修正 | 本地试用补建表与示例数据；生产核实先确认 Agent 回合的前提；“没有发出去”与发版中断写明 5xx 也可能已经落库 |
 | 2026-11-06 | 评分助手：等待动效 | 无新命令、无后端变化；`public/` 已重建；验证 `cd frontend/workbench && npx vitest run src/components/assistant/ChatThread.test.js` |
 | 2026-11-06 | README 精简为项目首页 | 无迁移、无新环境变量；新增 `examples/`（合成论文与评分标准）与 `test_readme_examples.py`；CLI 全部命令移到 `docs/CLI.md`；§2.2 补手工起 worker 的命令，§2.4 补不建库的一次性评分；排错补文档契约与示例漂移两条 |
 | 2026-11-05 | 评分助手：过程流式 | 新环境变量 `ASSISTANT_STREAM_ENABLED`（默认关，经仓库变量进生产）；新接口 `/runs/stream`；Caddy 对流式路径不压缩；无迁移；排错：进度攒到最后一起到、“连接中断，正在取回结果…”、测试里测不了读一半断开 |
@@ -2920,7 +2921,7 @@ SQL
 排错：
 - **现象**：老师的话下面出现“没有发出去 · 重新发送”。
   - 报错指向：像是前端没把消息发出去。
-  - 真正原因：这次运行请求失败了，后端没有存下这句话。输入框上方显示具体原因：运行锁 409（上一步还在处理）、网络中断、5xx。点“重新发送”按原文再发（快捷按钮仍带意图键）。例外：网络中断时请求可能已经到了后端，刷新后能看到这句话已经在，就不要再重发。
+  - 真正原因：这次运行请求失败了。运行锁 409 时后端确实没有收下这句话，可以直接点“重新发送”（按原文再发，快捷按钮仍带意图键）。网络中断和 5xx 时不一定：后端是先提交消息、再释放锁和返回，这两步出错也会是 5xx，消息可能已经存下了。这两种情况先刷新页面，会话里已经有这句话就不要重发，否则会多一条。
 
 验证：
 
@@ -2934,13 +2935,25 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js src/compone
 
 方案见 `docs/评分助手过程流式方案.md`。开关 `ASSISTANT_STREAM_ENABLED` 默认关；关闭时 `/runs/stream` 返回 404，前端照旧走 `/runs`。
 
-本地试（不用真实模型时只有 accepted 与 done；要看进度，用后端测试的脚本化模型）：
+本地试（不用真实模型时只有 accepted 与 done；要看进度，用后端测试的脚本化模型）。新的 SQLite 库要先建表并造示例数据，与 §2.2 相同：
 
 ```bash
-ASSISTANT_STREAM_ENABLED=true DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run uvicorn backend.app.main:app --port 8000
+export DATABASE_URL=sqlite+pysqlite:////private/tmp/paper_grading_dev.db ASSISTANT_STREAM_ENABLED=true
 ```
 
-生产打开（S3）：发布含本改动的版本后，在 GitHub 仓库变量里设 `ASSISTANT_STREAM_ENABLED=true` 并重新部署；然后在浏览器打开评分助手，问一句要查数据的话（例如“有哪些评分标准”），开发者工具 Network 里 `runs/stream` 请求的 EventStream 页应该一条一条出现 `progress`，时间各不相同。
+```bash
+.venv/bin/alembic upgrade head
+```
+
+```bash
+.venv/bin/python -m backend.app.scripts.seed_dev
+```
+
+```bash
+.venv/bin/uvicorn backend.app.main:app --port 8000
+```
+
+生产打开（S3）：发布含本改动的版本后，在 GitHub 仓库变量里设 `ASSISTANT_STREAM_ENABLED=true` 并重新部署。进度只在 Agent 回合里才有，所以先确认三个前提：仓库变量 `ASSISTANT_AGENT_ENABLED=true`；用来核实的老师当前用的助手模型通过了评测（`agent/evaluated.py`，现在只有 Google 端点上的 `gemini-2.5-flash`）；当天的 Agent 回合数没用完。然后在浏览器打开评分助手，问一句要查数据的话（例如“有哪些评分标准”），开发者工具 Network 里 `runs/stream` 请求的 EventStream 页应该一条一条出现 `progress`，时间各不相同。只看到 `accepted` 和 `done` 时先查这次是不是 Agent 回合（服务日志 `assistant_turn mode=agent`，或这条助手消息的 `meta.mode`），是 Agent 回合却没有进度，再查代理缓冲。
 
 验证：
 
@@ -2958,7 +2971,7 @@ cd frontend/workbench && npx vitest run src/api/client.test.js src/stores/assist
   - 真正原因：代理把推送攒住了。Caddy 的 `encode` 会攒够一段才发，所以两份 Caddyfile 都用 `@compressible not path */runs/stream` 排除了流式路径；改 Caddy 配置时别把它合并回 `encode zstd gzip`。另有代理（CDN、公司网关）时要关掉它对 `text/event-stream` 的缓冲，响应头已带 `X-Accel-Buffering: no`。
 - **现象**：对话里显示“连接中断，正在取回结果…”。
   - 报错指向：像是回合失败了。
-  - 真正原因：浏览器和后端之间的连接断了（网络、代理超时、发版换容器）。后端的回合在后台线程里照样跑完；前端每 2 秒读一次会话，等 `running` 变成 false 再显示。超过 70 秒还在运行会提示刷新；发版时进程退出，回合没有提交，锁 120 秒后过期。
+  - 真正原因：浏览器和后端之间的连接断了（网络、代理超时、发版换容器）。后端的回合在后台线程里照样跑完；前端每 2 秒读一次会话，等 `running` 变成 false 再显示。超过 70 秒还在运行会提示刷新。发版时进程退出：退出前已经提交的，刷新能看到回复；还没提交的不会落库，锁 120 秒后过期，这时会话里没有这句话，可以重新发送。
 - **现象**：写流式测试时，“读到第一条就断开”的用例里模型一直等到超时。
   - 报错指向：像是后台线程卡住了。
   - 真正原因：Starlette 的 TestClient 要等整个响应生成完才把内容交出来，测试里没法真的读一半断开。照 `test_assistant_stream.py` 的做法，把 `stream._events` 换成推出第一条就结束的生成器。

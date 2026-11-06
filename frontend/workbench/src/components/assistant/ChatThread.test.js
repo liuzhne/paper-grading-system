@@ -48,6 +48,9 @@ describe("对话", () => {
     store.progress = { label: "正在查：可用的评分标准…", since: Date.now() - 7500 };
     await nextTick();
     expect(wrapper.find('[data-test="typing"]').text()).toBe("正在查：可用的评分标准… 7 秒");
+    // 读屏只读步骤文字：秒数每秒都变，放在读屏区域外并且 aria-hidden（#79 复审）。
+    expect(wrapper.find('[role="status"]').text()).toBe("正在查：可用的评分标准…");
+    expect(wrapper.find('[aria-hidden="true"]:not(.avatar)').text()).toBe("7 秒");
     wrapper.unmount();
   });
 
@@ -60,7 +63,7 @@ describe("对话", () => {
     store.sending = true;
     await nextTick();
     const typing = wrapper.find(".typing");
-    expect(typing.attributes("role")).toBe("status");
+    expect(typing.find('[role="status"]').text()).toBe("正在整理…");
     const avatar = typing.find(".avatar.yz-wait");
     expect(avatar.attributes("aria-hidden")).toBe("true");
     expect(avatar.findAll(".yz-frame path")).toHaveLength(2);
