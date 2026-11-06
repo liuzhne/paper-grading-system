@@ -50,4 +50,24 @@ describe("对话", () => {
     expect(wrapper.find('[data-test="typing"]').text()).toBe("正在查：可用的评分标准… 7 秒");
     wrapper.unmount();
   });
+
+  it("等待动效（设计稿“评分助手 v2”）：头像的取景框与对勾分层动，文字扫光；只在等待时出现，读屏能读到进度", async () => {
+    const store = useAssistantStore();
+    store.messages = [{ id: "u1", role: "user", text: "你好", cards: [], created_at: "2026-11-06T07:00:00Z" }];
+    const wrapper = mount(ChatThread, { global: { stubs } });
+    expect(wrapper.find(".typing").exists()).toBe(false);
+
+    store.sending = true;
+    await nextTick();
+    const typing = wrapper.find(".typing");
+    expect(typing.attributes("role")).toBe("status");
+    const avatar = typing.find(".avatar.yz-wait");
+    expect(avatar.attributes("aria-hidden")).toBe("true");
+    expect(avatar.findAll(".yz-frame path")).toHaveLength(2);
+    expect(avatar.find("path.yz-check").attributes("d")).toBe("M8.2 12.4l3 3 5.2-5.8");
+    expect(typing.find(".yz-wait-text").text()).toBe("正在整理…");
+    // 对话里的助手头像是静止的，动效只给等待提示。
+    expect(wrapper.findAll(".yz-wait")).toHaveLength(1);
+    wrapper.unmount();
+  });
 });

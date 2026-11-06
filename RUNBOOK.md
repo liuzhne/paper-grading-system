@@ -1240,6 +1240,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-06 | 评分助手：等待动效 | 无新命令、无后端变化；`public/` 已重建；验证 `cd frontend/workbench && npx vitest run src/components/assistant/ChatThread.test.js` |
 | 2026-11-06 | README 精简为项目首页 | 无迁移、无新环境变量；新增 `examples/`（合成论文与评分标准）与 `test_readme_examples.py`；CLI 全部命令移到 `docs/CLI.md`；§2.2 补手工起 worker 的命令，§2.4 补不建库的一次性评分；排错补文档契约与示例漂移两条 |
 | 2026-11-05 | 评分助手：过程流式 | 新环境变量 `ASSISTANT_STREAM_ENABLED`（默认关，经仓库变量进生产）；新接口 `/runs/stream`；Caddy 对流式路径不压缩；无迁移；排错：进度攒到最后一起到、“连接中断，正在取回结果…”、测试里测不了读一半断开 |
 | 2026-11-05 | 评分助手：老师的话先显示 | 无新命令、无后端变化；`public/` 已重建；排错：老师的话下面出现“没有发出去” |

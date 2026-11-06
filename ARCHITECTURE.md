@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-06 | 评分助手：等待动效 | 无架构变化：只改 `components/assistant/ChatThread.vue` 等待提示的标记与样式（设计稿“评分助手 v2”的 `yz-wait`），`public/` 已重建 |
 | 2026-11-06 | README 精简为项目首页 | 只动文档入口：CLI 命令移到 `docs/CLI.md`，新增 `examples/`（合成示例，不进运行时）。模块边界、调用链、数据流与持久化边界不变，无迁移 |
 | 2026-11-05 | 评分助手：过程流式 | 新增 `services/assistant/stream.py`（后台线程 + `asyncio.Queue` + SSE）与 `agent/progress.py`（进度文字表）；`POST /assistant/conversations/{id}/runs/stream`；`RunContext.progress` / `emit`；`runner.run(emit=, locked=)`、`acquire_lock` / `release_lock`；会话返回只读 `running`、设置返回 `stream_enabled`；前端 `postStream`、`store.progress`、断线取回。开关 `ASSISTANT_STREAM_ENABLED` 默认关；无迁移；Caddy 对流式路径不压缩 |
 | 2026-11-05 | 评分助手：老师的话先显示 | 前端 `stores/assistant.js` 的 `send` 先放一条本地消息（`local-…`），`run` 返回后换成后端存下的那条；失败标 `local: "failed"`，`resend` 去掉它再发一次；`ChatThread` 显示“没有发出去 · 重新发送”。后端、接口与 OpenAPI 不变；`public/` 已重建 |

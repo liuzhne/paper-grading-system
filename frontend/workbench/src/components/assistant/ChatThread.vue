@@ -114,13 +114,15 @@ const typingText = computed(() => {
         </article>
       </template>
 
-      <div v-if="store.sending" class="typing">
-        <span class="avatar" aria-hidden="true">
+      <!-- 等待动效（设计稿“评分助手 v2”）：取景框转动寻找依据，对勾随之确认；文字扫光。 -->
+      <div v-if="store.sending" class="typing" role="status">
+        <span class="avatar yz-wait" aria-hidden="true">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 8.6V4h4.6" /><path d="M20 15.4V20h-4.6" /><path d="M8.2 12.4l3 3 5.2-5.8" />
+            <g class="yz-frame"><path d="M4 8.6V4h4.6" /><path d="M20 15.4V20h-4.6" /></g>
+            <path class="yz-check" d="M8.2 12.4l3 3 5.2-5.8" />
           </svg>
         </span>
-        <span data-test="typing">{{ typingText }}</span>
+        <span class="yz-wait-text" data-test="typing">{{ typingText }}</span>
       </div>
     </div>
   </div>
@@ -152,4 +154,37 @@ const typingText = computed(() => {
 .who strong { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
 .text { margin: 0; font-size: 14px; line-height: 1.85; white-space: pre-wrap; text-wrap: pretty; }
 .typing { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-muted); }
+
+/* 有据智评 · 等待动效（设计稿“评分助手 v2”）：取景框转动寻找依据，对勾随之确认；外圈光晕与文字扫光。 */
+.yz-wait { position: relative; animation: yz-halo 1.2s ease-out infinite; }
+.yz-wait .yz-frame { transform-box: view-box; transform-origin: 12px 12px; animation: yz-turn 2.4s cubic-bezier(.65, 0, .35, 1) infinite; }
+.yz-wait .yz-check { stroke-dasharray: 13 13; animation: yz-tick 1.2s cubic-bezier(.4, 0, .2, 1) infinite; }
+.yz-wait-text {
+  background: linear-gradient(90deg, var(--text-muted) 0%, var(--text-muted) 40%, var(--accent) 50%, var(--text-muted) 60%, var(--text-muted) 100%);
+  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: yz-shine 2.4s linear infinite;
+}
+@keyframes yz-turn {
+  0%, 20% { transform: rotate(0deg) scale(1); }
+  35% { transform: rotate(45deg) scale(.76); }
+  50%, 70% { transform: rotate(90deg) scale(1); }
+  85% { transform: rotate(135deg) scale(.76); }
+  100% { transform: rotate(180deg) scale(1); }
+}
+@keyframes yz-tick {
+  0% { stroke-dashoffset: 13; }
+  22%, 40% { stroke-dashoffset: 0; }
+  66%, 100% { stroke-dashoffset: -13; }
+}
+@keyframes yz-halo {
+  0% { box-shadow: 0 0 0 0 rgba(23, 92, 80, .32); }
+  70% { box-shadow: 0 0 0 7px rgba(23, 92, 80, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(23, 92, 80, 0); }
+}
+@keyframes yz-shine { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+/* 系统设置了“减少动态效果”：取景框不转，其余放慢到 3.6 秒（与设计稿一致）。 */
+@media (prefers-reduced-motion: reduce) {
+  .yz-wait, .yz-wait .yz-check, .yz-wait-text { animation-duration: 3.6s; }
+  .yz-wait .yz-frame { animation: none; }
+}
 </style>
