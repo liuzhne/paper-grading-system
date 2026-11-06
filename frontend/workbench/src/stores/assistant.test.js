@@ -401,7 +401,7 @@ describe("说不准有没有发出去（5xx、网络中断）：先核对会话�
     expect(store.messages).toHaveLength(1);
   });
 
-  it("附件：没有本地消息可对照，按会话里有没有新出现的老师消息判断（#79 复审）", async () => {
+  it("附件：按后端拼的“评分这 N 份文件”对应这次请求，没有就是没收下（#79 复审）", async () => {
     const store = useAssistantStore();
     store.conversation = conversation();
     const files = [new File(["a"], "a.docx")];
@@ -424,6 +424,40 @@ describe("说不准有没有发出去（5xx、网络中断）：先核对会话�
     await store.attachFiles(files);
     expect(store.error).toBeNull();
     expect(store.filesByThread["c1:1"]).toEqual(files);
+  });
+
+  it("跨标签页：另一个标签页在同一会话说的话不算这次送达（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    const otherTab = { ...conversation(), running: false, pending: { kind: "pick_files", card_id: "f-1", thread_id: "c1:9" },
+      messages: [{ id: "u9", role: "user", text: "开始评分", cards: [], created_at: "2026-10-11T00:00:02.5" }] };
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, otherTab],
+    });
+
+    await store.attachFiles(files);
+
+    expect(store.error).toBe("助手处理失败，请稍后再试。");
+    expect(store.filesByThread).toEqual({}); // 文件不归到另一个标签页开的流程
+  });
+
+  it("断线时序：会话已经不在运行、也没有这句话，请求可能还在路上，标“还不确定”而不是“没有发出去”（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url, init = {}) => {
+      if ((init.method || "GET").toUpperCase() === "POST") throw new TypeError("Failed to fetch");
+      return new Response(JSON.stringify(empty(false)), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    await store.send("你好");
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "unknown"]]);
+
+    await store.attachFiles(files);
+    expect(store.error).toBe("还没确认这批文件有没有发出去，请稍后刷新页面看看，先别重新发送。");
+    expect(store.filesByThread).toEqual({});
   });
 
   it("4xx（如运行锁 409）：后端确实没收下，不核对会话", async () => {
@@ -530,7 +564,7 @@ describe("过程流式", () => {
     expect(store.progress).toBeNull();
   });
 
-  it("断线后会话里没有这句话：后端没收到，标“没有发出去”", async () => {
+  it("断线后会话里没有这句话：请求可能还没到后端（还没拿到运行锁），标“还不确定”、不给重发（#79 复审）", async () => {
     const store = useAssistantStore();
     store.conversation = conversation();
     store.settings = { stream_enabled: true };
@@ -538,8 +572,8 @@ describe("过程流式", () => {
 
     await store.send("你好");
 
-    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "failed"]]);
-    expect(store.error).toBe("连接中断，这句话没有发出去。");
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "unknown"]]);
+    expect(store.error).toContain("先别重新发送");
   });
 });
 

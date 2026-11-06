@@ -27,13 +27,25 @@ const RECOVERING = "连接中断，正在取回结果…";
 const CHECKING = "出了点问题，正在核对这句话有没有发出去…";
 
 /**
- * 等不到这次运行结束、确认不了这句话有没有被收下：不能让老师重发（可能多一条），本地消息标“还不确定”。
+ * 确认不了这句话有没有被收下：不能让老师重发（可能多一条），本地消息标“还不确定”。
+ * 等不到这次运行结束、或者断线后会话里找不到它（请求可能还没到后端）时用。
  */
 class DeliveryUnknownError extends ApiError {
-  constructor() {
-    super(0, "还没确认这句话有没有发出去，请稍后刷新页面看看，先别重新发送。", null);
+  constructor(what = "这句话") {
+    super(0, `还没确认${what}有没有发出去，请稍后刷新页面看看，先别重新发送。`, null);
     this.name = "DeliveryUnknownError";
   }
+}
+
+/**
+ * 后端存下的那条老师消息的文字：说一句话就是这句话；附件是后端拼的“评分这 N 份文件”
+ * （`api/routes/assistant._run_request`）。核对送达按文字对应，不按“会话里新出现了老师消息”：
+ * 另一个标签页在同一会话里说的话也会新出现（#79 复审）。
+ */
+function sentText(body, local) {
+  if (local) return local.text;
+  if (body.attachments) return `评分这 ${body.attachments.count} 份文件`;
+  return body.text || null;
 }
 
 /** 后端自己返回的错误（响应体是后端的 JSON，带 detail）：这次请求已经处理完。代理或网关的 502、504 不是。 */
@@ -294,7 +306,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     } catch (err) {
       // 说一句话时结果说不准（5xx、连接断了）：先核对会话，不让老师直接重发。卡片上的操作照旧报错。
       if (body.type !== "message" || !deliveryUncertain(err)) throw err;
-      result = await recoverRun(target.id, local, known, err);
+      result = await recoverRun(target.id, sentText(body, local), local ? "这句话" : "这批文件", known, err);
     }
     if (local) dropLocal(local.id);
     const before = new Set(messages.value.map((item) => item.id));
@@ -319,13 +331,15 @@ export const useAssistantStore = defineStore("assistant", () => {
   }
 
   /**
-   * 这句话有没有被后端收下说不准时，不重发（会多一条），先核对会话：
-   * - 后端自己返回的 5xx：这次请求已经处理完，读一次会话就能判断，不用等；
-   * - 代理或网关的 5xx、请求发出后连接断了：回合可能还在跑，等会话的 `running` 变成 false 再判断，最多 70 秒。
-   * 会话里有这句话就用会话里的消息；没有就抛错，标“没有发出去”；等不到结束就标“还不确定”，不给重发。
+   * 这句话有没有被后端收下说不准时，不重发（会多一条），先核对会话。会话里的消息和这次请求只能按文字对应：
+   * - 后端自己返回的 5xx：这次请求已经处理完，读一次会话（不等 `running`）。有这句话就照常显示；没有就是没收下，
+   *   报后端的原因、标“没有发出去”。
+   * - 代理或网关的 5xx、请求发出后连接断了：等会话的 `running` 变成 false 再读，最多 70 秒。有这句话就照常显示；
+   *   没有也不能说没收下——请求可能还没到后端、还没拿到运行锁（#79 复审），标“还不确定”，不给重发。
    * `running` 只看运行锁，锁过期不会停后台线程；回合的模型请求受 60 秒截止时间约束，实际在锁过期前结束。
+   * 另一个标签页恰好在同一会话说了同样的话时会对错，这种情况不处理（要按请求编号去重才能根治）。
    */
-  async function recoverRun(conversationId, local, known, cause) {
+  async function recoverRun(conversationId, text, what, known, cause) {
     const finished = fromBackend(cause);
     progress.value = { label: finished ? CHECKING : RECOVERING, since: Date.now() };
     const deadline = Date.now() + RECOVER_WAIT_MS;
@@ -339,19 +353,12 @@ export const useAssistantStore = defineStore("assistant", () => {
         }
         if (detail && (finished || !detail.running)) {
           const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
-          // 附件没有本地消息可对照：看这次发送之后会话里有没有新出现的老师消息（运行锁保证同一时间只有一次运行）。
-          // 不能把“没有本地消息”当成送达（#79 复审）。
-          const delivered = fresh.some((item) => item.role === "user" && (!local || item.text === local.text));
-          if (!delivered) {
-            if (finished) throw cause;
-            const what = local ? "这句话" : "这批文件";
-            throw cause instanceof ApiError
-              ? new ApiError(cause.status, `服务暂时不可用，${what}没有发出去。`, null)
-              : new ApiError(0, `连接中断，${what}没有发出去。`, null);
-          }
-          return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail };
+          const delivered = text !== null && fresh.some((item) => item.role === "user" && item.text === text);
+          if (delivered) return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail };
+          if (finished) throw cause; // 请求处理完了，会话里没有：确实没收下
+          throw new DeliveryUnknownError(what);
         }
-        if (Date.now() >= deadline) throw new DeliveryUnknownError();
+        if (Date.now() >= deadline) throw new DeliveryUnknownError(what);
         await new Promise((resolve) => { window.setTimeout(resolve, RECOVER_POLL_MS); });
       }
     } finally {
