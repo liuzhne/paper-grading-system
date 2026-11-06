@@ -191,7 +191,8 @@ jobs:
             0038_assistant_conversations \
             0039_site_leads \
             0040_provider_output_observations \
-            0041_assistant_agent_state
+            0041_assistant_agent_state \
+            0042_assistant_message_client_id
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done

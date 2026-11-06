@@ -73,13 +73,4 @@ describe("对话", () => {
     expect(wrapper.findAll(".yz-wait")).toHaveLength(1);
     wrapper.unmount();
   });
-
-  it("确认不了有没有发出去的：标“还不确定”，不给重新发送", () => {
-    const store = useAssistantStore();
-    store.messages = [{ id: "local-1", role: "user", text: "你好", cards: [], created_at: "2026-11-06T07:00:00Z", local: "unknown" }];
-    const wrapper = mount(ChatThread, { global: { stubs } });
-    const note = wrapper.find(".unsent");
-    expect(note.text()).toBe("还不确定有没有发出去，请稍后刷新页面看看");
-    expect(note.find("button").exists()).toBe(false);
-  });
 });

@@ -22,9 +22,11 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import ValidationError
 from pydantic import model_validator
+from sqlalchemy import and_
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.api.deps import CurrentPrincipal
@@ -293,9 +295,47 @@ def _recent_user_texts(ctx: RunContext, exclude_id: str) -> list[str]:
     return [text[: intents.MAX_TEXT_CHARS] for text in reversed(rows)]
 
 
+def _replay(ctx: RunContext, client_id: str | None, text: str) -> list[AssistantMessage] | None:
+    """同一个请求编号在本会话里已经有老师消息：返回那一轮（这条老师消息，加到下一条老师消息之前的助手消息）。
+
+    发送去重（docs/评分助手发送去重方案.md §3）：5xx 或断线后前端用同一个编号重发，后端收到过就回放，
+    不再新建消息、不再跑一遍回合。编号相同、文字不同时以第一次为准，记一条警告。
+    """
+
+    if not client_id:
+        return None
+    conversation_id = ctx.conversation.id
+    first = ctx.db.scalar(select(AssistantMessage).where(
+        AssistantMessage.conversation_id == conversation_id,
+        AssistantMessage.role == "user",
+        AssistantMessage.client_id == client_id,
+    ))
+    if first is None:
+        return None
+    if (first.text or "") != (text or ""):
+        logger.warning("assistant_run_replay_text_mismatch conversation=%s", conversation_id)
+    later = ctx.db.scalars(
+        select(AssistantMessage)
+        .where(
+            AssistantMessage.conversation_id == conversation_id,
+            or_(AssistantMessage.created_at > first.created_at,
+                and_(AssistantMessage.created_at == first.created_at, AssistantMessage.id > first.id)),
+        )
+        .order_by(AssistantMessage.created_at, AssistantMessage.id)
+    ).all()
+    group = [first]
+    for message in later:
+        if message.role == "user":
+            break
+        group.append(message)
+    logger.info("assistant_run_replayed conversation=%s messages=%d", conversation_id, len(group))
+    return group
+
+
 def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attachments: dict | None,
-                    quick_action: str | None = None) -> None:
-    message = AssistantMessage(conversation_id=ctx.conversation.id, role="user", text=text, cards=[])
+                    quick_action: str | None = None, client_id: str | None = None) -> None:
+    message = AssistantMessage(conversation_id=ctx.conversation.id, role="user", text=text, cards=[],
+                               client_id=client_id)
     ctx.db.add(message)
     ctx.db.flush()
     ctx.new_message_ids.append(message.id)
@@ -522,25 +562,40 @@ def run(db: Session, principal: CurrentPrincipal, conversation: AssistantConvers
         _acquire_lock(db, conversation)
     ctx = RunContext(db=db, principal=principal, conversation=conversation, emit=emit)
     saver = SqlCheckpointSaver(db)
+    kind = request["type"]
+    client_id = request.get("client_id") if kind == "message" else None
+    replayed = None
     try:
         _expire_stale_pending(ctx, saver)
-        kind = request["type"]
         if kind == "message":
-            _handle_message(ctx, saver, request["text"], request.get("attachments"),
-                            request.get("quick_action"))
+            # 发送去重：同一个请求编号已经收到过，回放那一轮，不再新建消息、不再跑回合。
+            replayed = _replay(ctx, client_id, request["text"])
+            if replayed is None:
+                _handle_message(ctx, saver, request["text"], request.get("attachments"),
+                                request.get("quick_action"), client_id)
         elif kind == "resume":
             _resume_flow(ctx, saver, request["card_id"], request.get("value") or {})
         else:
             _handle_select(ctx, saver, request["card_id"], request.get("value") or {})
         db.commit()
+    except IntegrityError:
+        db.rollback()
+        # 两次同编号的请求都越过了运行锁（锁过期而第一次还在跑，实际不会）：后插入的被唯一索引拒绝，
+        # 回放先存下的那一次（迁移 0042）。别的完整性错误照常抛出。
+        replayed = _replay(ctx, client_id, request.get("text") or "") if client_id else None
+        if replayed is None:
+            raise
     except Exception:
         db.rollback()
         raise
     finally:
         _release_lock(db, conversation.id)
     db.refresh(conversation)
-    ids = list(dict.fromkeys([*ctx.new_message_ids, *ctx.updated_message_ids]))
-    messages = db.scalars(select(AssistantMessage).where(AssistantMessage.id.in_(ids))).all() if ids else []
+    if replayed is not None:
+        messages = replayed
+    else:
+        ids = list(dict.fromkeys([*ctx.new_message_ids, *ctx.updated_message_ids]))
+        messages = db.scalars(select(AssistantMessage).where(AssistantMessage.id.in_(ids))).all() if ids else []
     messages = sorted(messages, key=lambda item: (item.created_at, item.id))
     return {"messages": messages, "pending": conversation.pending, "conversation": conversation}
 

@@ -52,6 +52,8 @@ class AssistantMessageRead(BaseModel):
     cards: list[dict[str, Any]]
     intent: Optional[str] = None
     model_name: Optional[str] = None
+    # 老师消息的请求编号（发送去重）：前端按它把本地消息换成后端存下的那条。助手消息为空。
+    client_id: Optional[str] = None
     created_at: datetime
 
 
@@ -120,6 +122,9 @@ class AssistantRunCreate(BaseModel):
     quick_action: Optional[QuickAction] = None
     card_id: Optional[str] = Field(default=None, max_length=60)
     value: Optional[dict[str, Any]] = None
+    # 请求编号（docs/评分助手发送去重方案.md）：同一会话里重复收到同一个编号时回放第一次的结果。
+    # 只对 message 有意义；旧页面不带。
+    client_id: Optional[str] = Field(default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9-]+$")
 
     @model_validator(mode="after")
     def _shape(self):

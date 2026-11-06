@@ -129,4 +129,23 @@ test.describe("评分助手", () => {
     await expect(page.locator(".message.from-user .bubble", { hasText: "你好" })).toHaveCount(1);
     await expect(page.locator(".unsent")).toHaveCount(0);
   });
+
+  test("回复在路上丢了（后端已处理、页面拿到 502）：用同一个编号自动重发，后端回放，只存下一条（发送去重）", async ({ page }) => {
+    await openAssistant(page);
+    let lost = false;
+    await page.route("**/runs/stream", async (route) => {
+      if (lost) return route.continue();
+      lost = true;
+      await route.fetch(); // 请求真的到了后端、处理完并落库
+      await route.fulfill({ status: 502, contentType: "text/plain", body: "Bad Gateway" }); // 页面却拿到 502
+    });
+    await ask(page, "今天天气怎么样");
+    await expect(page.locator(".message").last()).toContainText("没理解");
+    const bubbles = page.locator(".message.from-user .bubble", { hasText: "今天天气怎么样" });
+    await expect(bubbles).toHaveCount(1);
+    await expect(page.locator(".unsent")).toHaveCount(0);
+    // 刷新后从后端读：同一个编号只存了一条老师消息。
+    await page.reload();
+    await expect(page.locator(".message.from-user .bubble", { hasText: "今天天气怎么样" })).toHaveCount(1);
+  });
 });
