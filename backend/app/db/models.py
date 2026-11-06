@@ -3303,6 +3303,15 @@ class AssistantMessage(Base):
             "conversation_id",
             "created_at",
         ),
+        # 发送去重（docs/评分助手发送去重方案.md）：同一会话里同一个请求编号只能有一条老师消息。迁移 0042。
+        Index(
+            "uq_assistant_messages_conversation_client_id",
+            "conversation_id",
+            "client_id",
+            unique=True,
+            postgresql_where=sql_text("client_id IS NOT NULL"),
+            sqlite_where=sql_text("client_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -3312,6 +3321,8 @@ class AssistantMessage(Base):
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 老师消息的请求编号（前端生成）：重复收到同一个编号时回放第一次的结果，不再新建。旧页面不带，为空。
+    client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     cards: Mapped[list] = mapped_column(
         MutableList.as_mutable(JSON), nullable=False, default=list

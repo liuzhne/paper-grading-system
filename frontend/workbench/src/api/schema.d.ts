@@ -3407,6 +3407,8 @@ export interface components {
             cards: {
                 [key: string]: unknown;
             }[];
+            /** Client Id */
+            client_id?: string | null;
             /**
              * Created At
              * Format: date-time
@@ -3464,6 +3466,8 @@ export interface components {
             attachments?: components["schemas"]["AssistantAttachments"] | null;
             /** Card Id */
             card_id?: string | null;
+            /** Client Id */
+            client_id?: string | null;
             /** Quick Action */
             quick_action?: ("start_grading" | "import_rubric" | "query_progress" | "query_paper" | "query_review" | "query_overview" | "next_steps") | null;
             /** Text */

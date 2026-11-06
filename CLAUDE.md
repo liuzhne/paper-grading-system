@@ -18,7 +18,7 @@
 - CI：`.github/workflows/ci.yml` 包含锁文件全量测试与 Postgres 16 的逐版本迁移、约束/排序、拒绝 lossy downgrade、备份恢复演练；本机 SQLite 通过不能替代真实 CI artifact。
 
 ## 当前发布边界
-- Alembic head：`0041_assistant_agent_state`（0023 规则检查点与人工复核任务；0024 批次七态约束 + `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0029 为 0026/0027 的新表补 `pgs_app` 授权与 RLS；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本 `rule_decision_ledger` 与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议 CHECK 加入 `anthropic_messages`；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与两条部分索引，新增 `work_runtime_state`；0036 AI 任务 `ai_tasks` / `ai_task_items` 与规则来源 `atomic_rules.ai_origin` / `ai_model`；0037 `ai_tasks.rubric_id` 对导入前的结构识别可空；0038 评分助手的偏好、会话、消息与两张流程状态表，给 `pgs_app` 授权并建 RLS；0039 官网申请表 `site_leads`，给 `pgs_app` 授权并建 RLS；0040 `scoring_runs` 与 `ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`；0041 评分助手 Agent 状态：`assistant_messages.meta` 与 `assistant_conversations.compaction`）。**0024–0028、0031 有数据时一律拒绝降级**；0033 的账本是缓存，降级可删，但有 `decision_reused=true` 或 `group_call_id` 的任务时拒绝降级；0034 有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级；0035 有排队、评分中或取消中的批量评分任务时拒绝降级；0036 有 AI 任务或已记录生成模型的规则时拒绝降级；0037 有不挂评分标准的结构识别任务时拒绝降级；0038 任一助手表有数据时拒绝降级；0039 官网申请表有数据时拒绝降级；0040 有非零的推理或截断观测时拒绝降级；0041 任一列有数据时拒绝降级。
+- Alembic head：`0042_assistant_message_client_id`（0023 规则检查点与人工复核任务；0024 批次七态约束 + `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0029 为 0026/0027 的新表补 `pgs_app` 授权与 RLS；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本 `rule_decision_ledger` 与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议 CHECK 加入 `anthropic_messages`；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与两条部分索引，新增 `work_runtime_state`；0036 AI 任务 `ai_tasks` / `ai_task_items` 与规则来源 `atomic_rules.ai_origin` / `ai_model`；0037 `ai_tasks.rubric_id` 对导入前的结构识别可空；0038 评分助手的偏好、会话、消息与两张流程状态表，给 `pgs_app` 授权并建 RLS；0039 官网申请表 `site_leads`，给 `pgs_app` 授权并建 RLS；0040 `scoring_runs` 与 `ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`；0041 评分助手 Agent 状态：`assistant_messages.meta` 与 `assistant_conversations.compaction`；0042 评分助手发送去重：`assistant_messages.client_id` 与 `(conversation_id, client_id)` 部分唯一索引）。**0024–0028、0031 有数据时一律拒绝降级**；0033 的账本是缓存，降级可删，但有 `decision_reused=true` 或 `group_call_id` 的任务时拒绝降级；0034 有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级；0035 有排队、评分中或取消中的批量评分任务时拒绝降级；0036 有 AI 任务或已记录生成模型的规则时拒绝降级；0037 有不挂评分标准的结构识别任务时拒绝降级；0038 任一助手表有数据时拒绝降级；0039 官网申请表有数据时拒绝降级；0040 有非零的推理或截断观测时拒绝降级；0041 任一列有数据时拒绝降级；0042 有请求编号时拒绝降级。
 - **新建表必须在迁移里给 `pgs_app` 授权并建 RLS**（照 0023 的做法）。生产运行角色没有 DDL，也不会自动获得新表权限；漏了不会让迁移失败，而是让迁移成功之后应用 permission denied——本地与 CI 不建这个角色，两边都测不出来。
 - v1 `score_paper()` 与 v2 `score_generic_submission()` 并存；正式 RubricVersion 走 AtomicRule Core，未版本化标准只能走显式 compatibility。
 - `SCORING_ENGINE_MODE` 当前默认 `legacy`；它只控制未版本化兼容路径。真实 `GATE-03` 达到 `gating_eligible=true` 且取得维护者发布批准前，禁止改为默认 Core。
@@ -30,7 +30,7 @@
   - `rubric_import/`：三层解析（见 `docs/评分规则解析模块重构方案.md`）——`sources/` 格式适配器（Excel/Word → 原文单元台账 `SourceLedger`，不用 LLM）、`extraction/` 抽取器（确定性表格/Word 抽取、E1–E8 触发、用户确认的结构覆盖、LLM 结构识别兜底）、`classification/` 兜底分类器；`coverage` 覆盖率、`parse_state` 单元处理与发布门禁、`structure_state` 结构建议合入/撤销、`review`/`review_state` 规则审查；`pipeline` 只做组装与持久化；`compiler` 结构化扣分规则（`compile_criterion_rules` 旧 LLM 编译仅供 CLI）；`requirements/` Word 模板的章节树和评分规范条目（分期 A，`REQUIREMENT_ITEMS_ENABLED` 默认关闭，见 `docs/Word评分规范抽取与对应方案.md`）。
   - `document_parser/`：docx/PDF 解析(`parser`)、分块(`chunking`)、格式解析(`format_resolver`)、格式比对(`format_check`)。
   - `papers/ingestion`：解析+落库共享服务（路由与离线脚本复用）。
-  - `assistant/`：评分助手（见 `docs/对话评分助手改造方案.md`）。LangGraph 流程图 `flow` + 查询图 `queries`，计划卡片 `plan`（流程开始时由代码列出步骤、逐步更新，见 `docs/评分助手计划卡片方案.md`），运行器 `runner`，自写状态存储 `checkpointer`（写入先缓冲、主线程落库），工具登记 `tools`，意图识别 `intents`（规则优先）。评分权为零。界面是原生工作区（任务标签按计划卡片、结果标签按结果卡片，都从消息算出，见 `docs/评分助手v2界面改造方案.md`）；流程顺序是选文件 → 建草稿任务并上传 → 预检 → 确认开始。过程流式 `stream`（`/runs/stream` 推“现在在做哪一步”，回复仍整段校验后显示；开关 `ASSISTANT_STREAM_ENABLED` 默认关，见 `docs/评分助手过程流式方案.md`）。
+  - `assistant/`：评分助手（见 `docs/对话评分助手改造方案.md`）。LangGraph 流程图 `flow` + 查询图 `queries`，计划卡片 `plan`（流程开始时由代码列出步骤、逐步更新，见 `docs/评分助手计划卡片方案.md`），运行器 `runner`，自写状态存储 `checkpointer`（写入先缓冲、主线程落库），工具登记 `tools`，意图识别 `intents`（规则优先）。评分权为零。界面是原生工作区（任务标签按计划卡片、结果标签按结果卡片，都从消息算出，见 `docs/评分助手v2界面改造方案.md`）；流程顺序是选文件 → 建草稿任务并上传 → 预检 → 确认开始。过程流式 `stream`（`/runs/stream` 推“现在在做哪一步”，回复仍整段校验后显示；开关 `ASSISTANT_STREAM_ENABLED` 默认关，见 `docs/评分助手过程流式方案.md`）。发送去重：每句话带请求编号 `client_id`，运行器按编号回放第一次的结果，前端没有确定结果时用同一个编号重发（`docs/评分助手发送去重方案.md`）。
   - `scoring/engine`：评分编排（**核心**）；`rules` 总分/等级；`validator` 结构化输出校验+注入检测。
   - `batch_scoring/jobs`：数据库持久化批任务、论文级检查点、租约恢复/取消/定向重试、观察策略与 Core 切换信号；只做观察，不授予 GATE-03 发布权限。它是 `work_queue` 的一种条目。
   - `work_queue/`：数据库即队列——`claim_next_item`（来源名额 + `SKIP LOCKED` + 任务内序号轮转）、条目心跳、`sweep_stale_items` 巡检（连续无进展上限）、叫醒（Vercel 上 `pgs-work` 只带来源键；内网、本地与 Lightsail 生产由 worker 循环调用同一个领取函数）。
@@ -88,7 +88,7 @@
 （迁移 head、命令、边界事实）；机器检不出来的部分靠这条约定。
 
 ## 约定
-- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0041_assistant_agent_state`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
+- 新增端点/字段要配 Alembic 迁移（当前 head 为 `0042_assistant_message_client_id`）+ 对应测试（`backend/app/tests/test_*.py`，复用 `conftest` 的 `client` 与 `make_*` 造数据）。
 - 改 prompt/输入构造要 bump `cache/llm_cache.PROMPT_VERSION`。
 - 改评分逻辑后用 §15 QWK 留出集重新锚定基线。
 - 生产变更需完成 `docs/上线清单.md`；备份恢复必须先 verify，restore 只允许显式确认的数据库与空 storage 目标。

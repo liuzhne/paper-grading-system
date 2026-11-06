@@ -20,47 +20,34 @@ import { useUploadStore } from "@/stores/upload.js";
 
 const JOB_POLL_MS = 3000;
 const RUBRIC_POLL_MS = 5000;
-/** 流式断线后取回结果：每隔这么久读一次会话，最多等这么久（回合上限 60 秒加余量，过程流式方案 §5）。 */
-const RECOVER_POLL_MS = 2000;
-const RECOVER_WAIT_MS = 70000;
-const RECOVERING = "连接中断，正在取回结果…";
-const CHECKING = "出了点问题，正在核对这句话有没有发出去…";
+/** 发一句话没有确定结果时，等这次运行结束再用同一个编号重发：每隔这么久读一次会话，最多等这么久（回合上限 60 秒加余量）。 */
+const RETRY_POLL_MS = 2000;
+const RETRY_WAIT_MS = 70000;
+const RETRYING = "连接出了问题，正在重新发送…";
+const WAITING_TURN = "上一步还在处理，处理完就自动发出…";
 
 /**
- * 确认不了这句话有没有被收下：不能让老师重发（可能多一条），本地消息标“还不确定”。
- * 等不到这次运行结束、或者断线后会话里找不到它（请求可能还没到后端）时用。
+ * 请求编号（发送去重，docs/评分助手发送去重方案.md）：后端按它去重，同一个编号重发不会多一条，回放第一次的结果。
+ * 非安全上下文没有 `randomUUID`，用 `getRandomValues` 拼一个同样格式的。
  */
-class DeliveryUnknownError extends ApiError {
-  constructor(what = "这句话") {
-    super(0, `还没确认${what}有没有发出去，请稍后刷新页面看看，先别重新发送。`, null);
-    this.name = "DeliveryUnknownError";
-  }
+export function makeClientId() {
+  const source = globalThis.crypto;
+  if (typeof source?.randomUUID === "function") return source.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof source?.getRandomValues === "function") source.getRandomValues(bytes);
+  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
- * 后端存下的那条老师消息的文字：说一句话就是这句话；附件是后端拼的“评分这 N 份文件”
- * （`api/routes/assistant._run_request`）。核对送达按文字对应，不按“会话里新出现了老师消息”：
- * 另一个标签页在同一会话里说的话也会新出现（#79 复审）。
+ * 发一句话没有确定结果、值得用同一个编号重发一次的情况：5xx（后端先提交消息再返回，返回前出错也是 5xx）、
+ * 请求发出后连接断了、409（运行锁被占，可能就是自己第一次的请求还在跑）。其余 4xx 是确实没收下。
  */
-function sentText(body, local) {
-  if (local) return local.text;
-  if (body.attachments) return `评分这 ${body.attachments.count} 份文件`;
-  return body.text || null;
-}
-
-/** 后端自己返回的错误（响应体是后端的 JSON，带 detail）：这次请求已经处理完。代理或网关的 502、504 不是。 */
-function fromBackend(err) {
-  return err instanceof ApiError && Boolean(err.payload) && typeof err.payload === "object" && "detail" in err.payload;
-}
-
-/**
- * 这句话有没有被后端收下说不准：5xx（后端先提交消息再返回，返回前出错也是 5xx）、请求发出后连接断了。
- * 4xx（运行锁 409、校验 422……）是确实没收下，可以直接重发。
- */
-function deliveryUncertain(err) {
+function worthRetry(err) {
   if (err instanceof StaleContextError) return false;
   if (err instanceof StreamInterruptedError) return true;
-  if (err instanceof ApiError) return err.status >= 500;
+  if (err instanceof ApiError) return err.status >= 500 || err.status === 409;
   return true; // fetch 本身失败（网络中断）：请求可能已经到了后端
 }
 const SETUP_DISMISSED_KEY = "pgs.assistant.setupDismissed";
@@ -265,12 +252,13 @@ export const useAssistantStore = defineStore("assistant", () => {
   /**
    * 老师这句话先显示出来，不等后端返回（本地消息，编号以 `local-` 开头）。返回结果里带着后端存下的那一条，
    * 收到后换掉；没发出去就留着并标“没有发出去”，老师可以重新发送，输入框已经清空了，不能让这句话丢掉。
+   * `client_id` 是请求编号：重新发送沿用它，后端按它去重。
    */
   let localSeq = 0;
-  function echo(text, quickAction) {
+  function echo(text, quickAction, clientId) {
     localSeq += 1;
     const item = { id: `local-${localSeq}`, role: "user", text, cards: [], created_at: new Date().toISOString(),
-      local: "sending", quick_action: quickAction || null };
+      local: "sending", quick_action: quickAction || null, client_id: clientId };
     messages.value = [...messages.value, item];
     return item;
   }
@@ -279,9 +267,9 @@ export const useAssistantStore = defineStore("assistant", () => {
     messages.value = messages.value.filter((item) => item.id !== id);
   }
 
-  /** 本地消息的状态：`failed` 没有发出去，可以重新发送；`unknown` 还不确定有没有发出去，不给重发。 */
-  function markLocal(id, state) {
-    messages.value = messages.value.map((item) => (item.id === id ? { ...item, local: state } : item));
+  /** 没有发出去：留着这句话，给“重新发送”（沿用同一个编号，后端去重，不会多一条）。 */
+  function markFailed(id) {
+    messages.value = messages.value.map((item) => (item.id === id ? { ...item, local: "failed" } : item));
   }
 
   function mergeMessages(incoming) {
@@ -296,17 +284,14 @@ export const useAssistantStore = defineStore("assistant", () => {
     // 新会话：create() 清空了消息列表，把刚显示的这句话放回去。
     if (local && !messages.value.some((item) => item.id === local.id)) messages.value = [...messages.value, local];
     stopWatchers();
-    const known = new Set(messages.value.map((item) => item.id));
     let result;
     try {
-      // 说一句话走流式（开关打开时），回合进行时能看到进度；卡片上的“确定”“选择”不调模型，照旧。
-      result = body.type === "message" && settings.value?.stream_enabled
-        ? await runStream(target.id, body)
-        : await api.post(`/assistant/conversations/${target.id}/runs`, body);
+      result = await dispatch(target.id, body);
     } catch (err) {
-      // 说一句话时结果说不准（5xx、连接断了）：先核对会话，不让老师直接重发。卡片上的操作照旧报错。
-      if (body.type !== "message" || !deliveryUncertain(err)) throw err;
-      result = await recoverRun(target.id, sentText(body, local), local ? "这句话" : "这批文件", known, err);
+      // 说一句话没有确定结果：等这次运行结束，用同一个编号重发一次——后端收到过就回放第一次的结果，
+      // 没收到就照常处理，不会多一条（发送去重方案 §4.2）。重发也失败就交给调用方标“没有发出去”。
+      if (body.type !== "message" || !body.client_id || !worthRetry(err)) throw err;
+      result = { ...(await retryOnce(target.id, body, err)), retried: true };
     }
     if (local) dropLocal(local.id);
     const before = new Set(messages.value.map((item) => item.id));
@@ -315,6 +300,13 @@ export const useAssistantStore = defineStore("assistant", () => {
     pending.value = result.pending || null;
     applyConversation(result.conversation);
     return result;
+  }
+
+  /** 说一句话走流式（开关打开时），回合进行时能看到进度；卡片上的“确定”“选择”不调模型，照旧。 */
+  function dispatch(conversationId, body) {
+    return body.type === "message" && settings.value?.stream_enabled
+      ? runStream(conversationId, body)
+      : api.post(`/assistant/conversations/${conversationId}/runs`, body);
   }
 
   async function runStream(conversationId, body) {
@@ -330,42 +322,32 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   }
 
-  /**
-   * 这句话有没有被后端收下说不准时，不重发（会多一条），先核对会话。会话里的消息和这次请求只能按文字对应：
-   * - 后端自己返回的 5xx：这次请求已经处理完，读一次会话（不等 `running`）。有这句话就照常显示；没有就是没收下，
-   *   报后端的原因、标“没有发出去”。
-   * - 代理或网关的 5xx、请求发出后连接断了：等会话的 `running` 变成 false 再读，最多 70 秒。有这句话就照常显示；
-   *   没有也不能说没收下——请求可能还没到后端、还没拿到运行锁（#79 复审），标“还不确定”，不给重发。
-   * `running` 只看运行锁，锁过期不会停后台线程；回合的模型请求受 60 秒截止时间约束，实际在锁过期前结束。
-   * 另一个标签页恰好在同一会话说了同样的话时会对错，要按请求编号去重才能根治；附件因此核对后不归档文件。
-   */
-  async function recoverRun(conversationId, text, what, known, cause) {
-    const finished = fromBackend(cause);
-    progress.value = { label: finished ? CHECKING : RECOVERING, since: Date.now() };
-    const deadline = Date.now() + RECOVER_WAIT_MS;
+  async function retryOnce(conversationId, body, cause) {
+    const busy = cause instanceof ApiError && cause.status === 409;
+    progress.value = { label: busy ? WAITING_TURN : RETRYING, since: Date.now() };
     try {
-      for (;;) {
-        let detail = null;
-        try {
-          detail = await api.get(`/assistant/conversations/${conversationId}`);
-        } catch (err) {
-          if (err instanceof StaleContextError) throw err;
-        }
-        if (detail && (finished || !detail.running)) {
-          const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
-          const delivered = text !== null && fresh.some((item) => item.role === "user" && item.text === text);
-          // `recovered`：结果是核对会话得来的，不是这次请求的返回。附件据此不归档文件（见 attachFiles）。
-          if (delivered) {
-            return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail, recovered: true };
-          }
-          if (finished) throw cause; // 请求处理完了，会话里没有：确实没收下
-          throw new DeliveryUnknownError(what);
-        }
-        if (Date.now() >= deadline) throw new DeliveryUnknownError(what);
-        await new Promise((resolve) => { window.setTimeout(resolve, RECOVER_POLL_MS); });
-      }
+      await waitUntilIdle(conversationId);
+      return await dispatch(conversationId, body);
     } finally {
       progress.value = null;
+    }
+  }
+
+  /**
+   * 等会话的运行结束（`running` 变成 false），最多 70 秒；读不到会话就接着等。到时间就不等了，直接重发：
+   * 还在跑会是 409，重发失败，标“没有发出去”，老师之后再点“重新发送”也是同一个编号，不会多一条。
+   */
+  async function waitUntilIdle(conversationId) {
+    const deadline = Date.now() + RETRY_WAIT_MS;
+    for (;;) {
+      try {
+        const detail = await api.get(`/assistant/conversations/${conversationId}`);
+        if (!detail?.running) return;
+      } catch (err) {
+        if (err instanceof StaleContextError) throw err;
+      }
+      if (Date.now() >= deadline) return;
+      await new Promise((resolve) => { window.setTimeout(resolve, RETRY_POLL_MS); });
     }
   }
 
@@ -391,30 +373,23 @@ export const useAssistantStore = defineStore("assistant", () => {
    * @param {string} text
    * @param {string} [quickAction]
    */
-  async function send(text, quickAction) {
+  async function send(text, quickAction, clientId = makeClientId()) {
     const cleaned = (text || "").trim();
     if (!cleaned || sending.value) return undefined;
-    const body = quickAction ? { type: "message", text: cleaned, quick_action: quickAction } : { type: "message", text: cleaned };
-    const local = echo(cleaned, quickAction);
-    let failure = null;
-    const result = await guarded(async () => {
-      try {
-        return await run(body, local);
-      } catch (err) {
-        failure = err;
-        throw err;
-      }
-    }, "发送失败");
-    if (result === undefined) markLocal(local.id, failure instanceof DeliveryUnknownError ? "unknown" : "failed");
+    const body = { type: "message", text: cleaned, client_id: clientId };
+    if (quickAction) body.quick_action = quickAction;
+    const local = echo(cleaned, quickAction, clientId);
+    const result = await guarded(() => run(body, local), "发送失败");
+    if (result === undefined) markFailed(local.id);
     return result;
   }
 
-  /** 重新发送一句没发出去的话：去掉那条本地消息，按原样再发一次（快捷按钮仍带意图键）。 */
+  /** 重新发送一句没发出去的话：去掉那条本地消息，按原样、用同一个编号再发一次（快捷按钮仍带意图键）。 */
   function resend(localId) {
     const item = messages.value.find((entry) => entry.id === localId && entry.local === "failed");
     if (!item || sending.value) return Promise.resolve(undefined);
     dropLocal(item.id);
-    return send(item.text, item.quick_action || undefined);
+    return send(item.text, item.quick_action || undefined, item.client_id || makeClientId());
   }
 
   function resume(cardId, value) {
@@ -463,23 +438,23 @@ export const useAssistantStore = defineStore("assistant", () => {
     const names = accepted.map((file) => file.name);
     const before = pending.value?.thread_id || null;
     const result = await guarded(
-      () => run({ type: "message", attachments: { count: accepted.length, names } }),
+      () => run({ type: "message", attachments: { count: accepted.length, names }, client_id: makeClientId() }),
       "处理文件失败",
     );
-    if (result?.recovered) {
-      // 结果是核对会话得来的：另一个标签页在同一会话发了同样份数的文件时，文字一样、对应不准（#79 复审）。
-      // 也就没法确认这次送达了没有。不把文件归到可能是别人的流程里：卡片在等文件就重新选择（与刷新页面后相同），
-      // 没有这样的卡片说明这次可能没送达，重新添加附件。
-      error.value = "连接出了问题，没法确认这批文件有没有交给评分流程：卡片在等文件就在卡片里重新选择，没有就重新添加附件。";
-      return;
-    }
     const thread = result?.pending?.thread_id;
-    if (thread && thread !== before) {
+    // 重发拿到的可能是回放：只有等待中的卡片是这一轮出的，才把文件交给它的流程（另一个标签页可能开了别的流程）。
+    if (thread && thread !== before && (!result.retried || ownsPending(result))) {
       filesByThread[thread] = accepted;
       return;
     }
     const card = proposedSwitchCard(result); // 后端先问要不要放弃上一步
     if (card) stagedByCard.set(card.id, accepted);
+  }
+
+  /** 当前等待的卡片是不是这一轮（返回的消息）里出的。 */
+  function ownsPending(result) {
+    const cardId = result?.pending?.card_id;
+    return Boolean(cardId) && (result.messages || []).some((item) => (item.cards || []).some((card) => card.id === cardId));
   }
 
   function proposedSwitchCard(result) {

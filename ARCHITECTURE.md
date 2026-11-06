@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-06 | 评分助手：发送去重（请求编号） | 迁移 `0042_assistant_message_client_id`：`assistant_messages.client_id` 与 `(conversation_id, client_id)` 部分唯一索引；`AssistantRunCreate` / `AssistantMessageRead` 加可选 `client_id`；`runner.run` 抢锁后按编号回放（`_replay`），唯一索引冲突同样回放；前端 `send` 生成编号、`retryOnce` 等运行结束后同一编号重发，撤掉 `recoverRun`、`unknown` 状态与附件不归档的绕开办法 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 附件的结果来自核对会话时（`recovered`），`attachFiles` 不归档文件、提示重新选择；调用链不变 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（二） | `recoverRun` 按文字对应这次请求（附件按“评分这 N 份文件”）；代理的 5xx 与断线后找不到也标“还不确定”；调用链不变 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正 | `recoverRun` 对附件改看会话里有没有新出现的老师消息，不再把“没有本地消息”当成送达；调用链不变 |
@@ -1792,14 +1793,13 @@ ChatComposer.submit → 清空输入框 → store.send(text, quickAction?)
         新会话：create() 清空列表后把本地消息放回去
         POST /assistant/conversations/{id}/runs（后端照旧在这次运行里存下老师的消息）
         成功：去掉本地消息 → mergeMessages(返回的消息，含后端那条) → 卡片、等待、焦点照旧
-    4xx（运行锁 409 等，后端确实没收下）：本地消息标 local: "failed"
-    5xx、请求发出后连接断了（说不准有没有收下，#79 复审后）：recoverRun 先核对会话
-        后端自己的 5xx（响应体是后端 JSON）：读一次会话；代理的 5xx、断线：等 running 为 false，最多 70 秒
-        按文字对应这次请求（说的话；附件是后端拼的“评分这 N 份文件”），不看“新出现了老师消息”（另一个标签页也会有）
-        有这句话 → 照常显示；后端自己的 5xx 且没有 → "failed"；代理的 5xx、断线且没有 → "unknown"（请求可能还在路上）；
-        等不到结束 → "unknown"（不给重发）；附件经过核对的结果一律不归档文件（同样份数的附件文字一样、对应不准，也就没法确认这次送达），请老师重新选择或重新添加
-ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重新发送” → store.resend(id)：去掉它，按原文与意图键再 send；
-            local === "unknown" 显示“还不确定有没有发出去，请稍后刷新页面看看”，不给重发
+    （11-06 起，发送去重）每句话带请求编号 client_id（echo 时生成，重新发送沿用）
+    其余 4xx（422 等，后端确实没收下）：本地消息标 local: "failed"
+    5xx、请求发出后连接断了、409（可能是自己第一次的请求还在跑）：retryOnce
+        waitUntilIdle：等会话 running 为 false，最多 70 秒 → 用同一个编号再 dispatch 一次
+        后端收到过就按编号回放第一次的结果，没收到就照常处理；重发也失败 → "failed"（重新发送同一个编号，安全）
+        附件：重发拿到的结果里，等待中的卡片是这一轮出的才把文件交给它的流程
+ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重新发送” → store.resend(id)：去掉它，按原文、意图键与同一个编号再 send
 ```
 
 - 本地消息只在请求期间存在，不参与按时间排序的合并：返回后一律以后端那条为准。
@@ -1825,9 +1825,9 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
      put → loop.call_soon_threadsafe(queue.put_nowait)
   → StreamingResponse(_events)：accepted → progress… → done | error；15 秒无事件发注释行心跳
 前端 onEvent(progress) → store.progress {label, since} → ChatThread 的“正在整理…”换成当前这一步（超过 5 秒加秒数）
-     done → 与 /runs 相同的合并；4xx → “没有发出去”
-     error 事件 / 5xx / StreamInterruptedError（请求发出后断线、或没有 done）→ 与 /runs 同一个 recoverRun：
-        不重发，先核对会话（见上一节），会话里没有这句话 → “没有发出去”，等不到结束 → “还不确定”
+     done → 与 /runs 相同的合并；其余 4xx → “没有发出去”
+     error 事件 / 5xx / 409 / StreamInterruptedError（请求发出后断线、或没有 done）→ 与 /runs 同一个 retryOnce：
+        等运行结束，用同一个编号走流式重发一次（见上一节；回放时只有 accepted 与 done）
 ```
 
 - 运行和连接分开：生成器被取消（刷新、关页面、切组织）不影响后台线程，回合照样提交、释放锁。进程退出时线程随之结束，与 `/runs` 一样靠锁过期。
@@ -1838,3 +1838,25 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 维护记录：2026-11-05 · 评分助手：过程流式：记录流式接口、后台线程与事件队列、进度来源和前端断线取回的调用链；无迁移，开关默认关。
 
 维护记录：2026-11-06 · README 精简为项目首页：核对模块边界、调用链与数据流均不变；`examples/` 只供文档与测试使用。
+
+### 2026-11-06 评分助手：发送去重（请求编号）
+
+方案见 [docs/评分助手发送去重方案.md](docs/评分助手发送去重方案.md)。取代 #79 里“按文字核对会话”的做法。
+
+```
+前端 store.send：makeClientId()（randomUUID，非安全上下文用 getRandomValues 拼）→ 本地消息与请求体都带 client_id
+后端 POST …/runs 或 …/runs/stream（AssistantRunCreate.client_id：8–64 位字母、数字、连字符，只对 message 有意义）
+  runner.run：抢运行锁 → _expire_stale_pending
+      message 且带 client_id：_replay 查本会话里这个编号的老师消息
+          有：返回那一轮（这条老师消息 + 到下一条老师消息之前的助手消息），不新建、不跑回合；文字不同记警告
+          没有：_handle_message 照常处理，新建老师消息时写上 client_id
+      提交时唯一索引冲突（两次请求都越过了运行锁）：回滚，改为回放先存下的那一次
+  返回体与 /runs 相同；AssistantMessageRead.client_id 让前端按编号换掉本地消息
+前端没有确定结果（5xx、409、断线）：retryOnce → waitUntilIdle（running 为 false，最多 70 秒）→ 同一编号再发一次
+```
+
+- 持久化：迁移 0042 只给已有表加一列和一个部分唯一索引（只约束 `client_id` 不为空的行），`pgs_app` 的表级授权与 RLS 照旧覆盖；有编号时拒绝降级。
+- 旧页面不带编号：后端照旧处理，不去重。`resume`、`select` 不带编号，靠卡片状态防重复。
+- 流式回放没有进度事件，只有 `accepted` 与 `done`。
+
+维护记录：2026-11-06 · 评分助手：发送去重：记录请求编号的生成、回放与唯一索引兜底的调用链；迁移 head 升为 `0042_assistant_message_client_id`。
