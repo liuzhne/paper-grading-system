@@ -45,6 +45,18 @@ export STORAGE_ROOT=/private/tmp/paper_grading_storage
 
 也可在全局 `uv` 可用时运行 `./scripts/start-web.sh`；该脚本默认使用 `/tmp/dev.db` 并自动迁移、seed、启动。
 
+批量评分与 AI 起草都是后台任务。手工只起 uvicorn 时，另开终端用同一个 `DATABASE_URL` 运行 worker，否则任务一直排队：
+
+```bash
+.venv/bin/python -m backend.app.scripts.run_batch_worker
+```
+
+备用 Streamlit 操作台（可选依赖，正式入口仍是 Web 工作台）：
+
+```bash
+uv run --extra streamlit streamlit run frontend/streamlit_app.py --server.port 8501
+```
+
 ### 2.3 PostgreSQL 本地启动
 
 准备安全的本地环境变量后启动数据库：
@@ -72,6 +84,14 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 ```bash
 .venv/bin/pgs init --seed --db /private/tmp/pgs-cli.db --storage /private/tmp/pgs-cli-storage
 ```
+
+不建库的一次性评分（README 快速开始用的就是这条，`examples/` 是合成示例，`test_readme_examples.py` 守着它能跑通）：
+
+```bash
+.venv/bin/pgs score examples/thesis.docx --no-db --rubric-file examples/rubric.xlsx --mock
+```
+
+全部命令见 [docs/CLI.md](docs/CLI.md)。
 
 ## 3. 常用开发操作
 
@@ -241,6 +261,8 @@ export LANGFUSE_RELEASE=<deployment-commit>
 | OPS ready 但不能切 Core | GATE-03 candidate/approval、`gating_eligible` | 这是预期：OPS 只表示必要条件，必须另有真实门禁和维护者批准 |
 | Langfuse 无 Trace | `llm_observability` 集成状态、endpoint/Key、采样率、Langfuse health | 先保证评分权威结果完整；再检查自托管服务和 Exporter 告警。不得为了出 Trace 打开原文 debug |
 | Langfuse 出现敏感内容 | content mode、脱敏回归、有效凭据和访问日志 | 立即关闭 Exporter，按安全事故处理并轮换可能暴露的凭据；清理观测副本前保留受控审计证据 |
+| 只改了 README 文案，`test_m8_documentation_contract.py` 失败（2026-11-06） | 断言里列出的字符串 | 报错指向 README 缺内容，真正的原因是文档契约：README、AGENTS、CLAUDE 三份都必须写着同一组运行事实——`Python 3.10+`、当前 Alembic head、`technical_proposal / technical-proposal-profile@1`、`SCORING_ENGINE_MODE` 默认 `legacy`、`GATE-03`。精简 README 时这些留在“项目状态”一节，不要为了好看删掉；迁移 head 变了三份一起改 |
+| `test_readme_examples.py` 报评分项数量不对 | `rubric_import/template.py` 的 `EXAMPLE_ROWS` 是否改过 | 报错指向 README 示例，真正的原因是导入模板改了而 `examples/rubric.xlsx` 没重新生成。用 `build_rubric_import_template()` 的输出覆盖该文件；不要只改测试里的数量 |
 
 ## 7. 批任务运行与恢复
 
@@ -1218,6 +1240,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-06 | README 精简为项目首页 | 无迁移、无新环境变量；新增 `examples/`（合成论文与评分标准）与 `test_readme_examples.py`；CLI 全部命令移到 `docs/CLI.md`；§2.2 补手工起 worker 的命令，§2.4 补不建库的一次性评分；排错补文档契约与示例漂移两条 |
 | 2026-11-05 | GitHub 仓库改名为 rubric-audit-engine | 各处克隆把 `origin` 改成新地址；文档链接改新名字；镜像标签不变；排错：绑定 PR 被拒、推送时提示新地址 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | 无新命令、无迁移；回复里加粗的状态说法（“已经\*\*完成\*\*”）同样会被核对并退回重写；卡片超出上限时可能出现“另外还有 N 个没有显示” |
 | 2026-11-05 | 评分助手：列表不能只剩引导句 | 无新命令、无新环境变量、无迁移；Agent 回复的 `meta` 多了 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`，日志 `assistant_turn` 多了 `reply_retries`、`dropped`；排错：回复只有“……有：”、后面是空的 |
@@ -2275,7 +2298,7 @@ npm --prefix frontend/workbench run test:unit -- src/views/AccountView.test.js s
 ### 2026-10-10 AI 任务 A2（起草扣分细则已改为后台任务）
 
 运行与配置：
-- 起草需要执行器：Vercel 上由 `pgs-work` 叫醒；内网 compose 用 `worker` 服务；本地 `start-web.sh` 与 `start-web-pg.sh` 都会同时启动 `run_batch_worker`。只起 uvicorn（例如 README 的 SQLite 手工命令）时，另开终端运行 `python -m backend.app.scripts.run_batch_worker`。
+- 起草需要执行器：Vercel 上由 `pgs-work` 叫醒；内网 compose 用 `worker` 服务；本地 `start-web.sh` 与 `start-web-pg.sh` 都会同时启动 `run_batch_worker`。只起 uvicorn（例如 §2.2 的 SQLite 手工命令）时，另开终端运行 `python -m backend.app.scripts.run_batch_worker`。
 - 接口：`POST /api/rubrics/{id}/ai-tasks`（202 新建 / 200 复用）、`GET /api/ai-tasks/{id}`、`GET /api/rubrics/{id}/ai-tasks?kind=rule_draft&active=1`、`POST /api/ai-tasks/{id}/cancel|retry`。`POST /api/rubrics/{id}/draft-deduction-rules` 返回 410 `ENDPOINT_RETIRED`。
 - 每个响应带 `X-PGS-Contract`。停用或改变前端在用的接口时，同时修改 `backend/app/core/contract.py` 与 `frontend/workbench/src/api/contract.js`（`test_ai_tasks.py` 校验一致），并重新构建 `public/`。
 - 日志关键字：`ai_task_created`、`work_item_claimed kind=ai_task`、`work_item_deferred … code=… delay=…`、`work_item_requeued`、`work_item_failed kind=ai_task code=…`、`ai_task_finished … status=… code=…`、`ai_tasks_cleared`。
@@ -2904,3 +2927,5 @@ git remote set-url origin https://github.com/liuzhne/rubric-audit-engine.git
   - 真正原因：本机 `origin` 还是旧仓库名。推送靠跳转能成功，但应用只认与 `origin` 同一个仓库的 PR。按上面的命令改 `origin` 后再绑定。
 
 维护记录：2026-11-05 · GitHub 仓库改名：新增改 `origin` 的命令，排错写明绑定 PR 被拒的真实原因。
+
+维护记录：2026-11-06 · README 精简为项目首页：README 快速开始改用 `examples/`，CLI 全部命令见 `docs/CLI.md`；补手工起 worker 的命令与两条排错。

@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-06 | README 精简为项目首页 | 只动文档入口：CLI 命令移到 `docs/CLI.md`，新增 `examples/`（合成示例，不进运行时）。模块边界、调用链、数据流与持久化边界不变，无迁移 |
 | 2026-11-05 | GitHub 仓库改名为 rubric-audit-engine | 无架构变化：只改文档与架构图里的 GitHub 链接、clone 后的目录名；镜像标签 `paper-grading-system:*`、Python 包名不变 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | `TurnRefs` 另存对象 → 名称（同名对象各自保留，`names` 仍供状态核对）；`pin` 可带名称，`t0` 带焦点里的任务名；`reply.validate_reply` 的注入检测与说法核对改看去掉记号后的文字；超出卡片上限、没有名称的对象也计数。调用链与持久化边界不变 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句 | `TurnRefs.add` 可带一行文字（评分标准“《名称》版本（文档类型）”、评分项名称），`TurnRefs.notes` 登记列出后的说明；`turn.cards_for` 改为 `turn.attachments`，返回卡片与代码列出的几行文字，运行器接在模型的引导句后面；卡片上限从校验移到显示，超出的用名称补一行。回复 `meta` 多记 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`（已有 JSON 列，无迁移）。提示词、工具定义与指纹不变，接口与 OpenAPI 不变 |
@@ -1772,3 +1773,5 @@ runner._try_agent_turn
 #78 复审修正：`validate_reply` 先去记号，再做注入检测、说法核对（`claims`）与整句清理，三者看同一份文字；`TurnRefs._display_names` 记对象 → 名称，`label_of` 从这里取；`run_turn` 把焦点里的 `batch_name` 随 `t0` 登记。
 
 维护记录：2026-11-05 · 评分助手 #78 复审修正：记录校验顺序、名称的另一份映射与 `t0` 的名称来源。
+
+维护记录：2026-11-06 · README 精简为项目首页：核对模块边界、调用链与数据流均不变；`examples/` 只供文档与测试使用。
