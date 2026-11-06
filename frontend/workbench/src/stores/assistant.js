@@ -339,12 +339,15 @@ export const useAssistantStore = defineStore("assistant", () => {
         }
         if (detail && (finished || !detail.running)) {
           const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
-          const delivered = !local || fresh.some((item) => item.role === "user" && item.text === local.text);
+          // 附件没有本地消息可对照：看这次发送之后会话里有没有新出现的老师消息（运行锁保证同一时间只有一次运行）。
+          // 不能把“没有本地消息”当成送达（#79 复审）。
+          const delivered = fresh.some((item) => item.role === "user" && (!local || item.text === local.text));
           if (!delivered) {
             if (finished) throw cause;
+            const what = local ? "这句话" : "这批文件";
             throw cause instanceof ApiError
-              ? new ApiError(cause.status, "服务暂时不可用，这句话没有发出去。", null)
-              : new ApiError(0, "连接中断，这句话没有发出去。", null);
+              ? new ApiError(cause.status, `服务暂时不可用，${what}没有发出去。`, null)
+              : new ApiError(0, `连接中断，${what}没有发出去。`, null);
           }
           return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail };
         }

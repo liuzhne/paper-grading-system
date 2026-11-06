@@ -401,6 +401,31 @@ describe("说不准有没有发出去（5xx、网络中断）：先核对会话�
     expect(store.messages).toHaveLength(1);
   });
 
+  it("附件：没有本地消息可对照，按会话里有没有新出现的老师消息判断（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    let detail = empty(false);
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, detail],
+    });
+
+    // 会话里没有新消息：后端没收下，报错，文件不归档。
+    await store.attachFiles(files);
+    expect(store.error).toBe("助手处理失败，请稍后再试。");
+    expect(Object.keys(store.filesByThread)).toEqual([]);
+
+    // 已经存下：照常显示，文件按会话里的流程线程归档。
+    detail = { ...conversation(), running: false, messages: [
+      { id: "u1", role: "user", text: "评分这 1 份文件", cards: [], created_at: "2026-10-11T00:00:02.5" },
+      message("m22", "用《标准》评这 1 份文件……开始吗？", [{ id: "start-1", type: "confirm_start", status: "proposed" }]),
+    ], pending: { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: { type: "confirm" } } };
+    await store.attachFiles(files);
+    expect(store.error).toBeNull();
+    expect(store.filesByThread["c1:1"]).toEqual(files);
+  });
+
   it("4xx（如运行锁 409）：后端确实没收下，不核对会话", async () => {
     const store = useAssistantStore();
     store.conversation = conversation();
