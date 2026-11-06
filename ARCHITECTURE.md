@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-06 | README 精简为项目首页 | 只动文档入口：CLI 命令移到 `docs/CLI.md`，新增 `examples/`（合成示例，不进运行时）。模块边界、调用链、数据流与持久化边界不变，无迁移 |
 | 2026-11-05 | 评分助手：过程流式 | 新增 `services/assistant/stream.py`（后台线程 + `asyncio.Queue` + SSE）与 `agent/progress.py`（进度文字表）；`POST /assistant/conversations/{id}/runs/stream`；`RunContext.progress` / `emit`；`runner.run(emit=, locked=)`、`acquire_lock` / `release_lock`；会话返回只读 `running`、设置返回 `stream_enabled`；前端 `postStream`、`store.progress`、断线取回。开关 `ASSISTANT_STREAM_ENABLED` 默认关；无迁移；Caddy 对流式路径不压缩 |
 | 2026-11-05 | 评分助手：老师的话先显示 | 前端 `stores/assistant.js` 的 `send` 先放一条本地消息（`local-…`），`run` 返回后换成后端存下的那条；失败标 `local: "failed"`，`resend` 去掉它再发一次；`ChatThread` 显示“没有发出去 · 重新发送”。后端、接口与 OpenAPI 不变；`public/` 已重建 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | `TurnRefs` 另存对象 → 名称（同名对象各自保留，`names` 仍供状态核对）；`pin` 可带名称，`t0` 带焦点里的任务名；`reply.validate_reply` 的注入检测与说法核对改看去掉记号后的文字；超出卡片上限、没有名称的对象也计数。调用链与持久化边界不变 |
@@ -1823,3 +1824,5 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 - Caddy（生产与内网两份）用 `@compressible not path */runs/stream` 把流式路径排除在 `encode` 之外。
 
 维护记录：2026-11-05 · 评分助手：过程流式：记录流式接口、后台线程与事件队列、进度来源和前端断线取回的调用链；无迁移，开关默认关。
+
+维护记录：2026-11-06 · README 精简为项目首页：核对模块边界、调用链与数据流均不变；`examples/` 只供文档与测试使用。

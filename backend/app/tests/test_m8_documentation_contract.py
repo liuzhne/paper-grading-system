@@ -42,8 +42,8 @@ def test_operator_guides_share_current_runtime_migration_and_profile_facts():
 
 
 def test_current_plan_and_historical_progress_have_an_explicit_truth_order():
-    plan = _read("代码改造计划.md")
-    progress = _read("执行进展.md")
+    plan = _read("docs/dev-notes/代码改造计划.md")
+    progress = _read("docs/dev-notes/执行进展.md")
 
     assert "Accepted ADR > 当前代码/迁移 head > `代码改造计划.md` §7" in plan
     assert "M7 状态：已完成" in plan

@@ -35,6 +35,8 @@ print(report["qwk"], report["mae"], report["exact_grade_agreement"])
 
 你手头若是"一批真实 .docx 论文 + 一张教师成绩表"，无需自己整理 paper_id：
 
+成绩表模板可直接生成，列随评分项自动展开：`GET /api/rubrics/{rubric_id}/scores-template.xlsx` 或 `pgs scores-template <rubric_id> -o 成绩表模板.xlsx`。
+
 **成绩表（.xlsx 或 .csv）列约定**：文件名列（表头含 文件名/filename）+ 总分列（总分/total）+ 其余表头=评分项 `code` 的列（分项分，区分大小写，须与 Rubric 的 criterion code 一致）。例：
 
 | 文件名 | 总分 | C01 | C02 |

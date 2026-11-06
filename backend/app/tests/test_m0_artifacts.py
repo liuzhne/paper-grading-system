@@ -146,8 +146,8 @@ def test_m0_terminology_and_reproducible_goldens_are_declared():
         assert "| %s |" % term in glossary
 
     legacy_docs = (
-        PROJECT_ROOT / "论文打分系统设计方案.md",
-        PROJECT_ROOT / "requirements-analysis.md",
+        PROJECT_ROOT / "docs/dev-notes/论文打分系统设计方案.md",
+        PROJECT_ROOT / "docs/dev-notes/requirements-analysis.md",
         PROJECT_ROOT / "technical-development.md",
     )
     for path in legacy_docs:
