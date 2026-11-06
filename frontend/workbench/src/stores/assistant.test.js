@@ -300,7 +300,8 @@ describe("assistant store", () => {
     const calls = fakeServer({
       "POST /assistant/conversations/c1/runs": (body) => {
         attempts += 1;
-        if (attempts === 1) return [503, { detail: "服务暂时不可用" }];
+        // 运行锁 409：后端确实没收下这句话，可以直接重发（5xx 会先核对会话，见“说不准有没有发出去”）。
+        if (attempts === 1) return [409, { detail: { code: "ASSISTANT_RUN_IN_PROGRESS", message: "上一步还在处理，请稍候。" } }];
         return [200, { messages: [{ id: "u1", role: "user", text: body.text, cards: [], created_at: "2026-10-11T00:00:05" }],
           pending: null, conversation: conversation() }];
       },
@@ -318,6 +319,99 @@ describe("assistant store", () => {
     ]);
     expect(store.messages.map((item) => item.id)).toEqual(["u1"]);
     expect(store.error).toBeNull();
+  });
+});
+
+describe("说不准有没有发出去（5xx、网络中断）：先核对会话，不直接给重发", () => {
+  const stored = (text) => ({ ...conversation(), running: false, pending: null,
+    messages: [{ id: "u1", role: "user", text, cards: [], created_at: "2026-10-11T00:00:02.5" }, message("m22", "好的。")] });
+  const empty = (running = false) => ({ ...conversation(), running, pending: null, messages: [] });
+
+  it("后端自己返回的 5xx：读一次会话（不等运行锁），这句话已经存下就照常显示，不报错", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    // 运行锁没释放成功也会是 5xx：会话还显示 running，但请求已经处理完，不用等。
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, { ...stored("你好"), running: true }],
+    });
+
+    await store.send("你好");
+
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual(
+      ["POST /assistant/conversations/c1/runs", "GET /assistant/conversations/c1"]);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+    expect(store.error).toBeNull();
+  });
+
+  it("后端自己返回的 5xx、会话里没有这句话：标“没有发出去”，显示后端的原因", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, empty(true)],
+    });
+
+    await store.send("你好");
+
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "failed"]]);
+    expect(store.error).toBe("助手处理失败，请稍后再试。");
+  });
+
+  it("代理返回的 502：回合可能还在跑，等运行结束再看会话", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    let reads = 0;
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [502, "Bad Gateway"],
+      "GET /assistant/conversations/c1": () => {
+        reads += 1;
+        return [200, reads === 1 ? empty(true) : stored("你好")];
+      },
+    });
+
+    const sending = store.send("你好");
+    await vi.waitFor(() => expect(store.progress?.label).toBe("连接中断，正在取回结果…"));
+    await vi.advanceTimersByTimeAsync(2000);
+    await sending;
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(reads).toBe(2);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+    expect(store.error).toBeNull();
+  });
+
+  it("网络中断、等了 70 秒运行还没结束：标“还不确定”，不给重发", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url, init = {}) => {
+      if ((init.method || "GET").toUpperCase() === "POST") throw new TypeError("Failed to fetch");
+      return new Response(JSON.stringify(empty(true)), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    const sending = store.send("你好");
+    await vi.advanceTimersByTimeAsync(72000);
+    await sending;
+
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "unknown"]]);
+    expect(store.error).toContain("先别重新发送");
+    expect(await store.resend(store.messages[0].id)).toBeUndefined(); // “还不确定”的不能重发
+    expect(store.messages).toHaveLength(1);
+  });
+
+  it("4xx（如运行锁 409）：后端确实没收下，不核对会话", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [409, { detail: { code: "ASSISTANT_RUN_IN_PROGRESS", message: "上一步还在处理，请稍候。" } }],
+    });
+
+    await store.send("你好");
+
+    expect(calls.map((call) => call.method)).toEqual(["POST"]);
+    expect(store.messages.map((item) => item.local)).toEqual(["failed"]);
   });
 });
 

@@ -24,6 +24,33 @@ const RUBRIC_POLL_MS = 5000;
 const RECOVER_POLL_MS = 2000;
 const RECOVER_WAIT_MS = 70000;
 const RECOVERING = "连接中断，正在取回结果…";
+const CHECKING = "出了点问题，正在核对这句话有没有发出去…";
+
+/**
+ * 等不到这次运行结束、确认不了这句话有没有被收下：不能让老师重发（可能多一条），本地消息标“还不确定”。
+ */
+class DeliveryUnknownError extends ApiError {
+  constructor() {
+    super(0, "还没确认这句话有没有发出去，请稍后刷新页面看看，先别重新发送。", null);
+    this.name = "DeliveryUnknownError";
+  }
+}
+
+/** 后端自己返回的错误（响应体是后端的 JSON，带 detail）：这次请求已经处理完。代理或网关的 502、504 不是。 */
+function fromBackend(err) {
+  return err instanceof ApiError && Boolean(err.payload) && typeof err.payload === "object" && "detail" in err.payload;
+}
+
+/**
+ * 这句话有没有被后端收下说不准：5xx（后端先提交消息再返回，返回前出错也是 5xx）、请求发出后连接断了。
+ * 4xx（运行锁 409、校验 422……）是确实没收下，可以直接重发。
+ */
+function deliveryUncertain(err) {
+  if (err instanceof StaleContextError) return false;
+  if (err instanceof StreamInterruptedError) return true;
+  if (err instanceof ApiError) return err.status >= 500;
+  return true; // fetch 本身失败（网络中断）：请求可能已经到了后端
+}
 const SETUP_DISMISSED_KEY = "pgs.assistant.setupDismissed";
 /** 老师在任务标签上操作后这么久之内，新结果不抢焦点，改为顶部提示（设计稿：60 秒）。 */
 const BUSY_MS = 60000;
@@ -240,8 +267,9 @@ export const useAssistantStore = defineStore("assistant", () => {
     messages.value = messages.value.filter((item) => item.id !== id);
   }
 
-  function markFailed(id) {
-    messages.value = messages.value.map((item) => (item.id === id ? { ...item, local: "failed" } : item));
+  /** 本地消息的状态：`failed` 没有发出去，可以重新发送；`unknown` 还不确定有没有发出去，不给重发。 */
+  function markLocal(id, state) {
+    messages.value = messages.value.map((item) => (item.id === id ? { ...item, local: state } : item));
   }
 
   function mergeMessages(incoming) {
@@ -256,21 +284,28 @@ export const useAssistantStore = defineStore("assistant", () => {
     // 新会话：create() 清空了消息列表，把刚显示的这句话放回去。
     if (local && !messages.value.some((item) => item.id === local.id)) messages.value = [...messages.value, local];
     stopWatchers();
-    // 说一句话走流式（开关打开时），回合进行时能看到进度；卡片上的“确定”“选择”不调模型，照旧。
-    const result = body.type === "message" && settings.value?.stream_enabled
-      ? await runStream(target.id, body, local)
-      : await api.post(`/assistant/conversations/${target.id}/runs`, body);
-    if (local) dropLocal(local.id);
     const known = new Set(messages.value.map((item) => item.id));
+    let result;
+    try {
+      // 说一句话走流式（开关打开时），回合进行时能看到进度；卡片上的“确定”“选择”不调模型，照旧。
+      result = body.type === "message" && settings.value?.stream_enabled
+        ? await runStream(target.id, body)
+        : await api.post(`/assistant/conversations/${target.id}/runs`, body);
+    } catch (err) {
+      // 说一句话时结果说不准（5xx、连接断了）：先核对会话，不让老师直接重发。卡片上的操作照旧报错。
+      if (body.type !== "message" || !deliveryUncertain(err)) throw err;
+      result = await recoverRun(target.id, local, known, err);
+    }
+    if (local) dropLocal(local.id);
+    const before = new Set(messages.value.map((item) => item.id));
     mergeMessages(result.messages);
-    revealArtifacts((result.messages || []).filter((item) => !known.has(item.id)));
+    revealArtifacts((result.messages || []).filter((item) => !before.has(item.id)));
     pending.value = result.pending || null;
     applyConversation(result.conversation);
     return result;
   }
 
-  async function runStream(conversationId, body, local) {
-    const known = new Set(messages.value.map((item) => item.id));
+  async function runStream(conversationId, body) {
     progress.value = null;
     try {
       return await postStream(`/assistant/conversations/${conversationId}/runs/stream`, body, {
@@ -278,37 +313,46 @@ export const useAssistantStore = defineStore("assistant", () => {
           if (event === "progress" && typeof data?.label === "string") progress.value = { label: data.label, since: Date.now() };
         },
       });
-    } catch (err) {
-      if (!(err instanceof StreamInterruptedError)) throw err;
-      // 要 await：直接返回 promise 的话 finally 立刻执行，“正在取回结果”还没显示就被清掉了。
-      return await recoverRun(conversationId, local, known);
     } finally {
       progress.value = null;
     }
   }
 
   /**
-   * 请求发出后连接断了：不重发（会多一条），读会话等这次运行结束，再用会话里的消息。
-   * 会话里找不到这句话，说明后端没收到，抛错让它标成“没有发出去”。
+   * 这句话有没有被后端收下说不准时，不重发（会多一条），先核对会话：
+   * - 后端自己返回的 5xx：这次请求已经处理完，读一次会话就能判断，不用等；
+   * - 代理或网关的 5xx、请求发出后连接断了：回合可能还在跑，等会话的 `running` 变成 false 再判断，最多 70 秒。
+   * 会话里有这句话就用会话里的消息；没有就抛错，标“没有发出去”；等不到结束就标“还不确定”，不给重发。
+   * `running` 只看运行锁，锁过期不会停后台线程；回合的模型请求受 60 秒截止时间约束，实际在锁过期前结束。
    */
-  async function recoverRun(conversationId, local, known) {
-    progress.value = { label: RECOVERING, since: Date.now() };
+  async function recoverRun(conversationId, local, known, cause) {
+    const finished = fromBackend(cause);
+    progress.value = { label: finished ? CHECKING : RECOVERING, since: Date.now() };
     const deadline = Date.now() + RECOVER_WAIT_MS;
-    for (;;) {
-      let detail = null;
-      try {
-        detail = await api.get(`/assistant/conversations/${conversationId}`);
-      } catch (err) {
-        if (err instanceof StaleContextError) throw err;
+    try {
+      for (;;) {
+        let detail = null;
+        try {
+          detail = await api.get(`/assistant/conversations/${conversationId}`);
+        } catch (err) {
+          if (err instanceof StaleContextError) throw err;
+        }
+        if (detail && (finished || !detail.running)) {
+          const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
+          const delivered = !local || fresh.some((item) => item.role === "user" && item.text === local.text);
+          if (!delivered) {
+            if (finished) throw cause;
+            throw cause instanceof ApiError
+              ? new ApiError(cause.status, "服务暂时不可用，这句话没有发出去。", null)
+              : new ApiError(0, "连接中断，这句话没有发出去。", null);
+          }
+          return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail };
+        }
+        if (Date.now() >= deadline) throw new DeliveryUnknownError();
+        await new Promise((resolve) => { window.setTimeout(resolve, RECOVER_POLL_MS); });
       }
-      if (detail && !detail.running) {
-        const fresh = (detail.messages || []).filter((item) => !known.has(item.id));
-        const delivered = !local || fresh.some((item) => item.role === "user" && item.text === local.text);
-        if (!delivered) throw new ApiError(0, "连接中断，这句话没有发出去。", null);
-        return { messages: detail.messages || [], pending: detail.pending || null, conversation: detail };
-      }
-      if (Date.now() >= deadline) throw new ApiError(0, "连接中断，没有取回结果，请刷新页面看看。", null);
-      await new Promise((resolve) => { window.setTimeout(resolve, RECOVER_POLL_MS); });
+    } finally {
+      progress.value = null;
     }
   }
 
@@ -339,8 +383,16 @@ export const useAssistantStore = defineStore("assistant", () => {
     if (!cleaned || sending.value) return undefined;
     const body = quickAction ? { type: "message", text: cleaned, quick_action: quickAction } : { type: "message", text: cleaned };
     const local = echo(cleaned, quickAction);
-    const result = await guarded(() => run(body, local), "发送失败");
-    if (result === undefined) markFailed(local.id);
+    let failure = null;
+    const result = await guarded(async () => {
+      try {
+        return await run(body, local);
+      } catch (err) {
+        failure = err;
+        throw err;
+      }
+    }, "发送失败");
+    if (result === undefined) markLocal(local.id, failure instanceof DeliveryUnknownError ? "unknown" : "failed");
     return result;
   }
 

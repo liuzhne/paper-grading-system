@@ -1,6 +1,7 @@
 <script setup>
 /**
- * 对话（评分助手 v2 设计稿）：老师的消息是深绿气泡，发出时先显示，没发出去的标“没有发出去”并可重新发送；
+ * 对话（评分助手 v2 设计稿）：老师的消息是深绿气泡，发出时先显示，没发出去的标“没有发出去”并可重新发送，
+ * 确认不了有没有被收下的标“还不确定”、不给重发；
  * 助手的消息带头像、名称与时间；“你发布了《…》”这类事件显示为分隔线。流程卡片与结果卡片显示成“在右侧查看”入口，对话本身的选择（选任务、重试、放弃上一步）仍在这里点。
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
@@ -99,6 +100,8 @@ const typingSeconds = computed(() => {
           <p v-if="message.local === 'failed'" class="unsent" role="alert">
             没有发出去<button type="button" :disabled="store.sending" @click="store.resend(message.id)">重新发送</button>
           </p>
+          <!-- 等不到这次运行结束、确认不了有没有被收下：不给重发，免得多一条。 -->
+          <p v-else-if="message.local === 'unknown'" class="unsent unsure" role="status">还不确定有没有发出去，请稍后刷新页面看看</p>
         </article>
         <article v-else class="message from-assistant">
           <span class="avatar" aria-hidden="true">
@@ -154,6 +157,7 @@ const typingSeconds = computed(() => {
 .unsent { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--danger); }
 .unsent button { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
 .unsent button:disabled { color: var(--text-faint); cursor: default; }
+.unsent.unsure { color: var(--text-muted); }
 .from-assistant { display: flex; gap: 12px; align-items: flex-start; }
 .avatar { flex: none; width: 28px; height: 28px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; margin-top: 1px; }
 .body { flex: 1; min-width: 0; }

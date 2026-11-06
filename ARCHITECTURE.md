@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-06 | 评分助手：说不准有没有发出去时先核对会话 | 前端 `store.run` 统一处理：5xx 与断线不再直接标“没有发出去”，先经 `recoverRun` 核对会话；新增本地状态 `unknown`；后端与接口不变 |
 | 2026-11-06 | 评分助手：过程流式与等待动效：#79 复审修正 | `ChatThread` 只把步骤文字放进 `role="status"`，已用秒数移出读屏区域；调用链与数据流不变 |
 | 2026-11-06 | 评分助手：等待动效 | 无架构变化：只改 `components/assistant/ChatThread.vue` 等待提示的标记与样式（设计稿“评分助手 v2”的 `yz-wait`），`public/` 已重建 |
 | 2026-11-06 | README 精简为项目首页 | 只动文档入口：CLI 命令移到 `docs/CLI.md`，新增 `examples/`（合成示例，不进运行时）。模块边界、调用链、数据流与持久化边界不变，无迁移 |
@@ -1788,8 +1789,12 @@ ChatComposer.submit → 清空输入框 → store.send(text, quickAction?)
         新会话：create() 清空列表后把本地消息放回去
         POST /assistant/conversations/{id}/runs（后端照旧在这次运行里存下老师的消息）
         成功：去掉本地消息 → mergeMessages(返回的消息，含后端那条) → 卡片、等待、焦点照旧
-    失败（guarded 吞掉异常、显示原因）：本地消息标 local: "failed"
-ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重新发送” → store.resend(id)：去掉它，按原文与意图键再 send
+    4xx（运行锁 409 等，后端确实没收下）：本地消息标 local: "failed"
+    5xx、请求发出后连接断了（说不准有没有收下，#79 复审后）：recoverRun 先核对会话
+        后端自己的 5xx（响应体是后端 JSON）：读一次会话；代理的 5xx、断线：等 running 为 false，最多 70 秒
+        会话里有这句话 → 照常显示；没有 → "failed"；等不到结束 → "unknown"（不给重发）
+ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重新发送” → store.resend(id)：去掉它，按原文与意图键再 send；
+            local === "unknown" 显示“还不确定有没有发出去，请稍后刷新页面看看”，不给重发
 ```
 
 - 本地消息只在请求期间存在，不参与按时间排序的合并：返回后一律以后端那条为准。
@@ -1815,9 +1820,9 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
      put → loop.call_soon_threadsafe(queue.put_nowait)
   → StreamingResponse(_events)：accepted → progress… → done | error；15 秒无事件发注释行心跳
 前端 onEvent(progress) → store.progress {label, since} → ChatThread 的“正在整理…”换成当前这一步（超过 5 秒加秒数）
-     done → 与 /runs 相同的合并；error / 非 2xx → “没有发出去”
-     StreamInterruptedError（请求发出后断线、或没有 done）→ recoverRun：不重发，每 2 秒 GET 会话，
-        running 为 false 后用会话里的消息；会话里没有这句话 → “没有发出去”；最多等 70 秒
+     done → 与 /runs 相同的合并；4xx → “没有发出去”
+     error 事件 / 5xx / StreamInterruptedError（请求发出后断线、或没有 done）→ 与 /runs 同一个 recoverRun：
+        不重发，先核对会话（见上一节），会话里没有这句话 → “没有发出去”，等不到结束 → “还不确定”
 ```
 
 - 运行和连接分开：生成器被取消（刷新、关页面、切组织）不影响后台线程，回合照样提交、释放锁。进程退出时线程随之结束，与 `/runs` 一样靠锁过期。
