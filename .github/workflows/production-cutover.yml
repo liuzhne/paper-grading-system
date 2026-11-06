@@ -162,6 +162,7 @@ jobs:
           AUTH_USERNAME: ${{ vars.AUTH_USERNAME }}
           SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}
           ASSISTANT_AGENT_ENABLED: ${{ vars.ASSISTANT_AGENT_ENABLED }}
+          ASSISTANT_STREAM_ENABLED: ${{ vars.ASSISTANT_STREAM_ENABLED }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

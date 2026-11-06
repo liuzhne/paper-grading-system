@@ -591,7 +591,15 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 附件的结果来自核对会话时（`recovered`），`attachFiles` 不归档文件、提示重新选择；调用链不变 |
+| 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（二） | `recoverRun` 按文字对应这次请求（附件按“评分这 N 份文件”）；代理的 5xx 与断线后找不到也标“还不确定”；调用链不变 |
+| 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正 | `recoverRun` 对附件改看会话里有没有新出现的老师消息，不再把“没有本地消息”当成送达；调用链不变 |
+| 2026-11-06 | 评分助手：说不准有没有发出去时先核对会话 | 前端 `store.run` 统一处理：5xx 与断线不再直接标“没有发出去”，先经 `recoverRun` 核对会话；新增本地状态 `unknown`；后端与接口不变 |
+| 2026-11-06 | 评分助手：过程流式与等待动效：#79 复审修正 | `ChatThread` 只把步骤文字放进 `role="status"`，已用秒数移出读屏区域；调用链与数据流不变 |
+| 2026-11-06 | 评分助手：等待动效 | 无架构变化：只改 `components/assistant/ChatThread.vue` 等待提示的标记与样式（设计稿“评分助手 v2”的 `yz-wait`），`public/` 已重建 |
 | 2026-11-06 | README 精简为项目首页 | 只动文档入口：CLI 命令移到 `docs/CLI.md`，新增 `examples/`（合成示例，不进运行时）。模块边界、调用链、数据流与持久化边界不变，无迁移 |
+| 2026-11-05 | 评分助手：过程流式 | 新增 `services/assistant/stream.py`（后台线程 + `asyncio.Queue` + SSE）与 `agent/progress.py`（进度文字表）；`POST /assistant/conversations/{id}/runs/stream`；`RunContext.progress` / `emit`；`runner.run(emit=, locked=)`、`acquire_lock` / `release_lock`；会话返回只读 `running`、设置返回 `stream_enabled`；前端 `postStream`、`store.progress`、断线取回。开关 `ASSISTANT_STREAM_ENABLED` 默认关；无迁移；Caddy 对流式路径不压缩 |
+| 2026-11-05 | 评分助手：老师的话先显示 | 前端 `stores/assistant.js` 的 `send` 先放一条本地消息（`local-…`），`run` 返回后换成后端存下的那条；失败标 `local: "failed"`，`resend` 去掉它再发一次；`ChatThread` 显示“没有发出去 · 重新发送”。后端、接口与 OpenAPI 不变；`public/` 已重建 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句：#78 复审修正 | `TurnRefs` 另存对象 → 名称（同名对象各自保留，`names` 仍供状态核对）；`pin` 可带名称，`t0` 带焦点里的任务名；`reply.validate_reply` 的注入检测与说法核对改看去掉记号后的文字；超出卡片上限、没有名称的对象也计数。调用链与持久化边界不变 |
 | 2026-11-05 | 评分助手：列表不能只剩引导句 | `TurnRefs.add` 可带一行文字（评分标准“《名称》版本（文档类型）”、评分项名称），`TurnRefs.notes` 登记列出后的说明；`turn.cards_for` 改为 `turn.attachments`，返回卡片与代码列出的几行文字，运行器接在模型的引导句后面；卡片上限从校验移到显示，超出的用名称补一行。回复 `meta` 多记 `dropped_sentences`、`cards_requested`、`cards_shown`、`listed`、`reply_retries`（已有 JSON 列，无迁移）。提示词、工具定义与指纹不变，接口与 OpenAPI 不变 |
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 互斥组一次调用的依据由 `rule_executor._semantic_group_decisions` 标上 `basis.group_code`（结果合同可选字段），`judgement_view._share_group_basis` 只在被选中的那一档显示；依据与扣分证据的编号先判类型；`persistence.core_item_reason` 按 `RULE_EVIDENCE_INSUFFICIENT` 单列证据不足；`production_env.from_file` 把可选设置的空值当没设；评分页定位先切回正文页签。模块边界、调用链与持久化边界不变，无迁移 |
@@ -1772,5 +1780,61 @@ runner._try_agent_turn
 #78 复审修正：`validate_reply` 先去记号，再做注入检测、说法核对（`claims`）与整句清理，三者看同一份文字；`TurnRefs._display_names` 记对象 → 名称，`label_of` 从这里取；`run_turn` 把焦点里的 `batch_name` 随 `t0` 登记。
 
 维护记录：2026-11-05 · 评分助手 #78 复审修正：记录校验顺序、名称的另一份映射与 `t0` 的名称来源。
+
+### 2026-11-05 评分助手：老师的话先显示
+
+方案见 [docs/评分助手v2界面改造方案.md](docs/评分助手v2界面改造方案.md) 第 3.6 节。只改前端，后端与接口不变。
+
+```
+ChatComposer.submit → 清空输入框 → store.send(text, quickAction?)
+    echo：messages 末尾加本地消息 {id: local-N, role: user, local: "sending"}，对话立即显示，滚到底
+    guarded → run(body, local)
+        新会话：create() 清空列表后把本地消息放回去
+        POST /assistant/conversations/{id}/runs（后端照旧在这次运行里存下老师的消息）
+        成功：去掉本地消息 → mergeMessages(返回的消息，含后端那条) → 卡片、等待、焦点照旧
+    4xx（运行锁 409 等，后端确实没收下）：本地消息标 local: "failed"
+    5xx、请求发出后连接断了（说不准有没有收下，#79 复审后）：recoverRun 先核对会话
+        后端自己的 5xx（响应体是后端 JSON）：读一次会话；代理的 5xx、断线：等 running 为 false，最多 70 秒
+        按文字对应这次请求（说的话；附件是后端拼的“评分这 N 份文件”），不看“新出现了老师消息”（另一个标签页也会有）
+        有这句话 → 照常显示；后端自己的 5xx 且没有 → "failed"；代理的 5xx、断线且没有 → "unknown"（请求可能还在路上）；
+        等不到结束 → "unknown"（不给重发）；附件经过核对的结果一律不归档文件（同样份数的附件文字一样、对应不准，也就没法确认这次送达），请老师重新选择或重新添加
+ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重新发送” → store.resend(id)：去掉它，按原文与意图键再 send；
+            local === "unknown" 显示“还不确定有没有发出去，请稍后刷新页面看看”，不给重发
+```
+
+- 本地消息只在请求期间存在，不参与按时间排序的合并：返回后一律以后端那条为准。
+- 附件不先显示（后端那条用户消息的文字由后端拼出），卡片上的“确定”“选择”本来就没有用户消息。
+
+维护记录：2026-11-05 · 评分助手：老师的话先显示：记录本地消息的生命周期与失败重发的调用链；只改前端。
+
+### 2026-11-05 评分助手：过程流式
+
+方案见 [docs/评分助手过程流式方案.md](docs/评分助手过程流式方案.md)。回合进行时把“现在在做哪一步”推给前端；最终回复照旧校验完一次显示，不逐字输出模型文字。开关 `ASSISTANT_STREAM_ENABLED` 默认关，关闭时一切照旧。
+
+```
+前端 store.send（说一句话，settings.stream_enabled 为真）
+  → api/client.postStream  POST /assistant/conversations/{id}/runs/stream（fetch + ReadableStream 解析 SSE）
+后端 routes/assistant.create_run_stream（async）
+  → run_in_threadpool(_prepare_stream)：鉴权、会话归属、请求整理、runner.acquire_lock；关掉请求会话
+      不通过：404 / 409 / 422 普通响应，不开始推送
+  → stream.start：后台线程 _work（自己的 Session(bind=…)）→ runner.run(emit=put, locked=True)
+        runner._try_agent_turn → ctx.progress(正在理解你的问题…)
+        agent.turn.run_turn → summarize 回调 → ctx.progress(正在整理之前的对话…)
+                            → _run（业务工具）→ ctx.progress(progress.for_tool)；回复不合格重写 → ctx.progress(正在核对回复…)
+        结束：AssistantRunRead 序列化 → put("done")；HTTPException / 异常 → put("error")；没进到 run 时自己释放锁
+     put → loop.call_soon_threadsafe(queue.put_nowait)
+  → StreamingResponse(_events)：accepted → progress… → done | error；15 秒无事件发注释行心跳
+前端 onEvent(progress) → store.progress {label, since} → ChatThread 的“正在整理…”换成当前这一步（超过 5 秒加秒数）
+     done → 与 /runs 相同的合并；4xx → “没有发出去”
+     error 事件 / 5xx / StreamInterruptedError（请求发出后断线、或没有 done）→ 与 /runs 同一个 recoverRun：
+        不重发，先核对会话（见上一节），会话里没有这句话 → “没有发出去”，等不到结束 → “还不确定”
+```
+
+- 运行和连接分开：生成器被取消（刷新、关页面、切组织）不影响后台线程，回合照样提交、释放锁。进程退出时线程随之结束，与 `/runs` 一样靠锁过期。
+- 进度文字只来自 `agent/progress.py`，参数只有工具目录写死的标题；不落库，不进 Agent 上下文。
+- `resume`、`select` 仍走 `/runs`。`running` 来自 `run_locked_until`（只读，`run_locked_until` 本身不出现在返回里）。
+- Caddy（生产与内网两份）用 `@compressible not path */runs/stream` 把流式路径排除在 `encode` 之外。
+
+维护记录：2026-11-05 · 评分助手：过程流式：记录流式接口、后台线程与事件队列、进度来源和前端断线取回的调用链；无迁移，开关默认关。
 
 维护记录：2026-11-06 · README 精简为项目首页：核对模块边界、调用链与数据流均不变；`examples/` 只供文档与测试使用。

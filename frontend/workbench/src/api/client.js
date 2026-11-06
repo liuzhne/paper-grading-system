@@ -197,21 +197,138 @@ export async function request(path, options = {}) {
 
   if (version !== contextVersion) throw new StaleContextError();
 
-  if (!response.ok) {
-    const detail =
-      payload && typeof payload === "object" && "detail" in payload
-        ? payload.detail
-        : null;
-    throw new ApiError(
-      response.status,
-      typeof detail === "string" ? detail :
-        detail && typeof detail.message === "string"
-          ? [detail.message, typeof detail.user_action === "string" ? detail.user_action : ""].filter(Boolean).join(" ")
-          : null,
-      payload,
-    );
-  }
+  if (!response.ok) throw apiError(response.status, payload);
   return payload;
+}
+
+/** 后端的错误体（`{detail: 字符串 | {message, user_action}}`）→ ApiError。 */
+function apiError(status, payload) {
+  const detail =
+    payload && typeof payload === "object" && "detail" in payload
+      ? payload.detail
+      : null;
+  return new ApiError(
+    status,
+    typeof detail === "string" ? detail :
+      detail && typeof detail.message === "string"
+        ? [detail.message, typeof detail.user_action === "string" ? detail.user_action : ""].filter(Boolean).join(" ")
+        : null,
+    payload,
+  );
+}
+
+/**
+ * 请求已经发出，连接却在拿到结果之前断了：不知道后端有没有收到、跑没跑完。
+ * 调用方不能重发（会多一条），要去取回结果（docs/评分助手过程流式方案.md §5）。
+ */
+export class StreamInterruptedError extends Error {
+  constructor(cause) {
+    super("连接中断");
+    this.name = "StreamInterruptedError";
+    this.cause = cause;
+  }
+}
+
+/**
+ * 把 SSE 文本切成事件。返回 [已完整的事件, 剩下的半截]；注释行（心跳）跳过。
+ * @param {string} buffer
+ * @returns {[Array<{event: string, data: any}>, string]}
+ */
+export function parseEvents(buffer) {
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const blocks = normalized.split("\n\n");
+  const rest = blocks.pop() ?? "";
+  const events = [];
+  for (const block of blocks) {
+    let event = "message";
+    const data = [];
+    for (const line of block.split("\n")) {
+      if (!line || line.startsWith(":")) continue;
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    }
+    if (!data.length && event === "message") continue;
+    let parsed = null;
+    try {
+      parsed = data.length ? JSON.parse(data.join("\n")) : null;
+    } catch {
+      parsed = data.join("\n");
+    }
+    events.push({ event, data: parsed });
+  }
+  return [events, rest];
+}
+
+/**
+ * 流式写请求（评分助手的过程流式）：SSE 事件逐条交给 `onEvent`，返回 `done` 的数据。
+ * 组织头、契约守卫、切换组织时中止都与 `request` 相同。
+ * - 开始推送之前的拒绝（404 / 409 / 422……）和推送中的 `error` 事件都抛 ApiError；
+ * - 请求发出后连接断了、或者推送结束了却没有 `done`，抛 StreamInterruptedError。
+ * @param {string} path
+ * @param {unknown} body
+ * @param {{organizationId?: string|null, onEvent?: (event: string, data: any) => void}} [options]
+ */
+export async function postStream(path, body, options = {}) {
+  if (reloadIfStale()) throw new StaleContextError();
+  const version = contextVersion;
+  const controller = new AbortController();
+  inflight.add(controller);
+  const headers = { "Content-Type": "application/json", Accept: "text/event-stream" };
+  if (options.organizationId) headers["X-Organization-ID"] = options.organizationId;
+  try {
+    let response;
+    try {
+      response = await fetch(`${apiBase()}${path}`, {
+        method: "POST", credentials: "same-origin", headers, body: JSON.stringify(body), signal: controller.signal,
+      });
+    } catch (error) {
+      if (version !== contextVersion) throw new StaleContextError();
+      throw new StreamInterruptedError(error);
+    }
+    if (version !== contextVersion) throw new StaleContextError();
+    noteContract(response);
+    if (!response.ok) {
+      const text = await response.text();
+      let payload = null;
+      try {
+        payload = text ? JSON.parse(text) : null;
+      } catch {
+        payload = text;
+      }
+      throw apiError(response.status, payload);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (version !== contextVersion) throw new StaleContextError();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const [events, rest] = parseEvents(buffer);
+        buffer = rest;
+        for (const item of events) {
+          if (item.event === "done") {
+            reader.cancel().catch(() => {});
+            return item.data;
+          }
+          if (item.event === "error") {
+            const status = typeof item.data?.status === "number" ? item.data.status : 500;
+            throw apiError(status, { detail: item.data?.detail ?? null });
+          }
+          options.onEvent?.(item.event, item.data);
+        }
+      }
+    } catch (error) {
+      if (error instanceof ApiError || error instanceof StaleContextError) throw error;
+      if (version !== contextVersion) throw new StaleContextError();
+      throw new StreamInterruptedError(error);
+    }
+    throw new StreamInterruptedError(null);
+  } finally {
+    inflight.delete(controller);
+  }
 }
 
 export const api = {

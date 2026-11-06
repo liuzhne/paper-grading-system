@@ -9,6 +9,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from dataclasses import field
+from typing import Callable
 
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -37,10 +38,24 @@ class RunContext:
     conversation: AssistantConversation
     new_message_ids: list[str] = field(default_factory=list)
     updated_message_ids: set[str] = field(default_factory=set)
+    #: 过程流式（docs/评分助手过程流式方案.md §4.1）：`emit(种类, 数据)` 把事件交给流式接口；
+    #: JSON 接口、测试与评测里为 None，`progress` 什么都不做。
+    emit: Callable[[str, dict], None] | None = None
+    _last_progress: str | None = field(default=None, repr=False)
+    _progress_step: int = field(default=0, repr=False)
 
     @property
     def user_id(self) -> str:
         return self.principal.user_id
+
+    def progress(self, label: str) -> None:
+        """告诉前端现在在做哪一步。不落库；连续同一句只发一次。文字只能来自 `agent/progress.py` 的表。"""
+
+        if self.emit is None or label == self._last_progress:
+            return
+        self._last_progress = label
+        self._progress_step += 1
+        self.emit("progress", {"label": label, "step": self._progress_step})
 
     # --- 消息与卡片 ---------------------------------------------------------------
 

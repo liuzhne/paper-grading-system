@@ -4,7 +4,10 @@
 # 改的时候两边一起改。
 
 {$PGS_SITE_ADDRESS} {
-	encode zstd gzip
+	# 评分助手的流式接口（SSE）不压缩：压缩器会攒够一段才发，进度就会攒到最后一起到
+	# （docs/评分助手过程流式方案.md §6）。reverse_proxy 对 text/event-stream 默认立即转发。
+	@compressible not path */runs/stream
+	encode @compressible zstd gzip
 
 	request_body {
 		max_size 50MB

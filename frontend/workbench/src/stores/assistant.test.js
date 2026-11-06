@@ -1,6 +1,8 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { watch } from "vue";
+
 import { useAssistantStore } from "./assistant.js";
 
 /**
@@ -237,7 +239,7 @@ describe("assistant store", () => {
     expect(store.jobs.b1.status).toBe("completed");
   });
 
-  it("后端拒绝（例如运行锁 409）时显示原因，不丢已有消息", async () => {
+  it("后端拒绝（例如运行锁 409）时显示原因，不丢已有消息；没发出去的那句标出来", async () => {
     const store = useAssistantStore();
     store.conversation = conversation();
     store.messages = [message("m1", "之前的消息")];
@@ -248,7 +250,348 @@ describe("assistant store", () => {
     await store.send("评分进度");
 
     expect(store.error).toBe("上一步还在处理，请稍候。");
-    expect(store.messages.map((item) => item.id)).toEqual(["m1"]);
+    expect(store.messages.map((item) => [item.role, item.text, item.local || null])).toEqual([
+      ["assistant", "之前的消息", null], ["user", "评分进度", "failed"],
+    ]);
+  });
+
+  it("老师这句话发出时先显示，返回后换成后端存下的那一条", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.messages = [message("m1", "之前的消息")];
+    let during = [];
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": (body) => {
+        during = store.messages.map((item) => [item.role, item.text, item.local || null]);
+        return [200, {
+          messages: [{ id: "u1", role: "user", text: body.text, cards: [], created_at: "2026-10-11T00:00:02.5" },
+            message("m22", "好的。")],
+          pending: null, conversation: conversation(),
+        }];
+      },
+    });
+
+    await store.send("有其他的评分标准吗？");
+
+    expect(during).toEqual([["assistant", "之前的消息", null], ["user", "有其他的评分标准吗？", "sending"]]);
+    expect(store.messages.map((item) => item.id)).toEqual(["m1", "u1", "m22"]);
+  });
+
+  it("新会话：建会话清空列表后，刚显示的这句话仍在", async () => {
+    const store = useAssistantStore();
+    let during = [];
+    fakeServer({
+      "POST /assistant/conversations": () => [201, conversation()],
+      "POST /assistant/conversations/c1/runs": () => {
+        during = store.messages.map((item) => item.text);
+        return [200, { messages: [], pending: null, conversation: conversation() }];
+      },
+    });
+
+    await store.send("你好");
+
+    expect(during).toEqual(["你好"]);
+  });
+
+  it("没发出去的可以重新发送：去掉那条本地消息，快捷按钮仍带意图键", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    let attempts = 0;
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": (body) => {
+        attempts += 1;
+        // 运行锁 409：后端确实没收下这句话，可以直接重发（5xx 会先核对会话，见“说不准有没有发出去”）。
+        if (attempts === 1) return [409, { detail: { code: "ASSISTANT_RUN_IN_PROGRESS", message: "上一步还在处理，请稍候。" } }];
+        return [200, { messages: [{ id: "u1", role: "user", text: body.text, cards: [], created_at: "2026-10-11T00:00:05" }],
+          pending: null, conversation: conversation() }];
+      },
+    });
+
+    await store.send("整体分数情况", "query_overview");
+    const failed = store.messages.find((item) => item.local === "failed");
+    expect(failed?.text).toBe("整体分数情况");
+
+    await store.resend(failed.id);
+
+    expect(calls.map((call) => call.body)).toEqual([
+      { type: "message", text: "整体分数情况", quick_action: "query_overview" },
+      { type: "message", text: "整体分数情况", quick_action: "query_overview" },
+    ]);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1"]);
+    expect(store.error).toBeNull();
+  });
+});
+
+describe("说不准有没有发出去（5xx、网络中断）：先核对会话，不直接给重发", () => {
+  const stored = (text) => ({ ...conversation(), running: false, pending: null,
+    messages: [{ id: "u1", role: "user", text, cards: [], created_at: "2026-10-11T00:00:02.5" }, message("m22", "好的。")] });
+  const empty = (running = false) => ({ ...conversation(), running, pending: null, messages: [] });
+
+  it("后端自己返回的 5xx：读一次会话（不等运行锁），这句话已经存下就照常显示，不报错", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    // 运行锁没释放成功也会是 5xx：会话还显示 running，但请求已经处理完，不用等。
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, { ...stored("你好"), running: true }],
+    });
+
+    await store.send("你好");
+
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual(
+      ["POST /assistant/conversations/c1/runs", "GET /assistant/conversations/c1"]);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+    expect(store.error).toBeNull();
+  });
+
+  it("后端自己返回的 5xx、会话里没有这句话：标“没有发出去”，显示后端的原因", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, empty(true)],
+    });
+
+    await store.send("你好");
+
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "failed"]]);
+    expect(store.error).toBe("助手处理失败，请稍后再试。");
+  });
+
+  it("代理返回的 502：回合可能还在跑，等运行结束再看会话", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    let reads = 0;
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [502, "Bad Gateway"],
+      "GET /assistant/conversations/c1": () => {
+        reads += 1;
+        return [200, reads === 1 ? empty(true) : stored("你好")];
+      },
+    });
+
+    const sending = store.send("你好");
+    await vi.waitFor(() => expect(store.progress?.label).toBe("连接中断，正在取回结果…"));
+    await vi.advanceTimersByTimeAsync(2000);
+    await sending;
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(reads).toBe(2);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+    expect(store.error).toBeNull();
+  });
+
+  it("网络中断、等了 70 秒运行还没结束：标“还不确定”，不给重发", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url, init = {}) => {
+      if ((init.method || "GET").toUpperCase() === "POST") throw new TypeError("Failed to fetch");
+      return new Response(JSON.stringify(empty(true)), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    const sending = store.send("你好");
+    await vi.advanceTimersByTimeAsync(72000);
+    await sending;
+
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "unknown"]]);
+    expect(store.error).toContain("先别重新发送");
+    expect(await store.resend(store.messages[0].id)).toBeUndefined(); // “还不确定”的不能重发
+    expect(store.messages).toHaveLength(1);
+  });
+
+  it("附件：按后端拼的“评分这 N 份文件”对应这次请求，没有就是没收下（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    let detail = empty(false);
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, detail],
+    });
+
+    // 会话里没有新消息：后端没收下，报错，文件不归档。
+    await store.attachFiles(files);
+    expect(store.error).toBe("助手处理失败，请稍后再试。");
+    expect(Object.keys(store.filesByThread)).toEqual([]);
+
+    // 已经存下：照常显示，但文件不归档（对应不准，可能是另一个标签页的同样份数），请老师在卡片里重新选择。
+    detail = { ...conversation(), running: false, messages: [
+      { id: "u1", role: "user", text: "评分这 1 份文件", cards: [], created_at: "2026-10-11T00:00:02.5" },
+      message("m22", "用《标准》评这 1 份文件……开始吗？", [{ id: "start-1", type: "confirm_start", status: "proposed" }]),
+    ], pending: { kind: "confirm_start", card_id: "start-1", thread_id: "c1:1", client: { type: "confirm" } } };
+    await store.attachFiles(files);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+    expect(store.error).toBe("连接出了问题，没法确认这批文件有没有交给评分流程：卡片在等文件就在卡片里重新选择，没有就重新添加附件。");
+    expect(store.filesByThread).toEqual({});
+  });
+
+  it("跨标签页：另一个标签页发了同样份数的文件（文字一样），文件也不归到它的流程（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, { ...conversation(), running: false,
+        pending: { kind: "confirm_start", card_id: "s-9", thread_id: "c1:9", client: { type: "confirm" } },
+        messages: [{ id: "u9", role: "user", text: "评分这 1 份文件", cards: [], created_at: "2026-10-11T00:00:02.5" }] }],
+    });
+
+    await store.attachFiles(files);
+
+    expect(store.filesByThread).toEqual({});
+    expect(store.error).toContain("没法确认这批文件有没有交给评分流程");
+  });
+
+  it("跨标签页：另一个标签页在同一会话说的话不算这次送达（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    const otherTab = { ...conversation(), running: false, pending: { kind: "pick_files", card_id: "f-1", thread_id: "c1:9" },
+      messages: [{ id: "u9", role: "user", text: "开始评分", cards: [], created_at: "2026-10-11T00:00:02.5" }] };
+    fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [500, { detail: "助手处理失败，请稍后再试。" }],
+      "GET /assistant/conversations/c1": () => [200, otherTab],
+    });
+
+    await store.attachFiles(files);
+
+    expect(store.error).toBe("助手处理失败，请稍后再试。");
+    expect(store.filesByThread).toEqual({}); // 文件不归到另一个标签页开的流程
+  });
+
+  it("断线时序：会话已经不在运行、也没有这句话，请求可能还在路上，标“还不确定”而不是“没有发出去”（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const files = [new File(["a"], "a.docx")];
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url, init = {}) => {
+      if ((init.method || "GET").toUpperCase() === "POST") throw new TypeError("Failed to fetch");
+      return new Response(JSON.stringify(empty(false)), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    await store.send("你好");
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "unknown"]]);
+
+    await store.attachFiles(files);
+    expect(store.error).toBe("还没确认这批文件有没有发出去，请稍后刷新页面看看，先别重新发送。");
+    expect(store.filesByThread).toEqual({});
+  });
+
+  it("4xx（如运行锁 409）：后端确实没收下，不核对会话", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [409, { detail: { code: "ASSISTANT_RUN_IN_PROGRESS", message: "上一步还在处理，请稍候。" } }],
+    });
+
+    await store.send("你好");
+
+    expect(calls.map((call) => call.method)).toEqual(["POST"]);
+    expect(store.messages.map((item) => item.local)).toEqual(["failed"]);
+  });
+});
+
+describe("过程流式", () => {
+  const userMessage = (text, at = "2026-10-11T00:00:02.5") => ({ id: "u1", role: "user", text, cards: [], created_at: at });
+
+  /** 假服务器：流式接口按给定的块吐出 SSE（可以一直不结束），会话接口按给定的列表依次返回。 */
+  function streamServer({ chunks = [], hangUp = false, details = [] }) {
+    const calls = [];
+    const encoder = new TextEncoder();
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url, init = {}) => {
+      const method = (init.method || "GET").toUpperCase();
+      const path = String(url).replace(/^\/api/, "");
+      calls.push({ method, path, body: init.body ? JSON.parse(init.body) : null });
+      if (path.endsWith("/runs/stream")) {
+        const body = new ReadableStream({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+            if (hangUp) controller.error(new TypeError("network error"));
+            else controller.close();
+          },
+        });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (method === "GET" && path === "/assistant/conversations/c1") {
+        const detail = details.length > 1 ? details.shift() : details[0];
+        return new Response(JSON.stringify(detail), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ detail: `no route ${method} ${path}` }), { status: 404 });
+    }));
+    return calls;
+  }
+
+  const sse = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+  it("开关打开时说话走流式：进度更新到当前这一步，done 照常合并", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.settings = { stream_enabled: true };
+    const seen = [];
+    const calls = streamServer({ chunks: [
+      sse("accepted", {}), sse("progress", { label: "正在理解你的问题…", step: 1 }),
+      sse("progress", { label: "正在查：可用的评分标准…", step: 2 }),
+      sse("done", { messages: [userMessage("有哪些评分标准？"), message("m22", "目前已发布的评分标准有：")],
+        pending: null, conversation: conversation() }),
+    ] });
+    const stop = watch(() => store.progress?.label, (label) => { if (label) seen.push(label); });
+
+    await store.send("有哪些评分标准？");
+    stop();
+
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual(["POST /assistant/conversations/c1/runs/stream"]);
+    expect(seen).toEqual(["正在理解你的问题…", "正在查：可用的评分标准…"]);
+    expect(store.progress).toBeNull();
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+  });
+
+  it("卡片上的操作不走流式", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.settings = { stream_enabled: true };
+    const calls = fakeServer({
+      "POST /assistant/conversations/c1/runs": () => [200, { messages: [], pending: null, conversation: conversation() }],
+    });
+    await store.select("card-1", { action: "keep" });
+    expect(calls.map((call) => call.path)).toEqual(["/assistant/conversations/c1/runs"]);
+  });
+
+  it("断线后不重发：读会话等这次运行结束，用会话里的消息", async () => {
+    // 只换 setTimeout：读流时运行环境内部也用计时器，全换掉流就读不动了。
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.settings = { stream_enabled: true };
+    const finished = { ...conversation(), running: false, pending: null,
+      messages: [userMessage("这批写得怎么样"), message("m22", "评完了，概况在右侧。")] };
+    const calls = streamServer({
+      chunks: [sse("accepted", {}), sse("progress", { label: "正在查：评分任务概况…", step: 1 })], hangUp: true,
+      details: [{ ...conversation(), running: true, messages: [], pending: null }, finished],
+    });
+
+    const sending = store.send("这批写得怎么样");
+    await vi.waitFor(() => expect(store.progress?.label).toBe("连接中断，正在取回结果…"));
+    await vi.advanceTimersByTimeAsync(2000);
+    await sending;
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "GET")).toHaveLength(2);
+    expect(store.messages.map((item) => item.id)).toEqual(["u1", "m22"]);
+    expect(store.error).toBeNull();
+    expect(store.progress).toBeNull();
+  });
+
+  it("断线后会话里没有这句话：请求可能还没到后端（还没拿到运行锁），标“还不确定”、不给重发（#79 复审）", async () => {
+    const store = useAssistantStore();
+    store.conversation = conversation();
+    store.settings = { stream_enabled: true };
+    streamServer({ chunks: [], hangUp: true, details: [{ ...conversation(), running: false, messages: [], pending: null }] });
+
+    await store.send("你好");
+
+    expect(store.messages.map((item) => [item.text, item.local])).toEqual([["你好", "unknown"]]);
+    expect(store.error).toContain("先别重新发送");
   });
 });
 
