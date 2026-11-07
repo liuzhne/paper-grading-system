@@ -143,6 +143,14 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 .venv/bin/python -m pytest -q --junitxml=/tmp/pgs-full.xml && .venv/bin/python scripts/ci_test_shard.py --record /tmp/pgs-full.xml
 ```
 
+**供应链与安全扫描**（2026-11-07 起）
+
+- 工作流里的第三方 action 一律固定到完整的提交 SHA，后面注释写版本号，例如 `actions/checkout@<40 位 SHA> # v7.0.1`。版本标签可以被改指向别的提交，SHA 不会。`test_ci_pipeline.py` 会拒绝只写标签的 `uses:`。
+- `.github/dependabot.yml` 每周一检查 action 新版本，合成一个 PR 同时更新 SHA 和注释，PR 开到 develop，照常过 `pgs-tests`。
+- Python 与前端依赖不做定期升级；仓库设置里开了 Dependabot 漏洞告警与安全更新，有已知漏洞时才自动开 PR（也开到 develop）。告警在 Security → Dependabot。
+- CodeQL 用 GitHub 的默认配置（Settings → Code security，没有工作流文件），扫描 Python、JavaScript/TypeScript 与工作流本身：开到 develop、main 的 PR，推送到这两个分支，以及每周一次。结果在 Security → Code scanning；**它不是规则集要求的检查**，不会挡住合并，发现的问题按严重程度另开 PR 处理。
+- 每个任务都写 `timeout-minutes`（同一个测试守着）：没写的默认能跑 6 小时，卡住时占着 runner，也挡住后面的部署。
+
 **排错**
 
 - **CI 上某一片失败，本地全套是绿的。** 报错指向那一片里的某个用例；真正的原因通常是它依赖了同一进程里排在前面的另一个文件留下的状态（全局设置、模块缓存、环境变量），分片后那个文件到了别的片里。用上面的命令只跑那一片来复现；修法是让用例自己准备状态，不要调权重把两个文件凑到一片。
@@ -150,6 +158,8 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 - **发布 PR 显示 “This branch is out-of-date with the base branch”。** 看上去是 develop 落后、要先同步；真正的原因是上一次发布的合并提交只在 main 上，这是正常的。main 的规则集不开 strict，不影响合并。**不要点 “Update branch”**：它会往 develop 直接推一个合并提交，被 `develop-integration` 规则集拒绝。
 - **发布 PR 列出一大堆已经发布过的提交，或者有冲突。** 看上去是 develop 的问题；真正的原因是上一次发布 PR 被 squash/rebase 了，或者热修没有合回 develop。先开 `main → develop` 的 PR 合回（Merge commit），再开发布 PR。
 - **`pgs-production-migrate` 在 `require-release-ref` 失败。** 报错指向工作流；真正的原因是在功能分支上点了 Run workflow（以前的做法是从 PR 分支迁移）。先把 PR 合进 develop，分支改选 develop 再跑。
+- **`test_every_third_party_action_is_pinned_to_a_commit_sha` 失败。** 报错指向测试；真正的原因是新加或改动的 `uses:` 只写了标签（如 `@v5`）。查出标签对应的提交：`gh api repos/<owner>/<action>/git/ref/tags/<标签>`，`object.type` 是 `tag` 时再查一次 `gh api repos/<owner>/<action>/git/tags/<sha>` 取 `object.sha`；写成 `@<SHA> # <完整版本号>`。
+- **Dependabot 的 action 升级 PR 让某个任务失败。** 看上去是新版本 action 坏了；先看发布说明里的不兼容改动（输入名、默认值、Node 版本），真正需要改的常是我们传的参数。**不要直接关掉这个 PR**：关掉后 Dependabot 通常不会再为同一个版本开 PR，要等更新的版本出来。把需要的参数改动直接推到这个 PR 的分支上，过了 CI 再合；确实要跳过这一版，在 PR 里用 `@dependabot ignore …` 命令并在 PR 里写明原因。
 - **`pgs-production-cutover` 在 `require-main` 失败。** 真正的原因是 Run workflow 默认选了 develop（默认分支），改选 main。
 
 ### 3.1 测试
@@ -1303,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
 | 2026-11-07 | 分支模型与流水线拆分 | 新增 3.0 分支、提交与发布规则；9.2 改为 develop → main 发布；新增 `tests.yml`、`scripts/ci_test_shard.py` 与权重文件；生产迁移从 develop 触发（功能分支被拒），切换只在 main；排错补分片失败、检查一直等待、发布 PR 冲突、守卫拒绝 |

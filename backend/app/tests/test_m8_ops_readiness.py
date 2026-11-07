@@ -99,7 +99,7 @@ def test_ci_has_locked_unit_postgres_migration_and_restore_gates():
         "pg-dump-version.txt",
         "container-backup-verify.json",
         "pgs-docker-compose-smoke-evidence",
-        "actions/upload-artifact@v7",
+        "actions/upload-artifact@",  # 版本固定到 SHA，由 test_ci_pipeline.py 检查
     ):
         assert marker in workflow
     assert "pull_request:" in workflow and "push:" in workflow

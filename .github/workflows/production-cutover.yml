@@ -43,6 +43,7 @@ jobs:
   # 单独一个任务：不在 main 时下面的任务根本不启动，拿不到 production 环境的密钥。
   require-main:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Only main may touch production
         env:
@@ -67,7 +68,7 @@ jobs:
       # 同时比较布尔与字符串：UI 给真布尔，`gh workflow run -f` 可能给字符串（见 production-migrate.yml）。
       REAL_RUN: ${{ inputs.dry_run == false || inputs.dry_run == 'false' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
