@@ -6,12 +6,16 @@
         --csv ASAP2_train_sourcetexts.csv --out ~/pgs-eval/asap2 --size 300
 
     DATABASE_URL=sqlite+pysqlite:///$HOME/pgs-eval/asap2/eval.db \\
+    STORAGE_ROOT=$HOME/pgs-eval/asap2/storage \\
     .venv/bin/python -m backend.app.scripts.run_asap_eval run \\
         --data ~/pgs-eval/asap2 --levels <档位 JSON> --label baseline
 
 ``run`` 在进程内走工作台同一组接口建草稿、确认规则、提交审核、发布评分标准，
 再用 ``build_labeled_eval`` 导入并评分，最后在 1–6 原始分上算指标。模型由
 ``LLM_PROVIDER`` 等环境变量或批次连接决定；真实模型会产生费用，需要授权预算。
+
+开始评分前拒绝落在仓库里的输出目录、报告、SQLite 数据库文件与 ``STORAGE_ROOT``
+（导入会把作文文档和解析出的正文存进去）。
 """
 
 from __future__ import annotations
@@ -81,19 +85,49 @@ def _existing_rubric(db, version: str):
     )
 
 
+def levels_version(levels: dict) -> str:
+    """评分标准版本号由档位文件哈希得出；报告里的档位哈希与“是否官方”只对这个版本成立。"""
+
+    return "levels-%s" % levels["sha256"][:12]
+
+
+def resolve_rubric(db, client, levels: dict, rubric_id: str | None = None) -> str:
+    """返回这份档位文件对应的已发布评分标准；没有就新建并发布。
+
+    显式给 ``rubric_id`` 时同样核对名称、版本与发布状态：别的档位文件建的评分标准
+    会让报告记下错误的档位哈希和“是否官方”，直接拒绝。
+    """
+
+    from backend.app.db.models import Rubric
+
+    version = levels_version(levels)
+    if rubric_id is None:
+        existing = _existing_rubric(db, version)
+        if existing is None:
+            rubric_id = publish_rubric(client, levels, version=version)
+            db.expire_all()
+            return rubric_id
+    else:
+        existing = db.get(Rubric, rubric_id)
+        if existing is None:
+            raise RuntimeError("评分标准 %s 不存在" % rubric_id)
+        if existing.name != asap.RUBRIC_NAME or existing.version != version:
+            raise RuntimeError(
+                "评分标准 %s（%s %s）不是用这份档位文件建的（应为 %s %s），报告的档位哈希会对不上"
+                % (rubric_id, existing.name, existing.version, asap.RUBRIC_NAME, version)
+            )
+    if existing.status != "published":
+        raise RuntimeError("评分标准 %s 已存在但未发布，请先在工作台处理或换档位文件" % existing.id)
+    return existing.id
+
+
 def evaluate(db, client, data_dir: Path, levels: dict, *, label: str, rubric_id: str | None = None) -> dict:
     """评分并汇总；同一档位文件只建一次评分标准，之后的运行沿用。"""
 
     from backend.app.eval.labeled_dataset import build_labeled_eval
 
     manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
-    version = "levels-%s" % levels["sha256"][:12]
-    if rubric_id is None:
-        existing = _existing_rubric(db, version)
-        if existing is not None and existing.status != "published":
-            raise RuntimeError("评分标准 %s 已存在但未发布，请先在工作台处理或换档位文件" % existing.id)
-        rubric_id = existing.id if existing is not None else publish_rubric(client, levels, version=version)
-        db.expire_all()
+    rubric_id = resolve_rubric(db, client, levels, rubric_id)
     sample_ids = {asap.filename_for(item["essay_id"]): item["essay_id"] for item in manifest["essays"]}
     base = build_labeled_eval(
         db,
@@ -140,9 +174,53 @@ def _print_summary(report: dict) -> None:
     print("有效样本 %s 篇；无总分 %s 篇（判失败或评分项待人工定分，不进指标）；评分政策标记复核 %s 篇（总分照常计入）" % (
         summary["n"], summary["missing_total"], summary["policy_review"],
     ))
+    if summary["not_run_total"]:
+        print("没跑完 %s 篇（文件缺失、解析或评分出错，原因见报告 runs.errors）" % summary["not_run_total"])
     for name in ("qwk", "mae", "exact", "adjacent", "mean_bias"):
         value = summary[name]
         print("  %-9s %s" % (name, "-" if value is None else round(value, 4)))
+
+
+def _require_outside(path, what: str) -> Path:
+    """相对路径按当前目录解析（与应用读设置时一致）；落在仓库里就拒绝。"""
+
+    resolved = Path(path).expanduser().resolve()
+    if resolved == PROJECT_ROOT or PROJECT_ROOT in resolved.parents:
+        raise GateValidationError("%s 在仓库里（%s），评测数据只能放在仓库外" % (what, resolved))
+    return resolved
+
+
+def _sqlite_file(database_url: str) -> Path | None:
+    """SQLite 文件库返回文件路径；内存库与其它数据库返回 None。"""
+
+    from sqlalchemy.engine import make_url
+
+    url = make_url(database_url)
+    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
+        return None
+    return Path(url.database)
+
+
+def _report_path(data_dir: Path, label: str) -> Path:
+    """报告固定写在 <data>/reports/ 下；组名只能是一个名字，不能带路径。"""
+
+    if not label or label in {".", ".."} or Path(label).name != label or "\\" in label:
+        raise ValueError("--label 只能是一个名字，不能带路径：%s" % label)
+    reports = _require_outside(data_dir / "reports", "报告目录")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return reports / ("%s-%s.json" % (label, stamp))
+
+
+def check_run_environment(data_dir: Path, label: str) -> Path:
+    """开始评分前检查：报告、SQLite 数据库文件与 STORAGE_ROOT 都要在仓库外。返回报告路径。"""
+
+    path = _report_path(data_dir, label)
+    database = _sqlite_file(str(settings.DATABASE_URL))
+    if database is not None:
+        _require_outside(database, "SQLite 数据库（DATABASE_URL）")
+    # 用远程存储时文档也会缓存在本地 STORAGE_ROOT 下，所以不分存储方式都检查。
+    _require_outside(settings.STORAGE_ROOT, "STORAGE_ROOT")
+    return path
 
 
 def main(argv=None) -> int:
@@ -158,8 +236,8 @@ def main(argv=None) -> int:
     run = commands.add_parser("run", help="建评分标准、评分并出报告")
     run.add_argument("--data", required=True)
     run.add_argument("--levels", required=True, help="档位描述 JSON")
-    run.add_argument("--label", required=True, help="这一组的名字，写进报告文件名")
-    run.add_argument("--rubric-id", help="沿用已发布的评分标准，不再新建")
+    run.add_argument("--label", required=True, help="这一组的名字，写进报告文件名（不能带路径）")
+    run.add_argument("--rubric-id", help="沿用已发布的评分标准（必须是同一份档位文件建的），不再新建")
     args = parser.parse_args(argv)
 
     try:
@@ -174,6 +252,7 @@ def main(argv=None) -> int:
 
         data_dir = ensure_external_artifact_dir(Path(args.data).expanduser(), PROJECT_ROOT)
         levels = asap.load_levels(args.levels)
+        path = check_run_environment(data_dir, args.label)
     except (GateValidationError, ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -187,12 +266,12 @@ def main(argv=None) -> int:
     try:
         with TestClient(app) as client:
             report = evaluate(db, client, data_dir, levels, label=args.label, rubric_id=args.rubric_id)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     finally:
         db.close()
-    reports = data_dir / "reports"
-    reports.mkdir(exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = reports / ("%s-%s.json" % (args.label, stamp))
+    path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     _print_summary(report)
     print("报告：%s" % path)

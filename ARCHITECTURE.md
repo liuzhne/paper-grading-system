@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | `run_asap_eval.check_run_environment` 在开评前拦仓库里的报告、SQLite 数据库文件与 `STORAGE_ROOT`；`resolve_rubric` 统一找或建评分标准并核对显式 `--rubric-id` 的版本；`summarize` 多出 `not_run`（不在 `per_sample` 里的样本）；评分链不变 |
 | 2026-11-06 | 评分助手：发送去重（请求编号） | 迁移 `0042_assistant_message_client_id`：`assistant_messages.client_id` 与 `(conversation_id, client_id)` 部分唯一索引；`AssistantRunCreate` / `AssistantMessageRead` 加可选 `client_id`；`runner.run` 抢锁后按编号回放（`_replay`），唯一索引冲突同样回放；前端 `send` 生成编号、`retryOnce` 等运行结束后同一编号重发，撤掉 `recoverRun`、`unknown` 状态与附件不归档的绕开办法 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 附件的结果来自核对会话时（`recovered`），`attachFiles` 不归档文件、提示重新选择；调用链不变 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（二） | `recoverRun` 按文字对应这次请求（附件按“评分这 N 份文件”）；代理的 5xx 与断线后找不到也标“还不确定”；调用链不变 |
@@ -1700,17 +1701,21 @@ rule_executor
 ```
 run_asap_eval prepare   eval/asap.load_rows → stratified_sample（分数 × 题目，固定种子）
                         → build_document（.docx：题目要求 + 作文，可选材料）→ scores.csv + manifest.json
-run_asap_eval run       eval/asap.load_levels（本机档位 JSON）
-                        → TestClient(app) 走 POST /rubrics → review-workspace → confirm → submit-review → publish
+run_asap_eval run       eval/asap.load_levels（本机档位 JSON）→ check_run_environment（报告、SQLite、STORAGE_ROOT 在仓库外）
+                        → resolve_rubric：按版本 levels-<哈希> 找已发布的；没有就
+                          TestClient(app) 走 POST /rubrics → review-workspace → confirm → submit-review → publish
                         → labeled_dataset.build_labeled_eval（ingest_file + score_paper，Core 路径）
                         → eval/asap.summarize（1–6 原始分 QWK、MAE、混淆矩阵、分组偏差）→ reports/<组名>-<时间>.json
 ```
 
-- 输出目录用 `gating.ensure_external_artifact_dir` 拦在仓库外；清单与报告不写作文正文。
-- 同一档位文件（按哈希命名版本）只建一次评分标准，各组沿用。
+- 输出目录用 `gating.ensure_external_artifact_dir` 拦在仓库外；`run` 开评前再拦报告、SQLite 数据库文件与 `STORAGE_ROOT`（导入写文档与解析正文的地方，远程存储也在这里缓存）。清单与报告不写作文正文。
+- 同一档位文件（按哈希命名版本）只建一次评分标准，各组沿用；显式 `--rubric-id` 也要是这个版本、已发布。
 - 指标不用 `runner.evaluate` 的等级 QWK：那里按百分制等级线分档，6 分制会被压成错的等级。
+- `summarize` 的样本三分：有总分（进指标）、无总分（`missing`）、没跑完（`not_run`，`build_labeled_eval` 只记进 `errors`、不在 `per_sample` 里），三者之和等于清单篇数。
 
 维护记录：2026-11-04 · ASAP 2.0 外部基准评测：记录评测脚本的调用链与数据边界。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正：调用链补上开评前的环境检查与 `resolve_rubric`，样本口径补上 `not_run`。
 
 ### 2026-11-04 论文评分第二阶段第二轮：B、C 补全
 

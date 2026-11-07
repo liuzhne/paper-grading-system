@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.eval import asap
+from backend.app.eval.gating import GateValidationError
 from backend.app.scripts import run_asap_eval
 
 
@@ -78,13 +79,29 @@ def test_load_rows_rejects_missing_columns_and_bad_scores(tmp_path):
         asap.load_rows(path)
 
     rows = _write_csv(tmp_path / "asap.csv", count_per_cell=1)
-    rows[0]["score"] = "7"
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+
+    def rewrite(**changes):
+        changed = [dict(rows[0], **changes)] + rows[1:]
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(changed)
+
+    rewrite(score="7")
     with pytest.raises(ValueError, match="1–6"):
         asap.load_rows(path)
+    for bad in ("3.0", ""):
+        rewrite(score=bad)
+        with pytest.raises(ValueError, match="分数不是整数：%s" % rows[0]["essay_id"]):
+            asap.load_rows(path)
+    # 同一 ID 两篇会生成同名文档、互相覆盖，成绩表却有两行。
+    rewrite(essay_id=rows[1]["essay_id"])
+    with pytest.raises(ValueError, match="essay_id 重复：%s" % rows[1]["essay_id"]):
+        asap.load_rows(path)
+    for bad in ("../escape", "", "a b"):
+        rewrite(essay_id=bad)
+        with pytest.raises(ValueError, match="essay_id 为空或含"):
+            asap.load_rows(path)
 
 
 def test_prepare_writes_documents_scores_and_a_text_free_manifest(tmp_path):
@@ -125,6 +142,7 @@ def test_summarize_scores_on_the_raw_scale_and_reports_groups():
             {"essay_id": "a", "score": 2, "prompt_name": "P", "economically_disadvantaged": "NA", "ell_status": "No", "race_ethnicity": "W", "gender": "F"},
             {"essay_id": "b", "score": 4, "prompt_name": "P", "economically_disadvantaged": "NA", "ell_status": "Yes", "race_ethnicity": "W", "gender": "M"},
             {"essay_id": "c", "score": 6, "prompt_name": "Q", "economically_disadvantaged": "NA", "ell_status": "No", "race_ethnicity": "W", "gender": "F"},
+            {"essay_id": "d", "score": 3, "prompt_name": "Q", "economically_disadvantaged": "NA", "ell_status": "No", "race_ethnicity": "W", "gender": "M"},
         ]
     }
     per_sample = [
@@ -135,6 +153,9 @@ def test_summarize_scores_on_the_raw_scale_and_reports_groups():
     summary = asap.summarize(per_sample, manifest)
 
     assert summary["n"] == 2 and summary["missing_essay_ids"] == ["c"]
+    # d 没跑完（文件缺失、解析或评分出错），不在 per_sample 里，单列出来。
+    assert summary["not_run_total"] == 1 and summary["not_run_essay_ids"] == ["d"]
+    assert summary["n"] + summary["missing_total"] + summary["not_run_total"] == len(manifest["essays"])
     assert summary["exact"] == 0.5 and summary["adjacent"] == 1.0 and summary["mean_bias"] == 0.5
     assert summary["policy_review"] == 1
     assert summary["confusion"]["rows_human_cols_system"][3][4] == 1
@@ -153,12 +174,30 @@ def test_run_publishes_the_banded_rubric_and_scores_with_the_mock_model(client, 
         report = run_asap_eval.evaluate(db, client, data_dir, levels, label="mock")
         again = run_asap_eval.evaluate(db, client, data_dir, levels, label="mock-again")
 
+        # 显式 --rubric-id 也要核对：别的档位文件建的评分标准会让报告记错档位哈希。
+        assert run_asap_eval.resolve_rubric(db, client, levels, report["rubric_id"]) == report["rubric_id"]
+        other = {**levels, "sha256": "0" * 64}
+        with pytest.raises(RuntimeError, match="不是用这份档位文件建的"):
+            run_asap_eval.evaluate(db, client, data_dir, other, label="x", rubric_id=report["rubric_id"])
+        with pytest.raises(RuntimeError, match="不存在"):
+            run_asap_eval.resolve_rubric(db, client, levels, "no-such-rubric")
+        # 上次运行在发布前中断留下的草稿：显式给 ID 与按版本查到都拒绝。
+        draft = client.post(
+            run_asap_eval.settings.API_PREFIX.rstrip("/") + "/rubrics",
+            json=asap.rubric_payload(other, version=run_asap_eval.levels_version(other)),
+        )
+        assert draft.status_code == 200, draft.text
+        db.expire_all()
+        for explicit in (draft.json()["id"], None):
+            with pytest.raises(RuntimeError, match="未发布"):
+                run_asap_eval.resolve_rubric(db, client, other, explicit)
+
     assert again["rubric_id"] == report["rubric_id"]  # 同一档位文件不重复建评分标准
     assert report["gating_eligible"] is False and report["levels"]["official"] is False
     assert report["runs"]["dataset_size"] == 12
     assert report["runs"]["completed_runs"] == 12, report["runs"]["errors"]
     summary = report["summary"]
-    assert summary["n"] + summary["missing_total"] == 12
+    assert summary["n"] + summary["missing_total"] + summary["not_run_total"] == 12
     assert set(report["settings"]) >= set(run_asap_eval.STAGE2_SETTINGS)
 
 
@@ -168,3 +207,64 @@ def test_run_refuses_output_inside_the_repository(capsys):
     assert code == 2
     assert "outside the repository" in capsys.readouterr().err
     assert not inside.exists()
+
+
+def test_run_refuses_reports_database_and_storage_inside_the_repository(tmp_path, monkeypatch):
+    settings = run_asap_eval.settings
+    monkeypatch.setattr(settings, "DATABASE_URL", "sqlite+pysqlite:///%s" % (tmp_path / "eval.db"))
+    monkeypatch.setattr(settings, "STORAGE_ROOT", tmp_path / "storage")
+    path = run_asap_eval.check_run_environment(tmp_path, "baseline")
+    assert path.parent == (tmp_path / "reports").resolve() and path.name.startswith("baseline-")
+
+    # 组名带路径（相对或绝对）会把报告写到 reports/ 以外，包括仓库里。
+    for label in ("../escape", str(run_asap_eval.PROJECT_ROOT / "report"), "..", ""):
+        with pytest.raises(ValueError, match="--label"):
+            run_asap_eval.check_run_environment(tmp_path, label)
+
+    # 相对路径按当前目录解析，与应用读设置时一致；在仓库根目录运行就落在仓库里。
+    monkeypatch.chdir(run_asap_eval.PROJECT_ROOT)
+    monkeypatch.setattr(settings, "DATABASE_URL", "sqlite+pysqlite:///eval.db")
+    with pytest.raises(GateValidationError, match="SQLite"):
+        run_asap_eval.check_run_environment(tmp_path, "baseline")
+    assert not (run_asap_eval.PROJECT_ROOT / "eval.db").exists()
+
+    monkeypatch.setattr(settings, "DATABASE_URL", "sqlite+pysqlite:///:memory:")
+    monkeypatch.setattr(settings, "STORAGE_ROOT", Path("storage"))  # 默认值
+    with pytest.raises(GateValidationError, match="STORAGE_ROOT"):
+        run_asap_eval.check_run_environment(tmp_path, "baseline")
+
+
+def test_run_reports_evaluation_errors_with_exit_code_2(tmp_path, monkeypatch, capsys):
+    closed = []
+
+    class _Session:
+        def close(self):
+            closed.append(True)
+
+    class _Client:
+        def __init__(self, app):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("评分标准 r1 已存在但未发布，请先在工作台处理或换档位文件")
+
+    monkeypatch.setattr("fastapi.testclient.TestClient", _Client)
+    monkeypatch.setattr("backend.app.db.session.SessionLocal", _Session)
+    monkeypatch.setattr(run_asap_eval, "evaluate", _fail)
+    monkeypatch.setattr(run_asap_eval.settings, "DATABASE_URL", "sqlite+pysqlite:///%s" % (tmp_path / "eval.db"))
+    monkeypatch.setattr(run_asap_eval.settings, "STORAGE_ROOT", tmp_path / "storage")
+
+    code = run_asap_eval.main(
+        ["run", "--data", str(tmp_path / "data"), "--levels", str(LEVELS_FILE), "--label", "mock"]
+    )
+
+    assert code == 2
+    assert "已存在但未发布" in capsys.readouterr().err
+    assert closed == [True]
+    assert not (tmp_path / "data" / "reports").exists()

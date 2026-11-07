@@ -1240,6 +1240,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | `run` 开始评分前还拒绝仓库里的报告、SQLite 数据库文件与 `STORAGE_ROOT`，`--label` 不能带路径；评分标准问题退出码 2；排错补“`STORAGE_ROOT` 在仓库里”与“不是用这份档位文件建的” |
 | 2026-11-06 | 评分助手：发送去重（请求编号） | 迁移 `0042_assistant_message_client_id`（先跑迁移工作流再部署）；日志新增 `assistant_run_replayed`、`assistant_run_replay_text_mismatch`；排错：“没有发出去”只在自动重发也失败或 4xx 后出现，同一句话出现两次 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 排错：发附件后提示“请在卡片里重新选择” |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（二） | “没有发出去”只在 4xx 与后端自己的 5xx 后出现；“还不确定”补上断线后会话里找不到的情况 |
@@ -2847,7 +2848,7 @@ B、C 改变评分，打开前要用 QWK 留出集对比（真实模型调用需
 
 ### 2026-11-04 ASAP 2.0 外部基准评测
 
-方案见 `docs/ASAP2.0外部基准评测方案.md`。数据（Kaggle `lburleigh/asap-2-0` 的 `ASAP2_train_sourcetexts.csv`）、生成的文档、数据库与报告都放在仓库外；脚本拒绝仓库内的输出目录。数据放在仓库根目录时，把 `/ASAP2_*.csv` 加进本机 `.git/info/exclude`。
+方案见 `docs/ASAP2.0外部基准评测方案.md`。数据（Kaggle `lburleigh/asap-2-0` 的 `ASAP2_train_sourcetexts.csv`）、生成的文档、数据库与报告都放在仓库外；`run` 在开始评分前拒绝落在仓库里的输出目录、报告、SQLite 数据库文件与 `STORAGE_ROOT`，`--label` 不能带路径。数据放在仓库根目录时，把 `/ASAP2_*.csv` 加进本机 `.git/info/exclude`。
 
 抽样（不调模型）：
 
@@ -2878,6 +2879,12 @@ export DATABASE_URL=sqlite+pysqlite:///$HOME/pgs-eval/asap2/eval.db LLM_PROVIDER
 - **现象**：`run` 报“评分标准已存在但未发布”。
   - 报错指向：像是档位文件有问题。
   - 真正原因：上次运行在发布前中断，留下了同名同版本的草稿。在工作台处理掉它，或换一份档位文件。
+- **现象**：`run` 报“STORAGE_ROOT 在仓库里”，可是没设过 `STORAGE_ROOT`。
+  - 报错指向：像是数据目录 `--data` 或存储配置写错了。
+  - 真正原因：`STORAGE_ROOT` 默认是相对路径 `storage`，按当前目录解析；在仓库根目录运行就落在仓库里，导入的作文文档和解析出的正文会留在仓库的 `storage/` 下。按上面的命令显式设 `STORAGE_ROOT=$HOME/pgs-eval/asap2/storage`。SQLite 的相对路径同理。
+- **现象**：`run --rubric-id` 报“不是用这份档位文件建的”。
+  - 报错指向：像是评分标准 ID 填错了。
+  - 真正原因：评分标准的版本号由档位文件哈希得出，这个 ID 是另一份档位文件建的（或档位文件被改过）。报告的档位哈希与“是否官方”取自 `--levels`，所以拒绝混用。去掉 `--rubric-id` 让脚本按档位文件找或新建，或换回原来的档位文件。
 
 验证：
 
@@ -2886,6 +2893,8 @@ export DATABASE_URL=sqlite+pysqlite:///$HOME/pgs-eval/asap2/eval.db LLM_PROVIDER
 ```
 
 维护记录：2026-11-04 · ASAP 2.0 外部基准评测：新增两条命令，排错写明复核标记与残留草稿的真实原因。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正：仓库边界补上报告、SQLite 与 `STORAGE_ROOT`，排错补默认相对路径与评分标准对不上档位文件两条。
 
 ### 2026-11-04 论文评分第二阶段第二轮（B、C 补全）
 

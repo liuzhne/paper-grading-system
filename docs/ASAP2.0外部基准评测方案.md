@@ -13,7 +13,8 @@
 ## 2. 数据
 
 - 文件：Kaggle `lburleigh/asap-2-0` 的 `ASAP2_train_sourcetexts.csv`（CC BY 4.0）。24,728 篇，列有 `essay_id`、`score`（1–6）、`full_text`、`assignment`、`prompt_name`、学生背景与最多 4 篇材料原文。文件名带 train，实际是全量，没有划分列。
-- 数据与生成物一律放在仓库外（脚本拒绝仓库内的输出目录）；仓库根目录下的 CSV 已加进本机 `.git/info/exclude`。
+- 数据与生成物一律放在仓库外：脚本在开始评分前拒绝落在仓库里的输出目录、报告、SQLite 数据库文件与 `STORAGE_ROOT`（导入会把文档和解析出的正文存进去；远程存储也会在这里缓存）。`--label` 只能是一个名字，不能带路径。仓库根目录下的 CSV 已加进本机 `.git/info/exclude`。
+- 读 CSV 时 `essay_id` 必须只含字母、数字、`_`、`-` 且不重复（它直接当文件名，重复会让文档互相覆盖），分数必须是 1–6 的整数；出错时指出是哪一篇。
 
 ## 3. 流程
 
@@ -28,11 +29,13 @@ run      评分标准：一个评分项 HOLISTIC、6 个档位（S1–S6，分�
 
 档位描述从本机 JSON 读取（`--levels`）。官方标准是 PERSUADE 2.0 仓库里的 `sat_rubric_only_source_based.pdf`，源自 SAT 评分标准、有版权，不进仓库：由使用者把官方原文填进 JSON，`"official": true`。仓库里的 `backend/app/eval/asap2_levels.unofficial.json` 是自写的简短描述，只用于跑通流程，结论不能和文献比较。
 
+评分标准的版本号是 `levels-<档位文件哈希前 12 位>`，同一档位文件只建一次。`--rubric-id` 只能指向这份档位文件建的、已发布的评分标准，否则拒绝：报告里的档位哈希与“是否官方”取自 `--levels`，评分却用另一份标准，结论会被标错。
+
 ## 4. 指标
 
 - 主要：QWK（1–6 整数分，`quadratic_weighted_kappa` 固定 1..6）、MAE、完全一致率、相差不超过 1 分的比例、混淆矩阵、各分数段准确率。
 - 公平性：按题目、经济状况、是否英语学习者、族裔、性别分组的平均偏差（系统分 − 人工分）。
-- 运行：完成数、无总分数（判失败，或有评分项等人工定分——“证据不足”转人工落在这里）、评分政策的复核标记数。没有总分的样本不进指标，报告单列；不同组比较时取各组都有总分的交集。
+- 运行：完成数、无总分数（判失败，或有评分项等人工定分——“证据不足”转人工落在这里）、没跑完数（文件缺失、解析或评分出错，原因在 `runs.errors`）、评分政策的复核标记数。有效样本 + 无总分 + 没跑完 = 清单篇数。没有总分和没跑完的样本不进指标，报告单列 ID；不同组比较时取各组都有总分的交集。
 - 评分政策的复核标记（总分过低、接近等级线）在 6 分制上会标出大量低分作文，它不改总分，不能当转人工率读。
 - 报告记录三个第二阶段设置、模型身份、档位文件哈希与是否官方原文。
 
@@ -53,7 +56,7 @@ run      评分标准：一个评分项 HOLISTIC、6 个档位（S1–S6，分�
 ```
 
 ```bash
-LLM_PROVIDER=mock DATABASE_URL=sqlite+pysqlite:///$HOME/pgs-eval/asap2/eval.db .venv/bin/python -m backend.app.scripts.run_asap_eval run --data ~/pgs-eval/asap2 --levels backend/app/eval/asap2_levels.unofficial.json --label mock
+LLM_PROVIDER=mock DATABASE_URL=sqlite+pysqlite:///$HOME/pgs-eval/asap2/eval.db STORAGE_ROOT=$HOME/pgs-eval/asap2/storage .venv/bin/python -m backend.app.scripts.run_asap_eval run --data ~/pgs-eval/asap2 --levels backend/app/eval/asap2_levels.unofficial.json --label mock
 ```
 
 真实模型运行前先 `alembic upgrade head` 建库，并配置与生产相同的模型连接（gemini-2.5-flash，思考关闭）。

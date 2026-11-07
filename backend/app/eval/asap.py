@@ -13,6 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import re
 import sys
 
 from backend.app.eval.metrics import mae
@@ -34,6 +35,8 @@ GROUP_FIELDS = (
     "gender",
 )
 _MISSING = {"", "NA", "N/A", "nan"}
+# essay_id 直接当文件名（papers/<essay_id>.docx），只收字母、数字、下划线与连字符。
+_ESSAY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 def sha256_file(path) -> str:
@@ -45,7 +48,11 @@ def sha256_file(path) -> str:
 
 
 def load_rows(path) -> list[dict]:
-    """读 Kaggle 的 ASAP 2.0 CSV；分数转成整数，缺列就报错。"""
+    """读 Kaggle 的 ASAP 2.0 CSV；分数转成整数。
+
+    缺列、essay_id 不能当文件名或重复、分数不是 1–6 的整数都报错，并指出是哪一篇。
+    重复 ID 在这里拦下：生成文档时同名文件会互相覆盖，成绩表却仍有两行。
+    """
 
     csv.field_size_limit(sys.maxsize)
     with open(path, newline="", encoding="utf-8") as handle:
@@ -54,10 +61,20 @@ def load_rows(path) -> list[dict]:
         if missing:
             raise ValueError("ASAP 2.0 CSV 缺少列：%s" % ", ".join(missing))
         rows = []
+        seen = set()
         for row in reader:
-            score = int(row["score"])
+            essay_id = row["essay_id"]
+            if not isinstance(essay_id, str) or not _ESSAY_ID.fullmatch(essay_id):
+                raise ValueError("essay_id 为空或含字母、数字、_、- 以外的字符：%r" % essay_id)
+            if essay_id in seen:
+                raise ValueError("essay_id 重复：%s" % essay_id)
+            seen.add(essay_id)
+            try:
+                score = int(row["score"])
+            except (TypeError, ValueError):
+                raise ValueError("分数不是整数：%s" % essay_id) from None
             if score not in SCORES:
-                raise ValueError("分数超出 1–6：%s" % row["essay_id"])
+                raise ValueError("分数超出 1–6：%s" % essay_id)
             rows.append({**row, "score": score})
     return rows
 
@@ -213,16 +230,20 @@ def summarize(per_sample, manifest: dict) -> dict:
     """在 1–6 原始分上算指标；没有自动总分的样本单列，不进指标。
 
     没有总分的样本包括判失败的，以及有评分项等人工定分的（“证据不足”转人工就在这里）。
+    没跑完的样本（文件缺失、解析或评分出错，原因在报告的 ``runs.errors``）不在
+    ``per_sample`` 里，另列 ``not_run``，保证 n + 无总分 + 没跑完 = 清单篇数。
     ``policy_review`` 只是评分政策的复核标记（总分过低、接近等级线），总分照常进指标。
     """
 
     essays = {item["essay_id"]: item for item in manifest["essays"]}
     scored = []
     missing = []
+    seen = set()
     for sample in per_sample:
         essay = essays.get(sample["sample_id"])
         if essay is None:
             continue
+        seen.add(essay["essay_id"])
         if sample.get("system_total") is None:
             missing.append(essay["essay_id"])
             continue
@@ -250,10 +271,13 @@ def summarize(per_sample, manifest: dict) -> dict:
             for value, deltas in sorted(buckets.items())
         }
     n = len(scored)
+    not_run = sorted(essay_id for essay_id in essays if essay_id not in seen)
     return {
         "n": n,
         "missing_total": len(missing),
         "missing_essay_ids": sorted(missing),
+        "not_run_total": len(not_run),
+        "not_run_essay_ids": not_run,
         "policy_review": sum(item[3] for item in scored),
         "qwk": quadratic_weighted_kappa(human, system, SCORES[0], SCORES[-1]) if n else None,
         "mae": mae(human, system) if n else None,
