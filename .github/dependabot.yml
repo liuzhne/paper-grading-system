@@ -1,0 +1,23 @@
+# Dependabot（RUNBOOK 3.0「供应链与安全扫描」）。
+#
+# 工作流里的第三方 action 一律固定在提交 SHA，后面注释写版本号（test_ci_pipeline.py 守着）。
+# SHA 不会自己变，所以由这里每周检查一次新版本，开一个 PR 同时改 SHA 和版本注释。PR 开到默认分支
+# develop，与其他功能 PR 一样过 pgs-tests、随下一次发布进 main。
+#
+# Python（uv.lock）与前端（package-lock.json）的依赖不做定期版本更新——每周几十个 PR 没人看得过来；
+# 只在有已知漏洞时由 Dependabot 安全更新开 PR（仓库设置里已打开，不需要写在这里）。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 3

@@ -589,6 +589,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 新增决策：Dependabot 告警与安全更新、CodeQL 默认配置、action 固定 SHA + 每周升级 PR、每个任务写超时；放弃依赖定期更新、CodeQL 高级配置、CodeQL 作为必需检查、基础镜像自动升级 |
+| 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 修订：第一次发布（#85）后关掉 main 的“合并前与 main 同步”，放弃“每次发布后合回 develop”的做法；记入放弃方案与代价 |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 修订：从迁移预演到发布 PR 合并冻结 develop；守卫只防误点、不是安全边界（仍不按分支限制 `production` 环境）；main 不等于线上版本；分片按 pytest 默认的两种文件名规则收集 |
 | 2026-11-07 | 分支模型与流水线拆分 | 新增决策：develop 集成、main 即生产（GitLab Flow 环境分支两级版），提交阶段只跑代码测试、发布门禁与部署只在 main；pytest 按文件分 4 片、Playwright 分 2 片；放弃完整 Git Flow、纯主干、按路径跳过、xdist、production 环境只限 main |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 修订：边界检查按应用实际解析路径的方式来，不展开 `~` |
@@ -2956,7 +2958,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
   - 分支：GitLab Flow 环境分支的两级版本。`develop` 集成，`main` 即生产；功能分支从 develop 切、PR 回 develop；发布是 `develop → main` 的 PR，只能 Merge commit；热修 `hotfix/*` 从 main 切、PR 到 main，部署后合回 develop。默认分支改为 develop。
   - 流水线：新增 `tests.yml`（`pgs-tests`，提交阶段：PR → develop 与 push develop，只跑代码测试，不碰部署密钥）；`ci.yml` 只看 main（发布 PR 与 push main），用 `workflow_call` 复用 `tests.yml`，再加 Postgres 门禁、Docker 冒烟、生产配置与来源分支检查 `release-source`；部署仍只在 push main。
   - 提速：后端 pytest 按测试文件分 4 片（`scripts/ci_test_shard.py`，按记录的耗时贪心均衡，片内保持整套运行的顺序），Playwright 用自带的 `--shard` 分 2 片；同一 PR 的新提交取消旧运行。
-  - 强制：main 与 develop 各一条规则集，要求 PR 与汇总检查（`tests-passed` / `release-gates-passed`），不设绕过名单、不要求审批人；main 开 strict 且只允许 Merge commit，develop 不开 strict。生产迁移工作流只接受 main、develop、`hotfix/*`，切换工作流只接受 main。
+  - 强制：main 与 develop 各一条规则集，要求 PR 与汇总检查（`tests-passed` / `release-gates-passed`），不设绕过名单、不要求审批人；main 只允许 Merge commit；两边都不开 strict（main 原本开了，第一次发布 #85 后关掉，见下面“放弃的方案”）。生产迁移工作流只接受 main、develop、`hotfix/*`，切换工作流只接受 main。
 - 原因：本项目单实例、合并即部署，不需要并行维护多个版本；两级环境分支让“哪些改动已上线”一眼可见，又满足维护者要的开发分支。只拆流水线不分片，提交阶段只能从约 9 分钟降到约 7.5 分钟；分片后关键路径预计 3–4 分钟。规则集只认汇总检查，改分片数或加减门禁不用改规则集。
 - 放弃的方案：
   - 完整 Git Flow（另设 `release/*` 发布分支）：给有版本号、多版本并行维护的软件用；这里会多一层合并；仓库里现有的 `release/*` 分支已被规则集 `release-branch-freeze` 冻结，只作历史存档。
@@ -2964,6 +2966,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
   - 按路径跳过（只改文档时不跑测试）：本仓库有文档契约测试（`test_m8_documentation_contract.py` 等），改文档同样会让测试失败；而且被跳过的必需检查会让 PR 一直等待。
   - pytest-xdist 进程内并行：要加依赖，且同一进程组里的用例共享全局设置与模块缓存，偶发失败难查；按文件分片每片仍是独立进程，与整套运行等价。
   - 把 `production` 环境限制为只允许 main 部署：候选镜像评测（`assistant-eval.yml` 的 `candidate=true`）要从 PR 分支使用这个环境，限制后它就跑不了；改为在两个生产手动工作流里各加一个不带环境的守卫任务。
+  - main 的规则集要求合并前与 main 同步（strict）：第一次发布 #85 合并后发现，Merge commit 只留在 main 上，develop 永远不含它，下一次发布 PR 一开就落后；develop 不能直接推送，“Update branch”也用不了。要保留它只能每次发布后再开一个 `main → develop` 的合回 PR（Git Flow 的做法）。发布 PR 的检查本来就跑在合并结果上，push main 部署前还会再跑一遍门禁，strict 多出的保护很小，所以关掉。代价：发布 PR 跑完门禁后 main 又被热修改动时不会强制重跑，靠手动重跑和 push main 的门禁兜底。
   - 发布 PR 合并后 push main 不再重跑门禁（直接部署发布 PR 验过的提交）：hotfix 或并发合并时 main 可能已经变了；发布频率降低后，部署前多 5–6 分钟可以接受。
 - 代价/约束：
   - develop 不开 strict，两个各自变绿的 PR 合在一起可能让 develop 变红，靠 push develop 的运行发现；develop 变红时先修再合别的。个人账号的仓库没有合并队列，这个缺口只能这样补。
@@ -2974,3 +2977,20 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
   - main 不等于线上版本：合并后部署还在跑或失败时线上仍是旧版本，以实例上的 `/opt/pgs/RELEASE` 为准。
 
 维护记录：2026-11-07 · 分支模型与流水线拆分：新增决策；D-011（生产只经 main 的门禁发布）不变，门禁的入口从“每个 PR”收窄到“发布 PR 与 push main”。
+
+### 2026-11-07 流水线补强：依赖与代码扫描、action 固定到 SHA、任务超时（Accepted，维护者要求）
+
+- 背景：流水线拆分后对照专业做法复查，发现三处成本小的缺口：没有依赖漏洞告警与代码安全扫描；第三方 action 大多只写版本标签（`checkout@v7` 等），只有 `setup-uv` 固定了 SHA；6 个任务没写超时，默认能跑 6 小时。
+- 选择：
+  - 打开 Dependabot 漏洞告警与安全更新（仓库设置），CodeQL 用默认配置扫描 Python、JavaScript/TypeScript 与工作流。
+  - 所有第三方 action 固定到完整提交 SHA，注释写版本；`.github/dependabot.yml` 每周把 action 升级合成一个 PR，开到 develop。
+  - 每个任务都写 `timeout-minutes`；`test_ci_pipeline.py` 守住 SHA 固定、版本注释、超时与 Dependabot 配置。
+- 原因：版本标签可以被重新指向别的提交，供应链被投毒时固定 SHA 是唯一不受影响的写法（GitHub 的 Actions 安全加固指南也这样建议）；固定之后不升级会越来越旧，所以必须配 Dependabot。公开仓库的 Dependabot 与 CodeQL 免费。
+- 放弃的方案：
+  - Python、前端依赖的定期版本更新：每周会有几十个 PR，没人看得过来；只在有漏洞时由安全更新开 PR。
+  - CodeQL 高级配置（自己维护一个工作流文件）：默认配置已覆盖这几种语言，少一个要维护的文件；需要自定义查询时再换。
+  - 把 CodeQL 设成规则集要求的检查：误报会挡住合并，扫描也比提交阶段慢；先看告警质量再决定。
+  - Docker 基础镜像（`python:3.12-slim-bookworm`、`postgres:16-bookworm`、`caddy:2-alpine`）的自动升级：牵涉镜像兼容与部署，单独评估。
+- 代价/约束：每周可能多一个 action 升级 PR；CodeQL 在 PR 上多一个不阻塞的检查；新加 action 时要自己查 SHA（RUNBOOK 3.0 排错有命令）。
+
+维护记录：2026-11-07 · 流水线补强：新增决策。
