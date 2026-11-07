@@ -182,9 +182,13 @@ def _print_summary(report: dict) -> None:
 
 
 def _require_outside(path, what: str) -> Path:
-    """相对路径按当前目录解析（与应用读设置时一致）；落在仓库里就拒绝。"""
+    """相对路径按当前目录解析（与应用读设置时一致）；落在仓库里就拒绝。
 
-    resolved = Path(path).expanduser().resolve()
+    不展开 ``~``：SQLAlchemy（只做 ``os.path.abspath``）和 ``STORAGE_ROOT`` 都不展开，
+    ``~/eval.db`` 实际是当前目录下名为 ``~`` 的目录。命令行参数在读入时已展开。
+    """
+
+    resolved = Path(path).resolve()
     if resolved == PROJECT_ROOT or PROJECT_ROOT in resolved.parents:
         raise GateValidationError("%s 在仓库里（%s），评测数据只能放在仓库外" % (what, resolved))
     return resolved
@@ -226,6 +230,8 @@ def _report_path(data_dir: Path, label: str) -> Path:
     if not label or label in {".", ".."} or Path(label).name != label or "\\" in label:
         raise ValueError("--label 只能是一个名字，不能带路径：%s" % label)
     reports = _require_outside(data_dir / "reports", "报告目录")
+    if reports.exists() and not reports.is_dir():
+        raise ValueError("报告目录不是目录：%s" % reports)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = reports / ("%s-%s.json" % (label, stamp))
     if path.is_symlink() or path.exists():
@@ -294,8 +300,8 @@ def main(argv=None) -> int:
     finally:
         db.close()
     _print_summary(report)  # 先打印：报告万一写不进去，指标也不至于丢
-    path.parent.mkdir(exist_ok=True)
     try:
+        path.parent.mkdir(exist_ok=True)
         # "x" 独占创建：评分期间有人在这个位置放了文件或符号链接，就拒绝而不是跟随它写。
         with open(path, "x", encoding="utf-8") as handle:
             handle.write(json.dumps(report, ensure_ascii=False, indent=2, default=str))

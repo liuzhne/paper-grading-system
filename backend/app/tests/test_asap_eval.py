@@ -292,11 +292,54 @@ def test_run_reports_evaluation_errors_with_exit_code_2(tmp_path, monkeypatch, c
     monkeypatch.setattr(run_asap_eval.settings, "DATABASE_URL", "sqlite+pysqlite:///%s" % (tmp_path / "eval.db"))
     monkeypatch.setattr(run_asap_eval.settings, "STORAGE_ROOT", tmp_path / "storage")
 
-    code = run_asap_eval.main(
-        ["run", "--data", str(tmp_path / "data"), "--levels", str(LEVELS_FILE), "--label", "mock"]
-    )
+    argv = ["run", "--data", str(tmp_path / "data"), "--levels", str(LEVELS_FILE), "--label", "mock"]
+    code = run_asap_eval.main(argv)
 
     assert code == 2
     assert "已存在但未发布" in capsys.readouterr().err
     assert closed == [True]
     assert not (tmp_path / "data" / "reports").exists()
+
+    # 评分跑完了但报告目录建不出来（评分期间那个位置出现了同名文件）：
+    # 指标照常打印，退出码 2，不抛原始堆栈。
+    def _finish_but_block_reports(db, client, data_dir, levels, *, label, rubric_id=None):
+        (data_dir / "reports").write_text("not a directory", encoding="utf-8")
+        summary = {name: None for name in ("qwk", "mae", "exact", "adjacent", "mean_bias")}
+        summary.update(n=0, missing_total=0, not_run_total=0, policy_review=0)
+        return {"label": label, "levels": {"official": False}, "settings": {"LLM_PROVIDER": "mock"}, "summary": summary}
+
+    monkeypatch.setattr(run_asap_eval, "evaluate", _finish_but_block_reports)
+    code = run_asap_eval.main(argv)
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "有效样本 0 篇" in captured.out
+    assert "报告写不进去" in captured.err
+    assert closed == [True, True]
+
+    # 报告目录事先就不是目录：开评前就拒绝，不白跑一轮评分。
+    with pytest.raises(ValueError, match="不是目录"):
+        run_asap_eval.check_run_environment(tmp_path / "data", "mock")
+
+
+def test_run_checks_paths_the_way_sqlalchemy_and_storage_resolve_them(tmp_path, monkeypatch):
+    # SQLAlchemy 与 STORAGE_ROOT 都不展开 ~：在仓库根目录运行时 ~/eval.db 是仓库里名为 ~ 的目录。
+    repo = (tmp_path / "repo").resolve()
+    (repo / "~").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(run_asap_eval, "PROJECT_ROOT", repo)
+    monkeypatch.chdir(repo)
+    settings = run_asap_eval.settings
+    outside = tmp_path / "outside"
+
+    monkeypatch.setattr(settings, "STORAGE_ROOT", outside / "storage")
+    monkeypatch.setattr(settings, "DATABASE_URL", "sqlite+pysqlite:///~/eval.db")
+    with pytest.raises(GateValidationError, match="SQLite"):
+        run_asap_eval.check_run_environment(outside, "baseline")
+
+    monkeypatch.setattr(settings, "DATABASE_URL", "sqlite+pysqlite:///%s" % (outside / "eval.db"))
+    monkeypatch.setattr(settings, "STORAGE_ROOT", Path("~/storage"))
+    with pytest.raises(GateValidationError, match="STORAGE_ROOT"):
+        run_asap_eval.check_run_environment(outside, "baseline")
