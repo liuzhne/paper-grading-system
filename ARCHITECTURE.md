@@ -591,6 +591,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | `_sqlite_file` 识别 URI 形式（`file:...?uri=true`）取真实路径、内存库放行；报告路径事先存在（含符号链接）就拒绝，写入改独占创建；调用链不变 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | `run_asap_eval.check_run_environment` 在开评前拦仓库里的报告、SQLite 数据库文件与 `STORAGE_ROOT`；`resolve_rubric` 统一找或建评分标准并核对显式 `--rubric-id` 的版本；`summarize` 多出 `not_run`（不在 `per_sample` 里的样本）；评分链不变 |
 | 2026-11-06 | 评分助手：发送去重（请求编号） | 迁移 `0042_assistant_message_client_id`：`assistant_messages.client_id` 与 `(conversation_id, client_id)` 部分唯一索引；`AssistantRunCreate` / `AssistantMessageRead` 加可选 `client_id`；`runner.run` 抢锁后按编号回放（`_replay`），唯一索引冲突同样回放；前端 `send` 生成编号、`retryOnce` 等运行结束后同一编号重发，撤掉 `recoverRun`、`unknown` 状态与附件不归档的绕开办法 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 附件的结果来自核对会话时（`recovered`），`attachFiles` 不归档文件、提示重新选择；调用链不变 |
@@ -1716,6 +1717,8 @@ run_asap_eval run       eval/asap.load_levels（本机档位 JSON）→ check_ru
 维护记录：2026-11-04 · ASAP 2.0 外部基准评测：记录评测脚本的调用链与数据边界。
 
 维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正：调用链补上开评前的环境检查与 `resolve_rubric`，样本口径补上 `not_run`。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正（二）：核对 SQLite URI 与报告符号链接两处边界，调用链不变。
 
 ### 2026-11-04 论文评分第二阶段第二轮：B、C 补全
 

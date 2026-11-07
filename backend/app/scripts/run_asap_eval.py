@@ -191,24 +191,46 @@ def _require_outside(path, what: str) -> Path:
 
 
 def _sqlite_file(database_url: str) -> Path | None:
-    """SQLite 文件库返回文件路径；内存库与其它数据库返回 None。"""
+    """SQLite 文件库返回文件路径；内存库与其它数据库返回 None。
+
+    URI 形式（``sqlite:///file:<路径>?uri=true``）取 ``file:`` 后面的路径；
+    ``mode=memory`` 与 ``file::memory:`` 是内存库。不带 ``uri=true`` 时
+    ``file:...`` 只是一个普通的相对文件名，按原样检查。
+    """
+
+    from urllib.parse import unquote
+    from urllib.parse import urlsplit
 
     from sqlalchemy.engine import make_url
+    from sqlalchemy.util import asbool
 
     url = make_url(database_url)
-    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
+    database = url.database
+    if url.get_backend_name() != "sqlite" or not database or database == ":memory:":
         return None
-    return Path(url.database)
+    if asbool(url.query.get("uri", False)) and database.startswith("file:"):
+        if url.query.get("mode") == "memory":
+            return None
+        database = unquote(urlsplit(database).path)
+        if not database or database == ":memory:":
+            return None
+    return Path(database)
 
 
 def _report_path(data_dir: Path, label: str) -> Path:
-    """报告固定写在 <data>/reports/ 下；组名只能是一个名字，不能带路径。"""
+    """报告固定写在 <data>/reports/ 下；组名只能是一个名字，不能带路径。
+
+    报告文件不能事先存在（包括指向别处的符号链接），写入时再用独占创建兜底。
+    """
 
     if not label or label in {".", ".."} or Path(label).name != label or "\\" in label:
         raise ValueError("--label 只能是一个名字，不能带路径：%s" % label)
     reports = _require_outside(data_dir / "reports", "报告目录")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return reports / ("%s-%s.json" % (label, stamp))
+    path = reports / ("%s-%s.json" % (label, stamp))
+    if path.is_symlink() or path.exists():
+        raise ValueError("报告文件已存在（或是符号链接），换一个组名再跑：%s" % path)
+    return path
 
 
 def check_run_environment(data_dir: Path, label: str) -> Path:
@@ -271,9 +293,15 @@ def main(argv=None) -> int:
         return 2
     finally:
         db.close()
+    _print_summary(report)  # 先打印：报告万一写不进去，指标也不至于丢
     path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    _print_summary(report)
+    try:
+        # "x" 独占创建：评分期间有人在这个位置放了文件或符号链接，就拒绝而不是跟随它写。
+        with open(path, "x", encoding="utf-8") as handle:
+            handle.write(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    except OSError as exc:
+        print("报告写不进去：%s" % exc, file=sys.stderr)
+        return 2
     print("报告：%s" % path)
     return 0
 

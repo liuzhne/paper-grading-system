@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 import json
 from pathlib import Path
 
@@ -221,12 +222,43 @@ def test_run_refuses_reports_database_and_storage_inside_the_repository(tmp_path
         with pytest.raises(ValueError, match="--label"):
             run_asap_eval.check_run_environment(tmp_path, label)
 
+    # 报告位置事先放了指向仓库的符号链接（哪怕目标还不存在）：拒绝，不跟随它写。
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 7, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(run_asap_eval, "datetime", _Frozen)
+    target = run_asap_eval.PROJECT_ROOT / "asap-report-symlink-target.json"
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "baseline-20261107T120000Z.json").symlink_to(target)
+    with pytest.raises(ValueError, match="符号链接"):
+        run_asap_eval.check_run_environment(tmp_path, "baseline")
+    assert not target.exists()
+    monkeypatch.setattr(run_asap_eval, "datetime", datetime)
+
+    # SQLite URI 形式：file: 后面的路径才是数据库文件；在仓库外运行也要拦下。
+    monkeypatch.chdir(tmp_path)
+    inside_db = run_asap_eval.PROJECT_ROOT / "eval.db"
+    for url in ("sqlite+pysqlite:///file:%s?uri=true" % inside_db, "sqlite+pysqlite:///file://%s?mode=ro&uri=true" % inside_db):
+        monkeypatch.setattr(settings, "DATABASE_URL", url)
+        with pytest.raises(GateValidationError, match="SQLite"):
+            run_asap_eval.check_run_environment(tmp_path, "baseline")
+
     # 相对路径按当前目录解析，与应用读设置时一致；在仓库根目录运行就落在仓库里。
     monkeypatch.chdir(run_asap_eval.PROJECT_ROOT)
     monkeypatch.setattr(settings, "DATABASE_URL", "sqlite+pysqlite:///eval.db")
     with pytest.raises(GateValidationError, match="SQLite"):
         run_asap_eval.check_run_environment(tmp_path, "baseline")
-    assert not (run_asap_eval.PROJECT_ROOT / "eval.db").exists()
+    assert not inside_db.exists()
+
+    # 内存库不是文件，在仓库根目录运行也放行（包括 URI 形式的共享内存库）。
+    for url in (
+        "sqlite+pysqlite:///file:memdb?mode=memory&cache=shared&uri=true",
+        "sqlite+pysqlite:///file::memory:?cache=shared&uri=true",
+    ):
+        monkeypatch.setattr(settings, "DATABASE_URL", url)
+        run_asap_eval.check_run_environment(tmp_path, "baseline")
 
     monkeypatch.setattr(settings, "DATABASE_URL", "sqlite+pysqlite:///:memory:")
     monkeypatch.setattr(settings, "STORAGE_ROOT", Path("storage"))  # 默认值
