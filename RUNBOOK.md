@@ -108,7 +108,7 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 
 **规则**
 
-1. `main` 与 `develop` 不直接推送，一切改动走 PR。两个分支都有规则集（Settings → Rules），不设绕过名单，管理员也一样；不要求审批人（单人维护，自己批不了自己的 PR）。
+1. `main` 与 `develop` 不直接推送，一切改动走 PR。两个分支各有一条规则集（Settings → Rules：`main-production`、`develop-integration`），都禁止删除与强推，不设绕过名单，管理员也一样；不要求审批人（单人维护，自己批不了自己的 PR）。CodeRabbit 只自动评审开到默认分支（develop）的 PR，发布 PR 不再评审一遍——代码在进 develop 时已经评审过。
 2. 默认分支是 `develop`：`gh pr create` 不带 `--base` 就开到 develop。功能分支的 PR 开到了 main，`release-source` 会失败，把 base 改成 develop：`gh pr edit <编号> --base develop`。
 3. 提交信息用 Conventional Commits：`<type>: <中文说明>`，type 取 `feat` `fix` `docs` `refactor` `test` `ci` `chore` `perf`；复审修正写成 `fix: 按 #NN 复审……`。一个提交做一件事；三文档同步（CLAUDE.md「三文档同步」）与代码放在同一个 PR 里。
 4. 合进 develop：`tests-passed` 绿即可。不要求分支先同步到最新的 develop（规则集不开 strict）——并行的 AI 会话多，每合一个就让其他 PR 全部重跑不划算。代价由 develop 上的 push 运行兜底：每次合并后提交阶段会在 develop 上再跑一遍，**develop 变红时先修好，再合别的**。
