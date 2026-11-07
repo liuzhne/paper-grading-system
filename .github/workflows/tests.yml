@@ -1,0 +1,222 @@
+name: pgs-tests
+
+# 提交阶段（RUNBOOK 3.0）：功能分支进 develop 只跑代码测试——后端全套 pytest、前端单测、类型、
+# API 合同、public/ 漂移与浏览器验收。不起 PostgreSQL、不构建镜像、不碰任何部署密钥。
+#
+# 发布门禁 ci.yml（develop → main 的发布 PR 与 push main）用 workflow_call 复用这一份定义，
+# 测试只写在这里一处。被调用时 github.workflow 与 github.event_name 都是调用方的。
+#
+# 后端按测试文件分 4 片（scripts/ci_test_shard.py，权重在 scripts/ci_test_weights.json），
+# 浏览器验收用 Playwright 自带的 --shard 分 2 片；每片都是独立的进程与后端，和整套运行一样。
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# 同一个 PR 推了新提交，旧的那次就不用跑完了；push 与手动运行各自独立（按 run_id 分组），
+# develop 上每一次合并都要有结论。前缀 tests- 让它在被 ci.yml 调用时不和调用方同组互相等待。
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  SCORING_ENGINE_MODE: legacy
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  unit-and-sqlite-migrations:
+    name: unit-and-sqlite-migrations (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Sync the locked environment
+        run: uv sync --locked
+      - name: Run this shard of the self-contained suite
+        run: |
+          set -euo pipefail
+          mkdir -p pgs_ops_artifacts
+          # 先落到文件再读：进程替换 <(...) 里的脚本失败不会让这一步失败。
+          uv run python scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total 4 \
+            > pgs_ops_artifacts/shard-files.txt
+          mapfile -t files < pgs_ops_artifacts/shard-files.txt
+          # 空列表交给 pytest 等于不带参数，会按 testpaths 把整套再跑一遍。
+          if [[ ${#files[@]} -eq 0 ]]
+          then
+            echo "::error::shard ${{ matrix.shard }} has no test files"
+            exit 1
+          fi
+          echo "shard ${{ matrix.shard }}/4: ${#files[@]} test files"
+          uv run python -m pytest -q --junitxml=pgs_ops_artifacts/pytest.xml "${files[@]}"
+      - name: Upload unit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgs-unit-and-sqlite-evidence-${{ matrix.shard }}
+          path: pgs_ops_artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  frontend-workbench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/workbench/package-lock.json
+      - name: Install the locked frontend environment
+        working-directory: frontend/workbench
+        run: npm ci
+      - name: Run component and state tests
+        working-directory: frontend/workbench
+        run: npm run test:unit
+      - name: Install uv and Python for the contract and assembly steps
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # OpenAPI 快照要从真实应用导出；只装 uv 而不 sync，只会报成 ModuleNotFoundError。
+      - name: Install the locked backend environment
+        run: uv sync --locked
+      - name: Check types
+        working-directory: frontend/workbench
+        run: npm run typecheck
+      # 前端是纯 JS，调错路径没有编译期报错，只在浏览器里变成一个 404。这一步
+      # 从真实应用导出 OpenAPI，重新生成类型，与已提交的 schema.d.ts 比对：
+      # 后端合同变了而前端没跟上，会直接显示成 diff。
+      - name: Check the API contract snapshot
+        working-directory: frontend/workbench
+        run: npm run api:dump && npm run api:check
+      # 部署用的是仓库里已提交的 public/（Lightsail 镜像 COPY 它，Vercel 也直接托管它）。
+      # 从源码重建并在有差异时失败：没有这道门，源码改动会跟着一份过期的产物上线。
+      - name: Assemble the static artifact from source
+        run: python scripts/build_web_static.py --with-workbench
+      - name: Fail if the committed public/ artifact drifted from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --porcelain also reports untracked files; `git diff` alone would
+          # miss a rebuild that only adds newly-hashed asset names.
+          drift="$(git status --porcelain -- public/)"
+          if [[ -n "$drift" ]]
+          then
+            echo "::error::public/ is out of sync with frontend sources."
+            echo "Run: python scripts/build_web_static.py --with-workbench"
+            echo "then commit the regenerated public/ artifact."
+            echo "$drift"
+            exit 1
+          fi
+      - name: Upload frontend evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgs-frontend-workbench-evidence
+          path: |
+            public/workbench/index.html
+            frontend/workbench/package-lock.json
+          if-no-files-found: error
+          retention-days: 30
+
+  frontend-e2e:
+    name: frontend-e2e (${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/workbench/package-lock.json
+      - name: Install the locked frontend environment
+        working-directory: frontend/workbench
+        run: npm ci
+      - name: Install uv and Python for the browser acceptance servers
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # 浏览器验收的 webServer 是真实 FastAPI；只装 uv 而不 sync，只会报成超时。
+      - name: Install the locked backend environment
+        run: uv sync --locked
+      - name: Install the Playwright browser
+        working-directory: frontend/workbench
+        run: npx playwright install --with-deps chromium
+      # 被测对象是已提交的 public/ 经真实 FastAPI 托管的结果；它与源码是否一致由
+      # frontend-workbench 的漂移检查负责，两项都要过。
+      - name: Run browser acceptance (V03-V07, V09, V11, V12)
+        working-directory: frontend/workbench
+        env:
+          # webServer 起的是真实 FastAPI + 统一组装产物，不是 Vite dev server：
+          # 深链接回退、缺失资源 404、/api 不被吞掉这几条只在生产托管路径上
+          # 才会出问题。路径相对 webServer 的 cwd（仓库根）。
+          PGS_PYTHON: .venv/bin/python
+        run: npx playwright test --shard=${{ matrix.shard }}/2
+      - name: Upload browser acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgs-frontend-e2e-evidence-${{ matrix.shard }}
+          path: |
+            frontend/workbench/playwright-report/
+            frontend/workbench/test-results/
+          if-no-files-found: error
+          retention-days: 30
+
+  # 分支保护只认这一项（develop 的规则集）：矩阵每片的名字带编号，改分片数不必改保护规则。
+  # !cancelled() 让它在前面有失败或被跳过时照样运行并报失败，而不是跟着被跳过。
+  tests-passed:
+    if: ${{ !cancelled() }}
+    needs:
+      - unit-and-sqlite-migrations
+      - frontend-workbench
+      - frontend-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every test job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS
+          do
+            if [ "$result" != "success" ]
+            then
+              echo "::error::a test job ended with '$result'"
+              exit 1
+            fi
+          done

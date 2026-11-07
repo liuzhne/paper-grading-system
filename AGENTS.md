@@ -7,7 +7,13 @@
 - 本地起服务（无 Docker）：`DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run alembic upgrade head && ... uv run uvicorn backend.app.main:app --port 8000`（详见 RUNBOOK §2.2）。
 - 迁移自检：`backend/app/tests/test_migrations.py`（pytest 用 `create_all` 建表，**不走 Alembic**，故迁移单独验证）。
 - Runtime：Python 3.10+；仓库锁文件与当前门禁使用 Python 3.12 验证。
-- CI/生产发布：`.github/workflows/ci.yml` 包含锁文件全量测试、Postgres 16 的逐版本迁移/约束/排序、拒绝 lossy downgrade、备份恢复演练和 Docker 冒烟；推送 `main` 且全部门禁通过后，才由 `deploy-vercel-production` 使用 GitHub `production` Environment 部署 Vercel。Vercel Git 直部署已关闭；当前 CLI 因上游 prebuilt 回归固定为 `58.4.0`。本机 SQLite 通过不能替代真实 CI artifact。
+- CI/生产发布分两层（RUNBOOK 3.0）：`.github/workflows/tests.yml`（`pgs-tests`）是提交阶段，PR → develop 与 push develop 只跑代码测试；`.github/workflows/ci.yml`（`pgs-production-gates`）只看 main，复用 `tests.yml`，再加 Postgres 16 的逐版本迁移/约束/排序、拒绝 lossy downgrade、备份恢复演练和 Docker 冒烟；推送 `main` 且全部门禁通过后，由 `deploy-lightsail-production` 使用 GitHub `production` Environment 部署（Vercel 部署已由仓库变量关闭）。本机 SQLite 通过不能替代真实 CI artifact。
+
+## 分支与提交（MUST，RUNBOOK 3.0）
+- 默认分支是 `develop`。功能分支从 develop 切，**PR 开到 develop**；不要开到 main，`release-source` 会拒绝。
+- 发布是 `develop → main` 的 PR，只能用 Merge commit；热修 `hotfix/*` 从 main 切、PR 到 main，部署后合回 develop。
+- 提交信息：`<type>: <中文说明>`（feat / fix / docs / refactor / test / ci / chore / perf）。
+- 含迁移：`pgs-production-migrate` 从 develop 触发（先迁移、后合发布 PR），功能分支会被拒绝。
 
 ## 当前发布边界
 - Alembic head：`0042_assistant_message_client_id`（0022 将旧单租户资源安全回填至默认组织；0023 持久化规则检查点与人工复核任务；0024 批次七态约束与 `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议加入 `anthropic_messages`（Claude），有该协议的连接或平台模型时拒绝降级；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与部分索引，新增 `work_runtime_state`（`pgs_app` 授权与 RLS），有活动批量评分任务时拒绝降级；0036 新增 `ai_tasks` / `ai_task_items`（`pgs_app` 授权与 RLS）与 `atomic_rules.ai_origin` / `ai_model`，有 AI 任务或已记录生成模型的规则时拒绝降级；0037 让导入前的结构识别任务可以不挂评分标准，有这类任务时拒绝降级；0038 评分助手的偏好、会话、消息与两张流程状态表（`pgs_app` 授权与 RLS），有数据时拒绝降级；0039 官网申请表 `site_leads`（`pgs_app` 授权与 RLS），有数据时拒绝降级；0040 `scoring_runs` 与 `ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`，有非零值时拒绝降级。0041 评分助手 Agent 状态（`assistant_messages.meta`、`assistant_conversations.compaction`），任一列有数据时拒绝降级；0042 评分助手发送去重（`assistant_messages.client_id` 与部分唯一索引），有请求编号时拒绝降级。**0024–0028、0031 含数据时一律拒绝降级**——降级会删掉不可重建的审计或导入草稿；0033 的账本是可重建的缓存，但有复用标记的任务时同样拒绝降级）。
