@@ -1,0 +1,12 @@
+{
+  "official": false,
+  "source": "项目自写的简短描述，只用于跑通流程；正式评测请换成 PERSUADE 2.0 仓库 sat_rubric_only_source_based.pdf 的官方原文",
+  "levels": {
+    "1": "Very little or no mastery: no viable position on the assignment, little or no use of the source texts, disorganized or very brief, and errors so serious that meaning is often obscured.",
+    "2": "Little mastery: a vague or limited position, weak or inaccurate use of the sources, poor organization, and frequent language errors that interfere with meaning.",
+    "3": "Developing mastery: a position with inconsistent reasoning, some relevant but thin or uneven evidence from the sources, a lapse in organization, and noticeable language errors.",
+    "4": "Adequate mastery: a clear position with adequate reasoning, mostly relevant evidence from the sources, generally organized, and some errors that do not obscure meaning.",
+    "5": "Reasonably consistent mastery: a well-developed position with strong reasoning, appropriate evidence integrated from the sources, clear organization, and few errors.",
+    "6": "Clear and consistent mastery: an insightful position with outstanding reasoning, well-chosen evidence used effectively from the sources, a coherent and well-organized whole, and skillful, nearly error-free language."
+  }
+}

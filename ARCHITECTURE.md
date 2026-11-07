@@ -591,6 +591,9 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 仓库边界检查不再展开 `~`，与 SQLAlchemy、`STORAGE_ROOT` 的解析一致；报告目录不是目录时开评前拒绝，建目录失败也退出码 2；调用链不变 |
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | `_sqlite_file` 识别 URI 形式（`file:...?uri=true`）取真实路径、内存库放行；报告路径事先存在（含符号链接）就拒绝，写入改独占创建；调用链不变 |
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | `run_asap_eval.check_run_environment` 在开评前拦仓库里的报告、SQLite 数据库文件与 `STORAGE_ROOT`；`resolve_rubric` 统一找或建评分标准并核对显式 `--rubric-id` 的版本；`summarize` 多出 `not_run`（不在 `per_sample` 里的样本）；评分链不变 |
 | 2026-11-06 | 评分助手：发送去重（请求编号） | 迁移 `0042_assistant_message_client_id`：`assistant_messages.client_id` 与 `(conversation_id, client_id)` 部分唯一索引；`AssistantRunCreate` / `AssistantMessageRead` 加可选 `client_id`；`runner.run` 抢锁后按编号回放（`_replay`），唯一索引冲突同样回放；前端 `send` 生成编号、`retryOnce` 等运行结束后同一编号重发，撤掉 `recoverRun`、`unknown` 状态与附件不归档的绕开办法 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 附件的结果来自核对会话时（`recovered`），`attachFiles` 不归档文件、提示重新选择；调用链不变 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（二） | `recoverRun` 按文字对应这次请求（附件按“评分这 N 份文件”）；代理的 5xx 与断线后找不到也标“还不确定”；调用链不变 |
@@ -607,6 +610,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 互斥组一次调用的依据由 `rule_executor._semantic_group_decisions` 标上 `basis.group_code`（结果合同可选字段），`judgement_view._share_group_basis` 只在被选中的那一档显示；依据与扣分证据的编号先判类型；`persistence.core_item_reason` 按 `RULE_EVIDENCE_INSUFFICIENT` 单列证据不足；`production_env.from_file` 把可选设置的空值当没设；评分页定位先切回正文页签。模块边界、调用链与持久化边界不变，无迁移 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新增 `scoring/frozen_document.py`（论文 Core 评分按 `document_snapshot_ref` 读判分时的冻结正文，证据视图与正文视图共用）与 `scoring/judgement_view.py`（读取时从 `rule_results` 算逐条规则判定与证据充分度，`items?include_view=true` 返回 `judgement_view`）；证据引用多存核对过的 `quote`，规则判定可带 `evidence_selection`（`build_v4_envelope(selection_report=)` 经 Profile 回填）与 `basis`（`SCORING_DECISION_BASIS_MODE=cite`）；结果合同只加可选字段、不升版本；落库扣分理由改中文。无迁移；开关关闭时判定身份与提示词不变 |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 开关打开时 `rubric_snapshot.load_from_session` 生成 `atomic-rule-snapshot@4`（多 `applies_to`，`evidence_policy` 可带 `judge_scope`），关闭时仍是 `@3` 并去掉 `judge_scope`；`judge_scope.explain_judge_scope` / `review_hint` 供评分与 `read_review_workspace` 共用；band 规则的请求不提供 `insufficient_evidence`；Core 落库写 `score_items.review_reasons`（`review_reasons.from_core_issues`）；规则编辑器加判定范围下拉框。无迁移，接口与 OpenAPI 不变 |
+| 2026-11-04 | ASAP 2.0 外部基准评测脚本 | 新增 `eval/asap.py`（抽样、生成 .docx、档位载荷、1–6 原始分指标）与 `scripts/run_asap_eval.py`；评分标准在进程内走工作台同一组接口发布，导入与评分复用 `build_labeled_eval`。不改评分链、提示词与数据库 |
 | 2026-11-03 | 论文评分第二阶段：预算量实际视图、判定范围、证据不足（分期 A–D） | 新增 `scoring/retrieval/judge_scope.py`；`build_v4_envelope` 加 `request_rules`、`budget_target`、`judge_scope`，预算改由 `core_view.estimate_view_input_tokens` 量实际视图（默认）；`PromptEnvelopeV4.coverage_mode` 增加 `section`、`cross_section`；`rule_executor` 把 `insufficient_evidence` 记为未触发加 `RULE_EVIDENCE_INSUFFICIENT` 复核问题，评分项转 `review_required`；新增只读脚本 `rule_health_report`。B、C 开关默认关闭，关闭时视图与提示词不变。无迁移，head 仍为 `0041_assistant_agent_state` |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增 `rubric_import/sources/docx_deep.py`、`rubric_import/requirements/`（`outline`、`items`、`state`）；`load_docx` 加 `deep`；`raw_parse_output` 新增 `outline`、`requirement_items`；台账单元新增 `image` 类型。开关 `REQUIREMENT_ITEMS_ENABLED` 默认关闭，关闭时调用链与数据不变。无迁移，head 仍为 `0041_assistant_agent_state`；评分链不变 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无模块变化：`ai_tasks/execution._finish` 对熔断延后不加 `deferral_count`，连续次数从 `attempt_history` 算（上限 5）；延迟叫醒的去重键改用执行次数。接口、数据库不变。 |
@@ -1691,6 +1695,33 @@ rule_executor
 - 费用估算 `usage_estimate` 本来就按实际视图量，不用改。
 
 维护记录：2026-11-03 · 论文评分第二阶段：记录选证据、预算、视图与证据不足的调用链和开关边界；无迁移。
+
+### 2026-11-04 ASAP 2.0 外部基准评测脚本
+
+方案见 [docs/ASAP2.0外部基准评测方案.md](docs/ASAP2.0外部基准评测方案.md)。只加评测工具，评分链不变。
+
+```
+run_asap_eval prepare   eval/asap.load_rows → stratified_sample（分数 × 题目，固定种子）
+                        → build_document（.docx：题目要求 + 作文，可选材料）→ scores.csv + manifest.json
+run_asap_eval run       eval/asap.load_levels（本机档位 JSON）→ check_run_environment（报告、SQLite、STORAGE_ROOT 在仓库外）
+                        → resolve_rubric：按版本 levels-<哈希> 找已发布的；没有就
+                          TestClient(app) 走 POST /rubrics → review-workspace → confirm → submit-review → publish
+                        → labeled_dataset.build_labeled_eval（ingest_file + score_paper，Core 路径）
+                        → eval/asap.summarize（1–6 原始分 QWK、MAE、混淆矩阵、分组偏差）→ reports/<组名>-<时间>.json
+```
+
+- 输出目录用 `gating.ensure_external_artifact_dir` 拦在仓库外；`run` 开评前再拦报告、SQLite 数据库文件与 `STORAGE_ROOT`（导入写文档与解析正文的地方，远程存储也在这里缓存）。清单与报告不写作文正文。
+- 同一档位文件（按哈希命名版本）只建一次评分标准，各组沿用；显式 `--rubric-id` 也要是这个版本、已发布。
+- 指标不用 `runner.evaluate` 的等级 QWK：那里按百分制等级线分档，6 分制会被压成错的等级。
+- `summarize` 的样本三分：有总分（进指标）、无总分（`missing`）、没跑完（`not_run`，`build_labeled_eval` 只记进 `errors`、不在 `per_sample` 里），三者之和等于清单篇数。
+
+维护记录：2026-11-04 · ASAP 2.0 外部基准评测：记录评测脚本的调用链与数据边界。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正：调用链补上开评前的环境检查与 `resolve_rubric`，样本口径补上 `not_run`。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正（二）：核对 SQLite URI 与报告符号链接两处边界，调用链不变。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正（三）：核对 `~` 的解析与报告目录的错误处理，调用链不变。
 
 ### 2026-11-04 论文评分第二阶段第二轮：B、C 补全
 

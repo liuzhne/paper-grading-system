@@ -1240,6 +1240,9 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 报告目录建不出来也退出码 2；排错补“写的是 `~/...` 却说在仓库里” |
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | SQLite 的 URI 形式按真实路径检查；报告文件已存在（含符号链接）时拒绝，写不进去退出码 2、指标已先打印 |
+| 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | `run` 开始评分前还拒绝仓库里的报告、SQLite 数据库文件与 `STORAGE_ROOT`，`--label` 不能带路径；评分标准问题退出码 2；排错补“`STORAGE_ROOT` 在仓库里”与“不是用这份档位文件建的” |
 | 2026-11-06 | 评分助手：发送去重（请求编号） | 迁移 `0042_assistant_message_client_id`（先跑迁移工作流再部署）；日志新增 `assistant_run_replayed`、`assistant_run_replay_text_mismatch`；排错：“没有发出去”只在自动重发也失败或 4xx 后出现，同一句话出现两次 |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（三） | 排错：发附件后提示“请在卡片里重新选择” |
 | 2026-11-06 | 评分助手：说不准有没有发出去：#79 复审修正（二） | “没有发出去”只在 4xx 与后端自己的 5xx 后出现；“还不确定”补上断线后会话里找不到的情况 |
@@ -1256,6 +1259,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 无新命令、无迁移；变量文件里 `NAME=` 的可选设置等于没设；排错条目补快照的两种存储位置与 `cite` 的限度；评分页定位会先切回正文页签 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新环境变量 `SCORING_DECISION_BASIS_MODE`（off / cite，默认 off，经仓库变量进生产）；无迁移；评分页 Core 评分项改为逐条规则判定与证据充分度；排错：证据显示“上下文”、冻结正文读不到、证据充分度为“中” |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 无新命令、无新环境变量、无迁移；规则编辑器加“判定范围”；排错：开关打开后快照变 `@4`、band 评分项不会转人工、复核原因为空 |
+| 2026-11-04 | ASAP 2.0 外部基准评测 | 新增命令 `run_asap_eval prepare` / `run`；数据与报告只能在仓库外；排错：评分政策的复核标记在 6 分制上会标出大量低分作文 |
 | 2026-11-03 | 论文评分第二阶段（分期 A–D） | 新增环境变量 `SCORING_TOKEN_BUDGET_TARGET`（默认 `provider_view`）、`SCORING_JUDGE_SCOPE_ENABLED`（默认关）、`SCORING_INSUFFICIENT_EVIDENCE_MODE`（默认 `off`），三者都接进生产部署；只读脚本 `rule_health_report`；无迁移；排错：`TOKEN_BUDGET_UNSATISFIABLE` 与评分项意外转人工 |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增环境变量 `REQUIREMENT_ITEMS_ENABLED`（默认关，生产暂不接）、只读脚本 `inspect_requirement_items`；无迁移；排错：`TEMPLATE_READ_INCOMPLETE` 警告、开关打开后多出的发布阻断 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无新命令、无迁移；排错：`work_item_deferred` 与 `deferral_count` 对不上时的读法。 |
@@ -2843,6 +2847,63 @@ B、C 改变评分，打开前要用 QWK 留出集对比（真实模型调用需
 发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`。A 默认打开会改变新评分的证据与分数；回退设 `SCORING_TOKEN_BUDGET_TARGET=envelope` 后重新部署。B、C 默认关闭，部署后行为只有 A 的变化。`cache/llm_cache.PROMPT_VERSION` 不动（legacy 提示词没变；Core 提示词版本随开关进运行身份）。
 
 维护记录：2026-11-03 · 论文评分第二阶段：新增三个评分设置与只读体检脚本，排错写明预算失败、证据不足转人工、账本不复用的真实原因。
+
+### 2026-11-04 ASAP 2.0 外部基准评测
+
+方案见 `docs/ASAP2.0外部基准评测方案.md`。数据（Kaggle `lburleigh/asap-2-0` 的 `ASAP2_train_sourcetexts.csv`）、生成的文档、数据库与报告都放在仓库外；`run` 在开始评分前拒绝落在仓库里的输出目录、报告、SQLite 数据库文件（URI 形式 `file:...?uri=true` 按真实路径算）与 `STORAGE_ROOT`，`--label` 不能带路径，报告文件不能事先存在。数据放在仓库根目录时，把 `/ASAP2_*.csv` 加进本机 `.git/info/exclude`。
+
+抽样（不调模型）：
+
+```bash
+.venv/bin/python -m backend.app.scripts.run_asap_eval prepare --csv ASAP2_train_sourcetexts.csv --out ~/pgs-eval/asap2 --size 300
+```
+
+用假模型跑通（新建本机数据库，不碰开发库）：
+
+```bash
+export DATABASE_URL=sqlite+pysqlite:///$HOME/pgs-eval/asap2/eval.db LLM_PROVIDER=mock STORAGE_ROOT=$HOME/pgs-eval/asap2/storage
+```
+
+```bash
+.venv/bin/alembic upgrade head
+```
+
+```bash
+.venv/bin/python -m backend.app.scripts.run_asap_eval run --data ~/pgs-eval/asap2 --levels backend/app/eval/asap2_levels.unofficial.json --label mock
+```
+
+真实模型运行要维护者授权预算；`--levels` 换成填了官方原文、`"official": true` 的本机 JSON，并配置与生产相同的模型连接。各组改环境变量（如 `SCORING_INSUFFICIENT_EVIDENCE_MODE=review`）后换 `--label` 再跑；同一档位文件沿用同一份评分标准。
+
+排错：
+- **现象**：输出说几乎全部样本“评分政策标记复核”。
+  - 报错指向：像是评分出错或证据不足转人工。
+  - 真正原因：默认评分政策对总分过低或接近等级线的论文打复核标记，6 分制上 1–3 分的作文都会被标。它不改总分，样本照常进指标；证据不足转人工的样本没有总分，算在“无总分”里。
+- **现象**：`run` 报“评分标准已存在但未发布”。
+  - 报错指向：像是档位文件有问题。
+  - 真正原因：上次运行在发布前中断，留下了同名同版本的草稿。在工作台处理掉它，或换一份档位文件。
+- **现象**：`run` 报“STORAGE_ROOT 在仓库里”，可是没设过 `STORAGE_ROOT`。
+  - 报错指向：像是数据目录 `--data` 或存储配置写错了。
+  - 真正原因：`STORAGE_ROOT` 默认是相对路径 `storage`，按当前目录解析；在仓库根目录运行就落在仓库里，导入的作文文档和解析出的正文会留在仓库的 `storage/` 下。按上面的命令显式设 `STORAGE_ROOT=$HOME/pgs-eval/asap2/storage`。SQLite 的相对路径同理。
+- **现象**：`DATABASE_URL` 或 `STORAGE_ROOT` 写的是 `~/...`，`run` 却说它在仓库里。
+  - 报错指向：像是检查把主目录误判成了仓库。
+  - 真正原因：`~` 写在 `.env.local` 里、加了引号，或不在值的开头（如 `sqlite:///~/eval.db`）时，shell 不会展开它；SQLAlchemy 与 `STORAGE_ROOT` 也都不展开，`~` 被当成当前目录下名为 `~` 的子目录，在仓库根目录运行就落在仓库里。改用 `$HOME/...`。
+- **现象**：`run --rubric-id` 报“不是用这份档位文件建的”。
+  - 报错指向：像是评分标准 ID 填错了。
+  - 真正原因：评分标准的版本号由档位文件哈希得出，这个 ID 是另一份档位文件建的（或档位文件被改过）。报告的档位哈希与“是否官方”取自 `--levels`，所以拒绝混用。去掉 `--rubric-id` 让脚本按档位文件找或新建，或换回原来的档位文件。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_asap_eval.py
+```
+
+维护记录：2026-11-04 · ASAP 2.0 外部基准评测：新增两条命令，排错写明复核标记与残留草稿的真实原因。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正：仓库边界补上报告、SQLite 与 `STORAGE_ROOT`，排错补默认相对路径与评分标准对不上档位文件两条。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正（二）：SQLite URI 形式与报告文件不覆盖。
+
+维护记录：2026-11-07 · ASAP 2.0 外部基准评测：#83 复审修正（三）：排错补 `~` 不展开。
 
 ### 2026-11-04 论文评分第二阶段第二轮（B、C 补全）
 
