@@ -38,7 +38,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 迁移要在发布之前（RUNBOOK 11.12「先迁移、后合并」），所以从将要发布的分支触发：develop（发布 PR 的
+  # 来源）或 hotfix/*；main 用于补跑。功能分支拒绝——迁移先进 develop，随发布 PR 一起上线（RUNBOOK 3.0）。
+  # 单独一个任务：分支不对时下面的任务根本不启动，拿不到 production 环境的密钥。
+  require-release-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only main, develop and hotfix branches may migrate production
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          case "$REF" in
+            refs/heads/main|refs/heads/develop|refs/heads/hotfix/*) echo "release ref: $REF"; exit 0 ;;
+          esac
+          echo "::error::生产迁移只能从 develop（发布前）、hotfix/* 或 main 触发，当前 $REF。功能分支先合进 develop。"
+          exit 1
+
   migrate:
+    needs: require-release-ref
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production

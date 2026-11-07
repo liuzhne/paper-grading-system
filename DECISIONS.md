@@ -589,6 +589,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 决策处理 |
 |---|---|---|
+| 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 修订：从迁移预演到发布 PR 合并冻结 develop；守卫只防误点、不是安全边界（仍不按分支限制 `production` 环境）；main 不等于线上版本；分片按 pytest 默认的两种文件名规则收集 |
+| 2026-11-07 | 分支模型与流水线拆分 | 新增决策：develop 集成、main 即生产（GitLab Flow 环境分支两级版），提交阶段只跑代码测试、发布门禁与部署只在 main；pytest 按文件分 4 片、Playwright 分 2 片；放弃完整 Git Flow、纯主干、按路径跳过、xdist、production 环境只限 main |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 修订：边界检查按应用实际解析路径的方式来，不展开 `~` |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | 修订：SQLite 按 URI 形式取真实路径；报告文件不能事先存在，不覆盖、不跟随符号链接 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | 修订：仓库边界扩到报告、SQLite 数据库文件与 `STORAGE_ROOT`（假模型试跑也一样）；`--rubric-id` 必须是同一档位文件建的；CSV 的 `essay_id` 必须能当文件名且不重复 |
@@ -2945,3 +2947,30 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - 迁移 0042 有编号时拒绝降级：要回退得先清空 `assistant_messages.client_id`，回退期间去重失效。
 
 维护记录：2026-11-06 · 评分助手：发送去重：记录请求编号、回放、部分唯一索引与自动重发的取舍和放弃的方案。
+
+### 2026-11-07 分支模型与流水线拆分：develop 只测，main 发布（Accepted，维护者要求）
+
+- 背景：所有 PR 都开到 main，每次推送都跑完整的 `pgs-production-gates`（全套 pytest、前端、Postgres 16 迁移与恢复、Docker 冒烟），一次 PR 约 9 分钟、合并到 main 约 11 分钟；其中全套 pytest 单独占 7.5 分钟，是关键路径。维护者要求建开发分支：提交到开发分支只做代码测试，开发分支进 main 时才跑部署检查与部署。
+- 参照：Git Flow（main + develop + feature/release/hotfix；作者 2020 年补注说持续交付的 Web 应用宜用更简单的流程）、GitHub Flow 与主干开发（DORA：构建加测试应在几分钟内完成）、GitLab Flow 的环境分支（单向往下游合并，生产分支即线上代码，热修上游优先）；流水线分层参照持续交付的部署流水线：提交阶段要快，验收阶段可以重，生产阶段收紧。
+- 选择：
+  - 分支：GitLab Flow 环境分支的两级版本。`develop` 集成，`main` 即生产；功能分支从 develop 切、PR 回 develop；发布是 `develop → main` 的 PR，只能 Merge commit；热修 `hotfix/*` 从 main 切、PR 到 main，部署后合回 develop。默认分支改为 develop。
+  - 流水线：新增 `tests.yml`（`pgs-tests`，提交阶段：PR → develop 与 push develop，只跑代码测试，不碰部署密钥）；`ci.yml` 只看 main（发布 PR 与 push main），用 `workflow_call` 复用 `tests.yml`，再加 Postgres 门禁、Docker 冒烟、生产配置与来源分支检查 `release-source`；部署仍只在 push main。
+  - 提速：后端 pytest 按测试文件分 4 片（`scripts/ci_test_shard.py`，按记录的耗时贪心均衡，片内保持整套运行的顺序），Playwright 用自带的 `--shard` 分 2 片；同一 PR 的新提交取消旧运行。
+  - 强制：main 与 develop 各一条规则集，要求 PR 与汇总检查（`tests-passed` / `release-gates-passed`），不设绕过名单、不要求审批人；main 开 strict 且只允许 Merge commit，develop 不开 strict。生产迁移工作流只接受 main、develop、`hotfix/*`，切换工作流只接受 main。
+- 原因：本项目单实例、合并即部署，不需要并行维护多个版本；两级环境分支让“哪些改动已上线”一眼可见，又满足维护者要的开发分支。只拆流水线不分片，提交阶段只能从约 9 分钟降到约 7.5 分钟；分片后关键路径预计 3–4 分钟。规则集只认汇总检查，改分片数或加减门禁不用改规则集。
+- 放弃的方案：
+  - 完整 Git Flow（另设 `release/*` 发布分支）：给有版本号、多版本并行维护的软件用；这里会多一层合并；仓库里现有的 `release/*` 分支已被规则集 `release-branch-freeze` 冻结，只作历史存档。
+  - GitHub Flow / 纯主干开发（只有 main）：最简单，但维护者明确要求开发分支，而且 main 即部署时每次合并都要过完整门禁，解决不了“合一次等 11 分钟”。
+  - 按路径跳过（只改文档时不跑测试）：本仓库有文档契约测试（`test_m8_documentation_contract.py` 等），改文档同样会让测试失败；而且被跳过的必需检查会让 PR 一直等待。
+  - pytest-xdist 进程内并行：要加依赖，且同一进程组里的用例共享全局设置与模块缓存，偶发失败难查；按文件分片每片仍是独立进程，与整套运行等价。
+  - 把 `production` 环境限制为只允许 main 部署：候选镜像评测（`assistant-eval.yml` 的 `candidate=true`）要从 PR 分支使用这个环境，限制后它就跑不了；改为在两个生产手动工作流里各加一个不带环境的守卫任务。
+  - 发布 PR 合并后 push main 不再重跑门禁（直接部署发布 PR 验过的提交）：hotfix 或并发合并时 main 可能已经变了；发布频率降低后，部署前多 5–6 分钟可以接受。
+- 代价/约束：
+  - develop 不开 strict，两个各自变绿的 PR 合在一起可能让 develop 变红，靠 push develop 的运行发现；develop 变红时先修再合别的。个人账号的仓库没有合并队列，这个缺口只能这样补。
+  - 发布 PR 必须 Merge commit；热修必须合回 develop，否则下一次发布 PR 冲突或撤掉热修。
+  - 权重文件会过时：只影响各片是否一样快，不影响跑哪些文件（每个文件恰好落在一片，由 `test_ci_pipeline.py` 守着）。
+  - 迁移“先迁移、后合并”改为从 develop 触发：从预演开始到发布 PR 合并，develop 冻结、不合任何 PR，正式迁移前核对提交与预演、发布 PR 的 head 相同（工作流用分支当时的最新提交，`expected_head` 只核对版本号）。
+  - 两个生产手动工作流的分支守卫只防误点、不是安全边界：守卫写在所选分支自己的工作流文件里，改得了工作流的人本来就能绕开。
+  - main 不等于线上版本：合并后部署还在跑或失败时线上仍是旧版本，以实例上的 `/opt/pgs/RELEASE` 为准。
+
+维护记录：2026-11-07 · 分支模型与流水线拆分：新增决策；D-011（生产只经 main 的门禁发布）不变，门禁的入口从“每个 PR”收窄到“发布 PR 与 push main”。

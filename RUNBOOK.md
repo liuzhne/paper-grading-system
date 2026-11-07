@@ -95,6 +95,62 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 
 ## 3. 常用开发操作
 
+### 3.0 分支、提交与发布规则（2026-11-07 起）
+
+分支模型参照 GitLab Flow 的环境分支：`develop` 是集成分支，`main` 是生产分支——main 只收将要上线的代码，部署成功后线上跑的就是 main 的最新提交。
+**main 不等于线上版本**：合并后门禁与部署还在跑、或者失败时，线上仍是旧版本。要确认线上跑的是哪个提交，看那次 push main 运行里 `deploy-lightsail-production` 的结果，以及实例上的 `/opt/pgs/RELEASE`（`deploy.sh` 切换成功后写入的 SHA）。
+为什么这样选、放弃了什么，见 DECISIONS「2026-11-07 分支模型与流水线拆分」。
+
+| 分支 | 从哪里切 | 合到哪里 | 合并方式 | 跑哪条流水线 |
+|---|---|---|---|---|
+| 功能分支 `feat/…` `fix/…` `docs/…` `chore/…`（AI 会话的 `claude/…`、`codex/…` 同样算） | `develop` | `develop`（PR） | Merge commit（与现有习惯一致；squash 也允许） | `pgs-tests`：只跑代码测试 |
+| `develop` | — | `main`（发布 PR） | **只能 Merge commit** | `pgs-production-gates`：全套门禁，合并后部署 |
+| 热修 `hotfix/…` | `main` | `main`（PR），部署后再把 `main` 合回 `develop` | Merge commit | 同上 |
+
+**规则**
+
+1. `main` 与 `develop` 不直接推送，一切改动走 PR。两个分支各有一条规则集（Settings → Rules：`main-production`、`develop-integration`），都禁止删除与强推，不设绕过名单，管理员也一样；不要求审批人（单人维护，自己批不了自己的 PR）。CodeRabbit 只自动评审开到默认分支（develop）的 PR，发布 PR 不再评审一遍——代码在进 develop 时已经评审过。
+2. 默认分支是 `develop`：`gh pr create` 不带 `--base` 就开到 develop。功能分支的 PR 开到了 main，`release-source` 会失败，把 base 改成 develop：`gh pr edit <编号> --base develop`。
+3. 提交信息用 Conventional Commits：`<type>: <中文说明>`，type 取 `feat` `fix` `docs` `refactor` `test` `ci` `chore` `perf`；复审修正写成 `fix: 按 #NN 复审……`。一个提交做一件事；三文档同步（CLAUDE.md「三文档同步」）与代码放在同一个 PR 里。
+4. 合进 develop：`tests-passed` 绿即可。不要求分支先同步到最新的 develop（规则集不开 strict）——并行的 AI 会话多，每合一个就让其他 PR 全部重跑不划算。代价由 develop 上的 push 运行兜底：每次合并后提交阶段会在 develop 上再跑一遍，**develop 变红时先修好，再合别的**。
+5. 发布：开 `develop → main` 的 PR，标题 `release: YYYY-MM-DD <要点>`，正文列出包含的 PR、迁移和要改的仓库变量。`release-gates-passed` 绿，而且 develop 已包含 main 的全部提交（main 的规则集开 strict），才能合并。合并后 push main 再跑一遍门禁，通过后部署 Lightsail（9.2）。
+6. 含迁移的发布仍是“先迁移、后合并”（11.12）：`pgs-production-migrate` 的分支选 **develop**（发布 PR 的来源，`hotfix/*` 热修时选热修分支），先 `dry_run`、再正式迁移，然后合并发布 PR。功能分支上触发会被 `require-release-ref` 拒绝——迁移要先进 develop，随发布 PR 一起上线。
+   **从预演开始冻结 develop**：工作流每次用所选分支当时的最新提交，`expected_head` 只核对迁移版本号、不核对提交，所以预演、正式迁移和发布 PR 之间 develop 一变，正式跑的就可能是没预演过、也没过发布门禁的迁移。做法：开发布 PR → 等 `release-gates-passed` 绿 → 预演 → 正式迁移 → 合并，**这期间不往 develop 合任何 PR**；正式迁移前核对它在 Actions 运行页显示的提交与预演那次相同、也与发布 PR 的 head 相同，不同就重新预演。
+   守卫只防误点，不是安全边界：守卫任务写在所选分支自己的工作流文件里，改得了工作流的人本来就能绕开它。`production` 环境不按分支限制的原因见 DECISIONS（候选镜像评测要从 PR 分支使用它）。
+7. 发布 PR 只能用 Merge commit（main 的规则集只允许这一种）。squash 或 rebase 会在 main 上留下 develop 没有的提交：下一次发布 PR 会把已经发布的改动再列一遍，还会冲突。
+8. 热修：从 main 切 `hotfix/<说明>` → PR 到 main（全套门禁）→ 合并部署 → **马上**开 `main → develop` 的 PR 合回（Merge commit）。不合回的话，下一次发布 PR 会冲突，或者把热修撤掉。
+9. `pgs-production-cutover` 只能在 main 上运行（它用实例上正在运行的那个提交）。Run workflow 默认选的是 develop，会被 `require-main` 拒绝。候选镜像评测（`assistant-eval.yml` 的 `candidate=true`）照旧在 PR 分支上跑，它不替换线上服务。
+
+**流水线**
+
+| 工作流 | 触发 | 内容 | 规则集要求的检查 |
+|---|---|---|---|
+| `pgs-tests`（`.github/workflows/tests.yml`） | PR → develop、push develop、手动；也被 `ci.yml` 调用 | 后端 pytest 分 4 片、前端单测/类型/API 合同/`public/` 漂移、浏览器验收分 2 片；不起 PostgreSQL、不构建镜像、不碰部署密钥 | develop：`tests-passed` |
+| `pgs-production-gates`（`.github/workflows/ci.yml`） | PR → main、push main、手动 | `release-source`（只收 develop 与 `hotfix/*`）、复用 `tests.yml`、Postgres 16 逐版本迁移与恢复演练、Docker Compose 冒烟、生产配置校验；只有 push main 才部署 | main：`release-gates-passed` |
+
+同一个 PR 推了新提交，旧的运行会被取消；push 的运行各自独立，不会被取消。
+规则集只认 `tests-passed` 与 `release-gates-passed` 这两个汇总检查：改分片数、加减门禁都不用改规则集。
+
+**后端分片**：按测试文件分 4 片（`scripts/ci_test_shard.py`），每片内部的顺序与整套运行时一致。权重是每个文件的耗时，存在 `scripts/ci_test_weights.json`；新加的测试文件按中位数计，不用改任何东西。只跑某一片（与 CI 完全相同的文件列表）：
+
+```bash
+.venv/bin/python -m pytest -q $(.venv/bin/python scripts/ci_test_shard.py --shard 2 --total 4)
+```
+
+各片快慢明显不均时，重算权重并提交：
+
+```bash
+.venv/bin/python -m pytest -q --junitxml=/tmp/pgs-full.xml && .venv/bin/python scripts/ci_test_shard.py --record /tmp/pgs-full.xml
+```
+
+**排错**
+
+- **CI 上某一片失败，本地全套是绿的。** 报错指向那一片里的某个用例；真正的原因通常是它依赖了同一进程里排在前面的另一个文件留下的状态（全局设置、模块缓存、环境变量），分片后那个文件到了别的片里。用上面的命令只跑那一片来复现；修法是让用例自己准备状态，不要调权重把两个文件凑到一片。
+- **PR 一直停在“等待 `tests-passed` / `release-gates-passed`”，Actions 里没有对应的运行。** 报错指向规则集；真正的原因是 PR 的 base 不对（功能分支开到 main 只会跑 `ci.yml`，开到其他分支两条都不跑），或者 workflow 文件写错、整条工作流没启动（Actions 页面顶部会有 “Invalid workflow file”）。
+- **发布 PR 列出一大堆已经发布过的提交，或者有冲突。** 看上去是 develop 的问题；真正的原因是上一次发布 PR 被 squash/rebase 了，或者热修没有合回 develop。先开 `main → develop` 的 PR 合回（Merge commit），再开发布 PR。
+- **`pgs-production-migrate` 在 `require-release-ref` 失败。** 报错指向工作流；真正的原因是在功能分支上点了 Run workflow（以前的做法是从 PR 分支迁移）。先把 PR 合进 develop，分支改选 develop 再跑。
+- **`pgs-production-cutover` 在 `require-main` 失败。** 真正的原因是 Run workflow 默认选了 develop（默认分支），改选 main。
+
 ### 3.1 测试
 
 全套测试自包含，使用内存 SQLite + Mock LLM，无需 Postgres、API Key 或联网：
@@ -346,15 +402,19 @@ Supabase 生产若存在最小权限角色 `pgs_app`，0023 会在同一迁移�
 3. 按 `docs/上线清单.md` 记录生产配置、日志安全、监控阈值、备份恢复和回退证据。
 4. 新迁移先在生产外完成备份、verify、隔离恢复演练和 Postgres 16 逐版本验证。
 
-### 9.2 权威 Vercel 流程
+### 9.2 发布：develop → main（2026-11-07 起）
 
-1. 功能分支按保护规则合入 `main`，不从本地工作区发布。
-2. `.github/workflows/ci.yml` 运行：
-   - `unit-and-sqlite-migrations`
+1. 功能分支先按 3.0 合进 `develop`，确认 develop 上的 `pgs-tests` 是绿的；不从本地工作区发布。
+2. 开 `develop → main` 的发布 PR。`.github/workflows/ci.yml`（`pgs-production-gates`）运行：
+   - `release-source`（只收 develop 与 `hotfix/*`）
+   - `tests`（复用 `tests.yml`：`unit-and-sqlite-migrations` 4 片、`frontend-workbench`、`frontend-e2e` 2 片）
    - `postgres-migrations-constraints-and-restore`
-   - `docker-compose-smoke`
-3. 三项成功后，`deploy-vercel-production` 才进入 GitHub `production` Environment，运行 `vercel pull`、`vercel build --prod`、`vercel deploy --prebuilt --prod`。
-4. 保存 CI URL、三类 artifact 和 deployment URL；验证 `/`、`/api/system/integrations` 及关键登录/上传/评分/报告路径。
+   - `docker-compose-smoke`（在 `tests` 与 Postgres 门禁之后）
+   - `production-config`
+   - 汇总 `release-gates-passed`（main 的规则集要求它）
+3. 含迁移时先从 develop 跑 `pgs-production-migrate`（3.0 第 6 条、11.12），再合并。
+4. 用 Merge commit 合并发布 PR。push main 再跑一遍门禁，全部通过后 `deploy-lightsail-production` 进入 GitHub `production` Environment 部署（9.4）。`deploy-vercel-production` 因仓库变量 `VERCEL_DEPLOY_ENABLED=false` 不再运行。
+5. 保存 CI URL 与 artifact；验证 `/`、`/api/system/health` 及关键登录/上传/评分/报告路径。
 
 Vercel Git 直部署保持关闭。CLI 当前固定 `vercel@58.4.0`；不要删除 `.vercelignore` 规避上游 prebuilt 回归。
 
@@ -370,9 +430,11 @@ docker compose --env-file .env.intranet logs -f app worker caddy
 
 验证 HTTPS、`/api/system/integrations`、登录和合成数据冒烟（`smoke_deployment` 会创建后台评分任务并等 worker 跑完），确认 `ps` 里 `worker` 为 running，并确认容器内 `pg_dump --version` 为 16.x。
 
-### 9.4 Lightsail 生产（迁移中）
+### 9.4 Lightsail 生产（当前生产入口）
 
-方案：`docs/部署平台迁移到AWS方案.md`。一台新加坡 Lightsail 实例跑 `deploy/production/compose.yml`（caddy + app + worker），数据库与文件存储是**新建的** Supabase 项目 `grading-system`（`mfkmbwkuiimhaytkazvk`，新加坡）。旧项目的数据经维护者确认不保留（2026-10-13），所以没有数据迁移，也没有新旧并行：新环境验证好后直接切流量，最后删除旧项目。切换前 Vercel 仍是正式入口，连的是旧库。
+> **现状**：2026-10-18 起 Lightsail 是正式入口；2026-10-28 起数据库是实例上的 db 容器（`postgres:16-bookworm`，不对外开端口）、文件存卷（`STORAGE_PROVIDER=local`，实例上 `/opt/pgs/DATA_PLANE=local`），当前配置与操作见 9.4.1。下面这段和“一次性准备”记录的是 2026-10-13 迁移时的做法（当时库与文件还在 Supabase），保留作历史，照着做之前先对照 9.4.1。
+
+方案：`docs/部署平台迁移到AWS方案.md`。（历史，2026-10-13）一台新加坡 Lightsail 实例跑 `deploy/production/compose.yml`（caddy + app + worker），数据库与文件存储是**新建的** Supabase 项目 `grading-system`（`mfkmbwkuiimhaytkazvk`，新加坡）。旧项目的数据经维护者确认不保留（2026-10-13），所以没有数据迁移，也没有新旧并行：新环境验证好后直接切流量，最后删除旧项目。切换前 Vercel 仍是正式入口，连的是旧库。
 
 一次性准备（S0，维护者执行）：
 
@@ -1240,6 +1302,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
+| 2026-11-07 | 分支模型与流水线拆分 | 新增 3.0 分支、提交与发布规则；9.2 改为 develop → main 发布；新增 `tests.yml`、`scripts/ci_test_shard.py` 与权重文件；生产迁移从 develop 触发（功能分支被拒），切换只在 main；排错补分片失败、检查一直等待、发布 PR 冲突、守卫拒绝 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 报告目录建不出来也退出码 2；排错补“写的是 `~/...` 却说在仓库里” |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | SQLite 的 URI 形式按真实路径检查；报告文件已存在（含符号链接）时拒绝，写不进去退出码 2、指标已先打印 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | `run` 开始评分前还拒绝仓库里的报告、SQLite 数据库文件与 `STORAGE_ROOT`，`--label` 不能带路径；评分标准问题退出码 2；排错补“`STORAGE_ROOT` 在仓库里”与“不是用这份档位文件建的” |

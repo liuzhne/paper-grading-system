@@ -183,6 +183,7 @@ sequenceDiagram
 - 内网 Compose：Caddy HTTPS -> FastAPI app -> PostgreSQL 16，Postgres、应用 storage、备份和 Caddy CA 使用独立 volume；app 启动先 `alembic upgrade head`。
 - Vercel 生产：`public/` 由构建脚本生成指纹化静态资源；Python API 使用 Supabase/Postgres 连接。Vercel Git 直部署关闭，生产只能由 GitHub Actions 门禁后执行 prebuilt deploy。
 - Lightsail 生产（迁移中，`docs/部署平台迁移到AWS方案.md`）：一台新加坡实例跑 `deploy/production/compose.yml`——Caddy（Let's Encrypt、压缩、安全头与缓存头）→ app（uvicorn 单进程）；worker 循环领取与巡检，与内网相同，不用 Vercel 队列；db（`postgres:16-bookworm`，不对外开端口，卷 `pg_data`）。不做自动备份（2026-10-28 起）。数据在哪里由实例上的 `/opt/pgs/DATA_PLANE` 决定（`docs/迁出Supabase到单机Docker方案.md`）：`supabase`（切换前）时数据库与文件存储是 Supabase 项目（6543 事务池），db 是空库；`local`（`pgs-production-cutover` 切换后）时 app 连 `pgs_app@db:5432/pgs`、`STORAGE_PROVIDER=local`、文件存卷 `/app/storage`，上传走 `POST /papers/upload`（不再有直传）。两种库都由 `backend/app/scripts/init_database.py` 初始化（运行角色、现有迁移、全表授权与行级安全；有 Supabase 的 `storage` 模式时建私有桶）；切换时 `copy_fixed_config` 只把账号、组织、成员、邀请、平台模型配置、模型连接、助手偏好与官网申请复制过来（新库里迁移 0022 预置的三行在同一事务里先删，再按旧库写入），其余数据不迁移。迁移与切换用一次性容器在实例上执行（`deploy/production/ops.sh`，连接串经 SSH 标准输入传入）。app 与 worker 共用卷 `/app/storage`（上传文件与 L0 缓存）。生产 compose 覆盖 Dockerfile 的 CMD，启动时不迁移。镜像由 GitHub Actions 构建后经 SSH 载入，运行时密钥存 GitHub `production` 环境、部署时生成实例 `.env`，`deploy.sh` 切换 `current` 标签。app 与 worker 的应用日志由 `core/log_config.py` 统一配置（级别 `LOG_LEVEL`），输出到标准输出，由 Docker 按大小轮转。
+- 发布链路（2026-11-07 起，RUNBOOK 3.0）：功能分支 → `develop`（`tests.yml` 提交阶段：后端 pytest 分 4 片、前端检查、浏览器验收分 2 片，不碰部署密钥）→ 发布 PR `develop → main`（`ci.yml`：`release-source`、复用 `tests.yml`、Postgres 16 迁移与恢复、Docker 冒烟、生产配置，汇总为 `release-gates-passed`）→ push `main` 再过一遍门禁后部署 Lightsail。main 只收将要上线的代码，部署成功后线上跑的就是它的最新提交（线上实际版本以实例上的 `/opt/pgs/RELEASE` 为准，合并后部署失败时两者不同）；热修 `hotfix/*` 从 main 切、合回 develop。
 
 FastAPI 中数据路由受 `enforce_auth` 保护；auth、公开集成自检和健康检查 `/api/system/health`（只返回检查项与状态）在登录前可达，`ops-readiness` 单独要求鉴权。开启 `AUTH_ENABLED` 后，弱密码、弱 `AUTH_SECRET` 或原文 LLM debug 会使应用 fail closed。
 
@@ -591,6 +592,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | §6 改为“部署成功后线上是 main 的最新提交，实际版本以 `/opt/pgs/RELEASE` 为准”；分片收集规则与 pytest 默认一致；调用链不变 |
+| 2026-11-07 | 分支模型与流水线拆分 | 应用模块、调用链与数据流不变；发布链路改为 `tests.yml`（提交阶段，develop）+ `ci.yml`（发布门禁与部署，main），见 §6 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 仓库边界检查不再展开 `~`，与 SQLAlchemy、`STORAGE_ROOT` 的解析一致；报告目录不是目录时开评前拒绝，建目录失败也退出码 2；调用链不变 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | `_sqlite_file` 识别 URI 形式（`file:...?uri=true`）取真实路径、内存库放行；报告路径事先存在（含符号链接）就拒绝，写入改独占创建；调用链不变 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正 | `run_asap_eval.check_run_environment` 在开评前拦仓库里的报告、SQLite 数据库文件与 `STORAGE_ROOT`；`resolve_rubric` 统一找或建评分标准并核对显式 `--rubric-id` 的版本；`summarize` 多出 `not_run`（不在 `per_sample` 里的样本）；评分链不变 |

@@ -1,125 +1,52 @@
 name: pgs-production-gates
 
+# 发布门禁与部署（RUNBOOK 3.0、9.2）。只看 main：
+# - develop → main 的发布 PR（以及 hotfix/* 热修 PR）跑全套门禁：代码测试（复用 tests.yml）、
+#   PostgreSQL 16 逐版本迁移与恢复演练、Docker Compose 冒烟、生产配置校验；
+# - 合并后 push main 再跑一遍门禁，全部通过才部署 Lightsail（Vercel 已停，见下）。
+# 功能分支进 develop 只跑 tests.yml，不经过这里。
 on:
   push:
-    branches: [main, Convert2RubricScalePlatform]
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# 发布 PR 推了新提交就取消旧的那次；push 按 run_id 各自独立，部署任务另有自己的串行组。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   SCORING_ENGINE_MODE: legacy
   PYTHONUNBUFFERED: "1"
 
 jobs:
-  unit-and-sqlite-migrations:
+  release-source:
+    # main 只接受 develop 的发布 PR 与 hotfix/* 热修（RUNBOOK 3.0）。功能分支直接开到 main，
+    # 这里失败并提示改 base；来自 fork 的 PR 也拒绝。
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Install uv and Python
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          python-version: "3.12"
-          enable-cache: true
-      - name: Sync the locked environment
-        run: uv sync --locked
-      - name: Run the complete self-contained suite
-        run: |
-          mkdir -p pgs_ops_artifacts
-          uv run python -m pytest -q --junitxml=pgs_ops_artifacts/pytest.xml
-      - name: Upload unit evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: pgs-unit-and-sqlite-evidence
-          path: pgs_ops_artifacts/
-          if-no-files-found: error
-          retention-days: 30
-
-  frontend-workbench:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/workbench/package-lock.json
-      - name: Install the locked frontend environment
-        working-directory: frontend/workbench
-        run: npm ci
-      - name: Run component and state tests
-        working-directory: frontend/workbench
-        run: npm run test:unit
-      - name: Install uv and Python for the contract and assembly steps
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          python-version: "3.12"
-          enable-cache: true
-      # 浏览器验收的 webServer 是真实 FastAPI，OpenAPI 快照也要从真实应用导出；
-      # 只装 uv 而不 sync，两者都只会报成超时或 ModuleNotFoundError。
-      - name: Install the locked backend environment
-        run: uv sync --locked
-      - name: Check types
-        working-directory: frontend/workbench
-        run: npm run typecheck
-      # 前端是纯 JS，调错路径没有编译期报错，只在浏览器里变成一个 404。这一步
-      # 从真实应用导出 OpenAPI，重新生成类型，与已提交的 schema.d.ts 比对：
-      # 后端合同变了而前端没跟上，会直接显示成 diff。
-      - name: Check the API contract snapshot
-        working-directory: frontend/workbench
-        run: npm run api:dump && npm run api:check
-      # Vercel's build hook runs scripts/build_web_static.py without
-      # --with-workbench, so the deployed workbench is whatever public/workbench
-      # holds in the repository. Rebuild it here and fail on any drift: without
-      # this gate a source change could ship behind a stale committed bundle.
-      - name: Assemble the static artifact from source
-        run: python scripts/build_web_static.py --with-workbench
-      - name: Fail if the committed public/ artifact drifted from source
-        shell: bash
-        run: |
-          set -euo pipefail
-          # --porcelain also reports untracked files; `git diff` alone would
-          # miss a rebuild that only adds newly-hashed asset names.
-          drift="$(git status --porcelain -- public/)"
-          if [[ -n "$drift" ]]
-          then
-            echo "::error::public/ is out of sync with frontend sources."
-            echo "Run: python scripts/build_web_static.py --with-workbench"
-            echo "then commit the regenerated public/ artifact."
-            echo "$drift"
-            exit 1
-          fi
-      - name: Install the Playwright browser
-        working-directory: frontend/workbench
-        run: npx playwright install --with-deps chromium
-      - name: Run browser acceptance (V03-V07, V09, V11, V12)
-        working-directory: frontend/workbench
+      - name: Only develop and hotfix branches may target main
         env:
-          # webServer 起的是真实 FastAPI + 统一组装产物，不是 Vite dev server：
-          # 深链接回退、缺失资源 404、/api 不被吞掉这几条只在生产托管路径上
-          # 才会出问题。路径相对 webServer 的 cwd（仓库根）。
-          PGS_PYTHON: .venv/bin/python
-        run: npx playwright test
-      - name: Upload frontend evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: pgs-frontend-workbench-evidence
-          path: |
-            public/workbench/index.html
-            frontend/workbench/package-lock.json
-            frontend/workbench/playwright-report/
-            frontend/workbench/test-results/
-          if-no-files-found: error
-          retention-days: 30
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]
+          then
+            case "$HEAD_REF" in
+              develop|hotfix/*) echo "release source: $HEAD_REF"; exit 0 ;;
+            esac
+          fi
+          echo "::error::main 只接受 develop 的发布 PR 与 hotfix/* 热修，当前是 ${HEAD_REPO}:${HEAD_REF}。功能分支请把 PR 的 base 改成 develop（RUNBOOK 3.0）。"
+          exit 1
+
+  tests:
+    uses: ./.github/workflows/tests.yml
 
   postgres-migrations-constraints-and-restore:
     runs-on: ubuntu-latest
@@ -317,7 +244,7 @@ jobs:
 
   docker-compose-smoke:
     needs:
-      - unit-and-sqlite-migrations
+      - tests
       - postgres-migrations-constraints-and-restore
     runs-on: ubuntu-latest
     # 显式写 shell: bash 时 Actions 用 `bash -eo pipefail`；默认的 `bash -e` 没有
@@ -462,7 +389,7 @@ jobs:
       - docker-compose-smoke
       # The deployed workbench comes from the committed public/ artifact, so a
       # drift or test failure there must block the release like any other gate.
-      - frontend-workbench
+      - tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
@@ -561,13 +488,50 @@ jobs:
       - name: Lint the deployment scripts
         run: shellcheck deploy/production/bootstrap.sh deploy/production/deploy.sh deploy/production/ops.sh
 
+  # main 的分支保护只认这一项：门禁里加减任务时不必改保护规则。release-source 只在 PR 上运行，
+  # push 与手动运行时它被跳过是正常的；其余每一项都必须成功。
+  release-gates-passed:
+    if: ${{ !cancelled() }}
+    needs:
+      - release-source
+      - tests
+      - postgres-migrations-constraints-and-restore
+      - docker-compose-smoke
+      - production-config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every release gate to succeed
+        env:
+          SOURCE: ${{ needs.release-source.result }}
+          EVENT: ${{ github.event_name }}
+          RESULTS: >-
+            ${{ needs.tests.result }}
+            ${{ needs.postgres-migrations-constraints-and-restore.result }}
+            ${{ needs.docker-compose-smoke.result }}
+            ${{ needs.production-config.result }}
+        run: |
+          echo "release-source: $SOURCE; gates: $RESULTS"
+          if [ "$EVENT" = "pull_request" ] && [ "$SOURCE" != "success" ]
+          then
+            echo "::error::release-source ended with '$SOURCE'"
+            exit 1
+          fi
+          for result in $RESULTS
+          do
+            if [ "$result" != "success" ]
+            then
+              echo "::error::a release gate ended with '$result'"
+              exit 1
+            fi
+          done
+
   deploy-lightsail-production:
     # 生产部署到 AWS Lightsail 单机（docs/部署平台迁移到AWS方案.md）。仓库变量
     # LIGHTSAIL_DEPLOY_ENABLED=true 之前不执行：实例、.env 与部署密钥要先准备好。
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.LIGHTSAIL_DEPLOY_ENABLED == 'true'
     needs:
       - docker-compose-smoke
-      - frontend-workbench
+      - tests
       - production-config
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -74,7 +74,10 @@ def test_llm_logger_runtime_guard_blocks_protected_raw_content_and_scrubs_keys(
 
 
 def test_ci_has_locked_unit_postgres_migration_and_restore_gates():
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    # 代码测试在 tests.yml（提交阶段），发布门禁 ci.yml 用 workflow_call 复用它（RUNBOOK 3.0）。
+    release = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/tests.yml" in release
+    workflow = release + (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
     for marker in (
         "permissions:",
         "contents: read",
