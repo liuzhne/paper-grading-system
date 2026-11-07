@@ -30,6 +30,7 @@ jobs:
     # 这里失败并提示改 base；来自 fork 的 PR 也拒绝。
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Only develop and hotfix branches may target main
         env:
@@ -50,6 +51,7 @@ jobs:
 
   postgres-migrations-constraints-and-restore:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -70,7 +72,7 @@ jobs:
       OPS_RTO_MINUTES: "120"
       OPS_RPO_MINUTES: "1440"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install uv and Python
@@ -235,7 +237,7 @@ jobs:
           fi
       - name: Upload Postgres and recovery evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pgs-postgres-migration-restore-evidence
           path: pgs_ops_artifacts/
@@ -247,6 +249,7 @@ jobs:
       - tests
       - postgres-migrations-constraints-and-restore
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # 显式写 shell: bash 时 Actions 用 `bash -eo pipefail`；默认的 `bash -e` 没有
     # pipefail，`python … | tee` 会取 tee 的退出码。冒烟脚本曾因此在登录改成
     # Cookie 后崩溃了一个多月，这一步仍是绿的。
@@ -266,7 +269,7 @@ jobs:
       PAPER_GRADING_SITE: https://localhost
       SCORING_ENGINE_MODE: legacy
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Build the production application image
@@ -373,7 +376,7 @@ jobs:
         run: docker compose --env-file .env.intranet.example down --volumes --remove-orphans
       - name: Upload Docker deployment evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pgs-docker-compose-smoke-evidence
           path: pgs_docker_artifacts/
@@ -415,7 +418,7 @@ jobs:
             fi
           done
           exit "$missing"
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install uv and Python for the Vercel Python builder
@@ -424,7 +427,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - name: Set up Node.js for the Vercel CLI
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
       - name: Install the Vercel CLI
@@ -467,11 +470,12 @@ jobs:
     # 生产（Lightsail）的 compose、Caddyfile 与部署脚本在合并前就要能用：
     # 部署时才发现语法错误，线上已经切了一半。
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Validate the production compose file
@@ -499,6 +503,7 @@ jobs:
       - docker-compose-smoke
       - production-config
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require every release gate to succeed
         env:
@@ -574,7 +579,7 @@ jobs:
             fi
           done
           exit "$missing"
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Configure SSH

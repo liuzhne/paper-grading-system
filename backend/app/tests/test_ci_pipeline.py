@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import yaml
@@ -175,3 +176,47 @@ def test_production_migrations_run_only_from_a_release_ref():
     run = guard["steps"][0]["run"]
     assert "refs/heads/main|refs/heads/develop|refs/heads/hotfix/*)" in run
     assert run.rstrip().endswith("exit 1")  # 其余一律拒绝
+
+
+# —— 供应链与超时（RUNBOOK 3.0「供应链与安全扫描」）——
+
+_USES = re.compile(r"^\s*(?:-\s*)?uses:\s*(?P<ref>[^\s#]+)(?P<rest>.*)$")
+
+
+def _workflow_files():
+    files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+    assert files
+    return files
+
+
+def test_every_third_party_action_is_pinned_to_a_commit_sha():
+    """标签可以被改指向别的提交，只有完整 SHA 不可变；版本写在注释里，Dependabot 一起更新。"""
+    found = 0
+    for path in _workflow_files():
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            match = _USES.match(line)
+            if not match or match["ref"].startswith("./"):
+                continue
+            found += 1
+            _, _, version = match["ref"].partition("@")
+            assert re.fullmatch(r"[0-9a-f]{40}", version), f"{path.name}:{number} 没有固定到提交 SHA：{line.strip()}"
+            assert re.search(r"#\s*v\d", match["rest"]), f"{path.name}:{number} 缺版本注释：{line.strip()}"
+    assert found > 0
+
+
+def test_every_job_has_a_timeout():
+    """没写 timeout-minutes 的任务默认能跑 6 小时，卡住时占着 runner，也挡住后面的部署。"""
+    for path in _workflow_files():
+        for name, job in yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"].items():
+            if "uses" in job:  # 调用可复用工作流的任务，超时写在被调用的工作流里
+                continue
+            assert isinstance(job.get("timeout-minutes"), int), f"{path.name}: {name}"
+
+
+def test_dependabot_keeps_the_pinned_actions_current():
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
+    actions = updates["github-actions"]
+    assert actions["directory"] == "/"
+    assert "target-branch" not in actions  # 开到默认分支 develop，和功能 PR 走同一条路
+    assert actions["groups"]  # 一次一个 PR，不是每个 action 一个
