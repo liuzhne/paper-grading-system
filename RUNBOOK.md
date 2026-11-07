@@ -430,7 +430,7 @@ docker compose --env-file .env.intranet logs -f app worker caddy
 
 验证 HTTPS、`/api/system/integrations`、登录和合成数据冒烟（`smoke_deployment` 会创建后台评分任务并等 worker 跑完），确认 `ps` 里 `worker` 为 running，并确认容器内 `pg_dump --version` 为 16.x。
 
-### 9.4 Lightsail 生产（迁移中）
+### 9.4 Lightsail 生产（当前生产入口）
 
 方案：`docs/部署平台迁移到AWS方案.md`。一台新加坡 Lightsail 实例跑 `deploy/production/compose.yml`（caddy + app + worker），数据库与文件存储是**新建的** Supabase 项目 `grading-system`（`mfkmbwkuiimhaytkazvk`，新加坡）。旧项目的数据经维护者确认不保留（2026-10-13），所以没有数据迁移，也没有新旧并行：新环境验证好后直接切流量，最后删除旧项目。切换前 Vercel 仍是正式入口，连的是旧库。
 
@@ -1300,7 +1300,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、上线清单的线上验证项改为 Lightsail，Vercel 项只在恢复 Vercel 时适用 |
+| 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中” |
 | 2026-11-07 | 分支模型与流水线拆分 | 新增 3.0 分支、提交与发布规则；9.2 改为 develop → main 发布；新增 `tests.yml`、`scripts/ci_test_shard.py` 与权重文件；生产迁移从 develop 触发（功能分支被拒），切换只在 main；排错补分片失败、检查一直等待、发布 PR 冲突、守卫拒绝 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 报告目录建不出来也退出码 2；排错补“写的是 `~/...` 却说在仓库里” |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | SQLite 的 URI 形式按真实路径检查；报告文件已存在（含符号链接）时拒绝，写不进去退出码 2、指标已先打印 |
