@@ -73,6 +73,31 @@ def test_every_test_file_lands_in_exactly_one_shard():
     assert shard.partition(files, shard.load_weights(), 4) == shard.partition(files, shard.load_weights(), 4)
 
 
+def test_shards_use_both_default_pytest_file_patterns(tmp_path):
+    """本地 pytest 会收集 ``*_test.py``；分片漏了它，CI 就悄悄少跑这些文件。"""
+    shard = _shard_module()
+    tests = tmp_path / "backend" / "app" / "tests"
+    (tests / "sub").mkdir(parents=True)
+    (tests / "__pycache__").mkdir()
+    for name in ("test_a.py", "b_test.py", "test_c_test.py", "helper.py", "conftest.py", "sub/test_d.py", "__pycache__/test_e.py"):
+        (tests / name).write_text("", encoding="utf-8")
+    prefix = "backend/app/tests/"
+    assert shard.test_files(tmp_path) == [
+        prefix + "b_test.py",
+        prefix + "sub/test_d.py",
+        prefix + "test_a.py",
+        prefix + "test_c_test.py",  # 两种规则都匹配，只出现一次
+    ]
+
+
+def test_pytest_keeps_the_default_file_patterns_the_shards_assume():
+    """改了 python_files 或 testpaths，scripts/ci_test_shard.py 要一起改。"""
+    config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "python_files" not in config
+    assert 'testpaths = ["backend/app/tests"]' in config
+    assert not (ROOT / "pytest.ini").exists() and not (ROOT / "setup.cfg").exists()
+
+
 def test_unknown_files_weigh_the_median_and_the_split_is_balanced():
     shard = _shard_module()
     files = ["a.py", "b.py", "c.py", "d.py", "new.py"]

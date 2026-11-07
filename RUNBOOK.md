@@ -97,7 +97,8 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 
 ### 3.0 分支、提交与发布规则（2026-11-07 起）
 
-分支模型参照 GitLab Flow 的环境分支：`develop` 是集成分支，`main` 是生产分支——**main 上是什么，线上跑的就是什么**。
+分支模型参照 GitLab Flow 的环境分支：`develop` 是集成分支，`main` 是生产分支——main 只收将要上线的代码，部署成功后线上跑的就是 main 的最新提交。
+**main 不等于线上版本**：合并后门禁与部署还在跑、或者失败时，线上仍是旧版本。要确认线上跑的是哪个提交，看那次 push main 运行里 `deploy-lightsail-production` 的结果，以及实例上的 `/opt/pgs/RELEASE`（`deploy.sh` 切换成功后写入的 SHA）。
 为什么这样选、放弃了什么，见 DECISIONS「2026-11-07 分支模型与流水线拆分」。
 
 | 分支 | 从哪里切 | 合到哪里 | 合并方式 | 跑哪条流水线 |
@@ -113,7 +114,9 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 3. 提交信息用 Conventional Commits：`<type>: <中文说明>`，type 取 `feat` `fix` `docs` `refactor` `test` `ci` `chore` `perf`；复审修正写成 `fix: 按 #NN 复审……`。一个提交做一件事；三文档同步（CLAUDE.md「三文档同步」）与代码放在同一个 PR 里。
 4. 合进 develop：`tests-passed` 绿即可。不要求分支先同步到最新的 develop（规则集不开 strict）——并行的 AI 会话多，每合一个就让其他 PR 全部重跑不划算。代价由 develop 上的 push 运行兜底：每次合并后提交阶段会在 develop 上再跑一遍，**develop 变红时先修好，再合别的**。
 5. 发布：开 `develop → main` 的 PR，标题 `release: YYYY-MM-DD <要点>`，正文列出包含的 PR、迁移和要改的仓库变量。`release-gates-passed` 绿，而且 develop 已包含 main 的全部提交（main 的规则集开 strict），才能合并。合并后 push main 再跑一遍门禁，通过后部署 Lightsail（9.2）。
-6. 含迁移的发布仍是“先迁移、后合并”（11.12）：`pgs-production-migrate` 的分支选 **develop**（发布 PR 的来源，`hotfix/*` 热修时选热修分支），先 `dry_run`、再正式迁移，然后合并发布 PR。功能分支上触发会被 `require-release-ref` 拒绝——迁移要先进 develop，随发布 PR 一起上线。迁移之后、发布 PR 合并之前不要再往 develop 合含迁移的 PR，否则发布出去的代码与迁移过的库对不上。
+6. 含迁移的发布仍是“先迁移、后合并”（11.12）：`pgs-production-migrate` 的分支选 **develop**（发布 PR 的来源，`hotfix/*` 热修时选热修分支），先 `dry_run`、再正式迁移，然后合并发布 PR。功能分支上触发会被 `require-release-ref` 拒绝——迁移要先进 develop，随发布 PR 一起上线。
+   **从预演开始冻结 develop**：工作流每次用所选分支当时的最新提交，`expected_head` 只核对迁移版本号、不核对提交，所以预演、正式迁移和发布 PR 之间 develop 一变，正式跑的就可能是没预演过、也没过发布门禁的迁移。做法：开发布 PR → 等 `release-gates-passed` 绿 → 预演 → 正式迁移 → 合并，**这期间不往 develop 合任何 PR**；正式迁移前核对它在 Actions 运行页显示的提交与预演那次相同、也与发布 PR 的 head 相同，不同就重新预演。
+   守卫只防误点，不是安全边界：守卫任务写在所选分支自己的工作流文件里，改得了工作流的人本来就能绕开它。`production` 环境不按分支限制的原因见 DECISIONS（候选镜像评测要从 PR 分支使用它）。
 7. 发布 PR 只能用 Merge commit（main 的规则集只允许这一种）。squash 或 rebase 会在 main 上留下 develop 没有的提交：下一次发布 PR 会把已经发布的改动再列一遍，还会冲突。
 8. 热修：从 main 切 `hotfix/<说明>` → PR 到 main（全套门禁）→ 合并部署 → **马上**开 `main → develop` 的 PR 合回（Merge commit）。不合回的话，下一次发布 PR 会冲突，或者把热修撤掉。
 9. `pgs-production-cutover` 只能在 main 上运行（它用实例上正在运行的那个提交）。Run workflow 默认选的是 develop，会被 `require-main` 拒绝。候选镜像评测（`assistant-eval.yml` 的 `candidate=true`）照旧在 PR 分支上跑，它不替换线上服务。
@@ -1297,6 +1300,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE` |
 | 2026-11-07 | 分支模型与流水线拆分 | 新增 3.0 分支、提交与发布规则；9.2 改为 develop → main 发布；新增 `tests.yml`、`scripts/ci_test_shard.py` 与权重文件；生产迁移从 develop 触发（功能分支被拒），切换只在 main；排错补分片失败、检查一直等待、发布 PR 冲突、守卫拒绝 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 报告目录建不出来也退出码 2；排错补“写的是 `~/...` 却说在仓库里” |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（二） | SQLite 的 URI 形式按真实路径检查；报告文件已存在（含符号链接）时拒绝，写不进去退出码 2、指标已先打印 |

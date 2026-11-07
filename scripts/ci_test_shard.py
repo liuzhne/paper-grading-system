@@ -27,9 +27,15 @@ TEST_ROOT = Path("backend/app/tests")
 WEIGHTS = ROOT / "scripts" / "ci_test_weights.json"
 
 
+# pytest 默认的 python_files。pyproject 没有覆盖它（test_ci_pipeline.py 守着）；要覆盖时这里一起改，
+# 否则本地会收集、CI 却漏掉的文件不会报错，只是悄悄不跑。
+PATTERNS = ("test_*.py", "*_test.py")
+
+
 def test_files(root: Path = ROOT) -> list[str]:
-    """与 pyproject 的 ``testpaths`` 和 pytest 默认的 ``test_*.py`` 规则一致。"""
-    found = (root / TEST_ROOT).rglob("test_*.py")
+    """与 pyproject 的 ``testpaths`` 和 pytest 默认的 ``python_files`` 规则一致。"""
+    base = root / TEST_ROOT
+    found = {path for pattern in PATTERNS for path in base.rglob(pattern)}
     return sorted(
         path.relative_to(root).as_posix()
         for path in found
