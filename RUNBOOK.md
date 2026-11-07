@@ -1256,6 +1256,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 无新命令、无迁移；变量文件里 `NAME=` 的可选设置等于没设；排错条目补快照的两种存储位置与 `cite` 的限度；评分页定位会先切回正文页签 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新环境变量 `SCORING_DECISION_BASIS_MODE`（off / cite，默认 off，经仓库变量进生产）；无迁移；评分页 Core 评分项改为逐条规则判定与证据充分度；排错：证据显示“上下文”、冻结正文读不到、证据充分度为“中” |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 无新命令、无新环境变量、无迁移；规则编辑器加“判定范围”；排错：开关打开后快照变 `@4`、band 评分项不会转人工、复核原因为空 |
+| 2026-11-04 | ASAP 2.0 外部基准评测 | 新增命令 `run_asap_eval prepare` / `run`；数据与报告只能在仓库外；排错：评分政策的复核标记在 6 分制上会标出大量低分作文 |
 | 2026-11-03 | 论文评分第二阶段（分期 A–D） | 新增环境变量 `SCORING_TOKEN_BUDGET_TARGET`（默认 `provider_view`）、`SCORING_JUDGE_SCOPE_ENABLED`（默认关）、`SCORING_INSUFFICIENT_EVIDENCE_MODE`（默认 `off`），三者都接进生产部署；只读脚本 `rule_health_report`；无迁移；排错：`TOKEN_BUDGET_UNSATISFIABLE` 与评分项意外转人工 |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增环境变量 `REQUIREMENT_ITEMS_ENABLED`（默认关，生产暂不接）、只读脚本 `inspect_requirement_items`；无迁移；排错：`TEMPLATE_READ_INCOMPLETE` 警告、开关打开后多出的发布阻断 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无新命令、无迁移；排错：`work_item_deferred` 与 `deferral_count` 对不上时的读法。 |
@@ -2843,6 +2844,48 @@ B、C 改变评分，打开前要用 QWK 留出集对比（真实模型调用需
 发布与回滚：无迁移，head 仍为 `0041_assistant_agent_state`。A 默认打开会改变新评分的证据与分数；回退设 `SCORING_TOKEN_BUDGET_TARGET=envelope` 后重新部署。B、C 默认关闭，部署后行为只有 A 的变化。`cache/llm_cache.PROMPT_VERSION` 不动（legacy 提示词没变；Core 提示词版本随开关进运行身份）。
 
 维护记录：2026-11-03 · 论文评分第二阶段：新增三个评分设置与只读体检脚本，排错写明预算失败、证据不足转人工、账本不复用的真实原因。
+
+### 2026-11-04 ASAP 2.0 外部基准评测
+
+方案见 `docs/ASAP2.0外部基准评测方案.md`。数据（Kaggle `lburleigh/asap-2-0` 的 `ASAP2_train_sourcetexts.csv`）、生成的文档、数据库与报告都放在仓库外；脚本拒绝仓库内的输出目录。数据放在仓库根目录时，把 `/ASAP2_*.csv` 加进本机 `.git/info/exclude`。
+
+抽样（不调模型）：
+
+```bash
+.venv/bin/python -m backend.app.scripts.run_asap_eval prepare --csv ASAP2_train_sourcetexts.csv --out ~/pgs-eval/asap2 --size 300
+```
+
+用假模型跑通（新建本机数据库，不碰开发库）：
+
+```bash
+export DATABASE_URL=sqlite+pysqlite:///$HOME/pgs-eval/asap2/eval.db LLM_PROVIDER=mock STORAGE_ROOT=$HOME/pgs-eval/asap2/storage
+```
+
+```bash
+.venv/bin/alembic upgrade head
+```
+
+```bash
+.venv/bin/python -m backend.app.scripts.run_asap_eval run --data ~/pgs-eval/asap2 --levels backend/app/eval/asap2_levels.unofficial.json --label mock
+```
+
+真实模型运行要维护者授权预算；`--levels` 换成填了官方原文、`"official": true` 的本机 JSON，并配置与生产相同的模型连接。各组改环境变量（如 `SCORING_INSUFFICIENT_EVIDENCE_MODE=review`）后换 `--label` 再跑；同一档位文件沿用同一份评分标准。
+
+排错：
+- **现象**：输出说几乎全部样本“评分政策标记复核”。
+  - 报错指向：像是评分出错或证据不足转人工。
+  - 真正原因：默认评分政策对总分过低或接近等级线的论文打复核标记，6 分制上 1–3 分的作文都会被标。它不改总分，样本照常进指标；证据不足转人工的样本没有总分，算在“无总分”里。
+- **现象**：`run` 报“评分标准已存在但未发布”。
+  - 报错指向：像是档位文件有问题。
+  - 真正原因：上次运行在发布前中断，留下了同名同版本的草稿。在工作台处理掉它，或换一份档位文件。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_asap_eval.py
+```
+
+维护记录：2026-11-04 · ASAP 2.0 外部基准评测：新增两条命令，排错写明复核标记与残留草稿的真实原因。
 
 ### 2026-11-04 论文评分第二阶段第二轮（B、C 补全）
 

@@ -607,6 +607,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 2026-11-04 | 评分证据与理由：#77 复审修正 | 互斥组一次调用的依据由 `rule_executor._semantic_group_decisions` 标上 `basis.group_code`（结果合同可选字段），`judgement_view._share_group_basis` 只在被选中的那一档显示；依据与扣分证据的编号先判类型；`persistence.core_item_reason` 按 `RULE_EVIDENCE_INSUFFICIENT` 单列证据不足；`production_env.from_file` 把可选设置的空值当没设；评分页定位先切回正文页签。模块边界、调用链与持久化边界不变，无迁移 |
 | 2026-11-04 | 评分证据与理由（G1–G5） | 新增 `scoring/frozen_document.py`（论文 Core 评分按 `document_snapshot_ref` 读判分时的冻结正文，证据视图与正文视图共用）与 `scoring/judgement_view.py`（读取时从 `rule_results` 算逐条规则判定与证据充分度，`items?include_view=true` 返回 `judgement_view`）；证据引用多存核对过的 `quote`，规则判定可带 `evidence_selection`（`build_v4_envelope(selection_report=)` 经 Profile 回填）与 `basis`（`SCORING_DECISION_BASIS_MODE=cite`）；结果合同只加可选字段、不升版本；落库扣分理由改中文。无迁移；开关关闭时判定身份与提示词不变 |
 | 2026-11-04 | 论文评分第二阶段第二轮：B、C 补全 | 开关打开时 `rubric_snapshot.load_from_session` 生成 `atomic-rule-snapshot@4`（多 `applies_to`，`evidence_policy` 可带 `judge_scope`），关闭时仍是 `@3` 并去掉 `judge_scope`；`judge_scope.explain_judge_scope` / `review_hint` 供评分与 `read_review_workspace` 共用；band 规则的请求不提供 `insufficient_evidence`；Core 落库写 `score_items.review_reasons`（`review_reasons.from_core_issues`）；规则编辑器加判定范围下拉框。无迁移，接口与 OpenAPI 不变 |
+| 2026-11-04 | ASAP 2.0 外部基准评测脚本 | 新增 `eval/asap.py`（抽样、生成 .docx、档位载荷、1–6 原始分指标）与 `scripts/run_asap_eval.py`；评分标准在进程内走工作台同一组接口发布，导入与评分复用 `build_labeled_eval`。不改评分链、提示词与数据库 |
 | 2026-11-03 | 论文评分第二阶段：预算量实际视图、判定范围、证据不足（分期 A–D） | 新增 `scoring/retrieval/judge_scope.py`；`build_v4_envelope` 加 `request_rules`、`budget_target`、`judge_scope`，预算改由 `core_view.estimate_view_input_tokens` 量实际视图（默认）；`PromptEnvelopeV4.coverage_mode` 增加 `section`、`cross_section`；`rule_executor` 把 `insufficient_evidence` 记为未触发加 `RULE_EVIDENCE_INSUFFICIENT` 复核问题，评分项转 `review_required`；新增只读脚本 `rule_health_report`。B、C 开关默认关闭，关闭时视图与提示词不变。无迁移，head 仍为 `0041_assistant_agent_state` |
 | 2026-11-01 | Word 评分规范：读全内容、章节、条目（分期 A） | 新增 `rubric_import/sources/docx_deep.py`、`rubric_import/requirements/`（`outline`、`items`、`state`）；`load_docx` 加 `deep`；`raw_parse_output` 新增 `outline`、`requirement_items`；台账单元新增 `image` 类型。开关 `REQUIREMENT_ITEMS_ENABLED` 默认关闭，关闭时调用链与数据不变。无迁移，head 仍为 `0041_assistant_agent_state`；评分链不变 |
 | 2026-10-30 | AI 任务：熔断延后不占限流额度 | 无模块变化：`ai_tasks/execution._finish` 对熔断延后不加 `deferral_count`，连续次数从 `attempt_history` 算（上限 5）；延迟叫醒的去重键改用执行次数。接口、数据库不变。 |
@@ -1691,6 +1692,25 @@ rule_executor
 - 费用估算 `usage_estimate` 本来就按实际视图量，不用改。
 
 维护记录：2026-11-03 · 论文评分第二阶段：记录选证据、预算、视图与证据不足的调用链和开关边界；无迁移。
+
+### 2026-11-04 ASAP 2.0 外部基准评测脚本
+
+方案见 [docs/ASAP2.0外部基准评测方案.md](docs/ASAP2.0外部基准评测方案.md)。只加评测工具，评分链不变。
+
+```
+run_asap_eval prepare   eval/asap.load_rows → stratified_sample（分数 × 题目，固定种子）
+                        → build_document（.docx：题目要求 + 作文，可选材料）→ scores.csv + manifest.json
+run_asap_eval run       eval/asap.load_levels（本机档位 JSON）
+                        → TestClient(app) 走 POST /rubrics → review-workspace → confirm → submit-review → publish
+                        → labeled_dataset.build_labeled_eval（ingest_file + score_paper，Core 路径）
+                        → eval/asap.summarize（1–6 原始分 QWK、MAE、混淆矩阵、分组偏差）→ reports/<组名>-<时间>.json
+```
+
+- 输出目录用 `gating.ensure_external_artifact_dir` 拦在仓库外；清单与报告不写作文正文。
+- 同一档位文件（按哈希命名版本）只建一次评分标准，各组沿用。
+- 指标不用 `runner.evaluate` 的等级 QWK：那里按百分制等级线分档，6 分制会被压成错的等级。
+
+维护记录：2026-11-04 · ASAP 2.0 外部基准评测：记录评测脚本的调用链与数据边界。
 
 ### 2026-11-04 论文评分第二阶段第二轮：B、C 补全
 
