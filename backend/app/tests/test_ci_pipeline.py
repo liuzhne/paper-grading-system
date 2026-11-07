@@ -210,7 +210,9 @@ def test_every_job_has_a_timeout():
         for name, job in yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"].items():
             if "uses" in job:  # 调用可复用工作流的任务，超时写在被调用的工作流里
                 continue
-            assert isinstance(job.get("timeout-minutes"), int), f"{path.name}: {name}"
+            timeout = job.get("timeout-minutes")
+            # YAML 的 true 在 Python 里也是 int；0 与负数等于没设。
+            assert type(timeout) is int and timeout > 0, f"{path.name}: {name}"
 
 
 def test_dependabot_keeps_the_pinned_actions_current():
@@ -218,5 +220,6 @@ def test_dependabot_keeps_the_pinned_actions_current():
     updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
     actions = updates["github-actions"]
     assert actions["directory"] == "/"
+    assert actions["schedule"]["interval"] == "weekly" and actions["schedule"]["day"] == "monday"
     assert "target-branch" not in actions  # 开到默认分支 develop，和功能 PR 走同一条路
-    assert actions["groups"]  # 一次一个 PR，不是每个 action 一个
+    assert "*" in actions["groups"]["github-actions"]["patterns"]  # 一次一个 PR，不是每个 action 一个

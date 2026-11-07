@@ -159,7 +159,7 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 - **发布 PR 列出一大堆已经发布过的提交，或者有冲突。** 看上去是 develop 的问题；真正的原因是上一次发布 PR 被 squash/rebase 了，或者热修没有合回 develop。先开 `main → develop` 的 PR 合回（Merge commit），再开发布 PR。
 - **`pgs-production-migrate` 在 `require-release-ref` 失败。** 报错指向工作流；真正的原因是在功能分支上点了 Run workflow（以前的做法是从 PR 分支迁移）。先把 PR 合进 develop，分支改选 develop 再跑。
 - **`test_every_third_party_action_is_pinned_to_a_commit_sha` 失败。** 报错指向测试；真正的原因是新加或改动的 `uses:` 只写了标签（如 `@v5`）。查出标签对应的提交：`gh api repos/<owner>/<action>/git/ref/tags/<标签>`，`object.type` 是 `tag` 时再查一次 `gh api repos/<owner>/<action>/git/tags/<sha>` 取 `object.sha`；写成 `@<SHA> # <完整版本号>`。
-- **Dependabot 的 action 升级 PR 让某个任务失败。** 看上去是新版本 action 坏了；先看发布说明里的不兼容改动（输入名、默认值、Node 版本），真正需要改的常是我们传的参数。不能马上修就关掉这个 PR，Dependabot 下周会再开。
+- **Dependabot 的 action 升级 PR 让某个任务失败。** 看上去是新版本 action 坏了；先看发布说明里的不兼容改动（输入名、默认值、Node 版本），真正需要改的常是我们传的参数。**不要直接关掉这个 PR**：关掉后 Dependabot 通常不会再为同一个版本开 PR，要等更新的版本出来。把需要的参数改动直接推到这个 PR 的分支上，过了 CI 再合；确实要跳过这一版，在 PR 里用 `@dependabot ignore …` 命令并在 PR 里写明原因。
 - **`pgs-production-cutover` 在 `require-main` 失败。** 真正的原因是 Run workflow 默认选了 develop（默认分支），改选 main。
 
 ### 3.1 测试
@@ -1313,7 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败” |
+| 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
 | 2026-11-07 | 分支模型与流水线拆分 | 新增 3.0 分支、提交与发布规则；9.2 改为 develop → main 发布；新增 `tests.yml`、`scripts/ci_test_shard.py` 与权重文件；生产迁移从 develop 触发（功能分支被拒），切换只在 main；排错补分片失败、检查一直等待、发布 PR 冲突、守卫拒绝 |
