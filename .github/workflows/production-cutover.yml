@@ -39,7 +39,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 默认分支是 develop（RUNBOOK 3.0），Run workflow 默认选的就是它；生产只认 main 上的代码。
+  # 单独一个任务：不在 main 时下面的任务根本不启动，拿不到 production 环境的密钥。
+  require-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only main may touch production
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]
+          then
+            echo "::error::只能在 main 上运行（当前 $REF）：Run workflow 时把分支选成 main。"
+            exit 1
+          fi
+
   cutover:
+    needs: require-main
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production

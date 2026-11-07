@@ -15,7 +15,13 @@
 - 本地起服务（无 Docker）：`DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run alembic upgrade head && ... uv run uvicorn backend.app.main:app --port 8000`（详见 RUNBOOK §2.2）。
 - 迁移自检：`backend/app/tests/test_migrations.py`（pytest 用 `create_all` 建表，**不走 Alembic**，故迁移单独验证）。
 - Runtime：Python 3.10+；仓库锁文件与当前门禁使用 Python 3.12 验证。
-- CI：`.github/workflows/ci.yml` 包含锁文件全量测试与 Postgres 16 的逐版本迁移、约束/排序、拒绝 lossy downgrade、备份恢复演练；本机 SQLite 通过不能替代真实 CI artifact。
+- CI 分两层（RUNBOOK 3.0）：`.github/workflows/tests.yml`（`pgs-tests`）是提交阶段，PR → develop 与 push develop 只跑代码测试（pytest 按文件分 4 片，`scripts/ci_test_shard.py`）；`.github/workflows/ci.yml`（`pgs-production-gates`）只看 main，复用 `tests.yml`，再加 Postgres 16 的逐版本迁移、约束/排序、拒绝 lossy downgrade、备份恢复演练与 Docker 冒烟，push main 才部署。本机 SQLite 通过不能替代真实 CI artifact。
+
+## 分支与提交（MUST，RUNBOOK 3.0）
+- 默认分支是 `develop`。功能分支从 develop 切，**PR 开到 develop**（`gh pr create --base develop`）；不要开到 main，`release-source` 会拒绝。
+- 发布是 `develop → main` 的 PR，只能用 Merge commit；热修 `hotfix/*` 从 main 切、PR 到 main，部署后合回 develop。
+- 提交信息：`<type>: <中文说明>`（feat / fix / docs / refactor / test / ci / chore / perf）。
+- 含迁移：`pgs-production-migrate` 从 develop 触发（先迁移、后合发布 PR），功能分支会被拒绝。
 
 ## 当前发布边界
 - Alembic head：`0042_assistant_message_client_id`（0023 规则检查点与人工复核任务；0024 批次七态约束 + `state_version`；0025 结构化复核原因；0026 命令幂等回执；0027 ExportEvent；0028 旧导出日志幂等补录；0029 为 0026/0027 的新表补 `pgs_app` 授权与 RLS；0031 新增数据库临时评分标准导入会话；0033 规则级决策账本 `rule_decision_ledger` 与 `rule_scoring_tasks.decision_reused` / `group_call_id`；0034 连接协议 CHECK 加入 `anthropic_messages`；0035 统一执行模型：`batch_scoring_items` 加来源键/序号/心跳/无进展计数与两条部分索引，新增 `work_runtime_state`；0036 AI 任务 `ai_tasks` / `ai_task_items` 与规则来源 `atomic_rules.ai_origin` / `ai_model`；0037 `ai_tasks.rubric_id` 对导入前的结构识别可空；0038 评分助手的偏好、会话、消息与两张流程状态表，给 `pgs_app` 授权并建 RLS；0039 官网申请表 `site_leads`，给 `pgs_app` 授权并建 RLS；0040 `scoring_runs` 与 `ai_usage_ledger` 加 `reasoning_tokens` / `truncated_count`；0041 评分助手 Agent 状态：`assistant_messages.meta` 与 `assistant_conversations.compaction`；0042 评分助手发送去重：`assistant_messages.client_id` 与 `(conversation_id, client_id)` 部分唯一索引）。**0024–0028、0031 有数据时一律拒绝降级**；0033 的账本是缓存，降级可删，但有 `decision_reused=true` 或 `group_call_id` 的任务时拒绝降级；0034 有 Claude 连接（含软删除）或平台模型为 Claude 时拒绝降级；0035 有排队、评分中或取消中的批量评分任务时拒绝降级；0036 有 AI 任务或已记录生成模型的规则时拒绝降级；0037 有不挂评分标准的结构识别任务时拒绝降级；0038 任一助手表有数据时拒绝降级；0039 官网申请表有数据时拒绝降级；0040 有非零的推理或截断观测时拒绝降级；0041 任一列有数据时拒绝降级；0042 有请求编号时拒绝降级。
