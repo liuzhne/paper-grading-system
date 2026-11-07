@@ -113,7 +113,7 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 2. 默认分支是 `develop`：`gh pr create` 不带 `--base` 就开到 develop。功能分支的 PR 开到了 main，`release-source` 会失败，把 base 改成 develop：`gh pr edit <编号> --base develop`。
 3. 提交信息用 Conventional Commits：`<type>: <中文说明>`，type 取 `feat` `fix` `docs` `refactor` `test` `ci` `chore` `perf`；复审修正写成 `fix: 按 #NN 复审……`。一个提交做一件事；三文档同步（CLAUDE.md「三文档同步」）与代码放在同一个 PR 里。
 4. 合进 develop：`tests-passed` 绿即可。不要求分支先同步到最新的 develop（规则集不开 strict）——并行的 AI 会话多，每合一个就让其他 PR 全部重跑不划算。代价由 develop 上的 push 运行兜底：每次合并后提交阶段会在 develop 上再跑一遍，**develop 变红时先修好，再合别的**。
-5. 发布：开 `develop → main` 的 PR，标题 `release: YYYY-MM-DD <要点>`，正文列出包含的 PR、迁移和要改的仓库变量。`release-gates-passed` 绿，而且 develop 已包含 main 的全部提交（main 的规则集开 strict），才能合并。合并后 push main 再跑一遍门禁，通过后部署 Lightsail（9.2）。
+5. 发布：开 `develop → main` 的 PR，标题 `release: YYYY-MM-DD <要点>`，正文列出包含的 PR、迁移和要改的仓库变量。`release-gates-passed` 绿就能合并。main 的规则集**不要求合并前与 main 同步**（不开 strict）：每次发布的合并提交只留在 main 上，开了 strict，下一次发布 PR 会一直显示落后于 main，而 develop 又不能直接推送。发布 PR 的检查跑在“develop 合进当前 main”的结果上；检查跑完之后 main 如果又被热修改动，GitHub 不会强制重跑——这时手动重跑发布 PR 的 `pgs-production-gates` 再合，push main 部署前的那一遍门禁兜底。合并后 push main 再跑一遍门禁，通过后部署 Lightsail（9.2）。
 6. 含迁移的发布仍是“先迁移、后合并”（11.12）：`pgs-production-migrate` 的分支选 **develop**（发布 PR 的来源，`hotfix/*` 热修时选热修分支），先 `dry_run`、再正式迁移，然后合并发布 PR。功能分支上触发会被 `require-release-ref` 拒绝——迁移要先进 develop，随发布 PR 一起上线。
    **从预演开始冻结 develop**：工作流每次用所选分支当时的最新提交，`expected_head` 只核对迁移版本号、不核对提交，所以预演、正式迁移和发布 PR 之间 develop 一变，正式跑的就可能是没预演过、也没过发布门禁的迁移。做法：开发布 PR → 等 `release-gates-passed` 绿 → 预演 → 正式迁移 → 合并，**这期间不往 develop 合任何 PR**；正式迁移前核对它在 Actions 运行页显示的提交与预演那次相同、也与发布 PR 的 head 相同，不同就重新预演。
    守卫只防误点，不是安全边界：守卫任务写在所选分支自己的工作流文件里，改得了工作流的人本来就能绕开它。`production` 环境不按分支限制的原因见 DECISIONS（候选镜像评测要从 PR 分支使用它）。
@@ -147,6 +147,7 @@ export DATABASE_URL=postgresql+psycopg://paper:<本地密码>@localhost:5432/pap
 
 - **CI 上某一片失败，本地全套是绿的。** 报错指向那一片里的某个用例；真正的原因通常是它依赖了同一进程里排在前面的另一个文件留下的状态（全局设置、模块缓存、环境变量），分片后那个文件到了别的片里。用上面的命令只跑那一片来复现；修法是让用例自己准备状态，不要调权重把两个文件凑到一片。
 - **PR 一直停在“等待 `tests-passed` / `release-gates-passed`”，Actions 里没有对应的运行。** 报错指向规则集；真正的原因是 PR 的 base 不对（功能分支开到 main 只会跑 `ci.yml`，开到其他分支两条都不跑），或者 workflow 文件写错、整条工作流没启动（Actions 页面顶部会有 “Invalid workflow file”）。
+- **发布 PR 显示 “This branch is out-of-date with the base branch”。** 看上去是 develop 落后、要先同步；真正的原因是上一次发布的合并提交只在 main 上，这是正常的。main 的规则集不开 strict，不影响合并。**不要点 “Update branch”**：它会往 develop 直接推一个合并提交，被 `develop-integration` 规则集拒绝。
 - **发布 PR 列出一大堆已经发布过的提交，或者有冲突。** 看上去是 develop 的问题；真正的原因是上一次发布 PR 被 squash/rebase 了，或者热修没有合回 develop。先开 `main → develop` 的 PR 合回（Merge commit），再开发布 PR。
 - **`pgs-production-migrate` 在 `require-release-ref` 失败。** 报错指向工作流；真正的原因是在功能分支上点了 Run workflow（以前的做法是从 PR 分支迁移）。先把 PR 合进 develop，分支改选 develop 再跑。
 - **`pgs-production-cutover` 在 `require-main` 失败。** 真正的原因是 Run workflow 默认选了 develop（默认分支），改选 main。
@@ -1302,6 +1303,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
 | 2026-11-07 | 分支模型与流水线拆分 | 新增 3.0 分支、提交与发布规则；9.2 改为 develop → main 发布；新增 `tests.yml`、`scripts/ci_test_shard.py` 与权重文件；生产迁移从 develop 触发（功能分支被拒），切换只在 main；排错补分片失败、检查一直等待、发布 PR 冲突、守卫拒绝 |
 | 2026-11-07 | ASAP 2.0 外部基准评测：#83 复审修正（三） | 报告目录建不出来也退出码 2；排错补“写的是 `~/...` 却说在仓库里” |
